@@ -1,28 +1,47 @@
-name: pages
-
-# Build the try-kaish site (wasm + bindings + source seed) and deploy it to
-# GitHub Pages on every push to main. The build job is the same gate ci.yml
-# runs on PRs (site build + real-time e2e) — keep the two in sync.
+# PR gates, cribbed from kaish's ci.yml: clippy on the wasm target (the only
+# target kaish-web builds for) and the full site build + real-time e2e — the
+# same checks pages.yml runs before deploying, so a green PR means a
+# deployable main. Runs on pull_request only: pushes to main get the identical
+# build + e2e inside pages.yml, and running both there would double the work.
 #
 # Actions are pinned by commit SHA, not tag — a tag can be moved, a digest
 # can't (supply-chain). Each pin carries a `# vX.Y.Z` comment naming the
 # release it points at, for humans and Dependabot.
+name: ci
+
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+  pull_request:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: pages
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
+  clippy:
+    name: clippy (wasm target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable branch, pinned 2026-07-05
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: clippy-wasm
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --target wasm32-unknown-unknown -p kaish-web --all-targets --locked -- -D warnings
+
+  site-e2e:
+    name: site build + e2e
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -41,6 +60,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: site-e2e
 
       - name: Install binaryen (wasm-opt)
         run: sudo apt-get update && sudo apt-get install -y binaryen
@@ -63,17 +84,3 @@ jobs:
           python3 -m http.server -d site 8137 &
           sleep 1
           deno run --allow-net --allow-run scripts/e2e.ts
-
-      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
-        with:
-          path: site
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
