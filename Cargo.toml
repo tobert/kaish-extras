@@ -13,7 +13,7 @@ repository = "https://github.com/tobert/kaish-extras"
 # kaish-* dependency to the published crates.io release before any release of
 # the crates in this workspace.
 [workspace.dependencies]
-kaish-kernel = { git = "https://github.com/tobert/kaish.git", rev = "7eba97bc35514e67fb7e23b91a46dfd6de915bd2", default-features = false }
+kaish-kernel = { git = "https://github.com/tobert/kaish.git", rev = "13c7e35e9c26baf8467e1587db95d34a01c0862b", default-features = false }
 
 [profile.release]
 # The wasm bundle ships over the network — favor size.
@@ -22,7 +22,3 @@ lto = true
 codegen-units = 1
 strip = true
 
-# Local development against the web-time worktree; drop before pushing —
-# CI must build against the pinned git rev alone.
-[patch."https://github.com/tobert/kaish.git"]
-kaish-kernel = { path = "/home/atobey/src/wt/kaish-web-time/crates/kaish-kernel" }
