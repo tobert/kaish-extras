@@ -89,6 +89,7 @@ let inflight = 0;
 let nextId = 0;
 let autoRestarts = 0;     // crash-driven respawns since the last healthy seed
 const MAX_AUTO_RESTARTS = 3;
+let completionReq = null; // {id, line, pos} awaiting the worker's answer
 
 function maybeSeed() {
   if (workerReady && seedFiles) {
@@ -124,6 +125,15 @@ function onWorkerMessage(ev) {
     inflight -= 1;
     if (inflight <= 0) { inflight = 0; setBusy(false); }
     renderResult(m);
+  } else if (m.type === 'completions') {
+    const req = completionReq;
+    completionReq = null;
+    // Only apply if the line is untouched since the request — the user may
+    // have kept typing while the worker was busy.
+    if (!req || m.id !== req.id) return;
+    if (cmdline.value !== req.line) return;
+    if ((cmdline.selectionStart ?? req.line.length) !== req.pos) return;
+    applyCompletion(req, m.start, m.candidates);
   } else if (m.type === 'crash') {
     put(`kaish kernel crashed: ${m.error}\n`, 'err');
     // A crash that recurs before any successful seed is permanent (bad
@@ -150,6 +160,7 @@ function spawnWorker() {
 function restartShell(note) {
   worker.terminate();
   inflight = 0;
+  completionReq = null;
   setBusy(false);
   cmdline.disabled = true;
   if (note) put(note + '\n', 'dim');
@@ -175,6 +186,44 @@ function submitLine(line) {
   histCursor = history.length;
   pendingLine = null;
   scrollToInput();
+}
+
+function longestCommonPrefix(strs) {
+  let lcp = strs[0] ?? '';
+  for (const s of strs) {
+    let i = 0;
+    while (i < lcp.length && i < s.length && lcp[i] === s[i]) i++;
+    lcp = lcp.slice(0, i);
+  }
+  return lcp;
+}
+
+function setLine(value, caret) {
+  cmdline.value = value;
+  cmdline.setSelectionRange(caret, caret);
+}
+
+// Bash-flavored Tab: a unique candidate completes (plus a space, unless it's
+// a directory); several candidates extend to their common prefix; when the
+// prefix can't grow, list them.
+function applyCompletion(req, start, candidates) {
+  if (!candidates.length) return;
+  const head = req.line.slice(0, start);
+  const tail = req.line.slice(req.pos);
+  if (candidates.length === 1) {
+    let rep = candidates[0].replacement;
+    if (!rep.endsWith('/')) rep += ' ';
+    setLine(head + rep + tail, (head + rep).length);
+    return;
+  }
+  const common = longestCommonPrefix(candidates.map((c) => c.replacement));
+  if (common.length > req.pos - start) {
+    setLine(head + common + tail, (head + common).length);
+  } else {
+    put(`kaish❯ ${req.line}\n`, 'dim');
+    put(candidates.map((c) => c.display).join('  ') + '\n', 'dim');
+    scrollToInput();
+  }
 }
 
 function renderResult(r) {
@@ -230,9 +279,13 @@ cmdline.addEventListener('keydown', (ev) => {
     ev.preventDefault();
     screen.textContent = '';
   } else if (ev.key === 'Tab') {
-    // Keep focus in the shell — a terminal owns Tab. Completion lands here
-    // once kaish-web exposes the KernelClient completion seam.
     ev.preventDefault();
+    if (cmdline.disabled || completionReq) return;
+    const line = cmdline.value;
+    const pos = cmdline.selectionStart ?? line.length;
+    nextId += 1;
+    completionReq = { id: nextId, line, pos };
+    worker.postMessage({ type: 'complete', id: nextId, line, pos });
   }
 });
 

@@ -32,6 +32,9 @@ self.onmessage = async (ev) => {
     } else if (msg.type === 'exec') {
       const r = JSON.parse(shell.execute(msg.line));
       postMessage({ type: 'result', id: msg.id, ...r });
+    } else if (msg.type === 'complete') {
+      const r = JSON.parse(shell.complete(msg.line, msg.pos));
+      postMessage({ type: 'completions', id: msg.id, ...r });
     }
   } catch (e) {
     // A wasm panic poisons the instance; report and let the main thread

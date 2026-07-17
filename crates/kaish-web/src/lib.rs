@@ -88,6 +88,125 @@ impl KaishShell {
         json.to_string()
     }
 
+    /// Tab completion at a cursor position. Returns a JSON string:
+    /// `{"start": <byte offset the word begins at>,
+    ///   "candidates": [{"display": <string>, "replacement": <string>}, …]}`.
+    ///
+    /// Context detection is shared with the native REPL
+    /// (`kaish_client::completion`); candidates come from the live kernel —
+    /// tool schemas for commands, the scope for variables, and the in-memory
+    /// VFS for paths (which the native REPL doesn't have yet: it completes
+    /// against the real filesystem).
+    pub fn complete(&self, line: &str, pos: usize) -> String {
+        use kaish_client::completion::{
+            detect_completion_context, word_start, CompletionContext,
+        };
+        use kaish_kernel::vfs::DirEntryKind;
+
+        let mut pos = pos.min(line.len());
+        while !line.is_char_boundary(pos) {
+            pos -= 1;
+        }
+
+        // (display, replacement) pairs; replacement spans [start..pos].
+        let (start, mut pairs): (usize, Vec<(String, String)>) =
+            self.rt.block_on(async {
+                match detect_completion_context(line, pos) {
+                    CompletionContext::Command => {
+                        let start = word_start(line, pos);
+                        let prefix = &line[start..pos];
+                        let pairs = self
+                            .kernel
+                            .tool_schemas()
+                            .into_iter()
+                            .filter(|s| s.name.starts_with(prefix))
+                            .map(|s| (s.name.clone(), s.name.clone()))
+                            .collect();
+                        (start, pairs)
+                    }
+                    CompletionContext::Variable => {
+                        let before = &line[..pos];
+                        let (start, prefix, braced) =
+                            if let Some(b) = before.rfind("${") {
+                                (b, &line[b + 2..pos], true)
+                            } else if let Some(d) = before.rfind('$') {
+                                (d, &line[d + 1..pos], false)
+                            } else {
+                                return (pos, Vec::new());
+                            };
+                        let pairs = self
+                            .kernel
+                            .list_vars()
+                            .await
+                            .into_iter()
+                            .filter(|(name, _)| name.starts_with(prefix))
+                            .map(|(name, _)| {
+                                let replacement = if braced {
+                                    format!("${{{name}}}")
+                                } else {
+                                    format!("${name}")
+                                };
+                                (name, replacement)
+                            })
+                            .collect();
+                        (start, pairs)
+                    }
+                    CompletionContext::Path => {
+                        let start = word_start(line, pos);
+                        let word = &line[start..pos];
+                        let (dir_part, base) = match word.rfind('/') {
+                            Some(i) => (&word[..=i], &word[i + 1..]),
+                            None => ("", word),
+                        };
+                        let dir_abs = if dir_part.starts_with('/') {
+                            PathBuf::from(dir_part)
+                        } else {
+                            self.kernel.cwd().await.join(dir_part)
+                        };
+                        let entries = self
+                            .kernel
+                            .vfs()
+                            .list(&dir_abs)
+                            .await
+                            .unwrap_or_default();
+                        let pairs = entries
+                            .into_iter()
+                            .filter(|e| {
+                                !e.name.is_empty()
+                                    && e.name.starts_with(base)
+                                    // dotfiles only when asked for, like bash
+                                    && (base.starts_with('.') || !e.name.starts_with('.'))
+                            })
+                            .map(|e| {
+                                let slash = match e.kind {
+                                    DirEntryKind::Directory => "/",
+                                    _ => "",
+                                };
+                                (
+                                    format!("{}{slash}", e.name),
+                                    format!("{dir_part}{}{slash}", e.name),
+                                )
+                            })
+                            .collect();
+                        (start, pairs)
+                    }
+                }
+            });
+
+        pairs.sort();
+        pairs.dedup();
+        serde_json::json!({
+            "start": start,
+            "candidates": pairs
+                .into_iter()
+                .map(|(display, replacement)| {
+                    serde_json::json!({ "display": display, "replacement": replacement })
+                })
+                .collect::<Vec<_>>(),
+        })
+        .to_string()
+    }
+
     /// Write a file into the in-memory VFS, creating parent directories.
     pub fn seed_file(&self, path: &str, contents: &[u8]) -> Result<(), JsValue> {
         self.rt.block_on(async {

@@ -108,7 +108,29 @@ await waitFor("uname output", async () => (await screenText()).includes("kaish")
 await waitFor("grep output", async () => /clock\.rs|\n1\n/.test(await screenText()));
 console.log("exec via worker: OK");
 
-// 3. Ctrl-C interrupts a runaway loop: worker restarts and reseeds.
+// 3. Tab completion: unique command completes with a trailing space; a
+//    path prefix extends to the candidates' common prefix via the VFS.
+async function tab(line: string) {
+  await evalJs(`(() => {
+    const c = document.getElementById('cmdline');
+    c.value = ${JSON.stringify(line)};
+    c.setSelectionRange(c.value.length, c.value.length);
+    c.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+  })()`);
+}
+async function cmdlineValue(): Promise<string> {
+  return (await evalJs(`document.getElementById('cmdline').value`)) ?? "";
+}
+await tab("unam");
+await waitFor("command completion 'unam' -> 'uname '",
+  async () => (await cmdlineValue()) === "uname ");
+await tab("cat /src/ka");
+await waitFor("path LCP '/src/ka' -> '/src/kaish'",
+  async () => (await cmdlineValue()) === "cat /src/kaish");
+await evalJs(`document.getElementById('cmdline').value = ''`);
+console.log("tab completion: OK");
+
+// 4. Ctrl-C interrupts a runaway loop: worker restarts and reseeds.
 await type("while true; do true; done");
 await new Promise((r) => setTimeout(r, 600));   // let it really wedge the worker
 await ctrlC();
