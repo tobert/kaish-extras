@@ -154,6 +154,27 @@ impl KaishShell {
                     CompletionContext::Path => {
                         let start = word_start(line, pos);
                         let word = &line[start..pos];
+                        // A dash-word in argument position completes the
+                        // governing command's flags from its schema, not paths.
+                        if word.starts_with('-') {
+                            use kaish_client::completion::{current_command, flag_candidates};
+                            let pairs = current_command(line, pos)
+                                .map(|(cs, ce)| &line[cs..ce])
+                                .and_then(|cmd| {
+                                    self.kernel
+                                        .tool_schemas()
+                                        .into_iter()
+                                        .find(|s| s.name == cmd)
+                                })
+                                .map(|schema| {
+                                    flag_candidates(&schema.params, word)
+                                        .into_iter()
+                                        .map(|f| (f.clone(), f))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            return (start, pairs);
+                        }
                         let (dir_part, base) = match word.rfind('/') {
                             Some(i) => (&word[..=i], &word[i + 1..]),
                             None => ("", word),

@@ -127,6 +127,9 @@ await waitFor("command completion 'unam' -> 'uname '",
 await tab("cat /src/ka");
 await waitFor("path LCP '/src/ka' -> '/src/kaish'",
   async () => (await cmdlineValue()) === "cat /src/kaish");
+await tab("echo --no-ne");
+await waitFor("flag completion 'echo --no-ne' -> '--no-newline '",
+  async () => (await cmdlineValue()) === "echo --no-newline ");
 await evalJs(`document.getElementById('cmdline').value = ''`);
 console.log("tab completion: OK");
 
