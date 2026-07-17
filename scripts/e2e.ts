@@ -40,7 +40,7 @@ function fail(msg: string): never {
 
 // Wait for the debugger endpoint, then a page target.
 let target: { webSocketDebuggerUrl: string } | undefined;
-for (let i = 0; i < 150 && !target; i++) {
+for (let i = 0; i < 300 for (let i = 0; i < 150 && !target; i++) {for (let i = 0; i < 150 && !target; i++) { !target; i++) {
   await new Promise((r) => setTimeout(r, 200));
   try {
     const targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
