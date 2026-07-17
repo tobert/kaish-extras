@@ -14,10 +14,9 @@ repository = "https://github.com/tobert/kaish-extras"
 # the crates in this workspace.
 [workspace.dependencies]
 # Both kaish crates must pin the SAME rev — mixing revs would put two copies
-# of kaish-kernel in the graph. Currently the client-completion branch head
-# (kaish PR #213); moves back to main after merge.
-kaish-kernel = { git = "https://github.com/tobert/kaish.git", rev = "ce5d84951fda8a691d9b341f07cc0b12f1447cb7", default-features = false }
-kaish-client = { git = "https://github.com/tobert/kaish.git", rev = "ce5d84951fda8a691d9b341f07cc0b12f1447cb7" }
+# of kaish-kernel in the graph. Currently kaish main (post-#213).
+kaish-kernel = { git = "https://github.com/tobert/kaish.git", rev = "a566600dbde2650984e57ed90767b03bebe32b68", default-features = false }
+kaish-client = { git = "https://github.com/tobert/kaish.git", rev = "a566600dbde2650984e57ed90767b03bebe32b68" }
 
 [profile.release]
 # The wasm bundle ships over the network — favor size.
