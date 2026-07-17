@@ -23,6 +23,10 @@ function findBrowser(): string {
 const chrome = new Deno.Command(findBrowser(), {
   args: [
     "--headless=new", "--disable-gpu", "--no-sandbox",
+    // Branded Chrome (136+) silently ignores remote debugging on the
+    // default profile — a throwaway user-data-dir is mandatory. Chrome
+    // creates the directory itself.
+    `--user-data-dir=/tmp/kaish-e2e-profile-${port}`,
     `--remote-debugging-port=${port}`, "about:blank",
   ],
   stdout: "null", stderr: "null",
@@ -36,7 +40,7 @@ function fail(msg: string): never {
 
 // Wait for the debugger endpoint, then a page target.
 let target: { webSocketDebuggerUrl: string } | undefined;
-for (let i = 0; i < 50 && !target; i++) {
+for (let i = 0; i < 150 && !target; i++) {
   await new Promise((r) => setTimeout(r, 200));
   try {
     const targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
