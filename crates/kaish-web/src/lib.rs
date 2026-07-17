@@ -16,8 +16,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use kaish_kernel::vfs::Filesystem;
-use kaish_kernel::{Kernel, KernelConfig};
+use kaish_kernel::{ExecuteOptions, Kernel, KernelConfig};
 use wasm_bindgen::prelude::*;
+
+/// An `Int32Array` view over the page-shared `SharedArrayBuffer` interrupt
+/// flag. `wasm32-unknown-unknown` is single-threaded, so `Send`/`Sync` are
+/// vacuous here — asserted only to satisfy `ExecuteOptions::interrupt`'s
+/// thread-safe bound, which real multi-threaded embedders do need.
+struct SharedFlag(js_sys::Int32Array);
+unsafe impl Send for SharedFlag {}
+unsafe impl Sync for SharedFlag {}
 
 fn js_err(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())
@@ -25,6 +33,21 @@ fn js_err(e: impl std::fmt::Display) -> JsValue {
 
 /// Largest output field handed to the page per call.
 const MAX_FIELD_BYTES: usize = 1_000_000;
+
+/// Shape an execute outcome into the `{code, out, err}` JSON the page reads.
+fn result_json<E: std::fmt::Display>(
+    outcome: Result<kaish_kernel::interpreter::ExecResult, E>,
+) -> String {
+    let json = match outcome {
+        Ok(r) => serde_json::json!({
+            "code": r.code,
+            "out": clip(r.text_out().as_ref()),
+            "err": if r.err.is_empty() { None } else { Some(clip(&r.err)) },
+        }),
+        Err(e) => serde_json::json!({ "code": 1, "out": "", "err": e.to_string() }),
+    };
+    json.to_string()
+}
 
 /// Clip to `MAX_FIELD_BYTES` at a char boundary, marking the cut.
 fn clip(s: &str) -> Cow<'_, str> {
@@ -77,15 +100,23 @@ impl KaishShell {
     /// the wasm boundary into `JSON.parse` and the DOM would freeze the tab.
     pub fn execute(&self, input: &str) -> String {
         let outcome = self.rt.block_on(self.kernel.execute(input));
-        let json = match outcome {
-            Ok(r) => serde_json::json!({
-                "code": r.code,
-                "out": clip(r.text_out().as_ref()),
-                "err": if r.err.is_empty() { None } else { Some(clip(&r.err)) },
-            }),
-            Err(e) => serde_json::json!({ "code": 1, "out": "", "err": e.to_string() }),
-        };
-        json.to_string()
+        result_json(outcome)
+    }
+
+    /// `execute`, interruptible: `flag` is an `Int32Array` over a
+    /// `SharedArrayBuffer` the page's main thread can flip to 1 while this
+    /// call blocks the worker. The kernel polls it at its cancellation
+    /// checkpoints (kaish `ExecuteOptions::interrupt`) and stops with exit
+    /// 130 — session state intact. The caller resets the flag afterward.
+    pub fn execute_interruptible(&self, input: &str, flag: js_sys::Int32Array) -> String {
+        let flag = SharedFlag(flag);
+        let opts = ExecuteOptions::new().with_interrupt(Arc::new(move || {
+            js_sys::Atomics::load(&flag.0, 0).map(|v| v != 0).unwrap_or(false)
+        }));
+        let outcome = self
+            .rt
+            .block_on(self.kernel.execute_with_options(input, opts));
+        result_json(outcome)
     }
 
     /// Tab completion at a cursor position. Returns a JSON string:

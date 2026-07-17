@@ -45,7 +45,7 @@
      <a href="https://github.com/tobert/kaish">kaish</a> kernel compiled to
      WebAssembly. No server, no syscalls, no POSIX — everything below runs in
      this tab against an in-memory filesystem seeded with kaish's own source.
-     Ctrl-C interrupts (restarting the shell), Ctrl-L clears.</p>
+     Tab completes, Ctrl-C interrupts, Ctrl-L clears.</p>
 </header>
 <div id="screen"></div>
 <div id="inputrow">
@@ -55,6 +55,26 @@
 </div>
 
 <script type="module">
+// Cross-origin isolation via service worker (Pages can't set COOP/COEP):
+// register, then reload once so the document response carries the headers
+// and SharedArrayBuffer — the Ctrl-C interrupt flag — becomes available.
+// Without isolation (no SW support, file://) everything still works;
+// Ctrl-C just falls back to restarting the shell.
+if (!window.crossOriginIsolated && window.isSecureContext && 'serviceWorker' in navigator) {
+  try {
+    await navigator.serviceWorker.register('./coi-sw.js');
+    if (!navigator.serviceWorker.controller && !sessionStorage.getItem('coi-reloaded')) {
+      sessionStorage.setItem('coi-reloaded', '1');
+      await navigator.serviceWorker.ready;
+      location.reload();
+      // Stop booting this doomed page instance; the reload takes over.
+      await new Promise(() => {});
+    }
+  } catch (e) {
+    console.warn('[kaish] isolation service worker unavailable:', e);
+  }
+}
+
 const screen = document.getElementById('screen');
 const cmdline = document.getElementById('cmdline');
 const prompt = document.getElementById('prompt');
@@ -84,6 +104,11 @@ let bootedOnce = false;
 // terminates and respawns it (session state resets, the seed comes back).
 let worker = null;
 let workerReady = false;
+// Tier-2 Ctrl-C: with cross-origin isolation, the kernel polls this shared
+// flag mid-execution and stops in place, state intact. Without it, ^C
+// falls back to restarting the worker (state resets).
+const interruptSab = window.crossOriginIsolated ? new SharedArrayBuffer(4) : null;
+const interruptFlag = interruptSab ? new Int32Array(interruptSab) : null;
 let seedFiles = null;     // [[path, Uint8Array]] — retained so restarts reseed instantly
 let inflight = 0;
 let nextId = 0;
@@ -154,7 +179,7 @@ function spawnWorker() {
   worker = new Worker('./worker.js', { type: 'module' });
   worker.onmessage = onWorkerMessage;
   worker.onerror = (e) => put(`worker error: ${e.message}\n`, 'err');
-  worker.postMessage({ type: 'boot' });
+  worker.postMessage({ type: 'boot', sab: interruptSab });
 }
 
 function restartShell(note) {
@@ -265,6 +290,14 @@ cmdline.addEventListener('keydown', (ev) => {
     if (window.getSelection()?.toString()) return;
     ev.preventDefault();
     if (inflight > 0) {
+      if (interruptFlag) {
+        // Tier 2: flip the shared flag; the kernel notices at its next
+        // checkpoint and returns exit 130 — session state intact. The
+        // worker resets the flag after the interrupted command returns.
+        Atomics.store(interruptFlag, 0, 1);
+        put('^C\n', 'err');
+        return;
+      }
       put('^C\n', 'err');
       restartShell('interrupted — shell restarted, session state reset ' +
                    '(seeded files are back; your writes and vars are not)');

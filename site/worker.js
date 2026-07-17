@@ -6,15 +6,17 @@
 import init, { KaishShell } from './pkg/kaish_web.js';
 
 let shell = null;
+let flagView = null; // Int32Array over the page-shared SAB interrupt flag
 
 self.onmessage = async (ev) => {
   const msg = ev.data;
   try {
     if (msg.type === 'boot') {
       const t0 = performance.now();
+      if (msg.sab) flagView = new Int32Array(msg.sab);
       await init();
       shell = new KaishShell();
-      console.log('[kaish-worker] booted');
+      console.log('[kaish-worker] booted' + (flagView ? ' (interruptible)' : ''));
       postMessage({ type: 'ready', ms: performance.now() - t0 });
     } else if (msg.type === 'seed') {
       const t0 = performance.now();
@@ -30,7 +32,13 @@ self.onmessage = async (ev) => {
         ms: performance.now() - t0,
       });
     } else if (msg.type === 'exec') {
-      const r = JSON.parse(shell.execute(msg.line));
+      const r = flagView
+        ? JSON.parse(shell.execute_interruptible(msg.line, flagView))
+        : JSON.parse(shell.execute(msg.line));
+      // Consume the flag here, not on the main thread: queued commands run
+      // before the main thread gets another look, and an unconsumed ^C
+      // would kill them all.
+      if (flagView) Atomics.store(flagView, 0, 0);
       postMessage({ type: 'result', id: msg.id, ...r });
     } else if (msg.type === 'complete') {
       const r = JSON.parse(shell.complete(msg.line, msg.pos));

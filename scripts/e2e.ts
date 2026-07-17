@@ -133,18 +133,38 @@ await waitFor("flag completion 'echo --no-ne' -> '--no-newline '",
 await evalJs(`document.getElementById('cmdline').value = ''`);
 console.log("tab completion: OK");
 
-// 4. Ctrl-C interrupts a runaway loop: worker restarts and reseeds.
-await type("while true; do true; done");
-await new Promise((r) => setTimeout(r, 600));   // let it really wedge the worker
-await ctrlC();
-await waitFor("interrupt notice", async () => (await screenText()).includes("interrupted"));
-await waitFor("reseed after interrupt", async () => {
-  const t = await screenText();
-  return t.indexOf("seeded", t.indexOf("interrupted")) > -1;
-});
-await type("echo back-alive");
-await waitFor("shell alive after ^C", async () => (await screenText()).includes("back-alive"));
-console.log("ctrl-c interrupt + restart: OK");
+// 4. Ctrl-C interrupts a runaway loop. Under cross-origin isolation (the
+//    coi service worker provides it even on GitHub Pages) this is tier 2:
+//    in-place kernel interrupt, exit 130, session state preserved. Without
+//    isolation it falls back to tier 1: worker restart + reseed.
+const isolated = await evalJs("window.crossOriginIsolated === true");
+if (isolated) {
+  await type("KEEP=preserved-7x9");
+  await type("while true; do true; done");
+  await new Promise((r) => setTimeout(r, 600)); // let it really wedge the worker
+  await ctrlC();
+  await waitFor("exit 130 after tier-2 ^C",
+    async () => (await screenText()).includes("exit 130"));
+  await type("echo $KEEP");
+  await waitFor("session state preserved across ^C",
+    async () => /\npreserved-7x9\n/.test(await screenText()));
+  if ((await screenText()).includes("shell restarted")) {
+    fail("tier-2 ^C restarted the shell instead of interrupting in place");
+  }
+  console.log("ctrl-c tier-2 (in-place, state preserved): OK");
+} else {
+  await type("while true; do true; done");
+  await new Promise((r) => setTimeout(r, 600));
+  await ctrlC();
+  await waitFor("interrupt notice", async () => (await screenText()).includes("interrupted"));
+  await waitFor("reseed after interrupt", async () => {
+    const t = await screenText();
+    return t.indexOf("seeded", t.indexOf("interrupted")) > -1;
+  });
+  await type("echo back-alive");
+  await waitFor("shell alive after ^C", async () => (await screenText()).includes("back-alive"));
+  console.log("ctrl-c tier-1 (restart fallback): OK");
+}
 
 console.log("E2E OK");
 try { chrome.kill(); } catch { /* already gone */ }
