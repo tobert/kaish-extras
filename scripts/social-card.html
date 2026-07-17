@@ -1,0 +1,46 @@
+<!doctype html>
+<!-- Source for site/social-preview.png (1200x630 og:image).
+     Regenerate: scripts/make-social-card.sh -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body {
+    width: 1200px; height: 630px;
+    background: #0d1117;
+    font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, monospace;
+    color: #e6edf3;
+    display: flex; flex-direction: column;
+    justify-content: center;
+    padding: 64px 72px;
+  }
+  .title { font-size: 54px; color: #7ee787; font-weight: 700; }
+  .title .kai { color: #e6edf3; }
+  .tag { font-size: 26px; color: #8b949e; margin-top: 14px; line-height: 1.4; }
+  .term {
+    margin-top: 44px;
+    background: #010409;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 28px 32px;
+    font-size: 24px; line-height: 1.65;
+  }
+  .p { color: #7ee787; }
+  .dim { color: #8b949e; }
+  .out { color: #e6edf3; }
+</style>
+</head>
+<body>
+  <div class="title">try kaish <span class="kai">— 会sh in your browser</span></div>
+  <div class="tag">A sandboxed shell you can sandbox. The real kaish kernel in
+    WebAssembly — no server, no syscalls, no POSIX.</div>
+  <div class="term">
+    <div><span class="p">kaish❯ </span><span class="out">uname -sm</span></div>
+    <div class="out">kaish wasm32</div>
+    <div><span class="p">kaish❯ </span><span class="out">grep -rn "fn system_now" /src/kaish | head -1</span></div>
+    <div class="out">crates/kaish-types/src/clock.rs:30</div>
+    <div><span class="p">kaish❯ </span><span class="dim">Tab completes · Ctrl-C interrupts · jq included</span></div>
+  </div>
+</body>
+</html>
