@@ -107,10 +107,26 @@ cmdline.addEventListener('keydown', (ev) => {
   } else if (ev.key === 'l' && ev.ctrlKey) {
     ev.preventDefault();
     screen.textContent = '';
+  } else if (ev.key === 'Tab') {
+    // Keep focus in the shell — a terminal owns Tab. Completion lands here
+    // once kaish-web exposes the KernelClient completion seam.
+    ev.preventDefault();
   }
 });
-document.body.addEventListener('click', () => {
-  if (!window.getSelection()?.toString()) cmdline.focus();
+
+// The whole page is the terminal: a click anywhere that isn't selecting
+// text returns focus to the prompt…
+document.addEventListener('pointerup', () => {
+  if (!cmdline.disabled && !window.getSelection()?.toString()) cmdline.focus();
+});
+// …and printable keys typed while focus wandered land in the prompt
+// (focusing during keydown routes the character into the input).
+document.addEventListener('keydown', (ev) => {
+  if (document.activeElement === cmdline || cmdline.disabled) return;
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  if (ev.key.length === 1 || ev.key === 'Backspace' || ev.key === 'Enter') {
+    cmdline.focus();
+  }
 });
 
 try {
