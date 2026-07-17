@@ -87,6 +87,8 @@ let workerReady = false;
 let seedFiles = null;     // [[path, Uint8Array]] — retained so restarts reseed instantly
 let inflight = 0;
 let nextId = 0;
+let autoRestarts = 0;     // crash-driven respawns since the last healthy seed
+const MAX_AUTO_RESTARTS = 3;
 
 function maybeSeed() {
   if (workerReady && seedFiles) {
@@ -113,6 +115,7 @@ function onWorkerMessage(ev) {
           `  help\n\n`, 'dim');
     }
     inflight = 0;
+    autoRestarts = 0;   // a healthy seed proves the engine works again
     setBusy(false);
     cmdline.disabled = false;
     cmdline.focus();
@@ -123,6 +126,15 @@ function onWorkerMessage(ev) {
     renderResult(m);
   } else if (m.type === 'crash') {
     put(`kaish kernel crashed: ${m.error}\n`, 'err');
+    // A crash that recurs before any successful seed is permanent (bad
+    // wasm, broken deploy) — respawning forever would just spin.
+    autoRestarts += 1;
+    if (autoRestarts > MAX_AUTO_RESTARTS) {
+      put('the shell keeps crashing — giving up; reload the page to retry\n', 'err');
+      worker.terminate();
+      cmdline.disabled = true;
+      return;
+    }
     restartShell('shell restarted — session state reset');
   }
 }
