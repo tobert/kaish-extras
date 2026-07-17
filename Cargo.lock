@@ -753,7 +753,7 @@ dependencies = [
 [[package]]
 name = "kaish-client"
 version = "0.12.0"
-source = "git+https://github.com/tobert/kaish.git?rev=8f5aaf22bb46780cda0c4223a1e79ebea2a3cd78#8f5aaf22bb46780cda0c4223a1e79ebea2a3cd78"
+source = "git+https://github.com/tobert/kaish.git?rev=c21adc78eb281cd5963ca473c5db706c0e7215e6#c21adc78eb281cd5963ca473c5db706c0e7215e6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -767,7 +767,7 @@ dependencies = [
 [[package]]
 name = "kaish-glob"
 version = "0.12.0"
-source = "git+https://github.com/tobert/kaish.git?rev=8f5aaf22bb46780cda0c4223a1e79ebea2a3cd78#8f5aaf22bb46780cda0c4223a1e79ebea2a3cd78"
+source = "git+https://github.com/tobert/kaish.git?rev=c21adc78eb281cd5963ca473c5db706c0e7215e6#c21adc78eb281cd5963ca473c5db706c0e7215e6"
 dependencies = [
  "async-trait",
  "ignore",
@@ -778,7 +778,7 @@ dependencies = [
 [[package]]
 name = "kaish-help"
 version = "0.12.0"
-source = "git+https://github.com/tobert/kaish.git?rev=8f5aaf22bb46780cda0c4223a1e79ebea2a3cd78#8f5aaf22bb46780cda0c4223a1e79ebea2a3cd78"
+source = "git+https://github.com/tobert/kaish.git?rev=c21adc78eb281cd5963ca473c5db706c0e7215e6#c21adc78eb281cd5963ca473c5db706c0e7215e6"
 dependencies = [
  "kaish-types",
 ]
@@ -786,7 +786,7 @@ dependencies = [
 [[package]]
 name = "kaish-kernel"
 version = "0.12.0"
-source = "git+https://github.com/tobert/kaish.git?rev=8f5aaf22bb46780cda0c4223a1e79ebea2a3cd78#8f5aaf22bb46780cda0c4223a1e79ebea2a3cd78"
+source = "git+https://github.com/tobert/kaish.git?rev=c21adc78eb281cd5963ca473c5db706c0e7215e6#c21adc78eb281cd5963ca473c5db706c0e7215e6"
 dependencies = [
  "anyhow",
  "ariadne",
@@ -832,7 +832,7 @@ dependencies = [
 [[package]]
 name = "kaish-tool-api"
 version = "0.12.0"
-source = "git+https://github.com/tobert/kaish.git?rev=8f5aaf22bb46780cda0c4223a1e79ebea2a3cd78#8f5aaf22bb46780cda0c4223a1e79ebea2a3cd78"
+source = "git+https://github.com/tobert/kaish.git?rev=c21adc78eb281cd5963ca473c5db706c0e7215e6#c21adc78eb281cd5963ca473c5db706c0e7215e6"
 dependencies = [
  "async-trait",
  "clap",
@@ -842,7 +842,7 @@ dependencies = [
 [[package]]
 name = "kaish-types"
 version = "0.12.0"
-source = "git+https://github.com/tobert/kaish.git?rev=8f5aaf22bb46780cda0c4223a1e79ebea2a3cd78#8f5aaf22bb46780cda0c4223a1e79ebea2a3cd78"
+source = "git+https://github.com/tobert/kaish.git?rev=c21adc78eb281cd5963ca473c5db706c0e7215e6#c21adc78eb281cd5963ca473c5db706c0e7215e6"
 dependencies = [
  "base64",
  "serde",
@@ -855,7 +855,7 @@ dependencies = [
 [[package]]
 name = "kaish-vfs"
 version = "0.12.0"
-source = "git+https://github.com/tobert/kaish.git?rev=8f5aaf22bb46780cda0c4223a1e79ebea2a3cd78#8f5aaf22bb46780cda0c4223a1e79ebea2a3cd78"
+source = "git+https://github.com/tobert/kaish.git?rev=c21adc78eb281cd5963ca473c5db706c0e7215e6#c21adc78eb281cd5963ca473c5db706c0e7215e6"
 dependencies = [
  "async-trait",
  "getrandom",
