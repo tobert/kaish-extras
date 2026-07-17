@@ -32,6 +32,7 @@ try {
   run(sh, "seq 1 10 | sort -rn | head -3", "10");
   run(sh, "echo '{\"a\": [1, 2, 3]}' | jq '.a | length'", "3");
   run(sh, "for f in $(ls /demo); do echo found: $f; done", "found: hello.txt");
+  run(sh, "date -u +%Y", "20");   // JS clock through kaish_types::clock + chrono
 
   // The playground seed: mount the real source tree and search it.
   const seed = await (await fetch('seed.json')).json();
