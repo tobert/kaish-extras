@@ -1,0 +1,28 @@
+[package]
+name = "kaish-web"
+description = "kaish in the browser — a wasm-bindgen embedding of the kaish kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kaish-kernel = { workspace = true }
+
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+serde_json = "1"
+console_error_panic_hook = "0.1"
+
+# The kernel drives its futures with tokio; in the browser we run a
+# current-thread runtime and block_on per call (all I/O is in-memory,
+# so futures resolve without external events).
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+
+# getrandom needs its JS backend selected explicitly on wasm32-unknown-unknown;
+# pairs with the --cfg getrandom_backend="wasm_js" rustflag in .cargo/config.toml.
+getrandom = { version = "0.3", features = ["wasm_js"] }

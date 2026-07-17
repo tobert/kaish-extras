@@ -1,0 +1,5 @@
+/target
+# generated site artifacts — built by scripts/build.sh / CI
+/site/pkg/
+/site/seed.json
+signoff.md

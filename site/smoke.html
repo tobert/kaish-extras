@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>kaish-web smoke test</title>
+<style>body { background:#111; color:#ddd; font-family:monospace; } pre { white-space:pre-wrap; }</style>
+<body>
+<h1>kaish-web smoke test</h1>
+<pre id="out">loading…</pre>
+<script type="module">
+// Machine-checked page: CI loads this headless and asserts "SMOKE OK" in #out.
+import init, { KaishShell } from './pkg/kaish_web.js';
+
+const out = document.getElementById('out');
+const log = (s) => { out.textContent += s + "\n"; console.log("[kaish-smoke]", s); };
+const run = (sh, cmd, expect) => {
+  const r = JSON.parse(sh.execute(cmd));
+  log(`$ ${cmd}\n${r.out}${r.err ? "ERR: " + r.err : ""}[code ${r.code}]`);
+  if (r.code !== 0) throw new Error(`exit ${r.code}: ${cmd}`);
+  if (expect && !r.out.includes(expect)) throw new Error(`missing "${expect}": ${cmd}`);
+};
+
+try {
+  await init();
+  out.textContent = "";
+  const sh = new KaishShell();
+  sh.seed_file("/demo/hello.txt",
+    new TextEncoder().encode("hello from the in-memory vfs\nsecond line\n"));
+
+  run(sh, "echo hello from kaish-in-wasm", "hello");
+  run(sh, "ls /", "demo");
+  run(sh, "cat -n /demo/hello.txt", "2\tsecond");
+  run(sh, "seq 1 10 | sort -rn | head -3", "10");
+  run(sh, "echo '{\"a\": [1, 2, 3]}' | jq '.a | length'", "3");
+  run(sh, "for f in $(ls /demo); do echo found: $f; done", "found: hello.txt");
+
+  // The playground seed: mount the real source tree and search it.
+  const seed = await (await fetch('seed.json')).json();
+  const enc = new TextEncoder();
+  for (const [path, text] of Object.entries(seed)) sh.seed_file(path, enc.encode(text));
+  log(`seeded ${Object.keys(seed).length} files`);
+  run(sh, "ls /src", "kaish");
+  run(sh, "grep -rn 'fn system_now' /src/kaish/crates/kaish-types/src | head -2", "clock.rs");
+
+  log("SMOKE OK");
+} catch (e) {
+  log("SMOKE FAIL: " + e);
+  console.error(e);
+}
+</script>
+</body>
+</html>

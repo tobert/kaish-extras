@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>try kaish — a sandboxed shell you can sandbox</title>
+<style>
+  :root {
+    --bg: #0d1117; --fg: #e6edf3; --dim: #8b949e; --accent: #7ee787;
+    --err: #ffa198; --badge: #30363d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, monospace;
+    font-size: 14px; line-height: 1.45;
+    margin: 0; padding: 1.2rem; min-height: 100vh;
+    display: flex; flex-direction: column;
+  }
+  header { margin-bottom: .8rem; }
+  header h1 { font-size: 1.1rem; margin: 0; color: var(--accent); }
+  header p { margin: .3rem 0 0; color: var(--dim); max-width: 60rem; }
+  header a { color: var(--accent); }
+  #screen { white-space: pre-wrap; word-break: break-word; flex: 1 0 auto; }
+  .cmd { color: var(--accent); }
+  .err { color: var(--err); }
+  .dim { color: var(--dim); }
+  .code-badge {
+    color: var(--err); background: var(--badge);
+    border-radius: 4px; padding: 0 .4em; font-size: .85em;
+  }
+  #inputrow { display: flex; align-items: baseline; }
+  #prompt { color: var(--accent); white-space: pre; }
+  #cmdline {
+    flex: 1; background: transparent; border: none; outline: none;
+    color: var(--fg); font: inherit; caret-color: var(--accent);
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>try kaish — 会sh in your browser</h1>
+  <p>A sandboxed shell you can sandbox: the real
+     <a href="https://github.com/tobert/kaish">kaish</a> kernel compiled to
+     WebAssembly. No server, no syscalls, no POSIX — everything below runs in
+     this tab against an in-memory filesystem seeded with kaish's own source.</p>
+</header>
+<div id="screen"></div>
+<div id="inputrow">
+  <span id="prompt">kaish❯ </span>
+  <input id="cmdline" autocomplete="off" spellcheck="false" disabled
+         aria-label="kaish command input">
+</div>
+
+<script type="module">
+import init, { KaishShell } from './pkg/kaish_web.js';
+
+const screen = document.getElementById('screen');
+const cmdline = document.getElementById('cmdline');
+
+function put(text, cls) {
+  const span = document.createElement('span');
+  if (cls) span.className = cls;
+  span.textContent = text;
+  screen.appendChild(span);
+}
+function scrollToInput() { cmdline.scrollIntoView({ block: 'end' }); }
+
+const history = [];
+let histCursor = 0;
+let shell = null;
+
+function runLine(line) {
+  put(`kaish❯ `, 'cmd');
+  put(line + '\n');
+  const trimmed = line.trim();
+  if (trimmed) {
+    history.push(line);
+    const r = JSON.parse(shell.execute(trimmed));
+    if (r.out) put(r.out.endsWith('\n') || r.out === '' ? r.out : r.out + '\n');
+    if (r.err) put(r.err.endsWith('\n') ? r.err : r.err + '\n', 'err');
+    if (r.code !== 0) {
+      put('exit ', 'dim');
+      const badge = document.createElement('span');
+      badge.className = 'code-badge';
+      badge.textContent = String(r.code);
+      screen.appendChild(badge);
+      put('\n');
+    }
+  }
+  histCursor = history.length;
+  scrollToInput();
+}
+
+cmdline.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') {
+    const line = cmdline.value;
+    cmdline.value = '';
+    runLine(line);
+  } else if (ev.key === 'ArrowUp') {
+    ev.preventDefault();
+    if (histCursor > 0) cmdline.value = history[--histCursor];
+  } else if (ev.key === 'ArrowDown') {
+    ev.preventDefault();
+    if (histCursor < history.length - 1) cmdline.value = history[++histCursor];
+    else { histCursor = history.length; cmdline.value = ''; }
+  } else if (ev.key === 'l' && ev.ctrlKey) {
+    ev.preventDefault();
+    screen.textContent = '';
+  }
+});
+document.body.addEventListener('click', () => {
+  if (!window.getSelection()?.toString()) cmdline.focus();
+});
+
+try {
+  const t0 = performance.now();
+  await init();
+  shell = new KaishShell();
+  put(`kernel up in ${(performance.now() - t0).toFixed(0)}ms — seeding /src …\n`, 'dim');
+
+  const t1 = performance.now();
+  const seed = await (await fetch('seed.json')).json();
+  const enc = new TextEncoder();
+  let files = 0, bytes = 0;
+  for (const [path, text] of Object.entries(seed)) {
+    const data = enc.encode(text);
+    shell.seed_file(path, data);
+    files += 1; bytes += data.length;
+  }
+  put(`seeded ${files} files (${(bytes / 1e6).toFixed(1)} MB) in ` +
+      `${(performance.now() - t1).toFixed(0)}ms\n`, 'dim');
+  put(`\nthe kaish and kaish-extras sources are under /src — try:\n` +
+      `  ls /src/kaish\n` +
+      `  grep -rn "system_now" /src/kaish/crates | head -5\n` +
+      `  cat -n /src/kaish/docs/LANGUAGE.md | head -30\n` +
+      `  cat /src/kaish/Cargo.toml | grep -A3 workspace.package\n` +
+      `  help\n\n`, 'dim');
+
+  cmdline.disabled = false;
+  cmdline.focus();
+} catch (e) {
+  put(`failed to start: ${e}\n`, 'err');
+  console.error(e);
+}
+</script>
+</body>
+</html>

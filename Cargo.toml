@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = ["crates/kaish-web"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Amy Tobey <tobert@gmail.com>"]
+repository = "https://github.com/tobert/kaish-extras"
+
+# kaish is pinned by git sha while kaish-extras finds its feet; switch every
+# kaish-* dependency to the published crates.io release before any release of
+# the crates in this workspace.
+[workspace.dependencies]
+kaish-kernel = { git = "https://github.com/tobert/kaish.git", rev = "7eba97bc35514e67fb7e23b91a46dfd6de915bd2", default-features = false }
+
+[profile.release]
+# The wasm bundle ships over the network — favor size.
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+
+# Local development against the web-time worktree; drop before pushing —
+# CI must build against the pinned git rev alone.
+[patch."https://github.com/tobert/kaish.git"]
+kaish-kernel = { path = "/home/atobey/src/wt/kaish-web-time/crates/kaish-kernel" }
