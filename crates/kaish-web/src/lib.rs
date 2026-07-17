@@ -11,6 +11,7 @@
 //! playground's sample tree is ordinary in-memory files — everything the
 //! visitor does to them stays in their tab.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -20,6 +21,21 @@ use wasm_bindgen::prelude::*;
 
 fn js_err(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())
+}
+
+/// Largest output field handed to the page per call.
+const MAX_FIELD_BYTES: usize = 1_000_000;
+
+/// Clip to `MAX_FIELD_BYTES` at a char boundary, marking the cut.
+fn clip(s: &str) -> Cow<'_, str> {
+    if s.len() <= MAX_FIELD_BYTES {
+        return Cow::Borrowed(s);
+    }
+    let mut end = MAX_FIELD_BYTES;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    Cow::Owned(format!("{}\n… [output truncated at 1 MB]\n", &s[..end]))
 }
 
 #[wasm_bindgen]
@@ -51,13 +67,16 @@ impl KaishShell {
 
     /// Execute one kaish statement or script. Returns a JSON string:
     /// `{"code": <i64>, "out": <string>, "err": <string|null>}`.
+    ///
+    /// `out`/`err` are clipped to 1 MB each — a multi-megabyte string crossing
+    /// the wasm boundary into `JSON.parse` and the DOM would freeze the tab.
     pub fn execute(&self, input: &str) -> String {
         let outcome = self.rt.block_on(self.kernel.execute(input));
         let json = match outcome {
             Ok(r) => serde_json::json!({
                 "code": r.code,
-                "out": r.text_out().as_ref(),
-                "err": if r.err.is_empty() { None } else { Some(r.err.as_str()) },
+                "out": clip(r.text_out().as_ref()),
+                "err": if r.err.is_empty() { None } else { Some(clip(&r.err)) },
             }),
             Err(e) => serde_json::json!({ "code": 1, "out": "", "err": e.to_string() }),
         };
@@ -73,8 +92,14 @@ impl KaishShell {
                 let mut cur = PathBuf::new();
                 for comp in parent.components() {
                     cur.push(comp);
-                    // AlreadyExists on an ancestor is the common case, not an error.
-                    let _ = vfs.mkdir(&cur).await;
+                    // An ancestor that already exists is the common case;
+                    // anything else (e.g. a file squatting on the dir name)
+                    // must surface, or the write below fails confusingly.
+                    if let Err(e) = vfs.mkdir(&cur).await {
+                        if e.kind() != std::io::ErrorKind::AlreadyExists {
+                            return Err(js_err(format!("mkdir {}: {e}", cur.display())));
+                        }
+                    }
                 }
             }
             vfs.write(p, contents).await.map_err(js_err)

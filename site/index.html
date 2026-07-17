@@ -58,16 +58,23 @@ import init, { KaishShell } from './pkg/kaish_web.js';
 const screen = document.getElementById('screen');
 const cmdline = document.getElementById('cmdline');
 
+const MAX_SCROLLBACK_NODES = 4000;
 function put(text, cls) {
   const span = document.createElement('span');
   if (cls) span.className = cls;
   span.textContent = text;
   screen.appendChild(span);
+  // Cap the scrollback: unbounded DOM growth janks and eventually kills
+  // the tab in a long session.
+  while (screen.childNodes.length > MAX_SCROLLBACK_NODES) {
+    screen.removeChild(screen.firstChild);
+  }
 }
 function scrollToInput() { cmdline.scrollIntoView({ block: 'end' }); }
 
 const history = [];
 let histCursor = 0;
+let pendingLine = null;   // partial input stashed while browsing history
 let shell = null;
 
 function runLine(line) {
@@ -76,7 +83,18 @@ function runLine(line) {
   const trimmed = line.trim();
   if (trimmed) {
     history.push(line);
-    const r = JSON.parse(shell.execute(trimmed));
+    let r;
+    try {
+      r = JSON.parse(shell.execute(trimmed));
+    } catch (e) {
+      // A wasm panic poisons the instance: every later call would fail
+      // silently. Say so loudly and stop taking input.
+      put(`kaish kernel crashed: ${e}\n`, 'err');
+      put(`reload the page to restart the shell\n`, 'err');
+      cmdline.disabled = true;
+      console.error(e);
+      return;
+    }
     if (r.out) put(r.out.endsWith('\n') || r.out === '' ? r.out : r.out + '\n');
     if (r.err) put(r.err.endsWith('\n') ? r.err : r.err + '\n', 'err');
     if (r.code !== 0) {
@@ -89,6 +107,7 @@ function runLine(line) {
     }
   }
   histCursor = history.length;
+  pendingLine = null;
   scrollToInput();
 }
 
@@ -99,11 +118,18 @@ cmdline.addEventListener('keydown', (ev) => {
     runLine(line);
   } else if (ev.key === 'ArrowUp') {
     ev.preventDefault();
-    if (histCursor > 0) cmdline.value = history[--histCursor];
+    if (histCursor > 0) {
+      if (histCursor === history.length) pendingLine = cmdline.value;
+      cmdline.value = history[--histCursor];
+    }
   } else if (ev.key === 'ArrowDown') {
     ev.preventDefault();
     if (histCursor < history.length - 1) cmdline.value = history[++histCursor];
-    else { histCursor = history.length; cmdline.value = ''; }
+    else {
+      histCursor = history.length;
+      cmdline.value = pendingLine ?? '';
+      pendingLine = null;
+    }
   } else if (ev.key === 'l' && ev.ctrlKey) {
     ev.preventDefault();
     screen.textContent = '';
@@ -119,12 +145,23 @@ cmdline.addEventListener('keydown', (ev) => {
 document.addEventListener('pointerup', () => {
   if (!cmdline.disabled && !window.getSelection()?.toString()) cmdline.focus();
 });
-// …and printable keys typed while focus wandered land in the prompt
-// (focusing during keydown routes the character into the input).
+// …and printable keys typed while focus wandered land in the prompt.
+// Focusing mid-keydown doesn't reliably deliver the character in every
+// browser (WebKit dispatches the input event to the previously focused
+// element), so mirror the key into the buffer ourselves.
 document.addEventListener('keydown', (ev) => {
   if (document.activeElement === cmdline || cmdline.disabled) return;
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
-  if (ev.key.length === 1 || ev.key === 'Backspace' || ev.key === 'Enter') {
+  if (ev.key.length === 1) {
+    ev.preventDefault();
+    cmdline.value += ev.key;
+    cmdline.focus();
+  } else if (ev.key === 'Backspace') {
+    ev.preventDefault();
+    cmdline.value = cmdline.value.slice(0, -1);
+    cmdline.focus();
+  } else if (ev.key === 'Enter') {
+    ev.preventDefault();
     cmdline.focus();
   }
 });
@@ -134,6 +171,9 @@ try {
   await init();
   shell = new KaishShell();
   put(`kernel up in ${(performance.now() - t0).toFixed(0)}ms — seeding /src …\n`, 'dim');
+  // Let the seeding message actually paint before the synchronous seed
+  // loop holds the main thread.
+  await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
 
   const t1 = performance.now();
   const seed = await (await fetch('seed.json')).json();
