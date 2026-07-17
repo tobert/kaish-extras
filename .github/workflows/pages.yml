@@ -1,0 +1,70 @@
+name: pages
+
+# Build the try-kaish site (wasm + bindings + source seed) and deploy it to
+# GitHub Pages on every push to main.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The playground seeds kaish's own source tree; check it out beside us.
+      - uses: actions/checkout@v4
+        with:
+          repository: tobert/kaish
+          path: kaish-src
+
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install binaryen (wasm-opt)
+        run: sudo apt-get update && sudo apt-get install -y binaryen
+
+      - name: Install wasm-bindgen-cli (locked version)
+        run: |
+          ver=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep '^version' | cut -d'"' -f2)
+          echo "wasm-bindgen $ver"
+          cargo install wasm-bindgen-cli --version "$ver" --locked
+
+      - name: Build site
+        run: scripts/build-site.sh ./kaish-src
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: e2e against the built site (runner's chrome, real-time CDP)
+        run: |
+          python3 -m http.server -d site 8137 &
+          sleep 1
+          deno run --allow-net --allow-run scripts/e2e.ts
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

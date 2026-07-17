@@ -8,7 +8,19 @@
 const url = Deno.args[0] ?? "http://127.0.0.1:8137/";
 const port = 9223;
 
-const chrome = new Deno.Command("chromium", {
+function findBrowser(): string {
+  for (const c of ["chromium", "google-chrome-stable", "google-chrome", "chromium-browser"]) {
+    try {
+      new Deno.Command(c, { args: ["--version"], stdout: "null", stderr: "null" })
+        .outputSync();
+      return c;
+    } catch { /* keep looking */ }
+  }
+  console.error("E2E FAIL: no chromium/chrome binary found");
+  Deno.exit(1);
+}
+
+const chrome = new Deno.Command(findBrowser(), {
   args: [
     "--headless=new", "--disable-gpu", "--no-sandbox",
     `--remote-debugging-port=${port}`, "about:blank",
