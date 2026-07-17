@@ -24,12 +24,16 @@ scripts/build-site.sh ~/src/kaish   # → site/ is a static bundle
 python3 -m http.server -d site 8137 # try it locally
 ```
 
-`site/smoke.html` is the machine-checked page: load it headless and assert
-`SMOKE OK` appears in `#out`:
+Two machine checks, both against a locally served `site/`:
 
 ```sh
+# engine smoke (main-thread wasm, virtual-time friendly):
 chromium --headless=new --virtual-time-budget=20000 \
   --dump-dom http://127.0.0.1:8137/smoke.html | grep "SMOKE OK"
+
+# full e2e (worker boot, seeding, FIFO exec, Ctrl-C interrupt+restart) —
+# real-time CDP, because virtual time can't wait on a Web Worker:
+deno run --allow-net --allow-run scripts/e2e.ts
 ```
 
 ## kaish dependency

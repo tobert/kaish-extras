@@ -43,7 +43,8 @@
   <p>A sandboxed shell you can sandbox: the real
      <a href="https://github.com/tobert/kaish">kaish</a> kernel compiled to
      WebAssembly. No server, no syscalls, no POSIX — everything below runs in
-     this tab against an in-memory filesystem seeded with kaish's own source.</p>
+     this tab against an in-memory filesystem seeded with kaish's own source.
+     Ctrl-C interrupts (restarting the shell), Ctrl-L clears.</p>
 </header>
 <div id="screen"></div>
 <div id="inputrow">
@@ -53,10 +54,9 @@
 </div>
 
 <script type="module">
-import init, { KaishShell } from './pkg/kaish_web.js';
-
 const screen = document.getElementById('screen');
 const cmdline = document.getElementById('cmdline');
+const prompt = document.getElementById('prompt');
 
 const MAX_SCROLLBACK_NODES = 4000;
 function put(text, cls) {
@@ -71,43 +71,110 @@ function put(text, cls) {
   }
 }
 function scrollToInput() { cmdline.scrollIntoView({ block: 'end' }); }
+function setBusy(busy) { prompt.textContent = busy ? 'kaish⋯ ' : 'kaish❯ '; }
 
 const history = [];
 let histCursor = 0;
 let pendingLine = null;   // partial input stashed while browsing history
-let shell = null;
+let bootedOnce = false;
 
-function runLine(line) {
+// ---- worker lifecycle -----------------------------------------------------
+// The kaish engine runs in a worker so the page never freezes; Ctrl-C
+// terminates and respawns it (session state resets, the seed comes back).
+let worker = null;
+let workerReady = false;
+let seedFiles = null;     // [[path, Uint8Array]] — retained so restarts reseed instantly
+let inflight = 0;
+let nextId = 0;
+
+function maybeSeed() {
+  if (workerReady && seedFiles) {
+    worker.postMessage({ type: 'seed', files: seedFiles });
+  }
+}
+
+function onWorkerMessage(ev) {
+  const m = ev.data;
+  if (m.type === 'ready') {
+    workerReady = true;
+    put(`kernel up in ${m.ms.toFixed(0)}ms — seeding /src …\n`, 'dim');
+    maybeSeed();
+  } else if (m.type === 'seeded') {
+    put(`seeded ${m.count} files (${(m.bytes / 1e6).toFixed(1)} MB) in ` +
+        `${m.ms.toFixed(0)}ms\n`, 'dim');
+    if (!bootedOnce) {
+      bootedOnce = true;
+      put(`\nthe kaish and kaish-extras sources are under /src — try:\n` +
+          `  ls /src/kaish\n` +
+          `  grep -rn "system_now" /src/kaish/crates | head -5\n` +
+          `  cat -n /src/kaish/docs/LANGUAGE.md | head -30\n` +
+          `  cat /src/kaish/Cargo.toml | grep -A3 workspace.package\n` +
+          `  help\n\n`, 'dim');
+    }
+    inflight = 0;
+    setBusy(false);
+    cmdline.disabled = false;
+    cmdline.focus();
+    scrollToInput();
+  } else if (m.type === 'result') {
+    inflight -= 1;
+    if (inflight <= 0) { inflight = 0; setBusy(false); }
+    renderResult(m);
+  } else if (m.type === 'crash') {
+    put(`kaish kernel crashed: ${m.error}\n`, 'err');
+    restartShell('shell restarted — session state reset');
+  }
+}
+
+function spawnWorker() {
+  workerReady = false;
+  worker = new Worker('./worker.js', { type: 'module' });
+  worker.onmessage = onWorkerMessage;
+  worker.onerror = (e) => put(`worker error: ${e.message}\n`, 'err');
+  worker.postMessage({ type: 'boot' });
+}
+
+function restartShell(note) {
+  worker.terminate();
+  inflight = 0;
+  setBusy(false);
+  cmdline.disabled = true;
+  if (note) put(note + '\n', 'dim');
+  spawnWorker();
+}
+
+// ---- REPL -----------------------------------------------------------------
+
+function submitLine(line) {
   put(`kaish❯ `, 'cmd');
   put(line + '\n');
   const trimmed = line.trim();
   if (trimmed) {
     history.push(line);
-    let r;
-    try {
-      r = JSON.parse(shell.execute(trimmed));
-    } catch (e) {
-      // A wasm panic poisons the instance: every later call would fail
-      // silently. Say so loudly and stop taking input.
-      put(`kaish kernel crashed: ${e}\n`, 'err');
-      put(`reload the page to restart the shell\n`, 'err');
-      cmdline.disabled = true;
-      console.error(e);
-      return;
-    }
-    if (r.out) put(r.out.endsWith('\n') || r.out === '' ? r.out : r.out + '\n');
-    if (r.err) put(r.err.endsWith('\n') ? r.err : r.err + '\n', 'err');
-    if (r.code !== 0) {
-      put('exit ', 'dim');
-      const badge = document.createElement('span');
-      badge.className = 'code-badge';
-      badge.textContent = String(r.code);
-      screen.appendChild(badge);
-      put('\n');
-    }
+    nextId += 1;
+    inflight += 1;
+    setBusy(true);
+    // Results come back strictly FIFO (single-threaded worker), so echoing
+    // at submit time keeps prompt/output interleaving correct even when
+    // commands queue up.
+    worker.postMessage({ type: 'exec', id: nextId, line: trimmed });
   }
   histCursor = history.length;
   pendingLine = null;
+  scrollToInput();
+}
+
+function renderResult(r) {
+  if (r.out) put(r.out.endsWith('\n') || r.out === '' ? r.out : r.out + '\n');
+  if (r.err) put(r.err.endsWith('\n') ? r.err : r.err + '\n', 'err');
+  if (r.code !== 0) {
+    put('exit ', 'dim');
+    const badge = document.createElement('span');
+    badge.className = 'code-badge';
+    badge.textContent = String(r.code);
+    screen.appendChild(badge);
+    put('\n');
+  }
   scrollToInput();
 }
 
@@ -115,7 +182,7 @@ cmdline.addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter') {
     const line = cmdline.value;
     cmdline.value = '';
-    runLine(line);
+    submitLine(line);
   } else if (ev.key === 'ArrowUp') {
     ev.preventDefault();
     if (histCursor > 0) {
@@ -129,6 +196,22 @@ cmdline.addEventListener('keydown', (ev) => {
       histCursor = history.length;
       cmdline.value = pendingLine ?? '';
       pendingLine = null;
+    }
+  } else if (ev.key === 'c' && ev.ctrlKey) {
+    // Terminal Ctrl-C — but never steal a real copy: with a selection
+    // active, the browser's Ctrl-C wins.
+    if (window.getSelection()?.toString()) return;
+    ev.preventDefault();
+    if (inflight > 0) {
+      put('^C\n', 'err');
+      restartShell('interrupted — shell restarted, session state reset ' +
+                   '(seeded files are back; your writes and vars are not)');
+    } else {
+      put(`kaish❯ ${cmdline.value}^C\n`, 'dim');
+      cmdline.value = '';
+      histCursor = history.length;
+      pendingLine = null;
+      scrollToInput();
     }
   } else if (ev.key === 'l' && ev.ctrlKey) {
     ev.preventDefault();
@@ -166,37 +249,18 @@ document.addEventListener('keydown', (ev) => {
   }
 });
 
-try {
-  const t0 = performance.now();
-  await init();
-  shell = new KaishShell();
-  put(`kernel up in ${(performance.now() - t0).toFixed(0)}ms — seeding /src …\n`, 'dim');
-  // Let the seeding message actually paint before the synchronous seed
-  // loop holds the main thread.
-  await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+// ---- boot -----------------------------------------------------------------
 
-  const t1 = performance.now();
+put('loading wasm …\n', 'dim');
+spawnWorker();
+try {
   const seed = await (await fetch('seed.json')).json();
   const enc = new TextEncoder();
-  let files = 0, bytes = 0;
-  for (const [path, text] of Object.entries(seed)) {
-    const data = enc.encode(text);
-    shell.seed_file(path, data);
-    files += 1; bytes += data.length;
-  }
-  put(`seeded ${files} files (${(bytes / 1e6).toFixed(1)} MB) in ` +
-      `${(performance.now() - t1).toFixed(0)}ms\n`, 'dim');
-  put(`\nthe kaish and kaish-extras sources are under /src — try:\n` +
-      `  ls /src/kaish\n` +
-      `  grep -rn "system_now" /src/kaish/crates | head -5\n` +
-      `  cat -n /src/kaish/docs/LANGUAGE.md | head -30\n` +
-      `  cat /src/kaish/Cargo.toml | grep -A3 workspace.package\n` +
-      `  help\n\n`, 'dim');
-
-  cmdline.disabled = false;
-  cmdline.focus();
+  // Clone (not transfer) into the worker so restarts reseed from this copy.
+  seedFiles = Object.entries(seed).map(([path, text]) => [path, enc.encode(text)]);
+  maybeSeed();
 } catch (e) {
-  put(`failed to start: ${e}\n`, 'err');
+  put(`failed to load seed.json: ${e}\n`, 'err');
   console.error(e);
 }
 </script>

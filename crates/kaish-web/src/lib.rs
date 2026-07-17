@@ -60,6 +60,11 @@ impl KaishShell {
             // A tab is not a machine: cap the in-memory VFS so a runaway
             // write loop degrades into an ENOSPC-style error, not tab death.
             config.vfs_budget_bytes = Some(256 * 1024 * 1024);
+            // Bound per-command output in the kernel (head/tail elision) so a
+            // runaway `while true; do echo …` accumulates a window, not the
+            // tab's memory; in_memory keeps it off the (nonexistent) disk.
+            config.output_limit =
+                kaish_kernel::output_limit::OutputLimitConfig::agent().in_memory();
             Kernel::new(config).map_err(js_err)?.into_arc()
         };
         Ok(KaishShell { rt, kernel })
