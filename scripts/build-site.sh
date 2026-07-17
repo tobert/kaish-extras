@@ -14,7 +14,7 @@ wasm-bindgen --target web --out-dir site/pkg \
   target/wasm32-unknown-unknown/release/kaish_web.wasm
 
 if command -v wasm-opt >/dev/null; then
-  wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int \
+  wasm-opt -Oz --all-features \
     -o site/pkg/kaish_web_bg.wasm site/pkg/kaish_web_bg.wasm
   echo "wasm-opt: $(du -h site/pkg/kaish_web_bg.wasm | cut -f1)"
 fi
