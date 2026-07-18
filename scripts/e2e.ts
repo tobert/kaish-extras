@@ -95,17 +95,69 @@ async function ctrlC() {
 }
 
 await send("Page.enable");
-await send("Page.navigate", { url });
 
-// 1. Boot + seed through the worker.
+// A reverse proxy in front of the real site server that fails the *first*
+// request for the wasm bundle with a real 503, then forwards everything
+// transparently. Reproduces the exact "kernel crashed: ... HTTP status code
+// is not ok" that GitHub Pages/Fastly edge blips cause — at the real network
+// layer, so it's indistinguishable from the live failure regardless of which
+// context (dedicated worker, coi-sw.js service worker) issues the fetch.
+// Proves the auto-restart backoff (index.html) actually recovers from one,
+// instead of relying on a real CDN hiccup happening to land during CI.
+let wasmFaultInjected = false;
+const proxyPort = 8138;
+const proxy = Deno.serve(
+  { port: proxyPort, hostname: "127.0.0.1", onListen: () => {} },
+  async (req) => {
+    const upstreamUrl = new URL(req.url);
+    upstreamUrl.protocol = new URL(url).protocol;
+    upstreamUrl.host = new URL(url).host;
+    if (!wasmFaultInjected && upstreamUrl.pathname.endsWith("kaish_web_bg.wasm")) {
+      wasmFaultInjected = true;
+      return new Response("e2e fault injection: transient wasm fetch failure", {
+        status: 503,
+      });
+    }
+    const upstream = await fetch(upstreamUrl);
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers: { "content-type": upstream.headers.get("content-type") ?? "" },
+    });
+  },
+);
+const proxyUrl = `http://127.0.0.1:${proxyPort}/`;
+
+await send("Page.navigate", { url: proxyUrl });
+
+// 1. Boot + seed through the worker — through the injected wasm-fetch
+//    failure above, so this also proves the crash auto-restart recovers.
 await waitFor("seeded banner", async () => (await screenText()).includes("seeded"));
-console.log("boot+seed: OK");
+{
+  const t = await screenText();
+  if (!t.includes("kaish kernel crashed")) {
+    fail("fault injection didn't reach the worker — no crash message seen");
+  }
+  if (!t.includes("shell restarted")) {
+    fail("crash message seen but no auto-restart followed");
+  }
+  if (t.includes("keeps crashing")) {
+    fail("a single transient failure exhausted all auto-restarts — backoff regression?");
+  }
+}
+console.log("boot+seed (recovers from injected transient wasm-fetch failure): OK");
 
-// 2. Commands run through the worker, FIFO.
+// 2. Commands run through the worker, FIFO. Assert on output the kernel
+//    actually produced, not text already on screen — the boot banner already
+//    contains "kaish" and the echoed command line itself contains
+//    "clock.rs", so checking for either used to pass before the worker had
+//    even responded.
+const beforeExec = (await screenText()).length;
 await type("uname -a");
 await type("grep -c 'pub fn' /src/kaish/crates/kaish-types/src/clock.rs");
-await waitFor("uname output", async () => (await screenText()).includes("kaish"));
-await waitFor("grep output", async () => /clock\.rs|\n1\n/.test(await screenText()));
+await waitFor("uname output (machine field is wasm32 on this build)",
+  async () => (await screenText()).slice(beforeExec).includes("wasm32"));
+await waitFor("grep output (a bare match count on its own line)",
+  async () => /\n\d+\n/.test((await screenText()).slice(beforeExec)));
 console.log("exec via worker: OK");
 
 // 3. Tab completion: unique command completes with a trailing space; a
@@ -139,6 +191,7 @@ console.log("tab completion: OK");
 //    isolation it falls back to tier 1: worker restart + reseed.
 const isolated = await evalJs("window.crossOriginIsolated === true");
 if (isolated) {
+  const beforeCtrlC = (await screenText()).length;
   await type("KEEP=preserved-7x9");
   await type("while true; do true; done");
   await new Promise((r) => setTimeout(r, 600)); // let it really wedge the worker
@@ -148,7 +201,9 @@ if (isolated) {
   await type("echo $KEEP");
   await waitFor("session state preserved across ^C",
     async () => /\npreserved-7x9\n/.test(await screenText()));
-  if ((await screenText()).includes("shell restarted")) {
+  // Scoped to text since this stage began — an earlier stage (fault
+  // injection) legitimately printed "shell restarted" already.
+  if ((await screenText()).slice(beforeCtrlC).includes("shell restarted")) {
     fail("tier-2 ^C restarted the shell instead of interrupting in place");
   }
   console.log("ctrl-c tier-2 (in-place, state preserved): OK");

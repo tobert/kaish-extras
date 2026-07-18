@@ -124,6 +124,7 @@ let nextId = 0;
 let autoRestarts = 0;     // crash-driven respawns since the last healthy seed
 const MAX_AUTO_RESTARTS = 3;
 let completionReq = null; // {id, line, pos} awaiting the worker's answer
+let restartTimer = null;  // pending backoff timer, so a second crash can't stack respawns
 
 function maybeSeed() {
   if (workerReady && seedFiles) {
@@ -175,11 +176,21 @@ function onWorkerMessage(ev) {
     autoRestarts += 1;
     if (autoRestarts > MAX_AUTO_RESTARTS) {
       put('the shell keeps crashing — giving up; reload the page to retry\n', 'err');
+      // A backoff scheduled by an earlier crash may still be pending — without
+      // this, giving up doesn't actually stick: the timer fires later and
+      // resurrects a worker after the page already told the user we quit.
+      if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
       worker.terminate();
+      inflight = 0;
+      setBusy(false);
       cmdline.disabled = true;
       return;
     }
-    restartShell('shell restarted — session state reset');
+    // A crash this early is usually a transient CDN blip on the ~5 MB wasm
+    // fetch (GitHub Pages edge hiccup), not a broken deploy. Back off before
+    // respawning so a blip lasting longer than an instant doesn't burn
+    // through every auto-restart in the same bad window.
+    restartShell('shell restarted — session state reset', 300 * autoRestarts);
   }
 }
 
@@ -191,14 +202,19 @@ function spawnWorker() {
   worker.postMessage({ type: 'boot', sab: interruptSab });
 }
 
-function restartShell(note) {
+function restartShell(note, delayMs = 0) {
+  if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
   worker.terminate();
   inflight = 0;
   completionReq = null;
   setBusy(false);
   cmdline.disabled = true;
   if (note) put(note + '\n', 'dim');
-  spawnWorker();
+  if (delayMs > 0) {
+    restartTimer = setTimeout(() => { restartTimer = null; spawnWorker(); }, delayMs);
+  } else {
+    spawnWorker();
+  }
 }
 
 // ---- REPL -----------------------------------------------------------------
