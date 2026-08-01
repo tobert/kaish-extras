@@ -1,9 +1,153 @@
 # The kaish approval ledger
 
-**Status:** design proposal, tuned by co-architect pass; cross-model review pending
-**Target:** kaish kernel 0.13 · **Drafted:** 2026-08-01 (Opus design agent), tuned same day (Fable)
+**Status:** design proposal, tuned by co-architect pass; cross-model reviewed (gemini-pro + gpt-sol). **The public types and `ToolCtx` API are NOT ready to merge** — see the review synthesis below for the six issues to resolve first.
+**Target:** kaish kernel 0.13 · **Drafted:** 2026-08-01 (Opus design agent), tuned + reviewed same day
 **Inputs:** [safety-inventory-2026-08.md](safety-inventory-2026-08.md) (problem statement), [../git.md](../git.md) §7 (first consumer), kaish `main` @ `818ff48`
+**Reviews:** [reviews/ledger-review-gemini-2026-08.md](reviews/ledger-review-gemini-2026-08.md), [reviews/ledger-review-gpt-2026-08.md](reviews/ledger-review-gpt-2026-08.md)
 **Supersedes:** the confirmation latch as a standalone mechanism (see §E)
+
+---
+
+## Cross-model review synthesis (2026-08-01)
+
+Two frontier models reviewed this proposal against the real kaish tree (kaibo
+batch, max thinking): gemini-pro said "ship it, fix four blockers"; gpt-sol said
+"do not merge the public types yet" and found six. gpt's review was the sharper
+one and its blockers are real — they are things this draft genuinely
+under-specified, not stylistic quibbles. **The design direction survives intact;
+the data model and lifecycle contracts need another pass before any code lands.**
+The reviews agree on far more than they differ, and where they agree they are
+almost certainly right.
+
+**Adopted — revise the design before PR 3+ (types) and PR 5 (`ToolCtx` API):**
+
+1. **Attempts are first-class (gpt Blocker 1, the most important finding).** The
+   §A.5 log keys terminal entries on `RequestId`, but with `max_redemptions > 1`
+   two `Redeemed(R)` followed by one `Settled(R)` is unbalanceable — you cannot
+   tell which attempt settled. Add an `AttemptId`; `Redeemed`/`Settled`/`Abandoned`
+   carry it; redemption becomes a linearizable reserve-a-use operation, and
+   settlement is idempotent by `AttemptId`. This is the single change that makes
+   the balance rule (§A.1) actually checkable. It also cleanly subsumes the
+   background-job lifecycle both reviews flagged.
+
+2. **One explicit linearization contract (gpt Blocker 2).** §B describes race
+   *outcomes* but not the *rule*. Adopt gpt's phrasing: "an operation wins by the
+   order its conditional ledger transaction commits; every derived event
+   (`Expired`/`Voided`/`Abandoned`) has a uniqueness key and is idempotent."
+   Standing-grant `max_uses` consumption is part of the same single critical
+   section. And **scope the clock claim**: v1 is in-process, one `Arc<LedgerInner>`,
+   one monotonic clock, *no durability claim* — the "concurrent kernels sharing a
+   ledger" language is too broad and must be narrowed to same-process.
+
+3. **Settlement is a dispatcher-owned guard, not after-return code (both;
+   gpt Blocker 3).** §C.1's "the seam posts `Settled` after `tool.execute()`
+   returns" does not fire on drop/abort/panic/process-death — verified against
+   `kernel.rs:3324-3340`, which only runs on normal return, and
+   `ctx.rs:82-101`, whose cancellation is cooperative with no dropped-future
+   callback. Replace with an attempt guard whose `Drop` best-effort-settles via a
+   synchronous outbox, plus a recovery sweep. **And fix the outcome vocabulary:**
+   a cancelled tool may have already written, so the honest terminal is
+   `Outcome::Unknown`/`LostExecutor`, not `Cancelled` — "Abandoned" must not imply
+   "no effect happened."
+
+4. **The security boundary must be structural, not a redaction convention
+   (gpt Blocker 5 — supersedes my §D.3 tuning).** My authority-gated token
+   delivery still routes a token *through* the public `ApprovalRequest` and then
+   redacts it at a chokepoint — but gpt correctly shows `Job::latch()` is **not** a
+   universal chokepoint (foreground results never pass through it;
+   `context.rs:759-798` mints the request, `job.rs:223-230` only stamps job-id
+   later). The fix is stronger and simpler: the public view is a distinct
+   `ApprovalRequestView` type **with no credential field at all** — tokenless by
+   construction, so nothing to redact and nothing to leak through clone/JSON/VFS/
+   telemetry. The kernel holds the redemption credential internally, bound to
+   principal/session; the requester can *trigger* replay after approval but can
+   never hold the grant. `with_approval_authority(bool)` becomes a
+   non-constructible `ApproverHandle` capability the agent session simply does not
+   possess. Also action item: audit that **no shell builtin bridges to
+   `Kernel::grant`** (gpt escape-path 4) and soften the threat-model prose to
+   "protects against command-level agents and portable tools, not hostile loaded
+   Rust or a hostile embedder" (the `as_any_mut` reality, `ctx.rs:106-121`).
+
+5. **Replay needs internal request correlation (gpt Blocker 4).** A bare replay
+   re-hits the gate and would post a *new* request. `Kernel::confirm` must reserve
+   an attempt for the original request and dispatch with an internal
+   `RedemptionContext { request_id, attempt_id }`; the gate matches the fresh
+   draft against the granted operation/resources before accepting. Only
+   `Exact`-captured invocations are replayable — represent capture status as an
+   enum (`Exact`/`Unavailable`/`CaptureFailed`/`DirectExecution`), since
+   `kernel.rs:3310-3321` silently substitutes empty argv today.
+
+6. **Migration is resequenced (both; gpt "7a/7b is not safe").** Both reviews
+   independently killed the clean rename-then-behavior split: `LatchRequest` is
+   `#[serde(deny_unknown_fields)]` (`result.rs:72-74`) and serialized directly, so
+   "byte-identical modulo key" only holds for a temporary compat projection, not
+   the final tokenless type. Adopt gpt's 7-step sequence: formalize transactions →
+   add internal approval types *alongside* the latch → build a latch **compat
+   adapter backed by the ledger** (preserving today's TTL/reuse) → port one gate →
+   validate fg/pipeline/bg/VFS/trash/CAS → *then* introduce the tokenless wire
+   break explicitly → remove the compat layer. Precede it with the
+   **operation matrix** gpt specifies (operation × trash × approval × reversible ×
+   fg/bg/direct → expected events + failure behavior); the invariant "trash
+   failure is loud, never falls through to an unprotected overwrite" is a row that
+   must not change.
+
+**Adopted — smaller corrections:**
+
+- **Drop "double-entry" from the name and the code (both reviews, independently).**
+  It is not double-entry accounting — there is no trial-balance invariant, and both
+  APIs wrap the same `Arc`. It is a **split-authority append-only approval ledger**;
+  call it the *approval ledger*. Amy's original framing ("double-entry, simple, not
+  crypto, an authorization handoff") is honored by the *split-authority* property,
+  which is the part that was ever load-bearing. Keep the intent, drop the label.
+- **Spans: linked short spans, not one minutes-long span** (both). Separate
+  request / decision-latency / redemption-settlement spans linked by
+  `RequestId` + `AttemptId`. Revises §F.
+- **`request_approval` returns a richer enum**, not `Result<Auth, ExecResult>`:
+  `Authorized(AttemptHandle)` / `Pending(TokenlessView)` / `Denied` / `Unsupported`
+  / `LedgerUnavailable`, all non-authorized failing closed (gpt API section).
+- **Redemption checks "detect stale authorization," they do not "close TOCTOU"**
+  (gpt). The final mutation still needs an atomic conditional write — for git refs,
+  git's own compare-and-swap ref update. Reword §B.3's claim.
+- **`LedgerSink` backpressure is unspecified** (both). Bounded/buffered async
+  channel; on full, fail closed (block new privileged ops) rather than block the
+  reactor or drop audit records. New subsection under §D.4.
+
+**The four open questions — reviewers converged (gpt's answers adopted where they
+diverge, as the more conservative):**
+
+1. *Ring capacity* → **partitioned retention**: unbounded-ish live index, settled
+   chains stream to the sink and evict; fail closed only when *live* entries
+   exhaust capacity (with per-principal quotas + metrics against DoS). A
+   memory-only v1 is an *operational* ledger, not a durable audit ledger — say so.
+2. *Post `fs.*` auto-grants when latch is off?* → reviewers **split**. gemini says
+   yes (complete non-repudiation record); gpt says not as the migration default
+   (preserve today's fast paths, add a separate effect-audit event, introduce
+   full auto-grant-posting later as a documented behavior+perf change). **Adopt
+   gpt's staging** — it de-risks the migration and reaches the same end state.
+   This is the one genuinely open call for Amy: audit-completeness-now vs.
+   migration-safety-now.
+3. *Long-lived span?* → **no**, linked short spans (both agree; already adopted
+   above).
+4. *`Irreversible` refuse `--confirm`?* → **yes, bind to an approver capability,
+   not a bearer token** (both agree). Human REPL keeps the `--confirm` UX because
+   it *holds* the capability; an agent-visible token never authorizes an
+   irreversible op.
+
+**Not adopted / noted:** gemini's PTY-stream-segregation concern (#2 evidence gap)
+is real but is an embedder-integration requirement (kaibo/kaijutsu must not blend
+the approval prompt into the agent's stdout), not a kernel design change — it
+becomes a line in EMBEDDING.md and a note to the embedders. gemini's "double-entry
+is dressing" and gpt's "is double-entry the right abstraction" are the same
+finding; resolved above.
+
+**Net:** the safety goals, the split-authority separation, the identity/credential
+split, redemption-time precondition checks, standing-grants-as-entries, and the
+latch-as-consumer endgame all survive. What changes is rigor: attempts, one
+linearization rule, a drop-safe settlement guard, a tokenless public view, replay
+correlation, and a compat-adapter migration. A revised draft incorporating these
+is the next design iteration; **no kernel PR should start from the version below
+without the seven adopted revisions folded in.** The original design text is
+retained unedited beneath this synthesis so the review citations line up.
 
 ---
 
