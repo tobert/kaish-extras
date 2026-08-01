@@ -1162,3 +1162,77 @@ object storage and refs/index are tractable, Path 2 is the more-kaish bet and
 worth the extra code (strong guarantee + VFS + wasm in one). If refs/index prove
 hard-wired to `std::fs`, Path 1 with the runtime guarantee is the honest answer.
 Amy's call once the evidence is in.
+
+---
+
+## Co-architect note 3 — fork resolved: Path 2; sign-offs landed (Fable + Amy, 2026-08-01)
+
+**The fork in note 2 is resolved: Path 2, staged.** The Opus source-reading
+agent was re-run and returned; full evidence with file:line citations is in
+[gix-plumbing-feasibility-2026-08.md](gix-plumbing-feasibility-2026-08.md).
+Every premise Path 2 needed held: object access sits behind `gix-object`'s
+three find traits (one required method each, implementable over kaish-vfs);
+gix-traverse / gix-revision / gix-revwalk are generic over the object source
+and do not depend on `gix-odb` at all; gix-index decouples from `std::fs`
+trivially in both directions; gix-ref reads are public byte parsers (writes
+are `gix-lock`-bound — a real wall for the eventual commit profile over VFS,
+but the read profile writes no refs). Staging, per the report: build
+native-first behind kaish-owned access traits; take the `gix-sec` cfg fix
+upstream; treat VFS-backed storage as a **second implementation** of those
+traits, not a refactor. Effort: Path 2 native is M-tier; `status`/`blame`
+stay L-tier under either path, so the fork never moved the biggest cost.
+
+Two findings from the report land beyond the fork itself:
+
+- **`gix-pack` 0.73 is already mmap-optional.** `FileData: Deref<Target=[u8]>`
+  with a blanket impl, and public `from_data()` constructors on the data,
+  index, and multi-index file types; only `Bundle`'s 69-line find pipeline is
+  mmap-hardwired. Verified in-source by two readers independently. Appendix
+  issue 12 (the gix-pack upstream ask) is **retired — upstream already built
+  it**; the facade just never exposes it. kaish-extras#3's premise is stale
+  the same way.
+- **The plumbing set compiles for `wasm32-unknown-unknown` today** (built,
+  not inferred — memmap2, gix-lock, gix-tempfile all tolerated in-tree). The
+  sole compile blocker is `gix-sec`, reachable only via `gix-discover` /
+  `gix-config` — and Path 2 drops gix-discover. Appendix issue 13 is promoted
+  from side-note to the only wasm gate.
+
+Corrections folded in: **rename detection does not exist without `gix-diff`'s
+`blob` feature** — the entire `rewrites` tracker is `#[cfg(feature = "blob")]`
+— so renames are exact-match-only, reported honestly; §H PR 2's rename fixture
+is revised accordingly, and gix-research §3(a) mitigation (ii) is wrong on
+this point. The pin set gains `gix-config 0.59` (no `gix-command`; use
+`from_bytes_no_includes` and resolve includes ourselves, which retires the
+`include.path` escape by construction — appendix issue 8). The §A.4 tripwire
+is achievable as originally intended after all: `cargo tree -i` for each of
+`gix-command` / `gix-transport` / `gix-filter` must report "did not match any
+packages".
+
+**Sign-offs (note 1, item 5), all resolved by Amy 2026-08-01:**
+
+**(a) Bare `git diff` = git parity: index→worktree, unstaged only.** This
+reverses §C.3's HEAD→worktree proposal (the table and justification around
+:305-316 are superseded on the bare-invocation row only; `--from`/`--to`
+semantics stand, and HEAD→worktree remains one spelling away as
+`git diff --from HEAD`). Decided on evidence: a five-model survey
+(gemini-3.1-pro-preview, gemini-3.5-flash, deepseek-v4-pro, claude-sonnet,
+claude-haiku — deliberately spanning families and ability tiers, toolie class
+included) was **unanimous** that bare `git diff` means unstaged-only, and
+every model's review reach is the `git status` → `git diff` →
+`git diff --staged` triple. Nobody expects HEAD→worktree. Amy: "a model
+assuming git parity may be reaching for the shorter option intentionally —
+it's been like that for decades now." Diverging would silently hand every one
+of those models a wrong mental model of the output.
+
+**(b) Tool name `git`, shadowing external git by default: yes.** The first
+consumer is kaibo, read-only — shadowing is exactly what's wanted there. When
+kaish grows write verbs (commit and friends), our implementation stays
+preferred; real git remains reachable by full path when exec is enabled.
+
+**(c) Status vocabulary: porcelain letters in the text surface** — reversing
+§C.4's "words, not porcelain letters" (:247). Parity is deep in base training
+and RL, and the clarity pressure that motivated words is relieved by the
+`--json` variants instead: `git status --json` / `git diff --json --staged`
+carry self-describing key names and word-valued fields, so scripts get
+clarity while prompts get trained-in muscle memory. One shape per surface:
+letters in text, words in JSON — not a `--porcelain` flag matrix.
