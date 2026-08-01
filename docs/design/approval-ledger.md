@@ -119,19 +119,85 @@ diverge, as the more conservative):**
    chains stream to the sink and evict; fail closed only when *live* entries
    exhaust capacity (with per-principal quotas + metrics against DoS). A
    memory-only v1 is an *operational* ledger, not a durable audit ledger — say so.
-2. *Post `fs.*` auto-grants when latch is off?* → reviewers **split**. gemini says
-   yes (complete non-repudiation record); gpt says not as the migration default
-   (preserve today's fast paths, add a separate effect-audit event, introduce
-   full auto-grant-posting later as a documented behavior+perf change). **Adopt
-   gpt's staging** — it de-risks the migration and reaches the same end state.
-   This is the one genuinely open call for Amy: audit-completeness-now vs.
-   migration-safety-now.
+2. *Post `fs.*` auto-grants when latch is off?* → **resolved by Amy (2026-08-01):
+   neither always nor never — an opt-in, glob-scoped subscription that is free
+   when nothing is subscribed.** See "fs.\* observability" below. This also
+   settles the reviewers' split: gpt's "don't post by default" is the unsubscribed
+   fast path; gemini's "complete record" is what an `observe` subscription buys
+   the operator who wants it.
 3. *Long-lived span?* → **no**, linked short spans (both agree; already adopted
    above).
 4. *`Irreversible` refuse `--confirm`?* → **yes, bind to an approver capability,
    not a bearer token** (both agree). Human REPL keeps the `--confirm` UX because
    it *holds* the capability; an agent-visible token never authorizes an
    irreversible op.
+
+### fs.\* observability — an opt-in, glob-scoped subscription (Amy, 2026-08-01)
+
+The question was "does every `fs.*` op post to the ledger when latch is off." The
+answer is **it's configurable, and the default costs nothing**. This resolves the
+reviewers' split and, pleasingly, is almost-free mechanism on top of standing
+grants.
+
+**The dominant design constraint: free when nothing is subscribed.** A `find`,
+`rm -rf`, or `cp -r` over a large tree must not pay a per-path ledger cost unless
+an operator has asked for it. Every gate call site (`gate_overwrites` in
+`tools/context.rs`, `rm`'s `decide_rm_action`, the trash paths) takes a cheap
+early-out *before constructing an `ApprovalRequest` at all*: one relaxed atomic
+load answering "are there any fs subscriptions?" — almost always no, branch
+predicted, done — and only then a glob match. Nothing is allocated on the
+unsubscribed path. This is a hard requirement, not a nice-to-have: kaish's
+large-filesystem-job performance is a first-class property and the ledger must
+not tax it by default.
+
+**Two subscription modes** — the audit-vs-enforce split, which is the whole point:
+
+- **`observe`** — matching ops post `Requested` + immediate `Granted{Observe}` to
+  the sink and proceed; they never defer, never block, never prompt. This is
+  "hook everything into an audit log" with no permission semantics. Mechanically
+  it is a standing auto-grant with a new `Grounds::Observe` and unlimited uses, so
+  it may need no new state-machine surface at all — just the `Grounds` variant and
+  the fast-path filter.
+- **`enforce`** — matching ops go through the real decision chain (today's
+  latch/approval semantics). This is `set -o latch`, re-expressed as a
+  subscription over `fs.*`.
+
+**Scope is a glob over (operation-class, resource path)** via `kaish-glob`:
+subscribe `fs.write` + `fs.remove` under `/workspace/**` as `observe`, and
+everything else — `/tmp/**`, reads, unmatched paths — stays unsubscribed and
+free. kaibo's likely posture is to subscribe *nothing* (it allows all reads
+within its roots and does not consult an audit log); the capability exists as
+proof that kaish *can* give you a complete, typed, structured record of every
+filesystem mutation an agent made — which is a genuinely strong story and hard to
+get from a normal shell.
+
+**Prior art (Amy's pointer, worth mining at implementation time):**
+
+- **ZFS / Solaris VSCAN** (the `vscan` dataset property + `vscand`): the property
+  being *off* means the hook is *not engaged* — zero cost, enforced by the
+  property gate rather than a deep runtime branch. That is exactly the
+  free-when-unused requirement, and it says the "is anything subscribed" check
+  belongs as high up and as cheap as possible. VSCAN also carries a **scanstamp**
+  xattr caching a content hash so an unchanged file skips re-scan, plus size and
+  file-type exempt lists checked before engaging the engine — the kaish analogs
+  are a per-subscription size/kind exempt filter and (later) skipping a re-post
+  for state already recorded unchanged.
+- **Linux fanotify** is the even-closer analog: it has precisely this split —
+  *notification* marks (stream events, non-blocking) versus `FAN_*_PERM`
+  *permission* marks (block for a userspace verdict) — and the "you pay only where
+  you place a mark" property. A subscription *is* kaish's mark; `observe` is a
+  notification mark, `enforce` is a permission mark.
+
+**Implementation note for the revised draft:** this lives on the approval/policy
+side as a subscription registry, consulted at the gate before `request_approval`
+does any work. Because an `observe` subscription reduces to a standing grant with
+`Grounds::Observe`, the incremental mechanism is small: the `Grounds` variant, a
+subscription registry with an atomic "any-fs-subscriptions" flag for the fast
+path, and the glob filter. It composes with — rather than duplicates — the
+standing-grant machinery the ledger already needs. It does **not** change the
+`fs.*` default posture the migration ships with (gpt's staging still holds: the
+unsubscribed fast path is the default), so it is additive and can land after the
+core migration rather than gating it.
 
 **Not adopted / noted:** gemini's PTY-stream-segregation concern (#2 evidence gap)
 is real but is an embedder-integration requirement (kaibo/kaijutsu must not blend
