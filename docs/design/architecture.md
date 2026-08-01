@@ -1,12 +1,16 @@
 # kaish-git v2 — architecture
 
-Status: **proposed** (2026-08-01). Inputs: [../git.md](../git.md) (history, autopsy,
-design commitments), [gix-research-2026-08.md](gix-research-2026-08.md) (verified
-gitoxide findings), [safety-inventory-2026-08.md](safety-inventory-2026-08.md)
-(kaish safety facilities). This document makes the calls; it does not survey
-options. Where a call was close, the runner-up is named.
+Status: **proposed** (2026-08-01, Opus design agent); co-architect pass done same
+day — see the "Co-architect notes" appendix for corrections and the
+reconciliation with the approval-ledger design. Inputs: [../git.md](../git.md)
+(history, autopsy, design commitments),
+[gix-research-2026-08.md](gix-research-2026-08.md) (verified gitoxide findings),
+[safety-inventory-2026-08.md](safety-inventory-2026-08.md) (kaish safety
+facilities). This document makes the calls; it does not survey options. Where a
+call was close, the runner-up is named.
 
-The approval-ledger design is being produced separately. Everything write-shaped
+The approval-ledger design is produced separately
+([approval-ledger.md](approval-ledger.md)). Everything write-shaped
 here is marked **depends on ledger**; the read profile is designed to need
 nothing from it.
 
@@ -740,11 +744,14 @@ let ceiling = ctx.backend().resolve_real_path(&mount.path)
 let repo = ReadRepo::discover(&real, &ceiling)?;
 ```
 
-v1 discovered upward with no ceiling, so a sandboxed agent standing in an empty
-subdirectory could find and read a repository outside its sandbox. gix's
-discovery takes ceiling directories; we seed them from the mount root. This needs
-no kaish change — `mounts()` plus `resolve_real_path()` on the mount path is
-enough.
+Correction from the co-architect pass: v1 did **not** have an upward-escape bug —
+it used `git2::Repository::open(&root)` (old `git_vfs.rs:49`), which opens only
+an exact repo root and never searches upward; the cost was ergonomic (`git
+status` from a subdirectory failed). v2 *introduces* upward discovery for
+ergonomics, and the ceiling is what keeps that new capability from becoming the
+escape v1 never had: gix's discovery takes ceiling directories, and we seed them
+from the mount root. This needs no kaish change — `mounts()` plus
+`resolve_real_path()` on the mount path is enough.
 
 We also keep the VFS path alongside the real path in every output
 (`repo_root_vfs` / `repo_root_real`, `path_vfs` on worktrees) so an agent can act
@@ -1048,3 +1055,49 @@ Issues, not inline TODOs.
 
 15. `ToolCtx::is_cancelled()` — portable cancellation poll for blocking tools ([G.1](#g1-toolctx-cancellation-handle-proposed)).
 16. `ToolSchema` effects markers for policy layers — **design with the ledger**, not before ([C.4](#c4-should-this-be-a-kaish-kernel-concept)).
+---
+
+## Co-architect notes (Fable, 2026-08-01)
+
+Pass done after the approval-ledger design landed; findings, none blocking the
+read profile:
+
+1. **Endorsed as-is:** no shell-out tier (the reasoning — a verb wearing our
+   name must keep our guarantees — beats the research doc's fallback-tier
+   suggestion); wasm as `compile_error!`; `owns_output` unused; the `.git`
+   fingerprint test; the dependency tripwires; bare `git diff` meaning
+   HEAD→worktree (flagged for Amy's sign-off below, since it is an agent-facing
+   semantic divergence from git(1), but the no-index-in-read-profile argument
+   holds and every result states its endpoints).
+
+2. **Factual correction applied in §E.2**: v1 had no upward-discovery escape
+   (it used `Repository::open`, which does not search); v2's ceiling guards the
+   discovery capability v2 itself introduces. The design was right; the history
+   was wrong.
+
+3. **§C.3 reconciliation with the ledger design.** `ApprovalSink` predates the
+   ledger doc. Under [approval-ledger.md](approval-ledger.md) §D.1, the gate
+   call is `ctx.request_approval(...)` on the portable `ToolCtx` — the tool
+   does not hold an approvals handle at all, and the fail-closed default means
+   a write verb in a ledger-less kernel refuses at runtime regardless. The
+   type-gate on `GitConfig` therefore stops being "carry the sink" and becomes
+   a deliberate-opt-in marker: `with_profile(Profile::Commit)` stays
+   unreachable except through an explicitly-named constructor
+   (`GitConfig::with_write_profiles_acknowledged(...)` or similar — bikeshed at
+   implementation), preserving "a build that forgot approvals does not
+   compile" in spirit while the actual authorization plumbing lives where the
+   ledger puts it. §G.3's demand list is otherwise satisfied point-for-point
+   by the ledger design (request_approval, ref-shaped resources, transition
+   conditions; effects markers stay a joint follow-up).
+
+4. **ToolCtx churn coordination.** This doc's §G.1 (`is_cancelled`, sync,
+   defaulted) and the ledger's PR 5 (`request_approval` etc., async, defaulted)
+   both touch the `ToolCtx` trait. Land them as one coordinated kaish PR series
+   so the trait changes shape once, not twice; `is_cancelled` is small enough
+   to ride in ledger PR 5 or immediately after it.
+
+5. **For Amy's sign-off** (agent-facing semantics): (a) bare `git diff` =
+   HEAD→worktree; (b) tool name `git` shadowing external git by default in
+   subprocess-enabled kernels (`with_tool_name` exists, but the default is the
+   decision); (c) porcelain-letter-free status words — endorsed here, but it is
+   the largest muscle-memory break in the surface.
