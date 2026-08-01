@@ -2,8 +2,10 @@
 
 Cross-model review of [../approval-ledger.md](../approval-ledger.md) via kaibo
 deliberate (`gemini-deliberate` cast; dossier built by gemini-flash-lite over
-the kaish tree + attached design docs). Verbatim below; synthesis and adopted
-amendments live in the design doc's "Cross-model review synthesis" section.
+the kaish tree + attached design docs). Verbatim below; the adopted amendments
+were folded into the design doc's body on 2026-08-01 (revision 2 — see its
+Provenance section). Line citations below resolve against revision 1:
+`git show 1b36591:docs/design/approval-ledger.md`.
 
 ---
 

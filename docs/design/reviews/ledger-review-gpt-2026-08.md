@@ -2,8 +2,10 @@
 
 Cross-model review of [../approval-ledger.md](../approval-ledger.md) via kaibo
 deliberate (`gpt-deliberate` cast; dossier built by gpt-5.6-luna over the kaish
-tree + attached design docs). Verbatim below; synthesis and adopted amendments
-live in the design doc's "Cross-model review synthesis" section.
+tree + attached design docs). Verbatim below; the adopted amendments were
+folded into the design doc's body on 2026-08-01 (revision 2 — see its
+Provenance section). Line citations below resolve against revision 1:
+`git show 1b36591:docs/design/approval-ledger.md`.
 
 This is the more demanding of the two reviews — it says "do not merge the public
 types yet" and identifies six blockers, several of which the gemini pass missed.

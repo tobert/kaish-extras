@@ -398,9 +398,11 @@ Two handles, and the split is what makes settlement drop-safe:
 
 ```rust
 /// Handed to the tool. Identifies the attempt; has no Drop behavior; cannot
-/// settle. A tool that forgets it changes nothing.
-#[derive(Clone, Copy)]
-pub struct AttemptHandle<'a>(&'a AttemptId);
+/// settle. A tool that forgets it changes nothing. Owns its id — a borrow
+/// here would pin the `&mut ToolCtx` that produced it, and the tool could
+/// never call `settle_with` while holding it.
+#[derive(Clone)]
+pub struct AttemptHandle(AttemptId);
 
 /// Held by the dispatcher for the life of the invocation. Its Drop settles.
 #[must_use]
@@ -773,9 +775,9 @@ report.
 
 ```rust
 #[non_exhaustive]
-pub enum ApprovalOutcome<'a> {
+pub enum ApprovalOutcome {
     /// A use is reserved. The dispatcher holds the matching guard.
-    Authorized(AttemptHandle<'a>),
+    Authorized(AttemptHandle),
     /// No decision yet. Exit 2, the view rides the control plane.
     Pending(ApprovalRequestView),
     Denied(DenialReason),
@@ -975,7 +977,7 @@ pub trait ToolCtx: Send + Sync {
     ///
     /// Default impl returns `Unsupported`: a context with no ledger refuses
     /// rather than permits.
-    async fn request_approval(&mut self, draft: ApprovalDraft) -> ApprovalOutcome<'_> {
+    async fn request_approval(&mut self, draft: ApprovalDraft) -> ApprovalOutcome {
         let _ = draft;
         ApprovalOutcome::Unsupported
     }
@@ -986,7 +988,7 @@ pub trait ToolCtx: Send + Sync {
 
     /// Record a richer outcome than an exit code on the dispatcher's guard.
     /// Optional — the seam settles anything left over with the exit code.
-    async fn settle_with(&mut self, attempt: AttemptHandle<'_>, outcome: Outcome) { /* … */ }
+    async fn settle_with(&mut self, attempt: AttemptHandle, outcome: Outcome) { /* … */ }
 }
 ```
 
