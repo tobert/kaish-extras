@@ -60,6 +60,22 @@ of rubber-stamping the change. Cross-family review has caught real deploy
 blockers here (wasm panic poisoning the instance, unbounded scrollback,
 WebKit focus-during-keydown dropping the first char).
 
+## Writing style
+
+kaish's [docs/style.md](https://github.com/tobert/kaish/blob/main/docs/style.md)
+applies here by reference — that guide names kaish-extras as an adopter, and it
+carries the weights, the term rules, and the reasoning. The weight map for this
+repo's files:
+
+- **Full weight**: every tool `description`, argument doc, and error or
+  diagnostic string a crate in this workspace returns — the future kaish-git
+  verb surface included. An agent reads an error more often than it reads any
+  help topic.
+- **Terms only**: `README.md` and the docs under `docs/`.
+- **Exempt**: `signoff.md` — it tells a story from a point of view.
+
+Groom at the point of touch; there is no bulk pass.
+
 ## Conventions
 
 Only the house rules that aren't standard practice:
