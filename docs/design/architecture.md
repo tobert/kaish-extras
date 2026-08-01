@@ -1101,3 +1101,64 @@ read profile:
    subprocess-enabled kernels (`with_tool_name` exists, but the default is the
    decision); (c) porcelain-letter-free status words — endorsed here, but it is
    the largest muscle-memory break in the surface.
+
+---
+
+## Co-architect note 2 — the gix-command finding and the facade-vs-plumbing fork (Fable, 2026-08-01, pre-reboot)
+
+**Verified during PR 0, and it falsifies a load-bearing decision.** Decision #12 /
+§A.2 / §D.3 claimed a default build "cannot spawn because `gix-command` is
+absent." It is not absent. The `gix` **facade** crate links `gix-command`
+(pure-Rust `std::process::Command` spawn machinery) **unconditionally** — even
+`gix --no-default-features` pulls it via `gix-command → gix-transport →
+gix-protocol → gix`, reinforced by `gix-diff` (textconv) and `gix-filter`
+(clean/smudge). Confirmed by `cargo tree -i gix-command` on the skeleton crate.
+Filed as **kaish-extras#4**. The prior gix-research doc missed it because it
+audited for C toolchains and network stacks; `gix-command` is pure-Rust process
+spawn, invisible to that audit.
+
+**This opens a fork. The decision is OPEN pending research (see below).**
+
+**Path 1 — facade + runtime guarantee.** Keep `gix::Repository`; accept
+`gix-command` is linked; downgrade §D.3 from "spawn code not linked" to "spawn is
+unreachable at runtime, proven": repos open `Permissions::isolated()` so no
+config/attribute drives a textconv/filter/transport spawn, there are no network
+verbs, and the hostile-repo fixture proves no subprocess is created. Change the
+§A.4 tripwire from "`gix-command` absent" (unachievable) to "no network/C
+transport backend present on default features" (which passed: no
+aws-lc/openssl/curl/cc). Less code, ships sooner. Loses: the structural
+guarantee, the VFS hook, and the wasm path (facade goes straight to `std::fs` and
+mmaps packs).
+
+**Path 2 — plumbing layer.** Rebuild the convenience/`Repository` layer on gix's
+low-level crates, skipping the facade. **Empirically verified spawn-free:** a
+probe depending on `gix-object 0.63`, `gix-odb 0.83`, `gix-ref 0.66`,
+`gix-traverse 0.60`, `gix-revision 0.48`, `gix-revwalk 0.34`,
+`gix-commitgraph 0.38`, `gix-discover 0.54`, `gix-index 0.54`, `gix-pack 0.73`,
+and `gix-diff 0.66` **without** its `blob` feature pulls **none** of
+`gix-command`/`gix-transport`/`gix-filter` (`cargo tree -i` → "did not match any
+packages"). Line hunks come from `gix-imara-diff` run directly on blob bytes
+(skips textconv — arguably more correct for an agent: raw content). `status`/
+`blame` are hand-composed (index+worktree-walk; revwalk+line-diff) since
+`gix-status`/`gix-blame` pull the machinery. More code, but potentially delivers
+THREE things the facade cannot, together: the genuine "spawn code not linked"
+guarantee; **git-over-kaish-vfs** (§5 "deeper fs hooks" — back object storage with
+VFS); and a **wasm path** as a side effect (owning pack IO = read packs through
+VFS into memory instead of mmap, sidestepping the gix-pack blocker).
+
+**Open research (LAUNCHED 2026-08-01, LOST TO REBOOT — RE-RUN):** an Opus
+source-reading agent was verifying Path 2's feasibility: (1) is object access
+abstractable behind `gix_object::Find` so we can back it with kaish-vfs; (2) are
+gix-traverse/revision/diff generic over a custom object source; (3) can gix-pack
+decode from supplied bytes (VFS) rather than mmap → wasm path; (4) how
+file-coupled are gix-ref/gix-index; (5) the rebuild-surface effort tier vs the
+facade. **This did not return before reboot — re-launch it.** The brief is
+reconstructable from this note (versions above; sources in
+`~/.cargo/registry/src/`). Until it returns, do not finalize the fork or unblock
+PR 0's dependency strategy.
+
+**Recommendation is deferred to that research.** If the readers are generic over
+object storage and refs/index are tractable, Path 2 is the more-kaish bet and
+worth the extra code (strong guarantee + VFS + wasm in one). If refs/index prove
+hard-wired to `std::fs`, Path 1 with the runtime guarantee is the honest answer.
+Amy's call once the evidence is in.
