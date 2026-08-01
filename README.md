@@ -13,8 +13,10 @@ live here:
   the kaish and kaish-extras source trees, so you can `grep` the shell's own
   implementation from inside the shell. Published via GitHub Pages.
 - *(planned)* tool bundles that were deliberately kept out of kaish core to
-  keep its dependency tree light: `kaish-tools-git` (revived — see kaish
-  GH #119), jq and ripgrep as add-ons.
+  keep its dependency tree light: a reinvented git plugin (history, autopsy,
+  and design intent in [docs/git.md](docs/git.md); the crates.io name
+  `kaish-tools-git` is reserved — see kaish GH #119), jq and ripgrep as
+  add-ons.
 
 ## How the playground works
 
