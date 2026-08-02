@@ -32,6 +32,18 @@ fixture asserted against real `git status --porcelain` before fixing.
   ignore `Stack` doesn't persist an id-mapping that misbehaves with sparse
   checkout or skip-worktree bits — needs a fixture or an upstream source check.
 
+## git status — needs a probe
+
+- **G4 — `guard_alternates` may be a 1-bit existence oracle (unconfirmed).**
+  A repository with a relative `objects/info/alternates` entry pointing outside
+  the mount is refused by `contain` (exit 4) when the target exists. The open
+  question is what `gix_odb::alternate::resolve` does when the target does *not*
+  exist: git's native behavior is to silently drop a broken alternate, and if
+  gix does the same, `contain` is never reached and the store opens (exit 0) —
+  the same outside-vs-nonexistent split G2 had. Needs a probe against
+  `gix_odb::alternate::resolve` (raised by gemini-pro in the PR #23 re-review;
+  behavioral, do not reason it out — build the fixture).
+
 ## Upstream
 
 - **R4 — unbounded recursion decoding the index cache-tree (gix-index).**
