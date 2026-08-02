@@ -144,11 +144,49 @@ impl ReadRepo {
         let git_dir = normalize(&git_dir);
         let work_dir = work_dir.as_deref().map(normalize);
 
-        // The ceiling post-check. A repository *at* the ceiling is inside it
-        // and is found; anything above it is refused as though it were not
-        // there, because from inside the mount it is not.
+        // ── The ceiling invariant ───────────────────────────────────────────
+        //
+        // Every directory this type will read from must be inside the ceiling.
+        // Not "discovery is ceilinged" — discovery is only the first of three
+        // ways a path gets chosen here, and the other two are chosen by
+        // *content of the repository*, which is attacker-controlled the moment
+        // you open a repository you did not create:
+        //
+        //   git_dir     — discovery, but a `.git` *file* can name it
+        //                 (`gitdir: /anywhere`), so it is repo-controlled too
+        //   common_dir  — `<git_dir>/commondir`, a file whose entire content
+        //                 is a path, absolute or `..`-bearing
+        //   work_dir    — discovery's physical parent today
+        //
+        // Checking only `git_dir` left `common_dir` free to redirect the
+        // config read and the object store at any host path — the escape the
+        // ceiling exists to prevent, reached without discovery ever leaving
+        // the mount. So the check is stated once, over every path, at the one
+        // place they are all known and before any of them is read.
         let ceiling = normalize(ceiling);
         if !git_dir.starts_with(&ceiling) {
+            // Two very different situations reach here, and collapsing them
+            // would either leak or mislead.
+            //
+            // If a working tree was found *inside* the mount, then a `.git`
+            // file inside the sandbox named a git dir outside it — the same
+            // shape as the `commondir` case below, and the ordinary result of
+            // mounting only a linked worktree and not its main repository.
+            // The caller already knows about the path we name, so saying so
+            // costs nothing and tells an embedder how to fix their layout.
+            //
+            // Otherwise discovery itself walked out of the mount, and from
+            // inside the mount there simply is no repository. That is all we
+            // say: confirming one exists above would answer a question the
+            // caller was never entitled to ask.
+            if let Some(work_dir) = work_dir.filter(|w| w.starts_with(&ceiling)) {
+                return Err(GitError::EscapesMount {
+                    operation,
+                    what: "git directory (the `gitdir:` line in its .git file)",
+                    repo: work_dir,
+                    ceiling,
+                });
+            }
             return Err(GitError::NotARepository {
                 operation,
                 start: real_path.to_path_buf(),
@@ -156,7 +194,43 @@ impl ReadRepo {
             });
         }
 
+        // `commondir` is read out of `git_dir`, which the check above has
+        // already placed inside the ceiling — so this read is safe to make
+        // before the result is trusted.
         let common_dir = resolve_common_dir(operation, &git_dir)?;
+        if !common_dir.starts_with(&ceiling) {
+            // Different from the case above, and a different code: a
+            // repository *was* found inside the mount. Either it is a linked
+            // worktree whose main repository legitimately lives outside — the
+            // embedder mounts that too — or it is a repository trying to point
+            // us at a path we were never given. We cannot tell the two apart,
+            // and under the sandbox model neither is readable, so both are
+            // refused with a message that explains what to do about the honest
+            // one.
+            return Err(GitError::EscapesMount {
+                operation,
+                what: "common directory (.git/commondir)",
+                repo: git_dir,
+                ceiling,
+            });
+        }
+        if let Some(work_dir) = work_dir.as_deref() {
+            // Defense in depth. Today `work_dir` is discovery's own physical
+            // parent and is bounded by the `git_dir` check above — see
+            // `work_dir_is_bounded_by_discovery` in tests/hostile_repo.rs for
+            // the reasoning and for what would invalidate it. The check costs
+            // one `starts_with` and it is what stands between a future
+            // `core.worktree` reader and `submodule_count` reading
+            // `<work_dir>/.gitmodules` off an arbitrary host path.
+            if !work_dir.starts_with(&ceiling) {
+                return Err(GitError::EscapesMount {
+                    operation,
+                    what: "working tree",
+                    repo: git_dir,
+                    ceiling,
+                });
+            }
+        }
 
         // Read repo-local config before opening anything. A repository we are
         // going to refuse must be refused before we touch its objects.

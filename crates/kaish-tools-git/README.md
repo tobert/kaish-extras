@@ -40,13 +40,42 @@ not exist. Four things enforce that, and each can fail on its own:
   subprocess, so an attacker-controlled `diff.*.textconv` in a repository's
   own config is inert text — nothing exists that could act on it.
 
-Repository discovery is ceilinged at the VFS mount root
-(`tests/discovery_ceiling.rs`): a repository *above* the mount is invisible
-from inside it. Note the converse, because the opposite belief is the
-dangerous one — mounting a repository `LocalFs::read_only` does **not** make
-this crate read-only. It makes kaish's own file verbs read-only on that path;
-git goes around the VFS entirely on the native path, and the four layers
-above are what make it read-only.
+Note the converse, because the opposite belief is the dangerous one —
+mounting a repository `LocalFs::read_only` does **not** make this crate
+read-only. It makes kaish's own file verbs read-only on that path; git goes
+around the VFS entirely on the native path, and the four layers above are
+what make it read-only.
+
+## Staying inside the mount
+
+Every directory `ReadRepo` reads from must be inside the ceiling, which is the
+real root of the VFS mount containing the path you named. Discovery is only
+one of three ways a directory gets chosen, and the other two are named by the
+repository itself — attacker-controlled the moment you open a repository you
+did not create:
+
+| Path | Chosen by |
+|---|---|
+| `git_dir` | discovery, or a `.git` *file*'s `gitdir:` line |
+| `common_dir` | `<git_dir>/commondir`, whose whole content is a path |
+| `work_dir` | discovery's physical parent |
+
+So the ceiling is checked over all three, before any of them is read.
+`tests/discovery_ceiling.rs` covers discovery; `tests/hostile_repo.rs` covers
+the two the repository names — including the refusal declining to echo the
+path it refused, since a message that repeated it back would be an oracle for
+probing the host filesystem.
+
+A repository whose common dir legitimately lives outside the mount (a linked
+worktree whose main repository is not mounted) is refused too, and says so,
+because under the sandbox model it genuinely cannot be read. The fix is to
+mount the common dir as well.
+
+**Known gap, not yet closed:** the ceiling check is lexical, so a symlink
+inside the mount whose target is outside it is followed. Whether to close that
+by canonicalizing under the ceiling or by refusing symlinked components is a
+design decision that belongs with kaish's own VFS policy, not with this crate
+alone; it is deliberately not fixed here.
 
 ## Tests
 

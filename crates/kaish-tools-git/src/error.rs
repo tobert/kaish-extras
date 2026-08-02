@@ -59,6 +59,41 @@ pub enum GitError {
         available: String,
     },
 
+    /// A repository inside the mount points at a directory outside it, and
+    /// that directory is one we would have had to read. Exit 4.
+    ///
+    /// Distinct from [`GitError::NotARepository`], which is what an escaping
+    /// *discovery* produces, and deliberately so: there, from inside the
+    /// mount, no repository exists, and saying more would confirm that one
+    /// exists outside. Here a repository *was* legitimately found inside the
+    /// mount, and it is the environment that makes it unreadable — a fact its
+    /// embedder can act on.
+    ///
+    /// The escaping path is **not** echoed. It is attacker-controlled content
+    /// out of a repository we have not decided to trust, and repeating it back
+    /// would turn this refusal into an oracle for probing the host filesystem
+    /// (`.git/commondir` says `/etc/shadow`; the error tells you whether that
+    /// resolved). The repository and the ceiling are both already known to the
+    /// caller, so nothing an honest embedder needs is withheld.
+    #[error(
+        "git {operation}: repository '{repo}' points its {what} outside the \
+         mount rooted at '{ceiling}', and kaish-git reads nothing outside that \
+         mount. If that is a real directory you meant to expose — a linked \
+         worktree whose main repository lives elsewhere is the usual case — \
+         mount it too and retry. If it is not, this repository is asking \
+         kaish-git to read a path it was never given. Nothing was read"
+    )]
+    EscapesMount {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// Which directory escaped, named as a caller would think of it.
+        what: &'static str,
+        /// The repository that was found inside the mount.
+        repo: PathBuf,
+        /// The mount root discovery was ceilinged at.
+        ceiling: PathBuf,
+    },
+
     /// The VFS path does not map to a real filesystem path, so there is
     /// nothing for the native git implementation to open. Exit 4.
     #[error(
@@ -219,6 +254,7 @@ impl GitError {
             | GitError::UnsupportedRepositoryFormat { .. }
             | GitError::UnknownExtension { .. }
             | GitError::EscapingInclude { .. }
+            | GitError::EscapesMount { .. }
             | GitError::NoContainingMount { .. }
             | GitError::UntrustedRepository { .. } => 4,
             GitError::VerbNotEnabled { .. } => 5,
@@ -291,6 +327,12 @@ mod tests {
                 key: "include.path".into(),
                 value: "/etc/passwd".into(),
             },
+            GitError::EscapesMount {
+                operation: "info",
+                what: "common directory",
+                repo: repo.clone(),
+                ceiling: PathBuf::from("/mnt"),
+            },
             GitError::NoContainingMount {
                 operation: "info",
                 vfs_path: repo.clone(),
@@ -314,6 +356,36 @@ mod tests {
                 "{e} claimed exit {code}; only 1/2/4/5 belong to this crate"
             );
         }
+    }
+
+    /// The escape refusal must never echo the path it refused. Repeating
+    /// attacker-supplied content back would turn the error into an oracle:
+    /// point `.git/commondir` at a candidate path and read the reply to learn
+    /// whether it exists.
+    #[test]
+    fn the_escape_refusal_does_not_echo_the_escaping_path() {
+        let err = GitError::EscapesMount {
+            operation: "info",
+            what: "common directory (.git/commondir)",
+            repo: PathBuf::from("/mnt/repo/.git"),
+            ceiling: PathBuf::from("/mnt"),
+        };
+        let msg = err.to_string();
+        assert_eq!(err.exit_code(), 4);
+        assert!(msg.contains("/mnt/repo/.git"), "must name the repo: {msg}");
+        assert!(msg.contains("outside the mount"), "must say what happened: {msg}");
+        assert!(
+            msg.contains("mount it too"),
+            "must tell a legitimate embedder the fix: {msg}"
+        );
+        assert!(
+            msg.contains("linked worktree"),
+            "must name the legitimate shape it might be: {msg}"
+        );
+        assert!(
+            msg.contains("Nothing was read"),
+            "must state that no read happened: {msg}"
+        );
     }
 
     /// E.5: "errors name the repository and the operation". A message that

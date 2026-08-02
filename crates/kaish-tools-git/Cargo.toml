@@ -107,5 +107,9 @@ name = "discovery_ceiling"
 path = "tests/discovery_ceiling.rs"
 
 [[test]]
+name = "hostile_repo"
+path = "tests/hostile_repo.rs"
+
+[[test]]
 name = "write_shaped_identifiers"
 path = "tests/write_shaped_identifiers.rs"
