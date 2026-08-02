@@ -803,6 +803,213 @@ async fn deep_paths_and_symlink_leaves_still_work() {
     assert_eq!(link["worktree"], "modified", "{link}");
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// The refusal must not be an existence oracle for the host
+// ───────────────────────────────────────────────────────────────────────────
+
+/// What the caller can observe about one run: the exit code, and everything
+/// rendered anywhere. Both halves have to match across the probe pair.
+struct Observable {
+    code: i64,
+    rendered: String,
+}
+
+/// Track `probe/x` in the index, aim the worktree's `probe` at a path outside
+/// the mount, and run status.
+///
+/// `target_exists` is the only difference between the two calls: it decides
+/// whether the symlink's target is a real directory on the host. That bit is
+/// the repository's to *ask about* and never ours to answer, so both calls must
+/// come back observably identical.
+async fn symlinked_parent_probe(target_exists: bool) -> (Observable, String) {
+    require_git();
+    let fixture = Fixture::empty();
+
+    let outside = fixture.path("outside");
+    if target_exists {
+        std::fs::create_dir_all(&outside).expect("create outside");
+        write_file(&outside, "x", "OUTSIDE_ORACLE_SECRET\n");
+    }
+
+    let mount = fixture.path("mounted");
+    let repo = mount.join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+    // Hand-written, because the point is an index whose entry survives the
+    // worktree being rearranged underneath it.
+    write_raw_index(&repo.join(".git"), &["probe/x"]);
+    std::os::unix::fs::symlink(&outside, repo.join("probe")).expect("symlink probe outside");
+
+    let result = status(&mount, "/mnt/repo", &["--json"]).await;
+    let observable = Observable {
+        code: result.code,
+        rendered: format!("{} {:?} {:?}", result.err, result.output(), result.baggage),
+    };
+    (observable, outside.to_str().expect("utf-8 path").to_string())
+}
+
+/// A worktree symlink out of the mount is refused the same way whether or not
+/// its target exists on the host.
+///
+/// The oracle this closes: a whole-chain `canonicalize` fails with `NotFound`
+/// on a dangling symlink and succeeds on a live one, and the two answers used
+/// to diverge — exit 4 for "the target is there", exit 0 with the entry
+/// reported deleted for "it is not". The repository chooses the symlink target,
+/// so that difference is a one-bit read of any host path it names, driven
+/// entirely by repository content. `repo.rs`'s `contain` already makes
+/// "resolves outside" and "does not resolve" indistinguishable; this is the
+/// same rule for the working tree.
+#[tokio::test]
+async fn a_symlinked_parent_out_of_the_mount_cannot_report_whether_its_target_exists() {
+    let (present, outside_present) = symlinked_parent_probe(true).await;
+    let (absent, outside_absent) = symlinked_parent_probe(false).await;
+
+    assert_eq!(
+        present.code, absent.code,
+        "the exit code told the repository whether the symlink target exists: \
+         present={} absent={}\npresent: {}\nabsent: {}",
+        present.code, absent.code, present.rendered, absent.rendered
+    );
+    assert_eq!(
+        present.code, 4,
+        "a worktree symlink out of the mount is a refusal: {}",
+        present.rendered
+    );
+
+    for (observable, outside) in [(&present, &outside_present), (&absent, &outside_absent)] {
+        assert!(
+            observable.rendered.contains("outside the mount"),
+            "{}",
+            observable.rendered
+        );
+        assert!(
+            !observable.rendered.contains("OUTSIDE_ORACLE_SECRET")
+                && !observable.rendered.contains(outside.as_str())
+                && !observable.rendered.contains("probe/x"),
+            "the refusal must not echo where the path aimed: {}",
+            observable.rendered
+        );
+    }
+}
+
+/// Over-refusal guard (a): a tracked file deleted from a directory that is
+/// still there is reported deleted, not refused. No symlink is involved, so
+/// nothing about it is a containment question.
+#[tokio::test]
+async fn a_deleted_tracked_file_under_a_live_directory_is_reported_deleted() {
+    let repo = Repo::init("repo");
+    repo.write("dir/kept.txt", "kept\n");
+    repo.write("dir/gone.txt", "gone\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "two files", "--quiet"]);
+    std::fs::remove_file(repo.root.join("dir/gone.txt")).expect("remove tracked file");
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    let j = json(&result);
+    let gone = j["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|e| e["path"] == "dir/gone.txt")
+        .unwrap_or_else(|| panic!("expected a row for dir/gone.txt: {j}"));
+    assert_eq!(gone["worktree"], "deleted", "{gone}");
+}
+
+/// Over-refusal guard (b): a tracked file whose whole parent directory was
+/// removed is reported deleted too. The chain is honestly absent — that is a
+/// fact about the working tree, not about the host.
+#[tokio::test]
+async fn a_deleted_parent_directory_reports_its_entries_deleted() {
+    let repo = Repo::init("repo");
+    repo.write("dir/a.txt", "a\n");
+    repo.write("dir/b.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "a dir", "--quiet"]);
+    std::fs::remove_dir_all(repo.root.join("dir")).expect("remove tracked dir");
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    let j = json(&result);
+    let entries = j["entries"].as_array().expect("entries");
+    for path in ["dir/a.txt", "dir/b.txt"] {
+        let row = entries
+            .iter()
+            .find(|e| e["path"] == path)
+            .unwrap_or_else(|| panic!("expected a row for {path}: {j}"));
+        assert_eq!(row["worktree"], "deleted", "{row}");
+    }
+}
+
+/// Over-refusal guard (c): a symlinked directory that stays *inside* the
+/// working tree is legitimate and must still be followed. A component walk that
+/// refused every symlink would break this checkout.
+#[tokio::test]
+async fn an_internal_symlinked_directory_is_followed() {
+    let repo = Repo::init("repo");
+    repo.write("real/x", "content\n");
+    std::os::unix::fs::symlink("real", repo.root.join("link")).expect("symlink link -> real");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-m", "link and real", "--quiet"]);
+
+    // Rewrite the index so `link/x` is a tracked path in its own right —
+    // git stores `link` as a symlink blob and never descends it, so this is the
+    // shape only a hand-written index produces.
+    write_raw_index(&repo.root.join(".git"), &["link/x"]);
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    assert_eq!(
+        result.code, 0,
+        "a symlink inside the working tree is not an escape: {} {:?}",
+        result.err,
+        result.output()
+    );
+    let j = json(&result);
+    let row = j["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|e| e["path"] == "link/x")
+        .unwrap_or_else(|| panic!("expected a row for link/x: {j}"));
+    // The zero oid in the raw index never matches real content, so the
+    // interesting assertion is that the file was *read and compared* at all.
+    assert_eq!(row["worktree"], "modified", "{row}");
+}
+
+/// The leaf half of the same question: a tracked *symlink* whose target does
+/// not exist behaves exactly like one whose target does.
+///
+/// `read_worktree_blob` uses `read_link`, which returns the target string
+/// without resolving it, so there is nothing here to leak — this fixture is
+/// what keeps that true if the leaf ever grows a resolution step.
+#[tokio::test]
+async fn a_symlinked_leaf_reads_the_same_whether_its_target_exists() {
+    async fn probe(target: &str) -> (i64, String) {
+        let repo = Repo::init("repo");
+        std::os::unix::fs::symlink(target, repo.root.join("link")).expect("symlink leaf");
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-m", "link", "--quiet"]);
+        // Retarget to the same length so only the target's existence differs.
+        std::fs::remove_file(repo.root.join("link")).expect("remove link");
+        std::os::unix::fs::symlink(target, repo.root.join("link")).expect("relink");
+
+        let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+        (
+            result.code,
+            format!("{} {:?}", result.err, result.output()),
+        )
+    }
+
+    // Same length, one absolute path that exists on every unix host and one
+    // that exists nowhere.
+    let (present, present_rendered) = probe("/etc/hostname").await;
+    let (absent, absent_rendered) = probe("/etc/nosuchxy").await;
+    assert_eq!(
+        present, absent,
+        "a symlinked leaf reported its target's existence: \
+         present={present} absent={absent}\n{present_rendered}\n{absent_rendered}"
+    );
+    assert_eq!(present, 0, "both are clean checkouts: {present_rendered}");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // The blob cap (Limits::max_blob_bytes)
 // ═══════════════════════════════════════════════════════════════════════════

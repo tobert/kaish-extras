@@ -706,6 +706,9 @@ impl<'a> WorktreePaths<'a> {
     }
 
     /// The canonical host path of a repo-relative directory, ceiling-checked.
+    ///
+    /// Cached per directory: index entries share their parents heavily, and the
+    /// cached value is the whole decision, refusals included.
     fn real_dir(&mut self, dir_rel: &str) -> Result<Option<PathBuf>, GitError> {
         if dir_rel.is_empty() {
             return Ok(Some(self.work_dir.to_path_buf()));
@@ -713,29 +716,78 @@ impl<'a> WorktreePaths<'a> {
         if let Some(cached) = self.dirs.get(dir_rel) {
             return Ok(cached.clone());
         }
-        let candidate = join_repo_relative(self.work_dir, dir_rel);
-        let resolved = match std::fs::canonicalize(&candidate) {
-            Ok(real) if real.starts_with(self.work_dir) => Some(real),
-            Ok(_) => return Err(self.escapes()),
-            // The two ways a directory chain is honestly absent: nothing at
-            // that name, or an ordinary file where a directory has to be. Both
-            // mean the entry is gone from the working tree, which is what the
-            // caller is told — the same semantics a missing leaf has always
-            // had here. Nothing else is swallowed.
-            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => None,
-            Err(e) => {
-                // `candidate` is `work_dir` plus screened ordinary components,
-                // so it names nothing the caller cannot already see.
-                return Err(GitError::repository(
-                    self.op,
-                    "resolving a worktree directory",
-                    &candidate,
-                    e,
-                ));
-            }
-        };
+        let resolved = self.walk_chain(dir_rel)?;
         self.dirs.insert(dir_rel.to_string(), resolved.clone());
         Ok(resolved)
+    }
+
+    /// Resolve a directory chain one component at a time, down from the
+    /// canonical working tree.
+    ///
+    /// A whole-chain `canonicalize` cannot do this job, and the reason is the
+    /// oracle it hands the repository. It answers `NotFound` for a symlink
+    /// whose target is absent and succeeds for one whose target is present, so
+    /// an escaping chain came back as a refusal in the first case and as an
+    /// ordinary "the file was deleted" in the second — one observable bit
+    /// saying whether an arbitrary host path exists, and the repository picks
+    /// the path. `repo.rs`'s [`contain`] already refuses to make that
+    /// distinction; this is the same rule at depth.
+    ///
+    /// Walking component-wise moves the decision onto something the repository
+    /// planted and therefore already knows: whether a symlink is *present* in
+    /// the chain. `symlink_metadata` does not follow the component it names, so
+    /// each step is classified before it is traversed, and the one class that
+    /// can leave the working tree — a symlink — is resolved and ceiling-checked
+    /// on its own. Escaping and dangling give the identical refusal.
+    ///
+    /// Every other outcome is a fact about the working tree itself: a component
+    /// that is not there, or an ordinary file where a directory has to be,
+    /// means the entry is gone. No symlink was involved in either, so saying so
+    /// reveals nothing outside the mount.
+    fn walk_chain(&self, dir_rel: &str) -> Result<Option<PathBuf>, GitError> {
+        let mut cur = self.work_dir.to_path_buf();
+        for component in dir_rel.split('/') {
+            // `cur` is canonical and `component` is a screened ordinary name,
+            // so `next` introduces at most one new symlink — the one lstat
+            // declines to follow.
+            let next = cur.join(component);
+            let meta = match std::fs::symlink_metadata(&next) {
+                Ok(m) => m,
+                // The two ways a chain is honestly absent. `NotADirectory` is
+                // unreachable while the walk is the only reader — a non-dir is
+                // caught below, at its own component — but a tree edited under
+                // us can still produce it, and it means exactly what the
+                // non-dir case means. Nothing else is swallowed.
+                Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+                    return Ok(None)
+                }
+                Err(e) => {
+                    // `next` is the canonical working tree plus screened
+                    // ordinary names, so it names nothing the caller cannot
+                    // already see.
+                    return Err(GitError::repository(
+                        self.op,
+                        "resolving a worktree directory",
+                        &next,
+                        e,
+                    ));
+                }
+            };
+            if meta.file_type().is_symlink() {
+                match std::fs::canonicalize(&next) {
+                    // A symlink that stays inside the working tree is
+                    // legitimate — checkouts use them — so it is followed, and
+                    // the canonical target becomes the base for what follows.
+                    Ok(real) if real.starts_with(self.work_dir) => cur = real,
+                    _ => return Err(self.escapes()),
+                }
+            } else if meta.is_dir() {
+                cur = next;
+            } else {
+                return Ok(None);
+            }
+        }
+        Ok(Some(cur))
     }
 
     fn escapes(&self) -> GitError {
