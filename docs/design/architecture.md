@@ -464,7 +464,7 @@ Other flags:
 | `--limit <N>` | int | 500 | max files |
 
 ```json
-{"from":{"kind":"commit","rev":"HEAD","oid":"…"},
+{"from":{"kind":"index"},
  "to":{"kind":"worktree"},
  "files":[{"path":"src/lib.rs","old_path":null,"status":"modified",
            "binary":false,"old_mode":"100644","new_mode":"100644",
