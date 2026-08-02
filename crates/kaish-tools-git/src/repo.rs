@@ -314,6 +314,17 @@ impl ReadRepo {
             GitError::repository(operation, "opening the object store", &common_dir, e)
         })?;
 
+        // The containment boundary, stated where it actually ends. Everything
+        // above ceiling-checks a path *this crate* opens. From here, gix opens
+        // objects, packs, `HEAD` and individual ref files itself, by name, and
+        // a symlink among those leaves (`objects/ab/cd…` linking out of the
+        // mount) is not interceptable without wrapping every gix open. The
+        // honest close is platform-level — `openat2(RESOLVE_BENEATH)` or a
+        // kaish VFS seam — and it is a threat-model decision, not a code change
+        // this PR makes. For the read verbs the residual is a read that lands
+        // outside and almost always fails to parse as a git object, not a
+        // general file-exfiltration primitive. Tracked as design input.
+
         // `WriteReflog::Disable` is not an optimization. The files ref store
         // appends to a reflog on ref *writes*; we make none, and setting this
         // means a future write-shaped mistake cannot quietly log its way into
