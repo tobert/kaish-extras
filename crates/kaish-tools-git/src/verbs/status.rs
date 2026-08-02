@@ -1047,7 +1047,7 @@ fn flatten_head_tree(
         // addition. Nothing to flatten.
         return Ok(out);
     };
-    flatten_subtree(repo, &tree_id, "", &mut out).map_err(|e| match e {
+    flatten_subtree(repo, &tree_id, "", 0, &mut out).map_err(|e| match e {
         FlattenError::Git(e) => e,
         FlattenError::Decode(path, msg) => GitError::repository(
             OP,
@@ -1064,13 +1064,37 @@ enum FlattenError {
     Decode(String, String),
 }
 
+/// How deep a tree this build walks.
+///
+/// The bound is our stack's, not git's. A cycle is impossible — a tree cannot
+/// contain its own hash — but depth is free for the repository and one stack
+/// frame each for us, and a chain of nested single-entry trees is a few dozen
+/// bytes per level to write. Measured on this crate's own fixture, a debug
+/// build on a 2 MiB thread overflows between 700 and 800 levels, so the limit
+/// is set well under the shallowest configuration we have seen fail rather
+/// than near it: an embedder's thread may be smaller than a test harness's,
+/// and the margin is what makes this a bound rather than a bet.
+///
+/// Generous where it matters. Real trees are tens of levels deep at the
+/// outside — the linux kernel's is about a dozen — so nothing that is actually
+/// a checkout comes near this. Git's own `core.maxTreeDepth` defaults far
+/// higher, which it can afford because its frames are a fraction of ours.
+const MAX_TREE_DEPTH: usize = 256;
+
 fn flatten_subtree(
     repo: &ReadRepo,
     tree_id: &ObjectId,
     prefix: &str,
+    depth: usize,
     out: &mut BTreeMap<String, (ObjectId, Class)>,
 ) -> Result<(), FlattenError> {
     const OP: &str = "status";
+    if depth > MAX_TREE_DEPTH {
+        return Err(FlattenError::Git(GitError::TreeTooDeep {
+            operation: OP,
+            limit: MAX_TREE_DEPTH,
+        }));
+    }
     // Own the tree bytes and its entries before recursing, so the borrow of the
     // scratch buffer ends before the next `find`.
     let mut buf = Vec::new();
@@ -1102,7 +1126,7 @@ fn flatten_subtree(
         }
     }
     for (oid, path) in subtrees {
-        flatten_subtree(repo, &oid, &path, out)?;
+        flatten_subtree(repo, &oid, &path, depth + 1, out)?;
     }
     Ok(())
 }

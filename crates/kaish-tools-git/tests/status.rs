@@ -1046,6 +1046,85 @@ async fn the_walk_does_not_descend_a_case_folded_git_dir() {
     );
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Tree depth
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Commit a chain of `depth` nested single-entry trees, without ever creating
+/// the path on disk.
+///
+/// `create_dir_all` cannot build this — the path is longer than `PATH_MAX` —
+/// but the index carries paths as plain strings and `write-tree` turns one into
+/// the tree chain, so three plumbing calls do what a filesystem cannot.
+fn commit_a_deep_tree(repo: &Repo, depth: usize) {
+    let blob = repo.git(&["hash-object", "-w", "--stdin"]);
+    let blob = blob.trim();
+    let deep = format!("{}leaf", "d/".repeat(depth));
+    repo.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("100644,{blob},{deep}"),
+    ]);
+    let tree = repo.git(&["write-tree"]);
+    let tree = tree.trim().to_string();
+    let commit = repo.git(&["commit-tree", &tree, "-m", "deep"]);
+    repo.git(&["update-ref", "refs/heads/main", commit.trim()]);
+}
+
+/// A pathologically deep HEAD tree is a loud refusal, not a stack overflow.
+///
+/// Flattening the tree recurses once per level, and a repository chooses how
+/// many levels there are — a chain of nested single-entry trees costs it a few
+/// dozen bytes each and costs us a stack frame each. A safety tool a repository
+/// can crash is not one, so the depth is capped and named. Without the cap this
+/// fixture aborts the whole test binary with `fatal runtime error: stack
+/// overflow`, which is why it is written as a `status` call and not a unit test.
+///
+/// The index is removed first, and that is load-bearing rather than tidy:
+/// `write-tree` leaves a cache-tree in `.git/index`, and decoding *that* is an
+/// unbounded recursion inside gix-index itself, one this crate cannot reach
+/// from the outside (see docs/issues.md, R4). Dropping the index keeps this
+/// fixture pointed at our recursion instead of the dependency's.
+#[tokio::test]
+async fn a_tree_deeper_than_the_cap_is_refused() {
+    let repo = Repo::init("repo");
+    commit_a_deep_tree(&repo, 1200);
+    std::fs::remove_file(repo.root.join(".git/index")).expect("drop the cache-tree index");
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    assert_eq!(
+        result.code, 1,
+        "an over-deep tree is a git-level no: {} {:?}",
+        result.err,
+        result.output()
+    );
+    assert!(
+        result.err.contains("nested") || result.err.contains("deep"),
+        "the refusal must say what it refused: {}",
+        result.err
+    );
+}
+
+/// The cap's over-refusal guard: an ordinarily deep tree is still read.
+#[tokio::test]
+async fn a_tree_under_the_cap_is_read() {
+    let repo = Repo::init("repo");
+    commit_a_deep_tree(&repo, 64);
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    let j = json(&result);
+    assert_eq!(j["clean"], false, "the deep leaf is not in the working tree: {j}");
+    let deep = format!("{}leaf", "d/".repeat(64));
+    let row = j["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|e| e["path"] == deep.as_str())
+        .unwrap_or_else(|| panic!("expected a row for the deep leaf: {j}"));
+    assert_eq!(row["worktree"], "deleted", "{row}");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // The blob cap (Limits::max_blob_bytes)
 // ═══════════════════════════════════════════════════════════════════════════

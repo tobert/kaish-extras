@@ -252,6 +252,31 @@ pub enum GitError {
         cap: u64,
     },
 
+    /// A tree nests deeper than this build will walk. Exit 1 — a git-level
+    /// "no" about this repository.
+    ///
+    /// Loud rather than truncated. A walk that stopped quietly at the limit
+    /// would report every path below it as absent from HEAD — a wrong answer
+    /// dressed as a real one. Walking on is not the alternative either: the
+    /// walk recurses once per level and the repository picks the number of
+    /// levels, so a few hundred nested single-entry trees, cheap to write, are
+    /// a stack overflow in a tool whose whole job is to be safe to point at a
+    /// repository you did not write.
+    ///
+    /// Only the limit is named. The depth is repository content, and so is any
+    /// path found at it.
+    #[error(
+        "git {operation}: this repository nests trees more than {limit} levels \
+         deep — {operation} walks the tree recursively, and going deeper would \
+         exhaust the stack. Nothing below that depth was read"
+    )]
+    TreeTooDeep {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The depth limit this build enforces.
+        limit: usize,
+    },
+
     /// A `--path` argument used git pathspec magic this crate does not
     /// implement. Exit 2 — usage, and it names the unsupported syntax rather
     /// than silently matching nothing (B, "no git pathspec magic").
@@ -309,7 +334,8 @@ impl GitError {
             GitError::NotARepository { .. }
             | GitError::Repository { .. }
             | GitError::NeedsWorktree { .. }
-            | GitError::BlobTooLarge { .. } => 1,
+            | GitError::BlobTooLarge { .. }
+            | GitError::TreeTooDeep { .. } => 1,
             GitError::Usage { .. }
             | GitError::NoVerb { .. }
             | GitError::PathspecMagic { .. } => 2,
