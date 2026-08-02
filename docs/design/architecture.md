@@ -975,10 +975,30 @@ over three primitives, not the one comparison above:
   refusal can never be read as an existence oracle for the host (the
   `contain` / `guard_alternates` helpers).
 
+- **Working-tree paths named by index entries** — every stage-0 path `git
+  status` compares against the working tree: screened lexically (no absolute,
+  `.`, `..` or empty component), then its whole parent chain canonicalized and
+  ceiling-checked against the working tree root before the leaf is `lstat`ed
+  through that canonical parent (the `WorktreePaths` helper in
+  `verbs/status.rs`). A leaf-only check is not enough here: `lstat` does not
+  follow the final component, but the kernel resolves every component before
+  it, so an entry `evil/x` under a symlinked `evil` reads a host file with no
+  symlinked leaf anywhere in sight.
+
 The residual carve-out, stated honestly: a symlinked leaf that gitoxide opens
-*internally* — loose objects, individual ref files, `HEAD`, packs — is not
-intercepted by any of the above, because nothing here wraps every `open`
-gitoxide makes. Closing that needs platform-level containment
+*internally* — loose objects, individual ref files, `HEAD`, packs, and the
+per-directory `.gitignore` files `gix-worktree`'s ignore `Stack` reads as
+`git status` descends the working tree — is not intercepted by any of the
+above, because nothing here wraps every `open` gitoxide makes. The
+`.gitignore` reads belong in that list and not in a footnote: they are the one
+carve-out path that reaches into the *working tree* rather than `.git`, the
+`Stack` consults them on every descent (`--untracked no` does not avoid them,
+it only stops us reporting what they matched), and a working tree is where a
+symlink is easiest to plant. They stay inside the mount only because the
+working tree root is ceiling-checked; a `.gitignore` symlinked out of it would
+be followed. What status opens *itself* — `.git/index`, `info/exclude`, and
+every path an index entry names — is contained above and is not in the
+carve-out. Closing the remainder needs platform-level containment
 (`openat2(RESOLVE_BENEATH)`), which belongs in a kaish VFS seam, not this
 crate — tracked as kaish #276 ("VFS seam: RESOLVE_BENEATH-scoped mount view
 for symlink containment"). The TOCTOU between a canonicalize/ceiling-check

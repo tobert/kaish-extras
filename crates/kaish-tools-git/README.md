@@ -79,7 +79,15 @@ So the containment is stated as an invariant over three primitives:
 - **content-named paths** (the `commondir` file's contents, each alternates
   entry) are `canonicalize`d and ceiling-checked, with "resolves outside" and
   "does not resolve" made deliberately indistinguishable so the refusal is not
-  an existence oracle.
+  an existence oracle;
+- **working-tree paths named by index entries** (what `git status` compares
+  against the tree) are screened lexically — no absolute, `.`, `..` or empty
+  component — and then have their whole *parent chain* canonicalized and
+  ceiling-checked before the leaf is lstat​ed through that canonical parent. The
+  leaf check alone is not enough at depth: `lstat` does not follow the final
+  component, but the kernel resolves every component before it, so an entry
+  `evil/x` under a symlinked `evil` reads a host file without a symlinked leaf
+  anywhere.
 
 Refusals never echo the escaping path, for the same oracle reason. kaish's own
 `LocalFs` canonicalizes before its containment check, so anything weaker here
@@ -90,9 +98,13 @@ covers the discovery side. The honest layouts still work: a store or a mount
 root reached through an in-mount symlink, an alternate inside the mount, a real
 linked worktree.
 
-**Residual, by construction:** the leaf checks cover files *this crate* opens.
-Objects, ref files and packs are opened by gitoxide internally, and a symlink
-among those (e.g. `objects/ab/cd…` linking out) is not intercepted here —
+**Residual, by construction:** the checks above cover files *this crate* opens.
+Objects, ref files and packs are opened by gitoxide internally, and so are the
+per-directory `.gitignore` files `gix-worktree`'s ignore stack reads while
+`status` descends the working tree — the stack consults them on every descent,
+so `--untracked no` does not avoid the reads, it only stops us reporting what
+they matched. A symlink among any of those (`objects/ab/cd…` linking out, a
+`.gitignore` pointing outside the mount) is not intercepted here;
 platform-level containment (`openat2(RESOLVE_BENEATH)` or a kaish VFS seam) is
 what would close it. Tracked as design input, not a code change in this PR.
 

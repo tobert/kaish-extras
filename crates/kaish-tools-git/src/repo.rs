@@ -332,9 +332,13 @@ impl ReadRepo {
         // in verbs/status.rs). Those reads are bounded by the working tree,
         // which is ceiling-checked above; a `.gitignore` symlinked out of the
         // mount would be followed, the same interceptability gap as gix opening
-        // an object by name. The two fixed-name leaves status opens *itself* —
-        // the index and `info/exclude` — go through `open_leaf` and are not in
-        // the carve-out.
+        // an object by name — and worth naming loudly because it is the one
+        // carve-out path that reaches into the working tree rather than `.git`,
+        // consulted on every descent whether or not `--untracked` reports what
+        // it matched. What status opens *itself* is not in the carve-out: the
+        // index and `info/exclude` go through `open_leaf`, and the working-tree
+        // paths its index entries name are contained parent-chain-first by
+        // `WorktreePaths` in verbs/status.rs.
 
         // `WriteReflog::Disable` is not an optimization. The files ref store
         // appends to a reflog on ref *writes*; we make none, and setting this
