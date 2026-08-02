@@ -936,6 +936,9 @@ let real = ctx.backend().resolve_real_path(&vfs_path)
 let mount = longest_prefix_mount(ctx.backend().mounts(), &vfs_path);
 let ceiling = ctx.backend().resolve_real_path(&mount.path)
     .ok_or_else(|| GitError::NotRealPath(mount.path.clone()))?;
+// `ReadRepo::discover` does not stop at this one ceiling comparison — every
+// directory, leaf and content-named path it goes on to open is contained the
+// same way. See the invariant below.
 let repo = ReadRepo::discover(&real, &ceiling)?;
 ```
 
@@ -951,6 +954,37 @@ from the mount root. This needs no kaish change — `mounts()` plus
 We also keep the VFS path alongside the real path in every output
 (`repo_root_vfs` / `repo_root_real`, `path_vfs` on worktrees) so an agent can act
 on what it sees.
+
+**The containment invariant `discover` actually holds.** A repository owns
+every byte under its own `.git`, symlinks included, and the paths it names
+for itself (`commondir`'s contents, `objects/info/alternates` entries) are
+attacker-controlled the moment a repository we did not create is opened — the
+normal case for a codebase-analysis agent. `repo.rs` enforces containment
+over three primitives, not the one comparison above:
+
+- **Directories** — `git_dir`, `common_dir`, `work_dir`, and the ceiling
+  itself: `std::fs::canonicalize` then `starts_with(ceiling)`.
+- **Fixed-name leaves** under an already-canonical, already-checked parent
+  (`commondir`, `config`, `shallow`, `refs`, `reftable`, `objects`,
+  `worktrees`, `.gitmodules`): `lstat`, no follow; a symlinked leaf is
+  resolved, ceiling-checked, and refused *before* it is read if it escapes
+  (the `open_leaf` helper).
+- **Content-named paths** — the `commondir` file's own contents, and each
+  `objects/info/alternates` entry: `canonicalize` then ceiling-check, with
+  "escapes" and "does not resolve" made indistinguishable on purpose, so the
+  refusal can never be read as an existence oracle for the host (the
+  `contain` / `guard_alternates` helpers).
+
+The residual carve-out, stated honestly: a symlinked leaf that gitoxide opens
+*internally* — loose objects, individual ref files, `HEAD`, packs — is not
+intercepted by any of the above, because nothing here wraps every `open`
+gitoxide makes. Closing that needs platform-level containment
+(`openat2(RESOLVE_BENEATH)`), which belongs in a kaish VFS seam, not this
+crate — tracked as kaish #276 ("VFS seam: RESOLVE_BENEATH-scoped mount view
+for symlink containment"). The TOCTOU between a canonicalize/ceiling-check
+here and gitoxide's later open is inherent to that design and is at parity
+with kaish's own `LocalFs`, which canonicalizes and ceiling-checks the same
+way before every open.
 
 ### E.3 Blocking calls and Send-ness
 
