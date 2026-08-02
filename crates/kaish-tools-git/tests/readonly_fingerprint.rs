@@ -261,6 +261,25 @@ fn real_git_status_writes_to_dot_git() {
     // bookkeeping rather than the fixture settling.
     support::git(&repo.root, &["status", "--porcelain"]);
 
+    // Move a clean tracked file's mtime without touching its bytes. `README.md`
+    // was `git add`ed in `build`, so its index entry and worktree content
+    // agree; only the stat is now stale. That is exactly the racy-clean case
+    // git resolves by re-hashing, finding the content unchanged, and rewriting
+    // the index with a refreshed stat — a `.git` write on an ordinary `status`,
+    // and one git performs regardless of version or mtime granularity. Without
+    // it the test rests on git *choosing* to rewrite an already-warm index,
+    // which some hosts (coarse mtime, other git builds) skip — a flake, not a
+    // loss of the property D.4 relies on.
+    let readme = repo.root.join("README.md");
+    let bumped = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+    let file = std::fs::File::options()
+        .write(true)
+        .open(&readme)
+        .expect("open README.md");
+    file.set_times(std::fs::FileTimes::new().set_modified(bumped))
+        .expect("bump README.md's mtime");
+    drop(file);
+
     let before = Fingerprint::take(&git_dir);
     support::git(&repo.root, &["status"]);
     let after = Fingerprint::take(&git_dir);
