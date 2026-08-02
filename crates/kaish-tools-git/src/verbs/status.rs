@@ -653,15 +653,16 @@ fn is_ordinary_component(segment: &str) -> bool {
 /// `Path::starts_with` cannot see this either; it is component-lexical, and
 /// the symlink is invisible to it.
 ///
-/// So this generalizes `repo.rs`'s `open_leaf` to arbitrary depth: resolve the
-/// entry's whole *parent chain* with `canonicalize`, ceiling-check the result
-/// against the canonical working tree, and only then lstat the leaf through
-/// the canonical parent. The leaf itself may be a symlink — git tracks
-/// symlinks, and their blob is the target string, which
-/// [`read_worktree_blob`] reads with `read_link` and never follows.
+/// So this generalizes `repo.rs`'s `open_leaf` to arbitrary depth: walk the
+/// entry's *parent chain* a component at a time from the canonical working
+/// tree ([`WorktreePaths::walk_chain`], which is also where the refusal is kept
+/// from becoming an existence oracle), then lstat the leaf through the
+/// canonical parent. The leaf itself may be a symlink — git tracks symlinks,
+/// and their blob is the target string, which [`read_worktree_blob`] reads with
+/// `read_link` and never follows.
 ///
-/// Parents are cached because index entries share them heavily: one
-/// `canonicalize` per distinct directory rather than one per entry.
+/// Parents are cached because index entries share them heavily: one walk per
+/// distinct directory rather than one per entry.
 struct WorktreePaths<'a> {
     op: &'static str,
     /// The canonical working tree root — the ceiling for every index entry,
