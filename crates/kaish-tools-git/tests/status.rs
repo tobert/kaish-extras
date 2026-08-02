@@ -1010,6 +1010,42 @@ async fn a_symlinked_leaf_reads_the_same_whether_its_target_exists() {
     assert_eq!(present, 0, "both are clean checkouts: {present_rendered}");
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// The untracked walk never enters a git directory
+// ───────────────────────────────────────────────────────────────────────────
+
+/// The walk skips a git directory whatever case it is spelled in.
+///
+/// On a case-insensitive filesystem — macOS and Windows, where a great many
+/// checkouts live — `.GIT` *is* the git directory, and an exact `== ".git"`
+/// compare walks straight into `objects/`, `refs/` and `config` and reports
+/// them as untracked. The compare is case-insensitive so the rule holds on
+/// every platform rather than on the one the test happens to run on; the cost
+/// is that a case-sensitive filesystem's unrelated `.GIT` directory is skipped
+/// too, which is the safe direction and the one git takes under
+/// `core.ignorecase`.
+#[tokio::test]
+async fn the_walk_does_not_descend_a_case_folded_git_dir() {
+    let repo = Repo::init("repo");
+    repo.write("tracked.txt", "t\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "one file", "--quiet"]);
+    repo.write(".GIT/objects/decoy", "not yours\n");
+    repo.write(".GIT/config", "[core]\n");
+
+    let j = json(&status(&repo.mount(), "/mnt/repo", &["--untracked", "all", "--json"]).await);
+    let paths: BTreeSet<String> = j["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|e| e["path"].as_str().expect("path").to_string())
+        .collect();
+    assert!(
+        paths.iter().all(|p| !p.starts_with(".GIT")),
+        "the walk descended a case-folded git dir: {paths:?}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // The blob cap (Limits::max_blob_bytes)
 // ═══════════════════════════════════════════════════════════════════════════

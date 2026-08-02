@@ -920,7 +920,14 @@ impl Walker<'_> {
         for name in names {
             // Never descend `.git` — neither the main one at the root nor a
             // nested submodule/worktree `.git` deeper down.
-            if name == ".git" {
+            //
+            // Case-insensitively, because on macOS and Windows `.GIT` *is* the
+            // git directory and an exact compare walks into `objects/`, `refs/`
+            // and `config` and reports them as untracked. Applying it
+            // everywhere costs a case-sensitive filesystem only that an
+            // unrelated `.GIT` goes unlisted — the safe direction, and the one
+            // git itself takes under `core.ignorecase`.
+            if name.eq_ignore_ascii_case(".git") {
                 continue;
             }
             let rel = if rel_dir.is_empty() {
