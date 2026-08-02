@@ -1,16 +1,19 @@
 # kaish-git v2 — architecture
 
-Status: **proposed** (2026-08-01, Opus design agent); co-architect pass done same
-day — see the "Co-architect notes" appendix for corrections and the
-reconciliation with the approval-ledger design. Inputs: [../git.md](../git.md)
-(history, autopsy, design commitments),
-[gix-research-2026-08.md](gix-research-2026-08.md) (verified gitoxide findings),
+Status: **current** — proposed 2026-08-01 (Opus design agent); three co-architect
+passes folded into the body 2026-08-02 (see
+[Changelog / provenance](#changelog--provenance)). Inputs:
+[../git.md](../git.md) (history, autopsy, design commitments),
+[gix-plumbing-feasibility-2026-08.md](gix-plumbing-feasibility-2026-08.md)
+(the source-read verification this design's dependency strategy rests on),
+[gix-research-2026-08.md](gix-research-2026-08.md) (the earlier facade-era
+gitoxide research — partly superseded, see [A.2](#a2-feature-axes)),
 [safety-inventory-2026-08.md](safety-inventory-2026-08.md) (kaish safety
 facilities). This document makes the calls; it does not survey options. Where a
 call was close, the runner-up is named.
 
-The approval-ledger design is produced separately
-([approval-ledger.md](approval-ledger.md)). Everything write-shaped
+The approval-ledger design lives in kaish (pointer:
+[approval-ledger.md](approval-ledger.md)). Everything write-shaped
 here is marked **depends on ledger**; the read profile is designed to need
 nothing from it.
 
@@ -21,24 +24,27 @@ nothing from it.
 | # | Decision | Where |
 |---|---|---|
 | 1 | One crate, `kaish-tools-git` (the reserved name), public typed model module | [A](#a-crate-layout) |
-| 2 | Feature axes: `read` (default), `textdiff`, `worktree`, `commit`, `remote`, `parallel` | [A](#a-crate-layout) |
-| 3 | wasm is a **compile error**, not a degraded build | [A](#a3-wasm), [F3](#f3-gix-pack-mmap-on-wasm) |
-| 4 | No shell-out tier. Ever. If you want real git, run real git | [A](#a2-feature-axes) |
-| 5 | Ten read verbs: `info status log show ls diff branch tag blame worktree list` | [B](#b-the-verb-surface) |
-| 6 | Structured diff is the primary form; unified patch is a *rendering* of it | [B4](#b4-git-diff) |
-| 7 | `owns_output` is **not used anywhere** — typed `OutputData` + `rich_json` | [B10](#b10-output-discipline) |
-| 8 | Profile config: embedder-supplied Rust struct, subtractive, no config file | [C](#c-the-profile-config) |
-| 9 | Write profiles are **unconstructible** without an approvals handle (type-level) | [C](#c3-write-profiles-are-type-gated) |
-| 10 | Read-only proven by a `.git`-fingerprint test across the whole read surface | [D4](#d4-the-proof-the-git-fingerprint-test) |
-| 11 | `Permissions::isolated()` explicitly; `secure()` is a trap | [D2](#d2-layer-2--gix-open-permissions) |
-| 12 | Default build cannot spawn: `gix-command` absent, enforced by a CI tripwire | [D3](#d3-layer-3--the-textconvfilter-attack-surface) |
-| 13 | clap **tree for schema reflection**, flat **per-verb parse** at execute time | [E1](#e1-schema-tree-and-argv-routing) |
-| 14 | No gix value ever crosses an `.await` — makes `!Send` a non-issue | [E3](#e3-blocking-calls-and-send-ness) |
-| 15 | Repo discovery is **ceilinged at the VFS mount root** | [E2](#e2-the-resolve_real_path-bridge) |
-| 16 | Identity from `GIT_AUTHOR_*` / `GIT_COMMITTER_*` kernel vars, no fallback | [E6](#e6-hermetic-identity) |
-| 17 | Worktree create/remove: implement here on gix plumbing, then offer upstream | [F2](#f2-worktree-createremove) |
-| 18 | Exactly **one** kaish PR is proposed, and the read profile ships without it | [G](#g-kaish-pr-cascade) |
-| 19 | Read profile ships as 0.1.0 in nine small PRs, zero kaish changes | [H](#h-phasing) |
+| 2 | **No `gix` facade** — build on the plumbing crates ("Path 2"), twelve exact pins | [A2](#a2-feature-axes), [A4](#a4-pinning-and-the-dependency-tripwires) |
+| 3 | Feature axes: `read` (default), `textdiff`, `worktree`, `commit`, `remote`, `parallel` | [A](#a-crate-layout) |
+| 4 | wasm is a **compile error**, not a degraded build | [A](#a3-wasm), [F3](#f3-wasm-and-gix-sec) |
+| 5 | No shell-out tier. Ever. If you want real git, run real git | [A](#a2-feature-axes) |
+| 6 | Ten read verbs: `info status log show ls diff branch tag blame worktree list` | [B](#b-the-verb-surface) |
+| 7 | Structured diff is the primary form; unified patch is a *rendering* of it | [B4](#b4-git-diff) |
+| 8 | Bare `git diff` is git parity — index→worktree, unstaged only | [B4](#b4-git-diff) |
+| 9 | Status: porcelain letters in the text surface, self-describing words in JSON | [B2](#b2-git-status) |
+| 10 | `owns_output` is **not used anywhere** — typed `OutputData` + `rich_json` | [B10](#b10-output-discipline) |
+| 11 | Profile config: embedder-supplied Rust struct, subtractive, no config file | [C](#c-the-profile-config) |
+| 12 | Write profiles are **unconstructible** without a deliberate opt-in (type-level) | [C](#c3-write-profiles-are-type-gated) |
+| 13 | Read-only proven by a `.git`-fingerprint test across the whole read surface | [D4](#d4-layer-4--the-proof-the-git-fingerprint-test) |
+| 14 | Isolation **by construction** — we load only what we choose to load | [D2](#d2-layer-2--isolation-by-construction) |
+| 15 | Default build cannot spawn: `gix-command` / `gix-transport` / `gix-filter` all absent, enforced by CI tripwires | [D3](#d3-layer-3--the-textconvfilter-attack-surface) |
+| 16 | clap **tree for schema reflection**, flat **per-verb parse** at execute time | [E1](#e1-schema-tree-and-argv-routing) |
+| 17 | No gix value ever crosses an `.await` — makes `!Send` a non-issue | [E3](#e3-blocking-calls-and-send-ness) |
+| 18 | Repo discovery is **ceilinged at the VFS mount root** | [E2](#e2-the-resolve_real_path-bridge) |
+| 19 | Identity from `GIT_AUTHOR_*` / `GIT_COMMITTER_*` kernel vars, no fallback | [E6](#e6-hermetic-identity) |
+| 20 | Worktree create/remove: implement here on gix plumbing, then offer upstream | [F2](#f2-worktree-createremove) |
+| 21 | Exactly **one** kaish PR is proposed, and the read profile ships without it | [G](#g-kaish-pr-cascade) |
+| 22 | Read profile ships as 0.1.0 in nine small PRs, zero kaish changes | [H](#h-phasing) |
 
 ---
 
@@ -66,7 +72,7 @@ crates/kaish-tools-git/
 │   ├── lib.rs        # pub use: GitTool, GitConfig, Profile, Verb, model::*
 │   ├── config.rs     # GitConfig / Profile / Verb / Limits  (no gix, no kaish)
 │   ├── model.rs      # typed results: Status, LogEntry, DiffFile, Hunk, …  (no gix, no kaish)
-│   ├── repo.rs       # discovery + ReadRepo newtype; the ONLY place gix::open is called
+│   ├── repo.rs       # discovery + ReadRepo; the ONLY place the plumbing handles are assembled
 │   ├── revspec.rs    # the accepted rev grammar (not gix's full revspec)
 │   ├── pathspec.rs   # literal paths + simple globs → repo-relative matcher
 │   ├── error.rs      # GitError → exit-code taxonomy
@@ -91,28 +97,85 @@ write?" by reading `repo.rs` and `verbs/write/` alone.
 
 ### A.2 Feature axes
 
+**The dependency strategy comes first, because every axis below is shaped by
+it: this crate does not use the `gix` facade.** The facade links `gix-command`
+— pure-Rust `std::process::Command` spawn machinery — **unconditionally**, via
+`gix-command → gix-transport → gix-protocol → gix`, reinforced by `gix-diff`
+(textconv) and `gix-filter` (clean/smudge); `gix --no-default-features` does not
+avoid it. That was found while scaffolding PR 0 and it falsified the original
+"no spawn in a default build" claim outright (kaish-extras#4). The earlier
+research missed it because it audited for C toolchains and network stacks, and
+`gix-command` is neither.
+
+**The call: build on gix's plumbing crates, skipping the facade** — "Path 2" in
+the feasibility report and in the issue backlog. A source-read verification of
+the pinned sources
+([gix-plumbing-feasibility-2026-08.md](gix-plumbing-feasibility-2026-08.md))
+found every premise this needs holds — object access sits behind `gix-object`'s
+three find traits, one required method each (§1); `gix-traverse` /
+`gix-revision` / `gix-revwalk` are generic over the object source and do not
+depend on `gix-odb` at all (§2); `gix-index` decodes *and* encodes from bytes
+(§4a); `gix-ref`'s read path is public byte parsers (§4b). The pin set links
+**none** of `gix-command` / `gix-transport` / `gix-filter`, so the structural
+claim is true again — and this time it is a property of the dependency graph
+that CI asserts in one line ([A.4](#a4-pinning-and-the-dependency-tripwires)),
+not a claim about configuration that must be re-proved on every gix bump.
+
+What it costs: we own the convenience layer the facade would have given us —
+repository assembly, a restricted rev-parse grammar, unified-patch rendering —
+and twelve pins that move on independent schedules instead of one. What it buys
+beyond the guarantee: the byte-level seams that make a kaish-vfs-backed *second*
+implementation of object/ref/index access possible, and with it the browser
+build ([A.3](#a3-wasm), [F.3](#f3-wasm-and-gix-sec)). Staging follows from that
+— build native-first behind kaish-owned access traits, and treat VFS-backed
+storage as a second implementation of those traits, not a refactor.
+
+Runner-up (close): keep the facade and downgrade the no-spawn claim to a runtime
+guarantee — repos opened `Permissions::isolated()`, no network verbs, hostile-repo
+fixture proving no subprocess is created. Less code, ships sooner. It lost
+because its guarantee is a claim about *configuration*, re-provable only per
+release, and because it forecloses both the VFS path and wasm.
+
 Mirroring kaish's own capability-axis discipline: opt-in, each compiles out
 cleanly, and the default is the smallest useful thing.
 
 | Feature | Default | Adds | Cost / risk |
 |---|---|---|---|
-| `read` | ✓ | `gix` with `sha1, index, revision, status, blame`; all ten read verbs | none — offline, no C toolchain but `zlib-rs`, no `gix-command` |
-| `textdiff` | — | `gix/blob-diff`: line hunks, `--patch` rendering | **links `gix-command`** (subprocess-capable machinery) — see [D.3](#d3-layer-3--the-textconvfilter-attack-surface) |
+| `read` | ✓ | the plumbing pin set ([A.4](#a4-pinning-and-the-dependency-tripwires)); all ten read verbs | none — offline, no C toolchain but `zlib-rs`, no spawn machinery linked at all |
+| `textdiff` | — | line hunks from `gix-imara-diff` on raw blob bytes; `--patch` rendering | we render the patch ourselves; no textconv, no attributes machinery |
 | `worktree` | — | worktree create/remove/lock/prune (**depends on ledger**) | writes refs and directories |
 | `commit` | — | index staging + commit (**depends on ledger**) | writes objects and refs |
-| `remote` | — | `gix/blocking-http-transport-reqwest` + direct `reqwest` (`rustls-no-provider`) + `rustls/ring` | ~doubles the build; `cc` via ring; never available on wasm |
-| `parallel` | — | `gix/parallel` (and LRU pack caches) | spawns threads inside an embedded kernel |
+| `remote` | — | **unrevisited under Path 2** — the facade-era wiring (`gix/blocking-http-transport-reqwest` + direct `reqwest` `rustls-no-provider` + `rustls/ring`) assumes a facade we no longer have, and `gix-transport` is a tripwire-forbidden crate | re-derive before pursuing; never available on wasm |
+| `parallel` | — | parallelism in the plumbing crates (and LRU pack caches) | spawns threads inside an embedded kernel |
 
 Notes that are load-bearing:
 
-- **The `read`↔`textdiff` split is exactly the no-subprocess concern.** The
-  research found `blob-diff → attributes → gix-command`. The default build
-  therefore does *name/status-level* diff via `gix-diff`'s `tree_with_rewrites`
-  and never links the spawn machinery. A CI tripwire (`cargo tree -p
-  kaish-tools-git -i gix-command` must find nothing on default features) turns
-  that from an intention into a gate. If `status` turns out to pull `attributes`
-  too — plausible, and unverified in the research — the tripwire fails on the
-  first PR and we deal with it then rather than shipping a quiet contradiction.
+- **The `read`↔`textdiff` split is no longer the no-subprocess boundary.** It
+  was, under the facade, where `blob-diff → attributes → gix-command`. Under
+  the plumbing, *no* build links spawn machinery, so `textdiff` carries no
+  spawn risk: line hunks come from `gix-imara-diff` run directly on blob bytes,
+  skipping textconv and `.gitattributes` by construction — arguably the more
+  correct answer for an agent, which wants raw content. What survives of the
+  split is staging: `textdiff` gates the hand-written unified-patch renderer
+  ([F.1](#f1-unified-patch-assembly), [H](#h-phasing) PR 6), which is the real
+  work. **Open:** whether `textdiff` stays a feature axis once that renderer
+  lands, or folds into `read`.
+- **Rename detection does not exist without `gix-diff`'s `blob` feature**, and
+  `blob` is exactly what pulls `gix-command`. The whole `rewrites` tracker —
+  `Rewrites`, `rewrites::Tracker`, `tree_with_rewrites` — is
+  `#[cfg(feature = "blob")]`, and the similarity computation *is* the blob
+  platform (feasibility §5.4). So renames are **exact-match-only** (same blob
+  oid, new path) and are reported honestly; see [B.4](#b4-git-diff). This also
+  corrects `gix-research-2026-08.md` §3(a) mitigation (ii), which proposed
+  dropping to `tree_with_rewrites` without `blob` for name/status diff — that
+  function is itself `blob`-gated. Without `blob` the available surface is
+  `gix_diff::tree()` plus a `tree::Visit` delegate we supply.
+- **`status` and `blame` are hand-composed**, because `gix-status` and
+  `gix-blame` drag in the machinery this design exists to avoid: `status` is
+  index + worktree walk (we own `.gitignore` and pathspec matching and the
+  racy-clean stat rules), `blame` is revwalk + per-commit path-limited tree
+  diff + line mapping. Both are L-tier under *either* dependency strategy
+  (feasibility §5.2) — the fork never moved the biggest cost.
 - **`parallel` stays off.** Without it most gix types are `!Send`, which is the
   strictly harder constraint; designing for it from day one (see
   [E.3](#e3-blocking-calls-and-send-ness)) means an embedder who needs the
@@ -134,41 +197,85 @@ Notes that are load-bearing:
 ```rust
 #[cfg(all(target_family = "wasm", not(feature = "unsupported-wasm-loose-objects-only")))]
 compile_error!(
-    "kaish-tools-git does not support wasm: gix-pack requires mmap, which is a \
-     stub on WASI, so every packed object fails to load at runtime. See \
-     kaish-extras GH #<wasm-tracking>. Build kaish-web without the git tool."
+    "kaish-tools-git does not support wasm: gix-sec's ownership check \
+     special-cases WASI but not bare wasm32, and it is reachable through \
+     gix-discover and gix-config, so this crate does not compile for \
+     wasm32-unknown-unknown. Beyond that, the native storage path reads \
+     through gix-odb and std::fs; a browser build needs the VFS-backed \
+     implementation of the access traits. See kaish-extras GH #3. Build \
+     kaish-web without the git tool."
 );
 ```
 
-Rationale: gix *compiles* for `wasm32-wasip1` today and then returns
-"object not found" for every object in a packfile — i.e. for essentially all
-history in any real repo. That is precisely the silent-degradation failure mode
-the project rejects, and a runtime error per object would be worse (it looks like
-a repo problem, not a build problem). A compile error names the real cause once,
-at the only moment anyone can act on it. The deliberately ugly escape feature
-exists so upstream work can be exercised without a fork; it is not a supported
-configuration and CI does not build it.
+The mmap premise this guard originally cited is **retired**: `gix-pack` 0.73
+already carries byte constructors — `from_data()` on the pack data, pack index
+*and* multi-pack-index file types, all generic over `T: Deref<Target = [u8]>`,
+with only `Bundle`'s 69-line find pipeline mmap-hardwired (feasibility
+§3.1–§3.3). The upstream ask we were going to file had already been built. Two
+things actually block wasm, both tracked as **kaish-extras#3**:
 
-`kaish-web` therefore keeps its current feature set and simply does not depend on
-this crate. When [F.3](#f3-gix-pack-mmap-on-wasm) lands upstream, the guard
-narrows to `wasm32-unknown-unknown` (blocked separately on `gix-sec`) and
+1. **Compile: `gix-sec`.** The plumbing pin set builds clean for
+   `wasm32-unknown-unknown` today — `gix-ref`, `gix-index`, `gix-lock`,
+   `gix-tempfile`, `memmap2` and `gix-imara-diff` all tolerated in-tree, built
+   rather than inferred (feasibility §6.2). The sole compile failure is
+   `gix-sec`'s ownership check, which special-cases `target_os = "wasi"` to
+   `Ok(true)` but not bare `wasm32`; it is reachable only through
+   `gix-discover` and `gix-config`. The fix is a two-line cfg extension
+   upstream ([F.3](#f3-wasm-and-gix-sec)).
+2. **Runtime: storage.** The native build reads objects through
+   `gix-odb::Store`, which is irreducibly path-and-mmap bound, and discovers
+   through `gix-discover`, which is pure `std::fs` probing. A browser build
+   needs the VFS-backed second implementation of the access traits — the same
+   work that delivers git-over-kaish-VFS, not an increment on top of it.
+
+Shipping before both land would be precisely the silent-degradation failure
+mode the project rejects, and a runtime error per object would be worse (it
+looks like a repo problem, not a build problem). A compile error names the real
+cause once, at the only moment anyone can act on it. The deliberately ugly
+escape feature exists so upstream work can be exercised without a fork; it is
+not a supported configuration and CI does not build it. **Open:** its name
+(`unsupported-wasm-loose-objects-only`) was coined for the retired mmap premise
+and no longer describes anything — rename it the next time the guard moves.
+
+`kaish-web` therefore keeps its current feature set and simply does not depend
+on this crate. As [F.3](#f3-wasm-and-gix-sec) progresses the guard narrows and
 eventually disappears.
 
 ### A.4 Pinning and the dependency tripwires
 
-`gix = "=0.86.0"` — exact-pinned, as the research recommends (0.x with monthly
-breaking minors; 0.82.0 was yanked). Bumps are their own PR with the full test
-suite as the gate.
+Twelve exact pins, not one. Every gix crate is 0.x with breaking minors roughly
+monthly (0.82.0 of the facade was yanked), so each is pinned with `=`, and bumps
+are their own PR with the full test suite as the gate:
+
+| Crate | Pin | Notes |
+|---|---|---|
+| `gix-object` | `=0.63` | the find traits; the whole object seam |
+| `gix-odb` | `=0.83` | native object store (the VFS path implements `Find` instead) |
+| `gix-ref` | `=0.66` | ref store; byte parsers are what a VFS store would reuse |
+| `gix-traverse` | `=0.60` | commit and tree walks |
+| `gix-revision` | `=0.48` | `describe`, `merge_base` — **not** `spec` (see [B](#b-the-verb-surface)) |
+| `gix-revwalk` | `=0.34` | the shared commit-graph cache |
+| `gix-commitgraph` | `=0.38` | optional acceleration; `Option<&Graph>` everywhere, so `None` is first-class |
+| `gix-discover` | `=0.54` | native discovery; dropped on the VFS path, which takes `gix-sec` with it |
+| `gix-index` | `=0.54` | `State::from_bytes` / `write_to`, byte-only both ways |
+| `gix-pack` | `=0.73` | generic over its backing bytes; `from_data` constructors |
+| `gix-diff` | `=0.66` | **without the `blob` feature** — `blob` is what pulls `gix-command` |
+| `gix-config` | `=0.59` | `from_bytes_no_includes`; do **not** use 0.51, it resolves a whole second-generation graph |
+
+`gix-imara-diff` supplies line hunks under `textdiff`. The set resolves with no
+duplicate crates (`cargo tree -d` → nothing to print).
 
 CI tripwires, all `cargo tree`-based, all on the **default** feature set unless
 noted:
 
 | Tripwire | Must be | Why |
 |---|---|---|
-| `gix-command` | absent | no spawn path in a no-subprocess build |
+| `gix-command`, `gix-transport`, `gix-filter` | each `cargo tree -i` reports "did not match any packages" | the whole spawn/transport/filter class is structurally absent — this is decision 15, made testable |
 | `aws-lc-sys`, `openssl-sys`, `native-tls`, `curl` | absent (incl. `--features remote`) | the cmake/C trap the research documented |
-| `memmap2` | present only with a non-wasm target | catches an accidental wasm build |
 | build scripts | `zlib-rs` only | the no-C-deps claim, kept honest |
+
+The wasm gate is [A.3](#a3-wasm)'s `compile_error!`, not a tripwire: `memmap2`
+compiles for wasm perfectly well, so its presence proves nothing.
 
 ---
 
@@ -180,6 +287,9 @@ Conventions that apply to every verb:
   external git (kaish resolves builtins before PATH). That is the point for an
   agent surface, and a footgun for a human who expected porcelain — so
   `GitConfig::with_tool_name("kgit")` exists for embedders who want both.
+  Signed off (Amy, 2026-08-01): the first consumer is kaibo, read-only, where
+  shadowing is exactly what is wanted; when write verbs land, ours stays
+  preferred and real git remains reachable by full path where exec is enabled.
 - **`--repo <PATH>`** on every verb selects the repository; default is the cwd.
   No `-C` (git muscle memory is not a design input).
 - **`--json`** via flattened `GlobalFlags` on every verb struct. Structured from
@@ -195,8 +305,14 @@ Conventions that apply to every verb:
   `<branch>`, `<tag>`, `refs/...`, `<oid>` (full or ≥4-char unambiguous prefix),
   `<rev>~N`, `<rev>^`, `<rev>^N`, and `<rev>:<path>` for `show`. Everything else
   — `@{...}`, `^{/regex}`, `:/text`, `A..B`, `A...B` — is a loud usage error.
-  This is where gix's `revparse-regex` feature would have been needed; refusing is
-  cheaper than a regex dependency and matches "no regex hell".
+  We parse that grammar ourselves and do not link `gix-revision`'s `spec`
+  module at all. `gix_revision::spec::parse` is a pure parser driving a
+  caller-supplied delegate — it resolves nothing — and the facade's
+  implementation of that delegate is 952 lines (feasibility §2.4, §5.3). An
+  agent-facing tool should have a small, stated revspec grammar rather than
+  git's baroque one; unsupported syntax exits with a specific error, never a
+  wrong answer. `describe` and `merge_base` remain available from
+  `gix-revision`; they are independent of `spec`.
 - **No `--force`, no `--all`-that-means-danger, no flag that silently discards
   work.** v1's `checkout(force = true)` default is the anti-pattern this surface
   is organized against.
@@ -216,14 +332,17 @@ Output (table: FIELD/VALUE; `rich_json` object):
  "git_dir":"/home/…/kaish/.git","bare":false,"shallow":false,
  "ref_backend":"files","head":{"branch":"main","oid":"…","detached":false},
  "worktrees":2,"submodules":0,
- "gix_version":"0.86.0",
+ "gix_pins":{"gix-object":"0.63.0","gix-pack":"0.73.0","…":"…"},
  "capabilities":{"profiles":["read"],"verbs":["info","status",…],
                  "features":["read"],"limits":{"max_rows":1000,…}}}
 ```
 
 `capabilities` is discoverability, not authority: the agent learns what it may
 ask for without being able to change it. `ref_backend` is where a reftable repo
-gets caught early — see [E.5](#e5-error-taxonomy).
+gets caught early — see [E.5](#e5-error-taxonomy). There is no single facade
+version to report, so `gix_pins` names the plumbing crates actually linked
+([A.4](#a4-pinning-and-the-dependency-tripwires)); **open:** whether that is the
+whole set, or only the few an embedder would act on.
 
 ### B.2 `git status`
 
@@ -242,15 +361,21 @@ gets caught early — see [E.5](#e5-error-taxonomy).
  "clean":false,"truncated":false}
 ```
 
-`index`/`worktree` each take one of
+In JSON, `index`/`worktree` each take one of
 `none|added|modified|deleted|renamed|copied|typechange|untracked|ignored`.
-**Words, not porcelain letters** — an agent parsing `XY` two-character codes is a
-bug generator, and the letters are only compact for humans reading a terminal.
-There is no `-s`/`--porcelain`/`--long`: one shape, plus `--json`. Renames are
-first-class (`orig_path`) and conflicts are a boolean, both of which v1's
-hand-rolled renderer got wrong.
 
-Table rendering: `INDEX  WORKTREE  PATH` (+ `← ORIG` on renames).
+**Porcelain letters in the text surface, self-describing words in JSON**
+(Amy, 2026-08-01). Parity is deep in base training and RL: a model reading a
+text status expects git's `XY` pair and will read one correctly whether or not
+we spell it out. The clarity pressure that argued for words is relieved by the
+`--json` variants instead — `git status --json`, `git diff --json --staged`
+carry self-describing key names and word-valued fields, so scripts get clarity
+while prompts get trained-in muscle memory. **One shape per surface**: letters
+in text, words in JSON, and no `--porcelain` flag matrix — there is no
+`-s`/`--porcelain`/`--long`. Renames are first-class (`orig_path`) and
+conflicts are a boolean, both of which v1's hand-rolled renderer got wrong.
+
+Table rendering: the `XY` pair, then `PATH` (+ `← ORIG` on renames).
 
 ### B.3 `git log`
 
@@ -302,18 +427,30 @@ Endpoint selection, deliberately not git(1)'s:
 
 | Invocation | From | To |
 |---|---|---|
-| `git diff` | `HEAD` | worktree |
+| `git diff` | index | worktree |
 | `git diff --staged` | `HEAD` | index |
 | `git diff --from <A>` | `A` | worktree |
 | `git diff --to <B>` | `HEAD` | `B` |
 | `git diff --from <A> --to <B>` | `A` | `B` |
 
-Bare `git diff` meaning **HEAD→worktree** diverges from git(1) (index→worktree).
-Justified because the read profile has no `add` — the index is not something the
-agent manipulates, so "what have I changed" is the only question bare `diff` can
-be asking. The divergence is made unmissable: every result, text and JSON,
-states its endpoints. `A..B` range syntax is not accepted (`--from`/`--to` is the
-one spelling; two spellings for one concept is drift).
+Bare `git diff` is **git parity** — index→worktree, unstaged changes only
+(Amy, 2026-08-01). An earlier draft made it HEAD→worktree, reasoning that the
+read profile has no `add`, so the index is not something the agent manipulates
+and "what have I changed" is the only question bare `diff` can be asking. That
+was reversed on evidence: a five-model survey (gemini-3.1-pro-preview,
+gemini-3.5-flash, deepseek-v4-pro, claude-sonnet, claude-haiku — deliberately
+spanning families and ability tiers, toolie class included) was **unanimous**
+that bare `git diff` means unstaged-only, and every model's review reach was
+the `git status` → `git diff` → `git diff --staged` triple. Nobody expects
+HEAD→worktree. Amy: "a model assuming git parity may be reaching for the
+shorter option intentionally — it's been like that for decades now." Diverging
+would have silently handed every one of those models a wrong mental model of
+the output. HEAD→worktree is one spelling away, as `git diff --from HEAD`.
+
+`--from`/`--to` semantics are unchanged by that call, and every result — text
+and JSON — still states its endpoints; parity removes a divergence, not the
+honesty. `A..B` range syntax is not accepted (`--from`/`--to` is the one
+spelling; two spellings for one concept is drift).
 
 Other flags:
 
@@ -323,7 +460,7 @@ Other flags:
 | `--name-only` | bool | false | paths only, no counts |
 | `--patch` | bool | false | include hunks (**`textdiff` only**; else exit 4) |
 | `--context <N>` | int | 3 | context lines for `--patch` |
-| `--find-renames` / `--no-find-renames` | bool | on | rename/copy detection |
+| `--find-renames` / `--no-find-renames` | bool | on | **exact-match** rename detection only — see below |
 | `--limit <N>` | int | 500 | max files |
 
 ```json
@@ -346,6 +483,17 @@ Other flags:
 `op` is a word, not a sigil — JSON consumers should never have to distinguish a
 leading space from an empty line. Binary files carry `"binary": true` and no
 hunks; we do **not** emit git's binary patch encoding (stated non-fidelity).
+
+**Renames are exact-match-only, and `similarity` never carries a score.**
+`gix-diff`'s rename tracker is `blob`-gated and `blob` pulls `gix-command`
+([A.2](#a2-feature-axes)), so `--find-renames` reports a rename when a blob oid
+reappears at a new path and nothing else. Copy detection is absent entirely.
+This is a real fidelity regression from git(1) and it is permanent under this
+dependency set, so it is reported rather than hidden — an agent that
+believes a rename was *scored* would draw wrong conclusions from `deleted` +
+`added` pairs that git would have folded. **Open:** what `similarity` carries
+for an exact rename — `null`, or `100` for git-shaped consumers. The field
+stays in the model either way; it will never carry a computed score.
 
 Text rendering: default is a table (`STATUS  +ADD  -DEL  PATH`); with `--patch`
 the text payload is the unified patch and the structure still rides along —
@@ -409,12 +557,16 @@ merge-base + revwalk; making the cost opt-in keeps the default listing cheap).
 `-L` with its regex and offset forms does not exist; `--lines 40:80` is the whole
 grammar.
 
-gix's blame is committed-content-only. Rather than refuse (annoying) or quietly
-blame stale content (dishonest), every result carries
-`"blamed_rev": "<oid>"` and `"worktree_differs": true|false`, and a stderr note
-fires when it is true. Rename-following across paths is absent upstream and is
-reported as `"follows_renames": false` in the payload — a capability statement,
-not a footnote in a README.
+Blame is hand-composed (revwalk + per-commit path-limited tree diff + line
+mapping — [A.2](#a2-feature-axes)) and is committed-content-only. Rather than
+refuse (annoying) or quietly blame stale content (dishonest), every result
+carries `"blamed_rev": "<oid>"` and `"worktree_differs": true|false`, and a
+stderr note fires when it is true. Rename-following across paths is not
+implemented and is reported as `"follows_renames": false` in the payload — a
+capability statement, not a footnote in a README. It is a different gap from
+[B.4](#b4-git-diff)'s exact-match renames: that one is permanent under this
+dependency set, this one waits on a rename-aware primitive existing at the
+plumbing level at all (kaish-extras#11).
 
 Rows: `{line, oid, short_oid, author, time, orig_line, text}`.
 
@@ -518,21 +670,33 @@ typing nothing.
 
 ### C.3 Write profiles are type-gated
 
-`Profile::Worktree` and `Profile::Commit` are unreachable without an approvals
-handle. The mechanism (shape to be finalized against the ledger design):
+`Profile::Worktree` and `Profile::Commit` are unreachable from the ordinary
+constructor. **The gate is a deliberate-opt-in marker, not an approvals
+handle.** An earlier draft had the config carry an `ApprovalSink`; that
+predates the ledger design and is superseded. Under the ledger (§D.1 of
+[approval-ledger.md](approval-ledger.md), which lives in kaish) the gate call is
+`ctx.request_approval(...)` on the portable `ToolCtx` — the tool holds no
+approvals handle at all, and the fail-closed default means a write verb in a
+ledger-less kernel refuses at runtime regardless. So the authorization plumbing
+lives where the ledger puts it, and what remains here is the *embedder's*
+acknowledgement that this build is meant to be able to write:
 
 ```rust
 impl GitConfig {
-    /// Attach the embedder's approval sink. Returns a config on which
-    /// `with_profile(Profile::Worktree | Profile::Commit)` is accepted.
-    pub fn with_approvals(self, sink: Arc<dyn ApprovalSink>) -> ApprovingGitConfig;
+    /// Acknowledge that this build enables write verbs. Returns a config on
+    /// which `with_profile(Profile::Worktree | Profile::Commit)` is accepted.
+    /// Authorization is not here — it is `ctx.request_approval` at the gate
+    /// site, per the ledger design.
+    pub fn with_write_profiles_acknowledged(self) -> WritableGitConfig;
 }
 ```
 
-`with_profile` for a write profile exists only on `ApprovingGitConfig`. A build
-that forgot approvals does not fail at runtime with a permission error — it does
-not compile. This is the same instinct as [D.1](#d1-layer-1--the-code-does-not-exist):
-the safe property is structural, not checked.
+`with_profile` for a write profile exists only on the returned type, so a build
+that meant to be read-only does not fail at runtime with a permission error —
+it does not compile. Same instinct as
+[D.1](#d1-layer-1--the-code-does-not-exist): the safe property is structural,
+not checked. **Open:** the constructor's name — bikeshed at implementation.
+What is decided is that it is explicitly named and carries no authorization.
 
 ### C.4 Should this be a kaish kernel concept?
 
@@ -552,8 +716,9 @@ but cannot classify a *subcommand of a plugin tool*; the latch's `(command,
 paths)` scope vocabulary can't express "this verb writes a ref" either. That gap
 is real, it is general (any capability-bearing plugin has it), and it should be a
 kaish PR — but it should be designed *with* the ledger, since they need a shared
-vocabulary, and it is not needed by the read profile at all. Filed as an issue,
-deliberately not implemented here.
+vocabulary, and it is not needed by the read profile at all. Deliberately not
+implemented here; it is a joint follow-up with the ledger, and the ledger design
+leaves it in the same place (see the [appendix](#appendix-the-issue-backlog)).
 
 ---
 
@@ -568,7 +733,7 @@ says so.
 `repo.rs` exposes a single newtype:
 
 ```rust
-pub struct ReadRepo { inner: gix::Repository }   // field private
+pub struct ReadRepo { /* private: object source, ref store, index, config */ }
 
 impl ReadRepo {
     pub fn discover(real_path: &Path, ceiling: &Path) -> Result<Self, GitError>;
@@ -576,63 +741,83 @@ impl ReadRepo {
 }
 ```
 
-`ReadRepo` never hands out `&gix::Repository`, so no caller can reach
-`commit_as`, `edit_references`, or an index writer. Every write-capable path
+There is no facade `Repository` to hand out ([A.2](#a2-feature-axes)):
+`ReadRepo` assembles the plumbing handles itself and never lends them, so no
+caller can reach a ref transaction or an index writer. Every write-capable path
 lives under `verbs/write/` behind `#[cfg(feature = "worktree")]` /
 `#[cfg(feature = "commit")]` and constructs a *different* handle
 (`WriteRepo`, which will take an approval token as a constructor argument). In
 a default build those modules are not compiled.
 
 A grep-able invariant, enforced by a test that scans the crate source: outside
-`verbs/write/`, the identifiers `commit_as`, `edit_references`, `write_object`,
-`index_mut` do not appear. Crude, cheap, and it fails the day someone reaches for
-one in the wrong place.
+`verbs/write/`, the write-shaped plumbing does not appear — `gix-ref`'s
+transaction API (`transaction`, `prepare`, `commit`), `gix-index`'s writers
+(`write_to`, `write`), and `gix_object::Write`. Crude, cheap, and it fails the
+day someone reaches for one in the wrong place.
 
-### D.2 Layer 2 — gix open permissions
+### D.2 Layer 2 — isolation by construction
 
-Every open goes through one function, and it is explicit about isolation because
-the research found `Permissions::default()` is `secure()` and `secure()` is
-currently *identical to* `all()`:
+There is no `Permissions` to set. `gix::open::Options::isolated()` was a facade
+API, and the facade is gone ([A.2](#a2-feature-axes)) — with it goes the trap
+that motivated the explicit call, namely that `Permissions::default()` is
+`secure()` and `secure()` is currently *identical to* `all()`. Under the
+plumbing there is no cascade to opt out of, because **nothing is loaded that we
+did not choose to load**: no system config, no user config, no `GIT_*`
+environment reading, no attributes stack, no credential helpers. Isolation stops
+being a setting and becomes the shape of the code.
+
+Repo-local `.git/config` still has to be read — `core.repositoryformatversion`,
+`extensions.objectformat`, `core.bare`, `core.worktree`,
+`core.precomposeUnicode` — and it is read deliberately:
 
 ```rust
-let mut opts = gix::open::Options::isolated();     // NOT default(), NOT secure()
-// system/user/`GIT_*` config and env-driven behavior are all off; repo-local
-// `.git/config` is still loaded (gix requires it for correctness) — see D.3.
+// bytes we fetched ourselves; includes are NOT followed by gix-config
+let cfg = gix_config::File::from_bytes_no_includes(&bytes, meta, opts)?;
+// any `include.path` / `includeIf` is resolved by us, or refused (see D.3)
 ```
 
-This maps exactly onto kaish's hermetic-env doctrine: the kernel never reads
-`std::env`, and neither does our git. A regression test asserts the open options
-are `isolated()` (and will fail loudly if a future gix release changes what
-`isolated()` includes, because the hostile-repo fixtures in D.3 exercise it).
+`gix-config`'s only `std::fs` sites are the path-based comfort constructors and
+the `include.path` machinery; the byte constructor reaches none of them
+(feasibility §6.1). This maps exactly onto kaish's hermetic-env doctrine: the
+kernel never reads `std::env`, and neither does our git. The hostile-repo
+fixtures in [D.3](#d3-layer-3--the-textconvfilter-attack-surface) are what keep
+it honest across pin bumps.
 
 ### D.3 Layer 3 — the textconv/filter attack surface
 
 Repo-local `.git/config` and `.gitattributes` are attacker-controlled the moment
 you open a repo you did not create — which is the *normal* case for a
-codebase-analysis agent. `isolated()` does not help here: repo-local config is
-always loaded.
+codebase-analysis agent. The answer is structural: the machinery that would act
+on them is not linked.
 
-- **Default (`read`) build: no spawn is possible**, because `gix-command` is not
-  in the dependency tree at all. Enforced by the `cargo tree` tripwire
-  ([A.4](#a4-pinning-and-the-dependency-tripwires)), not by intention.
-- **`textdiff` build**: the crate constructs the blob-diff pipeline itself with an
-  **empty driver set** and no textconv, rather than accepting a
-  config-derived pipeline. If, at implementation time, the pipeline cannot be
-  shown by source inspection to be driver-free, `textdiff` does not ship and an
-  upstream ask for an explicit no-spawn switch is filed instead. That is a real
-  gate, not a hedge.
-- **The hostile-repo fixture** (`tests/hostile_repo.rs`), which runs on every
-  build that enables `textdiff`: a repo whose `.git/config` declares
-  `diff.pwn.textconv` pointing at a script that creates a sentinel file, and
-  whose `.gitattributes` maps `* diff=pwn`. Every diff/show verb runs against it;
-  the test asserts the sentinel does not exist and the output is the internal
-  diff. Same fixture family covers `filter.*.clean/smudge` and
-  `core.hooksPath` (gix does not run hooks — an assertion worth pinning, since
-  it is a *feature* here).
-- **`include.path` escape**: repo-local config can `include.path = ../../../etc/…`.
-  If gix's isolated permissions do not already refuse includes escaping the repo,
-  we refuse to open a repo whose config declares an absolute or `..`-bearing
-  include, with a loud unsupported-repo error, and file the upstream question.
+- **No build can spawn**, in any feature combination the tripwires cover:
+  `gix-command`, `gix-transport` and `gix-filter` are each absent from the
+  dependency tree, so there is no `std::process::Command` path to reach. A
+  `diff.<driver>.textconv` or `filter.*.clean` declaration is inert text —
+  nothing reads it, because nothing that could act on it exists. Enforced by
+  the `cargo tree -i` tripwires ([A.4](#a4-pinning-and-the-dependency-tripwires)),
+  not by intention. This is the property the facade could not give us, and it
+  is why [A.2](#a2-feature-axes) went the way it did.
+- **`textdiff` is not an exception.** Line hunks come from `gix-imara-diff`
+  applied to blob bytes we fetched ourselves; there is no pipeline to
+  configure, no driver set to empty out, and no `.gitattributes` consultation
+  anywhere in the path.
+- **The hostile-repo fixture** (`tests/hostile_repo.rs`) runs anyway, on every
+  build: a repo whose `.git/config` declares `diff.pwn.textconv` pointing at a
+  script that creates a sentinel file, and whose `.gitattributes` maps
+  `* diff=pwn`. Every diff/show verb runs against it; the test asserts the
+  sentinel does not exist and the output is the internal diff. Same fixture
+  family covers `filter.*.clean/smudge` and `core.hooksPath` (nothing here runs
+  hooks — an assertion worth pinning, since it is a *feature*). A tripwire
+  proves absence in *our* graph; the fixture proves behavior, and it is what
+  catches a pin bump that quietly adds an edge.
+- **`include.path` escape: retired by construction.** Repo-local config can say
+  `include.path = ../../../etc/…`. Because config is parsed with
+  `from_bytes_no_includes` and includes are resolved by us
+  ([D.2](#d2-layer-2--isolation-by-construction)), there is no library code
+  path that follows one. We refuse an absolute or `..`-bearing include with a
+  loud unsupported-repo error (exit 4) — a decision we make, not a behavior we
+  hope gix has.
 
 ### D.4 Layer 4 — the proof: the `.git` fingerprint test
 
@@ -656,21 +841,31 @@ compile error in the fixture table.
 Two facts that must not be confused, because confusing them creates false
 confidence:
 
-1. gix **cannot** read through `kaish-vfs` (upstream: not possible). kaish-git
+1. **The read profile as shipped does not read through `kaish-vfs`.** It
    operates on real host paths behind the `localfs` axis, through
-   `resolve_real_path`. It is unavailable under `NoLocal`, on `MemoryFs`
-   mounts, and against a non-disk-backed embedder backend — that is a hard
-   architectural constraint, not a phase-1 shortcut.
-2. Therefore **mounting a repo `LocalFs::read_only` does not make kaish-git
-   read-only.** It makes kaish's *own* file verbs read-only on that path, which
-   is worth doing, but gix goes around the VFS entirely. Layers 1–4 are what make
-   kaish-git read-only. The embedder guide will say this in these words, because
-   the opposite belief is the dangerous one.
+   `resolve_real_path`, and is unavailable under `NoLocal`, on `MemoryFs`
+   mounts, and against a non-disk-backed embedder backend. That is a property
+   of *this implementation*, not of gitoxide: the "not possible" answer
+   upstream (Discussion #1150) is about `gix::Repository`, which
+   [A.2](#a2-feature-axes) replaces. The plumbing has a coherent byte-level
+   seam — `gix-object`'s find traits, `gix-pack`'s `from_data`, `gix-index`'s
+   `State::from_bytes`/`write_to`, `gix-ref`'s parsers, `gix-config`'s byte
+   constructors — so a VFS-backed *second* implementation of the access traits
+   is buildable, and it is what the browser build waits on
+   ([A.3](#a3-wasm), kaish-extras#3). Ref **writes** are the exception:
+   transactions are `gix-lock`-bound to `std::fs`, so a VFS-backed write path
+   is a real design problem, deferred with the write profiles
+   ([F.2](#f2-worktree-createremove)).
+2. **Mounting a repo `LocalFs::read_only` does not make kaish-git read-only.**
+   It makes kaish's *own* file verbs read-only on that path, which is worth
+   doing, but git goes around the VFS entirely on the native path. Layers 1–4
+   are what make kaish-git read-only. The embedder guide will say this in these
+   words, because the opposite belief is the dangerous one.
 
 The `GitVfs` v2 idea from the capture doc (mounting repository *objects* into
 kaish's VFS, so byte budgets and output limits govern object access) points the
-other direction and is compatible with all of the above — but it is out of scope
-for the read profile and is filed as an issue rather than designed here.
+other direction and is compatible with all of the above — out of scope for the
+read profile, tracked as kaish-extras#12.
 
 ---
 
@@ -852,9 +1047,10 @@ The kernel never populates these from the OS environment, so the embedder must
 seed them (`KernelConfig::with_var`). **There is no fallback**: a commit attempted
 without author identity fails loud, naming the two variables to set. v1 called
 `repo.signature()`, which read the host's `~/.gitconfig` through libgit2 — the
-exact hermeticity leak this replaces. `isolated()` open plus explicitly-passed
-signatures (`commit_as`) means gix has no path back to host config even if it
-wanted one.
+exact hermeticity leak this replaces. Nothing in the plumbing reads user or
+system config ([D.2](#d2-layer-2--isolation-by-construction)), and the author
+and committer signatures are fields we fill in on the commit object we build —
+there is no path back to host config even if something wanted one.
 
 ---
 
@@ -872,16 +1068,17 @@ is included because `git apply -3` uses it.
 
 Stated non-fidelity (documented in the embedder guide, not discovered later):
 color; `--word-diff`; whitespace-config-driven rendering
-(`diff.*.whitespace`, `core.autocrlf`); exact rename-detection heuristics; git's
-binary patch encoding (we emit `Binary files a/x and b/x differ` and set
-`binary: true`).
+(`diff.*.whitespace`, `core.autocrlf`); git's binary patch encoding (we emit
+`Binary files a/x and b/x differ` and set `binary: true`); and **rename
+detection**, which is not a heuristic divergence but an absence — exact-match
+only, no similarity scoring, no copy detection ([B.4](#b4-git-diff)).
 
 Test strategy: golden fixtures for the shape, plus an opt-in `compat-tests`
 feature that, when real git is on PATH, pipes our patch through
 `git apply --check` against the fixture repo and asserts it applies. That is a
 falsifiable fidelity claim rather than an assertion of good intentions.
 
-→ Issue: **"diff: enumerate and pin known divergences from git(1) patch output"**.
+→ kaish-extras#7.
 
 ### F.2 Worktree create/remove
 
@@ -899,32 +1096,53 @@ well-specified — a `.git` file containing `gitdir:`, and
 outside that scope is a loud exit 4. Locking is the default for
 agent-created worktrees, and `prune` defaults to `--dry-run`.
 
-→ Issues: **"implement linked worktree create/remove/lock/prune on gix plumbing"**
-and **"offer worktree lifecycle upstream to gitoxide"**.
+Ref writes go through `gix-ref` transactions, built on `gix-lock`'s `.lock`-file
+protocol against `std::fs` (feasibility §4b). That works natively and is what we
+want for a worktree profile on real paths; it is a wall only for a VFS- or
+wasm-backed *write* path, where reimplementing the atomicity guarantee is the
+part you least want to hand-roll. Deferred with the ledger.
 
-### F.3 gix-pack mmap on wasm
+→ kaish-extras#8 (implement) and kaish-extras#9 (offer upstream).
 
-**Decision: gate wasm off with a `compile_error!` and pursue the upstream fix
-ourselves. No patched fork.**
+### F.3 wasm and `gix-sec`
 
-A fork pin in a workspace that also builds `kaish-web` risks two gix versions in
-one graph and buys a maintenance tail for a target we cannot ship anyway
-(networking does not build for wasm either). The upstream change is small,
-precedented (contributor `uberroot4` already did it), and Byron's stated
-condition was a real downstream consumer — which kaish-git is. Upstream-first is
-both the honest and the faster path.
+**Decision: gate wasm off with a `compile_error!` ([A.3](#a3-wasm)) and take the
+one remaining upstream fix ourselves. No patched fork.**
 
-→ Issues: **"no wasm support until gix-pack has a non-mmap fallback (tracking)"**
-(kaish-extras) and the upstream PR to GitoxideLabs. Separately, the
-`wasm32-unknown-unknown` `gix-sec` cfg gap is tracked as its own issue, since it
-gates any future browser-hosted git in `kaish-web`.
+The upstream ask has changed shape. The `gix-pack` non-mmap fallback we were
+going to file **already exists**: 0.73's `from_data` constructors are generic
+over `T: Deref<Target = [u8]>` for pack data, pack index and multi-pack-index
+alike, and only `Bundle`'s 69-line find pipeline is mmap-typed (feasibility
+§3.1–§3.3). It is the facade and `gix-odb::Store` that go straight to mmap, not
+the plumbing. So the sole *compile* blocker left is `gix-sec`: its ownership
+check special-cases `target_os = "wasi"` to `Ok(true)` but not bare `wasm32`,
+and it reaches us only through `gix-discover` and `gix-config`. That is a
+two-line cfg extension to a special case already present, and kaish-extras is
+the "known downstream consumer" Byron said the work needed.
+
+A fork pin in a workspace that also builds `kaish-web` risks two copies of a gix
+crate in one graph and buys a maintenance tail for a target we cannot ship until
+the VFS-backed access-trait implementation lands anyway. Upstream-first is both
+the honest and the faster path.
+
+One smaller ask survives, of the same shape as the retired one:
+`gix-commitgraph::File` stores a concrete `memmap2::Mmap` and has no byte
+constructor (feasibility §3.5). Impact is performance only — every consumer
+takes `Option<&Graph>`, so `None` is a first-class mode — which makes it a
+lower-stakes, better-precedented request than the one that turned out to be
+already built.
+
+→ kaish-extras#3 (tracking: the `gix-sec` fix plus the VFS-backed read path)
+and the upstream `gix-sec` PR to GitoxideLabs.
 
 ### F.4 tree↔index diff (for `--staged`)
 
-gix has no tree↔index diff. **Decision: `index_from_tree()` then tree↔tree**, as
-the research suggests. It is correct and costs an in-memory index build.
+gix has no tree↔index diff. **Decision: build the tree's index in memory, then
+tree↔tree.** It is correct and costs an in-memory index build. With bare
+`git diff` now reading index→worktree ([B.4](#b4-git-diff)), this path is
+exercised by `--staged` alone.
 
-→ Issue: **"`--staged` builds a temporary index; revisit if gix adds tree↔index"**.
+→ kaish-extras#10.
 
 ### F.5 blame limitations
 
@@ -932,7 +1150,7 @@ No rename-following, no worktree content, no shallow history, single file. All
 are reported *in the payload* (`follows_renames: false`, `worktree_differs`,
 `blamed_rev`) rather than only in prose.
 
-→ Issue: **"blame: follow renames (blocked on gix-blame)"**.
+→ kaish-extras#11.
 
 ---
 
@@ -967,6 +1185,11 @@ blocking third-party tool wants it), tiny, and defaulted so nothing breaks.
 **The read profile ships without it**, degraded exactly as described in
 [E.3](#e3-blocking-calls-and-send-ness). This is a follow-on PR, not a blocker.
 
+**Land it with the ledger's `ToolCtx` work, not separately.** The ledger's own
+kaish PR adds `request_approval` and friends to the same trait; two independent
+PRs would reshape `ToolCtx` twice for embedders who implement it by hand.
+`is_cancelled` is small enough to land in that PR, or immediately behind it.
+
 ### G.2 Nothing else is required for the read profile
 
 Stated explicitly because it is the point: **phases 1–9 of
@@ -976,16 +1199,19 @@ non-trivial plugin.
 
 ### G.3 Depends on ledger (not proposed here)
 
-Listed so the ledger designer sees the demand, not as PRs to open now:
+This was a demand list for the ledger designer. **The ledger design answers it
+point-for-point**, so it now reads as a dependency statement:
 
-- A portable approval API on `ToolCtx` (`request_approval(...) -> Result<Approval, ExecResult>`),
-  so a plugin is a first-class gate producer instead of a downcasting squatter.
+- A portable approval API on `ToolCtx` — the ledger's `ctx.request_approval(...)`,
+  which makes a plugin a first-class gate producer instead of a downcasting
+  squatter. ✅ satisfied.
 - A ref-shaped scope vocabulary: git's interesting resource is
-  `(ref, old_oid, new_oid, reachability)`, which `(command, paths)` cannot express.
+  `(ref, old_oid, new_oid, reachability)`, which `(command, paths)` cannot
+  express. ✅ satisfied — the ledger's resources are shaped, not path-shaped.
 - Approve-a-transition-and-verify-at-redemption semantics, following the
-  kernel's own `cas_overwrite` pattern.
+  kernel's own `cas_overwrite` pattern. ✅ satisfied — transition conditions.
 - `ToolSchema` effects markers (see [C.4](#c4-should-this-be-a-kaish-kernel-concept)) —
-  design with the ledger so they share a vocabulary.
+  the one item still open, and still a joint follow-up rather than a git PR.
 
 ### G.4 Verify-at-implementation, likely non-issues
 
@@ -1004,235 +1230,112 @@ PR runs clippy `--all-targets` clean and adds tests that can fail.
 
 | PR | Content | Gate / proof |
 |---|---|---|
-| 0 | Workspace member, `Cargo.toml`, kaish pin, CI job, dependency tripwires, wasm `compile_error!` guard, doc skeleton. No verbs. | tripwires green; `cargo build` for wasm fails with our message |
-| 1 | `config.rs`, `model.rs` skeleton, `repo.rs` (isolated open + ceilinged discovery), `error.rs`, `git info`, the fixture harness, **the `.git` fingerprint test** | fingerprint test green over `info`; ceiling test proves discovery cannot escape a mount |
-| 2 | `git status` | rename + conflict + untracked-mode fixtures; fingerprint extended |
+| 0 | Workspace member, `Cargo.toml`, kaish pin, the twelve plumbing pins, CI job, dependency tripwires, wasm `compile_error!` guard, doc skeleton. No verbs. | tripwires green (`gix-command`/`gix-transport`/`gix-filter` each unmatched); `cargo build` for wasm fails with our message |
+| 1 | `config.rs`, `model.rs` skeleton, `repo.rs` (repository assembly + ceilinged discovery), `error.rs`, `git info`, the fixture harness, **the `.git` fingerprint test** | fingerprint test green over `info`; ceiling test proves discovery cannot escape a mount |
+| 2 | `git status` | conflict + untracked-mode fixtures; **the rename fixture asserts exact-match renames only**, not git's similarity behavior; fingerprint extended |
 | 3 | `git log` (+ `--stat`, `--first-parent`, path filter) | limit/truncation reported; date-parse rejections are loud |
 | 4 | `git ls` + `git show` (commit/tag/tree/blob, no patch) | blob byte-cap; `show HEAD:path` round-trips binary content |
-| 5 | `git diff` structured (name/status + counts, `--staged` via F.4) | endpoints stated in every result; `--patch` without `textdiff` exits 4 |
-| 6 | `textdiff` feature: hunks + unified-patch rendering | **hostile-textconv fixture**; `git apply --check` compat test |
+| 5 | `git diff` structured (name/status + counts, `--staged` via F.4) | bare `diff` is index→worktree; endpoints stated in every result; `--patch` without `textdiff` exits 4 |
+| 6 | `textdiff` feature: hunks from `gix-imara-diff` + unified-patch rendering | **hostile-textconv fixture**; `git apply --check` compat test |
 | 7 | `git branch`, `git tag`, `git worktree list`, `git blame` | `worktree_differs` marker; `--ahead-behind` opt-in cost |
 | 8 | `GitConfig` plumbing end-to-end, `git info` capability reporting, `docs/embedding-git.md` | disabled verb absent from `tools --json` and unroutable; router-vs-`select_leaf` drift test |
 | 9 | **Publish `kaish-tools-git` 0.1.0** — read profile complete, zero kaish changes | — |
 
 Then, in order and each gated on the one before:
 
-10. kaish PR: `ToolCtx::is_cancelled` ([G.1](#g1-toolctx-cancellation-handle-proposed)) → wire gix interrupt flags into `blame`/`log`.
-11. Upstream: `gix-pack` non-mmap fallback → narrow the wasm guard.
-12. **Ledger design lands** (separate track) → `ApprovalSink`, `WriteRepo`, `ApprovingGitConfig`.
+10. kaish PR: `ToolCtx::is_cancelled` ([G.1](#g1-toolctx-cancellation-handle-proposed)), landed with the ledger's `ToolCtx` work → wire interrupt flags into `blame`/`log`.
+11. Upstream `gix-sec` cfg fix, then the VFS-backed implementation of the access traits → narrow the wasm guard (kaish-extras#3).
+12. **Ledger ships in kaish** (separate track) → `ctx.request_approval` at the gate sites, `WriteRepo`, the write-profile opt-in constructor ([C.3](#c3-write-profiles-are-type-gated)).
 13. `worktree` profile (F.2) — create/remove/lock/prune, ledger-gated.
 14. `commit` profile — `add`/`commit`/`branch create`/`tag create`, ledger-gated, ref-transition scoped.
 15. `remote`, if ever.
 
 ---
 
-## Appendix: issues to file at design time
+## Appendix: the issue backlog
 
 Per the house rule, deferrals discovered outside an active PR go to GitHub
-Issues, not inline TODOs.
+Issues, not inline TODOs. The design-time backlog was filed on 2026-08-01 and
+carries the real numbers below; two items were retired rather than filed.
 
-**kaish-extras**
+**kaish-extras** (github.com/tobert/kaish-extras)
 
-1. wasm unsupported until `gix-pack` has a non-mmap fallback (tracking).
-2. `wasm32-unknown-unknown`: `gix-sec` cfg gap blocks any browser-hosted git.
-3. diff: enumerate and pin known divergences from `git(1)` patch output.
-4. Implement linked worktree create/remove/lock/prune on gix plumbing.
-5. Offer worktree lifecycle upstream to gitoxide.
-6. `--staged` builds a temporary index; revisit if gix adds tree↔index diff.
-7. blame: follow renames (blocked on `gix-blame`).
-8. `include.path` escape handling in repo-local config — confirm gix behavior, refuse if needed.
-9. `GitVfs` v2: mount repository objects into kaish's VFS (byte budgets over object access).
-10. Repository-handle caching, if profiling shows per-verb open is hot.
-11. `gix` version-bump policy and the exact-pin review checklist.
+| # | Issue |
+|---|---|
+| [#3](https://github.com/tobert/kaish-extras/issues/3) | wasm blocked on the upstream `gix-sec` cfg fix plus a VFS-backed read path (tracking). Absorbs the two wasm items this appendix originally listed separately, and the upstream `gix-sec` ask. Its body still argues the retired `gix-pack` mmap premise — stale, see [A.3](#a3-wasm). |
+| [#4](https://github.com/tobert/kaish-extras/issues/4) | the `gix` facade pulls `gix-command` unconditionally — the finding that falsified the original no-spawn premise and led to [A.2](#a2-feature-axes). |
+| [#7](https://github.com/tobert/kaish-extras/issues/7) | diff: enumerate and pin known divergences from `git(1)` patch output. |
+| [#8](https://github.com/tobert/kaish-extras/issues/8) | implement linked worktree create/remove/lock/prune on gix plumbing. |
+| [#9](https://github.com/tobert/kaish-extras/issues/9) | offer the worktree lifecycle implementation upstream to gitoxide (tracking). |
+| [#10](https://github.com/tobert/kaish-extras/issues/10) | `--staged` builds a temporary index — revisit if gix adds tree↔index diff. |
+| [#11](https://github.com/tobert/kaish-extras/issues/11) | blame: follow renames (blocked on `gix-blame`). |
+| [#12](https://github.com/tobert/kaish-extras/issues/12) | `GitVfs` v2 — mount repository objects into kaish's VFS (byte budgets over object access). |
+| [#13](https://github.com/tobert/kaish-extras/issues/13) | repository-handle caching, if profiling shows per-verb open is hot. |
+| [#14](https://github.com/tobert/kaish-extras/issues/14) | `gix` version-bump policy and the exact-pin review checklist. |
 
-**gitoxide (upstream)**
+**Retired, not filed**
 
-12. `gix-pack`: read-into-memory fallback where mmap is unsupported (we are the downstream consumer Byron asked for).
-13. `gix-sec`: extend the WASI ownership-check special case to bare `wasm32`.
-14. Question: an explicit "never spawn external filters/textconv" switch for `blob-diff`.
+- **`include.path` escape handling** — retired by construction. Config is parsed
+  with `from_bytes_no_includes` and includes are resolved by us, so no library
+  code path follows one ([D.2](#d2-layer-2--isolation-by-construction),
+  [D.3](#d3-layer-3--the-textconvfilter-attack-surface)).
+- **`gix-pack` read-into-memory fallback (upstream)** — retired: `gix-pack` 0.73
+  already ships the `from_data` byte constructors we were going to ask for
+  ([F.3](#f3-wasm-and-gix-sec)).
 
-**kaish**
+**gitoxide (upstream)** — not filed yet
 
-15. `ToolCtx::is_cancelled()` — portable cancellation poll for blocking tools ([G.1](#g1-toolctx-cancellation-handle-proposed)).
-16. `ToolSchema` effects markers for policy layers — **design with the ledger**, not before ([C.4](#c4-should-this-be-a-kaish-kernel-concept)).
----
+- `gix-sec`: extend the WASI ownership-check special case to bare `wasm32`. The
+  only wasm compile blocker; tracked from our side by #3.
+- `gix-commitgraph::File::from_data` — a byte constructor mirroring `gix-pack`'s.
+  Performance only, since `Option<&Graph>` makes `None` first-class
+  ([F.3](#f3-wasm-and-gix-sec)).
+- An explicit "never spawn external filters/textconv" switch for `blob-diff` was
+  on this list under the facade. We are no longer the consumer who would ask —
+  nothing here links `blob` — so it is left here only in case the facade path
+  ever returns.
 
-## Co-architect notes (Fable, 2026-08-01)
+**kaish** — not filed yet
 
-Pass done after the approval-ledger design landed; findings, none blocking the
-read profile:
-
-1. **Endorsed as-is:** no shell-out tier (the reasoning — a verb wearing our
-   name must keep our guarantees — beats the research doc's fallback-tier
-   suggestion); wasm as `compile_error!`; `owns_output` unused; the `.git`
-   fingerprint test; the dependency tripwires; bare `git diff` meaning
-   HEAD→worktree (flagged for Amy's sign-off below, since it is an agent-facing
-   semantic divergence from git(1), but the no-index-in-read-profile argument
-   holds and every result states its endpoints).
-
-2. **Factual correction applied in §E.2**: v1 had no upward-discovery escape
-   (it used `Repository::open`, which does not search); v2's ceiling guards the
-   discovery capability v2 itself introduces. The design was right; the history
-   was wrong.
-
-3. **§C.3 reconciliation with the ledger design.** `ApprovalSink` predates the
-   ledger doc. Under [approval-ledger.md](approval-ledger.md) §D.1, the gate
-   call is `ctx.request_approval(...)` on the portable `ToolCtx` — the tool
-   does not hold an approvals handle at all, and the fail-closed default means
-   a write verb in a ledger-less kernel refuses at runtime regardless. The
-   type-gate on `GitConfig` therefore stops being "carry the sink" and becomes
-   a deliberate-opt-in marker: `with_profile(Profile::Commit)` stays
-   unreachable except through an explicitly-named constructor
-   (`GitConfig::with_write_profiles_acknowledged(...)` or similar — bikeshed at
-   implementation), preserving "a build that forgot approvals does not
-   compile" in spirit while the actual authorization plumbing lives where the
-   ledger puts it. §G.3's demand list is otherwise satisfied point-for-point
-   by the ledger design (request_approval, ref-shaped resources, transition
-   conditions; effects markers stay a joint follow-up).
-
-4. **ToolCtx churn coordination.** This doc's §G.1 (`is_cancelled`, sync,
-   defaulted) and the ledger's PR 5 (`request_approval` etc., async, defaulted)
-   both touch the `ToolCtx` trait. Land them as one coordinated kaish PR series
-   so the trait changes shape once, not twice; `is_cancelled` is small enough
-   to ride in ledger PR 5 or immediately after it.
-
-5. **For Amy's sign-off** (agent-facing semantics): (a) bare `git diff` =
-   HEAD→worktree; (b) tool name `git` shadowing external git by default in
-   subprocess-enabled kernels (`with_tool_name` exists, but the default is the
-   decision); (c) porcelain-letter-free status words — endorsed here, but it is
-   the largest muscle-memory break in the surface.
+- `ToolCtx::is_cancelled()` — portable cancellation poll for blocking tools
+  ([G.1](#g1-toolctx-cancellation-handle-proposed)). Lands with the ledger's own
+  `ToolCtx` PR, not separately.
+- `ToolSchema` effects markers for policy layers — **design with the ledger**,
+  not before ([C.4](#c4-should-this-be-a-kaish-kernel-concept)).
 
 ---
 
-## Co-architect note 2 — the gix-command finding and the facade-vs-plumbing fork (Fable, 2026-08-01, pre-reboot)
+## Changelog / provenance
 
-**Verified during PR 0, and it falsifies a load-bearing decision.** Decision #12 /
-§A.2 / §D.3 claimed a default build "cannot spawn because `gix-command` is
-absent." It is not absent. The `gix` **facade** crate links `gix-command`
-(pure-Rust `std::process::Command` spawn machinery) **unconditionally** — even
-`gix --no-default-features` pulls it via `gix-command → gix-transport →
-gix-protocol → gix`, reinforced by `gix-diff` (textconv) and `gix-filter`
-(clean/smudge). Confirmed by `cargo tree -i gix-command` on the skeleton crate.
-Filed as **kaish-extras#4**. The prior gix-research doc missed it because it
-audited for C toolchains and network stacks; `gix-command` is pure-Rust process
-spawn, invisible to that audit.
+**2026-08-02 — co-architect notes folded into the body.** This document carried
+three appended co-architect notes (Fable, 2026-08-01, plus Amy's sign-offs).
+They are now part of the text, and the superseded passages they corrected are
+deleted rather than left standing beside them. What changed:
 
-**This opens a fork. The decision is OPEN pending research (see below).**
+- **The dependency strategy.** The `gix` facade links `gix-command`
+  unconditionally, which falsified the original "no spawn in a default build"
+  claim (kaish-extras#4). After a source-read verification
+  ([gix-plumbing-feasibility-2026-08.md](gix-plumbing-feasibility-2026-08.md))
+  the fork resolved to the plumbing crates, and the structural guarantee — plus
+  the tripwires that prove it — came back with it ([A.2](#a2-feature-axes),
+  [A.4](#a4-pinning-and-the-dependency-tripwires),
+  [D.3](#d3-layer-3--the-textconvfilter-attack-surface)).
+- **wasm.** The `gix-pack` mmap premise is retired; the blockers are `gix-sec`
+  and the VFS-backed read path ([A.3](#a3-wasm), [F.3](#f3-wasm-and-gix-sec)).
+- **Isolation and rename detection.** `Permissions::isolated()` was a facade API
+  and is replaced by isolation by construction
+  ([D.2](#d2-layer-2--isolation-by-construction)); rename detection is
+  exact-match-only, which also corrects `gix-research-2026-08.md` §3(a)
+  mitigation (ii) ([B.4](#b4-git-diff)).
+- **Amy's sign-offs (2026-08-01).** Bare `git diff` is git parity
+  ([B.4](#b4-git-diff)); the tool is named `git` and shadows external git
+  ([B](#b-the-verb-surface)); status speaks porcelain letters in text and
+  self-describing words in JSON ([B.2](#b2-git-status)).
+- **The ledger.** `ApprovalSink` is superseded by `ctx.request_approval` on the
+  portable `ToolCtx`; the type gate becomes a deliberate-opt-in marker
+  ([C.3](#c3-write-profiles-are-type-gated), [G.3](#g3-depends-on-ledger-not-proposed-here)).
 
-**Path 1 — facade + runtime guarantee.** Keep `gix::Repository`; accept
-`gix-command` is linked; downgrade §D.3 from "spawn code not linked" to "spawn is
-unreachable at runtime, proven": repos open `Permissions::isolated()` so no
-config/attribute drives a textconv/filter/transport spawn, there are no network
-verbs, and the hostile-repo fixture proves no subprocess is created. Change the
-§A.4 tripwire from "`gix-command` absent" (unachievable) to "no network/C
-transport backend present on default features" (which passed: no
-aws-lc/openssl/curl/cc). Less code, ships sooner. Loses: the structural
-guarantee, the VFS hook, and the wasm path (facade goes straight to `std::fs` and
-mmaps packs).
-
-**Path 2 — plumbing layer.** Rebuild the convenience/`Repository` layer on gix's
-low-level crates, skipping the facade. **Empirically verified spawn-free:** a
-probe depending on `gix-object 0.63`, `gix-odb 0.83`, `gix-ref 0.66`,
-`gix-traverse 0.60`, `gix-revision 0.48`, `gix-revwalk 0.34`,
-`gix-commitgraph 0.38`, `gix-discover 0.54`, `gix-index 0.54`, `gix-pack 0.73`,
-and `gix-diff 0.66` **without** its `blob` feature pulls **none** of
-`gix-command`/`gix-transport`/`gix-filter` (`cargo tree -i` → "did not match any
-packages"). Line hunks come from `gix-imara-diff` run directly on blob bytes
-(skips textconv — arguably more correct for an agent: raw content). `status`/
-`blame` are hand-composed (index+worktree-walk; revwalk+line-diff) since
-`gix-status`/`gix-blame` pull the machinery. More code, but potentially delivers
-THREE things the facade cannot, together: the genuine "spawn code not linked"
-guarantee; **git-over-kaish-vfs** (§5 "deeper fs hooks" — back object storage with
-VFS); and a **wasm path** as a side effect (owning pack IO = read packs through
-VFS into memory instead of mmap, sidestepping the gix-pack blocker).
-
-**Open research (LAUNCHED 2026-08-01, LOST TO REBOOT — RE-RUN):** an Opus
-source-reading agent was verifying Path 2's feasibility: (1) is object access
-abstractable behind `gix_object::Find` so we can back it with kaish-vfs; (2) are
-gix-traverse/revision/diff generic over a custom object source; (3) can gix-pack
-decode from supplied bytes (VFS) rather than mmap → wasm path; (4) how
-file-coupled are gix-ref/gix-index; (5) the rebuild-surface effort tier vs the
-facade. **This did not return before reboot — re-launch it.** The brief is
-reconstructable from this note (versions above; sources in
-`~/.cargo/registry/src/`). Until it returns, do not finalize the fork or unblock
-PR 0's dependency strategy.
-
-**Recommendation is deferred to that research.** If the readers are generic over
-object storage and refs/index are tractable, Path 2 is the more-kaish bet and
-worth the extra code (strong guarantee + VFS + wasm in one). If refs/index prove
-hard-wired to `std::fs`, Path 1 with the runtime guarantee is the honest answer.
-Amy's call once the evidence is in.
-
----
-
-## Co-architect note 3 — fork resolved: Path 2; sign-offs landed (Fable + Amy, 2026-08-01)
-
-**The fork in note 2 is resolved: Path 2, staged.** The Opus source-reading
-agent was re-run and returned; full evidence with file:line citations is in
-[gix-plumbing-feasibility-2026-08.md](gix-plumbing-feasibility-2026-08.md).
-Every premise Path 2 needed held: object access sits behind `gix-object`'s
-three find traits (one required method each, implementable over kaish-vfs);
-gix-traverse / gix-revision / gix-revwalk are generic over the object source
-and do not depend on `gix-odb` at all; gix-index decouples from `std::fs`
-trivially in both directions; gix-ref reads are public byte parsers (writes
-are `gix-lock`-bound — a real wall for the eventual commit profile over VFS,
-but the read profile writes no refs). Staging, per the report: build
-native-first behind kaish-owned access traits; take the `gix-sec` cfg fix
-upstream; treat VFS-backed storage as a **second implementation** of those
-traits, not a refactor. Effort: Path 2 native is M-tier; `status`/`blame`
-stay L-tier under either path, so the fork never moved the biggest cost.
-
-Two findings from the report land beyond the fork itself:
-
-- **`gix-pack` 0.73 is already mmap-optional.** `FileData: Deref<Target=[u8]>`
-  with a blanket impl, and public `from_data()` constructors on the data,
-  index, and multi-index file types; only `Bundle`'s 69-line find pipeline is
-  mmap-hardwired. Verified in-source by two readers independently. Appendix
-  issue 12 (the gix-pack upstream ask) is **retired — upstream already built
-  it**; the facade just never exposes it. kaish-extras#3's premise is stale
-  the same way.
-- **The plumbing set compiles for `wasm32-unknown-unknown` today** (built,
-  not inferred — memmap2, gix-lock, gix-tempfile all tolerated in-tree). The
-  sole compile blocker is `gix-sec`, reachable only via `gix-discover` /
-  `gix-config` — and Path 2 drops gix-discover. Appendix issue 13 is promoted
-  from side-note to the only wasm gate.
-
-Corrections folded in: **rename detection does not exist without `gix-diff`'s
-`blob` feature** — the entire `rewrites` tracker is `#[cfg(feature = "blob")]`
-— so renames are exact-match-only, reported honestly; §H PR 2's rename fixture
-is revised accordingly, and gix-research §3(a) mitigation (ii) is wrong on
-this point. The pin set gains `gix-config 0.59` (no `gix-command`; use
-`from_bytes_no_includes` and resolve includes ourselves, which retires the
-`include.path` escape by construction — appendix issue 8). The §A.4 tripwire
-is achievable as originally intended after all: `cargo tree -i` for each of
-`gix-command` / `gix-transport` / `gix-filter` must report "did not match any
-packages".
-
-**Sign-offs (note 1, item 5), all resolved by Amy 2026-08-01:**
-
-**(a) Bare `git diff` = git parity: index→worktree, unstaged only.** This
-reverses §C.3's HEAD→worktree proposal (the table and justification around
-:305-316 are superseded on the bare-invocation row only; `--from`/`--to`
-semantics stand, and HEAD→worktree remains one spelling away as
-`git diff --from HEAD`). Decided on evidence: a five-model survey
-(gemini-3.1-pro-preview, gemini-3.5-flash, deepseek-v4-pro, claude-sonnet,
-claude-haiku — deliberately spanning families and ability tiers, toolie class
-included) was **unanimous** that bare `git diff` means unstaged-only, and
-every model's review reach is the `git status` → `git diff` →
-`git diff --staged` triple. Nobody expects HEAD→worktree. Amy: "a model
-assuming git parity may be reaching for the shorter option intentionally —
-it's been like that for decades now." Diverging would silently hand every one
-of those models a wrong mental model of the output.
-
-**(b) Tool name `git`, shadowing external git by default: yes.** The first
-consumer is kaibo, read-only — shadowing is exactly what's wanted there. When
-kaish grows write verbs (commit and friends), our implementation stays
-preferred; real git remains reachable by full path when exec is enabled.
-
-**(c) Status vocabulary: porcelain letters in the text surface** — reversing
-§C.4's "words, not porcelain letters" (:247). Parity is deep in base training
-and RL, and the clarity pressure that motivated words is relieved by the
-`--json` variants instead: `git status --json` / `git diff --json --staged`
-carry self-describing key names and word-valued fields, so scripts get
-clarity while prompts get trained-in muscle memory. One shape per surface:
-letters in text, words in JSON — not a `--porcelain` flag matrix.
+The notes' full text — including the reasoning that did not survive into the
+body, and the fork as it stood while it was open — is in this repo's git
+history: `git log --follow docs/design/architecture.md`, at and before the
+commit that added this section.
