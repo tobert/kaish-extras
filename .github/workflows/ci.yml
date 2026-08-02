@@ -107,6 +107,19 @@ jobs:
       - name: Build
         run: cargo build -p kaish-tools-git --locked
 
+      # The fixture harness shells out to real git as its oracle, so a fixture
+      # is whatever git actually produces — a real pack, a real `worktrees/`
+      # entry, real `packed-refs` — rather than whatever we believed it
+      # produces. That is fine in tests and forbidden in the crate, which
+      # links no spawn machinery at all (the tripwires below).
+      # ubuntu-latest ships git; the harness asserts its presence rather than
+      # skipping, so a runner without it fails loudly instead of reporting a
+      # green suite that proved nothing.
+      - name: Test (real git is the fixture oracle)
+        run: |
+          git --version
+          cargo test -p kaish-tools-git --locked
+
   git-tool-dependency-tripwires:
     name: kaish-tools-git dependency tripwire (${{ matrix.pkg }})
     runs-on: ubuntu-latest
