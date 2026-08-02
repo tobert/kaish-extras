@@ -49,7 +49,7 @@ pub(crate) fn run(
         repo_root_real: repo.root().display().to_string(),
         git_dir: repo.git_dir().display().to_string(),
         bare: repo.is_bare(),
-        shallow: repo.is_shallow(),
+        shallow: repo.is_shallow()?,
         ref_backend: repo.ref_backend(),
         head: repo.head()?,
         worktrees: repo.worktree_count()?,

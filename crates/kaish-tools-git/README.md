@@ -48,35 +48,53 @@ what make it read-only.
 
 ## Staying inside the mount
 
-Every directory `ReadRepo` reads from must be inside the ceiling, which is the
-real root of the VFS mount containing the path you named. Discovery is only
-one of three ways a directory gets chosen, and the other two are named by the
-repository itself — attacker-controlled the moment you open a repository you
-did not create:
+Every path `ReadRepo` reads from must resolve inside the ceiling — the real
+root of the VFS mount containing the path you named — as the operating system
+resolves it, not lexically. That obligation is wider than it first looks,
+because almost nothing here is a path the caller handed us:
 
 | Path | Chosen by |
 |---|---|
 | `git_dir` | discovery, or a `.git` *file*'s `gitdir:` line |
-| `common_dir` | `<git_dir>/commondir`, whose whole content is a path |
+| `common_dir` | `<git_dir>/commondir` — a file whose whole content is a path |
 | `work_dir` | discovery's physical parent |
+| every control file/probe | a fixed name joined onto one of the above: `config`, `commondir`, `shallow`, `refs`, `reftable`, `objects`, `worktrees`, `.gitmodules` |
+| object-store alternates | `objects/info/alternates`, naming arbitrary object dirs — no symlink needed |
 
-So the ceiling is checked over all three, before any of them is read — and it
-is checked against paths resolved the way the operating system resolves them,
-not lexically. A repository owns every byte under its own `.git`, symlinks
-included, and a lexical check walks straight through one: a `commondir` of
-`evil`, where `.git/evil` is a symlink, is inside the ceiling to a string
-comparison and outside it to `openat`. kaish's own `LocalFs` canonicalizes
-before its containment check, so anything weaker here would make this crate a
-bypass of a guarantee the platform already enforces.
+A repository owns every byte under its own `.git`, and it can weaponize all of
+that: a `commondir` whose *content* points outside, a `commondir` that is
+*itself* a symlink to `/etc/shadow`, a `config` symlinked out, an `alternates`
+file naming a host object store. A lexical check walks straight through a
+symlink — `<git_dir>/evil` where `.git/evil` links out is inside the ceiling to
+a string comparison and elsewhere to `open`.
 
-The two path helpers run lexical-first, canonical-second, and both are load
-bearing. Canonical alone would resolve a symlink that lexical `..`-folding
-makes harmless; lexical alone misses the plain symlink. `tests/hostile_repo.rs`
-pins each case, including the refusal declining to echo the path it refused —
-a message that repeated it back would be an oracle for probing the host
-filesystem.
+So the containment is stated as an invariant over three primitives:
 
-`tests/discovery_ceiling.rs` covers the discovery side.
+- **directories** (`git_dir`, `common_dir`, `work_dir`) are `canonicalize`d and
+  ceiling-checked before use;
+- **leaves** — every fixed-name file or probe under a checked directory — go
+  through a helper that lstat​s the leaf and, if it is a symlink, resolves and
+  ceiling-checks the target, refusing one that escapes *before the file is
+  read*;
+- **content-named paths** (the `commondir` file's contents, each alternates
+  entry) are `canonicalize`d and ceiling-checked, with "resolves outside" and
+  "does not resolve" made deliberately indistinguishable so the refusal is not
+  an existence oracle.
+
+Refusals never echo the escaping path, for the same oracle reason. kaish's own
+`LocalFs` canonicalizes before its containment check, so anything weaker here
+would make this crate a bypass of a guarantee the platform already enforces.
+
+`tests/hostile_repo.rs` pins every case above; `tests/discovery_ceiling.rs`
+covers the discovery side. The honest layouts still work: a store or a mount
+root reached through an in-mount symlink, an alternate inside the mount, a real
+linked worktree.
+
+**Residual, by construction:** the leaf checks cover files *this crate* opens.
+Objects, ref files and packs are opened by gitoxide internally, and a symlink
+among those (e.g. `objects/ab/cd…` linking out) is not intercepted here —
+platform-level containment (`openat2(RESOLVE_BENEATH)` or a kaish VFS seam) is
+what would close it. Tracked as design input, not a code change in this PR.
 
 A repository whose common dir legitimately lives outside the mount (a linked
 worktree whose main repository is not mounted) is refused too, and says so,

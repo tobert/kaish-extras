@@ -65,6 +65,12 @@ pub struct ReadRepo {
     common_dir: PathBuf,
     /// The working tree root, or `None` for a bare repository.
     work_dir: Option<PathBuf>,
+    /// The canonical mount root that discovery was ceilinged at. Kept so the
+    /// read accessors can hold the same "everything I open is inside the
+    /// ceiling" invariant `discover` establishes — a `shallow` marker or a
+    /// `.gitmodules` that is a symlink out of the mount is refused there too,
+    /// not only during open.
+    ceiling: PathBuf,
     objects: gix_odb::Handle,
     refs: gix_ref::file::Store,
 }
@@ -161,16 +167,31 @@ impl ReadRepo {
         // Second, a repository owns every byte under its own `.git`, symlinks
         // included, and a lexical check walks straight through one: a
         // `commondir` of `evil` where `.git/evil` is a symlink is inside the
-        // ceiling to a string comparison and outside it to `openat`. So every
-        // path — and the ceiling itself — is resolved with `canonicalize`
-        // before it is compared, and the comparison happens before any of them
-        // is read.
+        // ceiling to a string comparison and outside it to `openat`. And it is
+        // not only the directories below that are named by repository content
+        // — every file this type opens is reached by joining a fixed name onto
+        // a checked directory, and that leaf can be a symlink too. So the
+        // ceiling and every directory are resolved with `canonicalize` before
+        // they are compared (here), and every file and probe underneath goes
+        // through `open_leaf`, which refuses a symlinked leaf that escapes.
         let ceiling = real_dir(operation, "mount root", ceiling)?;
-        let git_dir = real_dir(operation, "git directory", &git_dir)?;
-        let work_dir = work_dir
-            .as_deref()
-            .map(|w| real_dir(operation, "working tree", w))
-            .transpose()?;
+
+        // `git_dir` is discovery's output, but a `.git` file's `gitdir:` line
+        // can make it repository-controlled — so a value that will not resolve
+        // is folded into "no repository" rather than echoed back.
+        let git_dir = std::fs::canonicalize(&git_dir).map_err(|_| GitError::NotARepository {
+            operation,
+            start: real_path.to_path_buf(),
+            ceiling: ceiling.clone(),
+        })?;
+        let work_dir = match work_dir {
+            Some(w) => Some(std::fs::canonicalize(&w).map_err(|_| GitError::NotARepository {
+                operation,
+                start: real_path.to_path_buf(),
+                ceiling: ceiling.clone(),
+            })?),
+            None => None,
+        };
 
         if !git_dir.starts_with(&ceiling) {
             // Two very different situations reach here, and collapsing them
@@ -202,33 +223,6 @@ impl ReadRepo {
             });
         }
 
-        // `commondir` is read out of `git_dir`, which the check above has
-        // already placed inside the ceiling — so this read is safe to make
-        // before the result is trusted. `real_dir` is what makes the check
-        // that follows meaningful: `resolve_common_dir` only joins and
-        // normalizes lexically, and the path it produces may traverse a
-        // symlink the repository put there.
-        let common_dir = real_dir(
-            operation,
-            "common directory",
-            &resolve_common_dir(operation, &git_dir)?,
-        )?;
-        if !common_dir.starts_with(&ceiling) {
-            // Different from the case above, and a different code: a
-            // repository *was* found inside the mount. Either it is a linked
-            // worktree whose main repository legitimately lives outside — the
-            // embedder mounts that too — or it is a repository trying to point
-            // us at a path we were never given. We cannot tell the two apart,
-            // and under the sandbox model neither is readable, so both are
-            // refused with a message that explains what to do about the honest
-            // one.
-            return Err(GitError::EscapesMount {
-                operation,
-                what: "common directory (.git/commondir)",
-                repo: git_dir,
-                ceiling,
-            });
-        }
         if let Some(work_dir) = work_dir.as_deref() {
             // Defense in depth. Today `work_dir` is discovery's own physical
             // parent and is bounded by the `git_dir` check above — see
@@ -238,18 +232,54 @@ impl ReadRepo {
             // `core.worktree` reader and `submodule_count` reading
             // `<work_dir>/.gitmodules` off an arbitrary host path.
             if !work_dir.starts_with(&ceiling) {
-                return Err(GitError::EscapesMount {
-                    operation,
-                    what: "working tree",
-                    repo: git_dir,
-                    ceiling,
-                });
+                return Err(escapes(operation, "working tree", &git_dir, &ceiling));
             }
         }
 
+        // `commondir` in two steps, because both the file and its content are
+        // repository-controlled. First the *file*: `open_leaf` refuses it if it
+        // is a symlink pointing out of the mount, so a `commondir` symlinked to
+        // `/etc/shadow` is never read. Then its *content*, which is itself a
+        // path: `contain` canonicalizes and ceiling-checks it, refusing an
+        // absolute, `..`-bearing, or symlink-traversing target — the linked
+        // worktree whose main repository lives outside the mount, or a
+        // repository pointing us somewhere it was never given.
+        let common_dir = match open_leaf(
+            operation,
+            "common directory (.git/commondir)",
+            &git_dir,
+            "commondir",
+            &ceiling,
+        )? {
+            Leaf::Absent => git_dir.clone(),
+            Leaf::At(commondir_file) => {
+                let text = std::fs::read_to_string(&commondir_file)
+                    .map_err(|e| {
+                        GitError::repository(operation, "reading the commondir file", &git_dir, e)
+                    })?
+                    .trim()
+                    .to_string();
+                let candidate = if Path::new(&text).is_absolute() {
+                    normalize(Path::new(&text))
+                } else {
+                    normalize(&git_dir.join(&text))
+                };
+                contain(
+                    operation,
+                    "common directory (.git/commondir)",
+                    &git_dir,
+                    &candidate,
+                    &ceiling,
+                )?
+            }
+        };
+
         // Read repo-local config before opening anything. A repository we are
-        // going to refuse must be refused before we touch its objects.
-        let config = read_repo_config(operation, &common_dir)?;
+        // going to refuse must be refused before we touch its objects. The
+        // config file itself goes through `open_leaf`, since it too is a leaf
+        // a repository could symlink out of the mount.
+        let config_leaf = open_leaf(operation, "repository config", &common_dir, "config", &ceiling)?;
+        let config = read_repo_config(operation, config_leaf.path())?;
         check_include_paths(operation, &common_dir, &config)?;
         let format_version = check_format_version(operation, &common_dir, &config)?;
         if format_version >= 1 {
@@ -259,10 +289,28 @@ impl ReadRepo {
         // The ref backend check does not wait for format version 1: a
         // `reftable/` directory on disk is evidence regardless of what the
         // config claims, and answering from an empty `refs/` would be the
-        // silent fallback E.5 forbids.
-        check_ref_backend(operation, &common_dir, &config)?;
+        // silent fallback E.5 forbids. Both probes go through `open_leaf`.
+        let has_reftable = open_leaf(operation, "reftable directory", &common_dir, "reftable", &ceiling)?
+            .path()
+            .is_some_and(Path::is_dir);
+        let has_refs = open_leaf(operation, "refs directory", &common_dir, "refs", &ceiling)?
+            .path()
+            .is_some_and(Path::is_dir);
+        check_ref_backend(operation, &common_dir, &config, has_reftable, has_refs)?;
 
-        let objects = gix_odb::at(common_dir.join("objects")).map_err(|e| {
+        // The object store, and its alternates. `open_leaf` catches an
+        // `objects` directory symlinked out of the mount (a legitimate
+        // shared-store symlink that stays inside is followed and its resolved
+        // path used); `guard_alternates` catches `objects/info/alternates`
+        // naming an outside store, which needs no symlink at all.
+        let objects_dir = match open_leaf(operation, "object store", &common_dir, "objects", &ceiling)? {
+            Leaf::At(dir) => dir,
+            // A repository with no object directory is malformed; let gix say
+            // so against a path the caller owns.
+            Leaf::Absent => common_dir.join("objects"),
+        };
+        guard_alternates(operation, &objects_dir, &ceiling)?;
+        let objects = gix_odb::at(&objects_dir).map_err(|e| {
             GitError::repository(operation, "opening the object store", &common_dir, e)
         })?;
 
@@ -292,6 +340,7 @@ impl ReadRepo {
             git_dir,
             common_dir,
             work_dir,
+            ceiling,
             objects,
             refs,
         })
@@ -319,8 +368,21 @@ impl ReadRepo {
     }
 
     /// Whether history is truncated.
-    pub fn is_shallow(&self) -> bool {
-        self.common_dir.join("shallow").exists()
+    ///
+    /// Fallible because the `shallow` marker is a leaf under the common dir
+    /// like any other, and a repository that symlinks it out of the mount is
+    /// refused rather than followed — the same invariant `discover` holds for
+    /// every path it opens.
+    pub fn is_shallow(&self) -> Result<bool, GitError> {
+        Ok(open_leaf(
+            self.operation,
+            "shallow marker",
+            &self.common_dir,
+            "shallow",
+            &self.ceiling,
+        )?
+        .path()
+        .is_some())
     }
 
     /// The ref backend actually read.
@@ -394,30 +456,38 @@ impl ReadRepo {
     pub fn worktree_count(&self) -> Result<usize, GitError> {
         let mut count = usize::from(self.common_dir.file_name() == Some(std::ffi::OsStr::new(".git")));
 
-        let dir = self.common_dir.join("worktrees");
-        match std::fs::read_dir(&dir) {
-            Ok(entries) => {
-                for entry in entries {
-                    let entry = entry.map_err(|e| {
-                        GitError::repository(self.operation, "listing linked worktrees", &dir, e)
-                    })?;
-                    // A registered worktree is a directory carrying a
-                    // `gitdir` file; git leaves other things in here.
-                    if entry.path().join("gitdir").is_file() {
-                        count += 1;
-                    }
-                }
-            }
-            // Only "no worktrees directory" is swallowed, and it is not an
-            // error: a repository that never had a linked worktree has none.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(GitError::repository(
-                    self.operation,
-                    "listing linked worktrees",
-                    &dir,
-                    e,
-                ))
+        // `open_leaf` refuses a `worktrees` symlinked out of the mount and
+        // hands back its real path otherwise. Absent means the repository
+        // never had a linked worktree.
+        let Some(dir) = open_leaf(
+            self.operation,
+            "worktrees directory",
+            &self.common_dir,
+            "worktrees",
+            &self.ceiling,
+        )?
+        .path()
+        .map(Path::to_path_buf) else {
+            return Ok(count);
+        };
+
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|e| GitError::repository(self.operation, "listing linked worktrees", &dir, e))?
+        {
+            let entry = entry.map_err(|e| {
+                GitError::repository(self.operation, "listing linked worktrees", &dir, e)
+            })?;
+            // A registered worktree is a real directory carrying a `gitdir`
+            // file. A symlinked entry is not something git writes here, and
+            // following one would step outside the mount to count it, so it is
+            // skipped rather than followed — `symlink_metadata` does not
+            // follow it.
+            let entry_path = entry.path();
+            let is_symlink = std::fs::symlink_metadata(&entry_path)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(true);
+            if !is_symlink && entry_path.join("gitdir").is_file() {
+                count += 1;
             }
         }
         Ok(count)
@@ -434,21 +504,22 @@ impl ReadRepo {
         let Some(work_dir) = self.work_dir.as_deref() else {
             return Ok(0);
         };
-        let path = work_dir.join(".gitmodules");
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            // Only "no .gitmodules" is swallowed: a repository without
-            // submodules does not have the file.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => {
-                return Err(GitError::repository(
-                    self.operation,
-                    "reading .gitmodules",
-                    &path,
-                    e,
-                ))
-            }
+        // `.gitmodules` is a leaf under the working tree, which a repository
+        // could symlink out of the mount — `open_leaf` refuses that and
+        // returns the safe path otherwise.
+        let Some(path) = open_leaf(
+            self.operation,
+            ".gitmodules file",
+            work_dir,
+            ".gitmodules",
+            &self.ceiling,
+        )?
+        .path()
+        .map(Path::to_path_buf) else {
+            return Ok(0);
         };
+        let bytes = std::fs::read(&path)
+            .map_err(|e| GitError::repository(self.operation, "reading .gitmodules", &path, e))?;
         let file = parse_config_bytes(self.operation, &path, &bytes)?;
         Ok(file
             .sections()
@@ -481,28 +552,23 @@ fn parse_config_bytes(
     .map_err(|e| GitError::repository(operation, "parsing config", path, e))
 }
 
-/// Read `<common_dir>/config`.
+/// Parse the repository config at an already-ceiling-checked path.
 ///
-/// A repository with no config file is legal (it just has no settings), so
-/// only "file is missing" is swallowed.
+/// `config_path` is `None` when the file is absent, which is legal — a
+/// repository with no config just has no settings. The path itself was
+/// resolved by [`open_leaf`], so a `config` symlinked out of the mount was
+/// already refused before this runs.
 fn read_repo_config(
     operation: &'static str,
-    common_dir: &Path,
+    config_path: Option<&Path>,
 ) -> Result<gix_config::File, GitError> {
-    let path = common_dir.join("config");
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => {
-            return Err(GitError::repository(
-                operation,
-                "reading the repository config",
-                &path,
-                e,
-            ))
-        }
+    let Some(path) = config_path else {
+        return parse_config_bytes(operation, Path::new("config"), &[]);
     };
-    parse_config_bytes(operation, &path, &bytes)
+    let bytes = std::fs::read(path).map_err(|e| {
+        GitError::repository(operation, "reading the repository config", path, e)
+    })?;
+    parse_config_bytes(operation, path, &bytes)
 }
 
 /// Refuse an `include.path` / `includeIf.*.path` that leaves the repository.
@@ -638,6 +704,8 @@ fn check_ref_backend(
     operation: &'static str,
     common_dir: &Path,
     config: &gix_config::File,
+    has_reftable: bool,
+    has_refs: bool,
 ) -> Result<(), GitError> {
     if let Some(declared) = config.string("extensions.refstorage") {
         let declared = declared.to_string();
@@ -649,16 +717,19 @@ fn check_ref_backend(
             });
         }
     }
-    if common_dir.join("reftable").is_dir() {
+    // The `reftable`/`refs` probes are made by the caller through `open_leaf`,
+    // so a `reftable` or `refs` symlinked out of the mount was refused before
+    // we got here rather than followed to decide the backend.
+    if has_reftable {
         return Err(GitError::UnsupportedRefBackend {
             operation,
             backend: "reftable".to_string(),
             repo: common_dir.to_path_buf(),
         });
     }
-    // The files backend's own markers. Their absence means we are looking at
+    // The files backend's own marker. Its absence means we are looking at
     // storage we have not identified, and guessing is what E.5 forbids.
-    if !common_dir.join("refs").is_dir() {
+    if !has_refs {
         return Err(GitError::UnsupportedRefBackend {
             operation,
             backend: "unknown (no 'refs' directory)".to_string(),
@@ -671,32 +742,6 @@ fn check_ref_backend(
 // ═══════════════════════════════════════════════════════════════════════════
 // Path helpers
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// Resolve `<git_dir>/commondir`, which a linked worktree carries.
-fn resolve_common_dir(operation: &'static str, git_dir: &Path) -> Result<PathBuf, GitError> {
-    let path = git_dir.join("commondir");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        // Only "no commondir file" is swallowed: that is the ordinary main
-        // repository, where the git dir *is* the common dir.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(git_dir.to_path_buf()),
-        Err(e) => {
-            return Err(GitError::repository(
-                operation,
-                "reading the worktree's commondir",
-                &path,
-                e,
-            ))
-        }
-    };
-    let text = text.trim();
-    let common = Path::new(text);
-    Ok(if common.is_absolute() {
-        normalize(common)
-    } else {
-        normalize(&git_dir.join(common))
-    })
-}
 
 /// Resolve a path the way the operating system will, for ceiling comparison.
 ///
@@ -717,6 +762,142 @@ fn resolve_common_dir(operation: &'static str, git_dir: &Path) -> Result<PathBuf
 fn real_dir(operation: &'static str, what: &'static str, path: &Path) -> Result<PathBuf, GitError> {
     std::fs::canonicalize(path)
         .map_err(|e| GitError::repository(operation, format!("resolving the {what}"), path, e))
+}
+
+/// What resolving a fixed-name leaf under a checked parent found.
+enum Leaf {
+    /// A real path, inside the ceiling, safe to read.
+    At(PathBuf),
+    /// The leaf does not exist.
+    Absent,
+}
+
+impl Leaf {
+    /// The resolved path, or `None` when the leaf was absent.
+    fn path(&self) -> Option<&Path> {
+        match self {
+            Leaf::At(p) => Some(p),
+            Leaf::Absent => None,
+        }
+    }
+}
+
+/// Build a non-echoing exit-4 refusal for a repository-controlled path that
+/// left the mount.
+///
+/// The escaping path is never named — see [`GitError::EscapesMount`]. `repo`
+/// is a directory the caller already knows about (the git dir, the common
+/// dir), so naming it leaks nothing.
+fn escapes(operation: &'static str, what: &'static str, repo: &Path, ceiling: &Path) -> GitError {
+    GitError::EscapesMount {
+        operation,
+        what,
+        repo: repo.to_path_buf(),
+        ceiling: ceiling.to_path_buf(),
+    }
+}
+
+/// Resolve `parent/name` for reading, refusing a symlinked leaf whose target
+/// leaves the ceiling.
+///
+/// The escape the whole `commondir` family shares: a lexical ceiling check
+/// covers a *directory*, but every file and probe under it is reached by
+/// joining a fixed name onto that directory, and the leaf can be a symlink the
+/// repository planted. `<common_dir>/config` as a symlink to `/etc/shadow` is
+/// inside the ceiling to a string comparison and `/etc/shadow` to `open`.
+///
+/// `parent` MUST already be canonical and inside `ceiling`, so only the final
+/// component can introduce a symlink. `symlink_metadata` (lstat, no follow)
+/// separates the cases without paying `canonicalize` on the common path where
+/// the leaf is an ordinary file. A symlink is resolved and ceiling-checked;
+/// one that escapes — or dangles — is refused without echoing where it aimed,
+/// so the refusal cannot be read as an oracle for what exists on the host.
+fn open_leaf(
+    operation: &'static str,
+    what: &'static str,
+    parent: &Path,
+    name: &str,
+    ceiling: &Path,
+) -> Result<Leaf, GitError> {
+    let path = parent.join(name);
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Leaf::Absent),
+        // `path` is `parent/<fixed name>`: `parent` is ours and `name` is a
+        // constant, so this names nothing the caller does not already own.
+        Err(e) => {
+            return Err(GitError::repository(
+                operation,
+                format!("checking the {what}"),
+                &path,
+                e,
+            ))
+        }
+    };
+    if !meta.file_type().is_symlink() {
+        // A real file or directory directly under a canonical parent is inside
+        // the ceiling by construction.
+        return Ok(Leaf::At(path));
+    }
+    match std::fs::canonicalize(&path) {
+        Ok(real) if real.starts_with(ceiling) => Ok(Leaf::At(real)),
+        _ => Err(escapes(operation, what, parent, ceiling)),
+    }
+}
+
+/// Canonicalize a path whose value came from repository *content* and confirm
+/// it is inside the ceiling.
+///
+/// The sibling of [`open_leaf`] for the two paths a repository writes out in
+/// full rather than as a symlinked leaf: the `commondir` file's contents, and
+/// each entry of `objects/info/alternates`. Non-echoing on both "resolves
+/// outside" and "does not resolve", and the two are made indistinguishable on
+/// purpose — a repository that learns whether `/some/candidate` exists by
+/// reading which error it gets back has an oracle, so both give the same one.
+fn contain(
+    operation: &'static str,
+    what: &'static str,
+    repo: &Path,
+    candidate: &Path,
+    ceiling: &Path,
+) -> Result<PathBuf, GitError> {
+    match std::fs::canonicalize(candidate) {
+        Ok(real) if real.starts_with(ceiling) => Ok(real),
+        _ => Err(escapes(operation, what, repo, ceiling)),
+    }
+}
+
+/// Refuse an object store whose `objects/info/alternates` reaches outside the
+/// ceiling.
+///
+/// `gix-odb` honors `objects/info/alternates` — a file naming arbitrary
+/// absolute object-store paths, no symlink required — and offers no option to
+/// turn that off (`gix_odb::store::init::Options` carries only `slots` and
+/// `use_multi_pack_index`). Left alone, a repository inside the mount could
+/// name `/anywhere/objects` and have gix search it. So the same resolver gix
+/// uses (`gix_odb::alternate::resolve`, matching its parsing, its chain
+/// following and its realpathing exactly) runs first, and every dir it yields
+/// is ceiling-checked before the store is opened. Any escape, or any error
+/// resolving the chain, refuses the store — non-echoing, since the paths came
+/// from repository content.
+fn guard_alternates(
+    operation: &'static str,
+    objects_dir: &Path,
+    ceiling: &Path,
+) -> Result<(), GitError> {
+    let alternates = gix_odb::alternate::resolve(objects_dir.to_path_buf(), ceiling)
+        .map_err(|_| escapes(operation, "object store alternate (objects/info/alternates)", objects_dir, ceiling))?;
+    for dir in alternates {
+        if !dir.starts_with(ceiling) {
+            return Err(escapes(
+                operation,
+                "object store alternate (objects/info/alternates)",
+                objects_dir,
+                ceiling,
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Lexically normalize a path: drop `.`, resolve `..` against the preceding
@@ -844,7 +1025,9 @@ mod tests {
     #[test]
     fn reftable_declaration_is_refused_loudly() {
         let cfg = config("[extensions]\n\trefStorage = reftable\n");
-        let err = check_ref_backend("info", Path::new("/repo/.git"), &cfg)
+        // The config declaration path: no reftable dir on disk, refs present,
+        // and the declaration alone must still refuse.
+        let err = check_ref_backend("info", Path::new("/repo/.git"), &cfg, false, true)
             .expect_err("reftable must be refused");
         assert_eq!(err.exit_code(), 4);
         let msg = err.to_string();
@@ -855,6 +1038,35 @@ mod tests {
             msg.contains("not a fallback"),
             "must say no fallback happened: {msg}"
         );
+    }
+
+    /// The on-disk `reftable/` directory signal, independent of the config
+    /// declaration: `has_reftable = true` alone must refuse.
+    #[test]
+    fn reftable_directory_on_disk_is_refused() {
+        let cfg = config("");
+        let err = check_ref_backend("info", Path::new("/repo/.git"), &cfg, true, true)
+            .expect_err("a reftable directory must be refused");
+        assert_eq!(err.exit_code(), 4);
+        assert!(err.to_string().contains("reftable"), "{err}");
+    }
+
+    /// A files repository with `refs/` present and no reftable is accepted.
+    #[test]
+    fn files_backend_with_refs_is_accepted() {
+        let cfg = config("");
+        check_ref_backend("info", Path::new("/repo/.git"), &cfg, false, true)
+            .expect("the files backend is what we read");
+    }
+
+    /// No `refs/` directory at all is refused: it is storage we did not
+    /// identify, and E.5 forbids guessing.
+    #[test]
+    fn missing_refs_directory_is_refused() {
+        let cfg = config("");
+        let err = check_ref_backend("info", Path::new("/repo/.git"), &cfg, false, false)
+            .expect_err("no refs directory must be refused");
+        assert_eq!(err.exit_code(), 4);
     }
 
     #[test]
