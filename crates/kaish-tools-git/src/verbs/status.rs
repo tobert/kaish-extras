@@ -24,7 +24,7 @@
 //! self-describing words in [`crate::model`] (decision 9). Both are computed
 //! from one [`StatusReport`], so they cannot disagree.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 
 use clap::{Parser, ValueEnum};
@@ -233,7 +233,11 @@ impl Building {
 /// A file's type, normalized so a tree entry and an index entry compare on the
 /// same axis. The executable bit is a class of its own because git treats a
 /// mode flip (`100644` ↔ `100755`) as a modification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Ord` so a rename candidate can be keyed by `(oid, class)`: pairing across
+/// classes is what fabricates a rename out of a deleted symlink and an added
+/// file that happen to share a blob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Class {
     File,
     Exec,
@@ -448,16 +452,29 @@ fn stage_the_index(
         deleted.push((path.clone(), *oid, *class));
     }
 
-    // Exact-match renames: a deleted blob oid reappearing at an added path.
-    // No similarity scoring — that needs `gix-diff`'s `blob` feature, which
-    // pulls `gix-command` (A.2). A modified-then-moved file has a different
-    // oid, so it never pairs, and is reported as delete + add (the honest
-    // limitation, asserted by the rename fixture).
+    // Exact-match renames: a deleted blob oid reappearing at an added path,
+    // *of the same class*. No similarity scoring — that needs `gix-diff`'s
+    // `blob` feature, which pulls `gix-command` (A.2). A modified-then-moved
+    // file has a different oid, so it never pairs, and is reported as delete +
+    // add (the honest limitation, asserted by the rename fixture).
+    //
+    // The class is part of the key, not an afterthought: a symlink's blob is
+    // its target string, so `ln -s hello a` and a file containing `hello`
+    // share an oid, and pairing on oid alone reports a rename between two
+    // things git would never call one. The candidates are keyed into queues
+    // in path order — `deleted` comes out of a `BTreeMap` — so the source a
+    // rename claims is the lowest-sorting unclaimed one, the same on every
+    // run, rather than whatever a linear scan reached first.
+    let mut candidates: BTreeMap<(ObjectId, Class), VecDeque<usize>> = BTreeMap::new();
+    for (i, (_, oid, class)) in deleted.iter().enumerate() {
+        candidates.entry((*oid, *class)).or_default().push_back(i);
+    }
     let mut consumed_deletes: BTreeSet<usize> = BTreeSet::new();
     for (add_path, add_oid, add_class) in &added {
-        let Some(di) = deleted.iter().enumerate().position(|(i, (_, doid, _))| {
-            !consumed_deletes.contains(&i) && doid == add_oid
-        }) else {
+        let claimed = candidates
+            .get_mut(&(*add_oid, *add_class))
+            .and_then(VecDeque::pop_front);
+        let Some(di) = claimed else {
             out.entry(add_path.clone())
                 .or_insert_with(|| Building::empty(add_class.kind()))
                 .index = Code::Added;

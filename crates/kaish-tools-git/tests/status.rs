@@ -592,3 +592,37 @@ async fn status_on_a_bare_repo_needs_a_worktree() {
     assert_eq!(result.code, 1, "bare status is a git-level no: {}", result.err);
     assert!(result.err.contains("working tree"), "{}", result.err);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Exact-rename pairing
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A deleted symlink and an added regular file that happen to share a blob oid
+/// are **not** a rename. Git's own rename detection pairs within a type; a
+/// pairing that ignores class turns `ln -s hello a` plus `echo -n hello > b`
+/// into a fabricated `R a -> b`.
+#[tokio::test]
+async fn a_deleted_symlink_does_not_pair_with_an_added_file() {
+    let repo = Repo::init("repo");
+    // The blob of a symlink is its target string, so this link and a regular
+    // file containing "hello" hash to the same oid.
+    std::os::unix::fs::symlink("hello", repo.root.join("a")).expect("symlink a");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-m", "add link", "--quiet"]);
+
+    std::fs::remove_file(repo.root.join("a")).expect("remove a");
+    std::fs::write(repo.root.join("b"), "hello").expect("write b");
+    repo.git(&["add", "-A"]);
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    let j = json(&result);
+    let entries = j["entries"].as_array().expect("entries");
+    assert!(
+        entries.iter().all(|e| e["index"] != "renamed"),
+        "a symlink and a file must not pair as a rename: {j}"
+    );
+    let a = entries.iter().find(|e| e["path"] == "a").expect("a entry");
+    assert_eq!(a["index"], "deleted", "{a}");
+    let b = entries.iter().find(|e| e["path"] == "b").expect("b entry");
+    assert_eq!(b["index"], "added", "{b}");
+}
