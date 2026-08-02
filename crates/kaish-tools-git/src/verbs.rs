@@ -11,3 +11,4 @@
 //! exactly when the assertion is cheapest to keep true.
 
 pub(crate) mod info;
+pub(crate) mod status;

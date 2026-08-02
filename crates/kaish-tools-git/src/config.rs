@@ -56,23 +56,26 @@ impl Profile {
 pub enum Verb {
     /// `git info` — what am I looking at, and what am I allowed to do.
     Info,
+    /// `git status` — staged, unstaged, untracked, ignored, conflicted.
+    Status,
 }
 
 impl Verb {
     /// Every verb this build knows how to execute.
-    pub const ALL: &'static [Verb] = &[Verb::Info];
+    pub const ALL: &'static [Verb] = &[Verb::Info, Verb::Status];
 
     /// The verb's argv spelling — the word an agent types.
     pub fn as_str(&self) -> &'static str {
         match self {
             Verb::Info => "info",
+            Verb::Status => "status",
         }
     }
 
     /// The profile that grants this verb.
     pub fn profile(&self) -> Profile {
         match self {
-            Verb::Info => Profile::Read,
+            Verb::Info | Verb::Status => Profile::Read,
         }
     }
 }
@@ -262,6 +265,7 @@ mod tests {
         let start: BTreeSet<Verb> = GitConfig::read_only().verbs().collect();
         let narrowed = GitConfig::read_only()
             .without_verb(Verb::Info)
+            .without_verb(Verb::Status)
             .with_tool_name("kgit")
             .with_limits(Limits {
                 max_rows: 5,

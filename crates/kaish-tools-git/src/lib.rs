@@ -26,8 +26,11 @@
 //! content hash under `.git` before and after running every read verb, then
 //! asserts nothing moved.
 //!
-//! This is PR 1 of the phasing plan: `git info`, the repository open path, the
-//! fixture harness, and that fingerprint test.
+//! PR 1 landed `git info`, the repository open path, the fixture harness, and
+//! that fingerprint test. PR 2 adds `git status`, hand-composed on the index,
+//! a worktree walk, and a tree↔index comparison — `gix-status` is disqualified
+//! because it hard-requires `gix-filter` (→ `gix-command`), the spawn
+//! machinery the tripwires forbid.
 
 #[cfg(target_family = "wasm")]
 compile_error!(
@@ -61,7 +64,10 @@ pub use config::{ConfigError, GitConfig, Limits, Profile, Verb};
 #[cfg(not(target_family = "wasm"))]
 pub use error::GitError;
 #[cfg(not(target_family = "wasm"))]
-pub use model::{Capabilities, Head, LimitsReport, RefBackend, RepoInfo};
+pub use model::{
+    Capabilities, EntryKind, EntryStatus, Head, LimitsReport, RefBackend, RepoInfo, StatusEntry,
+    StatusReport, StatusTotals,
+};
 #[cfg(not(target_family = "wasm"))]
 pub use repo::ReadRepo;
 #[cfg(not(target_family = "wasm"))]
@@ -80,6 +86,8 @@ const GIX_PINS: &[(&str, &str)] = &[
     ("gix-config", "0.59.0"),
     ("gix-diff", "0.66.0"),
     ("gix-discover", "0.54.0"),
+    ("gix-glob", "0.27.0"),
+    ("gix-ignore", "0.22.0"),
     ("gix-index", "0.54.0"),
     ("gix-object", "0.63.0"),
     ("gix-odb", "0.83.0"),
@@ -88,6 +96,7 @@ const GIX_PINS: &[(&str, &str)] = &[
     ("gix-revision", "0.48.0"),
     ("gix-revwalk", "0.34.0"),
     ("gix-traverse", "0.60.0"),
+    ("gix-worktree", "0.55.0"),
 ];
 
 /// The pin set, as `git info` reports it.

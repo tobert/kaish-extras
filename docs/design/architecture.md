@@ -975,10 +975,43 @@ over three primitives, not the one comparison above:
   refusal can never be read as an existence oracle for the host (the
   `contain` / `guard_alternates` helpers).
 
+- **Working-tree paths named by index entries** — every stage-0 path `git
+  status` compares against the working tree: screened lexically per
+  `/`-separated segment (each segment exactly one ordinary component, so no
+  absolute, `.`, `..`, empty, NUL, or — on a platform where `\` separates — a
+  segment that is secretly two), then its parent chain resolved *one component
+  at a time* down from the canonical working tree root, before the leaf is
+  `lstat`ed through that canonical parent (the `WorktreePaths` helper in
+  `verbs/status.rs`). A leaf-only check is not enough here: `lstat` does not
+  follow the final component, but the kernel resolves every component before
+  it, so an entry `evil/x` under a symlinked `evil` reads a host file with no
+  symlinked leaf anywhere in sight.
+
+  The walk is component-wise rather than one `canonicalize` over the whole
+  chain, for the reason `contain` exists. A whole-chain `canonicalize` answers
+  `NotFound` for a symlink whose target is absent and succeeds for one whose
+  target is present, so an escaping chain refused (exit 4) in the second case
+  and reported an ordinary deletion (exit 0) in the first — one observable bit
+  saying whether an arbitrary host path exists, with the repository choosing
+  the path. Walking component-wise moves the decision onto whether a symlink is
+  *present* in the chain, which the repository planted and already knows;
+  escaping and dangling then give the identical refusal. A symlink that stays
+  inside the working tree is legitimate and is followed.
+
 The residual carve-out, stated honestly: a symlinked leaf that gitoxide opens
-*internally* — loose objects, individual ref files, `HEAD`, packs — is not
-intercepted by any of the above, because nothing here wraps every `open`
-gitoxide makes. Closing that needs platform-level containment
+*internally* — loose objects, individual ref files, `HEAD`, packs, and the
+per-directory `.gitignore` files `gix-worktree`'s ignore `Stack` reads as
+`git status` descends the working tree — is not intercepted by any of the
+above, because nothing here wraps every `open` gitoxide makes. The
+`.gitignore` reads belong in that list and not in a footnote: they are the one
+carve-out path that reaches into the *working tree* rather than `.git`, the
+`Stack` consults them on every descent (`--untracked no` does not avoid them,
+it only stops us reporting what they matched), and a working tree is where a
+symlink is easiest to plant. They stay inside the mount only because the
+working tree root is ceiling-checked; a `.gitignore` symlinked out of it would
+be followed. What status opens *itself* — `.git/index`, `info/exclude`, and
+every path an index entry names — is contained above and is not in the
+carve-out. Closing the remainder needs platform-level containment
 (`openat2(RESOLVE_BENEATH)`), which belongs in a kaish VFS seam, not this
 crate — tracked as kaish #276 ("VFS seam: RESOLVE_BENEATH-scoped mount view
 for symlink containment"). The TOCTOU between a canonicalize/ceiling-check

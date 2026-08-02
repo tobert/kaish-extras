@@ -85,7 +85,10 @@ Only the house rules that aren't standard practice:
   `AlreadyExists` is swallowed).
 - No legacy dual-representations — delete superseded code immediately, no
   compat shims or parallel old/new paths.
-- Defer out-of-scope work to GitHub Issues, not inline TODOs or scratch notes.
+- Defer out-of-scope work to [docs/issues.md](docs/issues.md), not inline
+  TODOs or scratch notes. An entry graduates to a GitHub issue only when
+  someone outside the repo needs the link; delete entries in the PR that
+  fixes them.
 - Comments carry non-obvious intent only; this codebase leans on them for
   browser-specific constraints (see worker.js, coi-sw.js) — keep that bar.
 

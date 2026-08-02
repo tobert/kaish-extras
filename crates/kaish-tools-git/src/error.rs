@@ -210,6 +210,90 @@ pub enum GitError {
         repo: PathBuf,
     },
 
+    /// A verb that needs a working tree was run against a bare repository.
+    /// Exit 1 — a git-level "no", the same class git returns for
+    /// `git status` in a bare repo.
+    #[error(
+        "git {operation}: repository '{repo}' is bare — {operation} needs a \
+         working tree, and a bare repository has none"
+    )]
+    NeedsWorktree {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The bare repository.
+        repo: PathBuf,
+    },
+
+    /// A working-tree file a verb had to read whole is larger than the
+    /// embedder's `max_blob_bytes`. Exit 1 — a git-level "no" about this
+    /// working tree.
+    ///
+    /// Loud on purpose, and named on purpose. Skipping the file would make the
+    /// answer silently wrong about a tracked path, and reading it would let a
+    /// repository choose our allocation size — `git status` hashes every
+    /// tracked file, so a multi-GB blob is an OOM in a tool whose whole job is
+    /// to be safe to point at a repository you did not write. The path is
+    /// inside the mount and the caller can already see it, so naming it leaks
+    /// nothing and is the only way an embedder can act on this.
+    #[error(
+        "git {operation}: working-tree file '{path}' is {size} bytes, over \
+         this build's {cap}-byte cap (GitConfig limits, max_blob_bytes) — \
+         {operation} hashes every tracked file to compare it against the \
+         index, so it will not read this one. Raise the cap to include it"
+    )]
+    BlobTooLarge {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The repo-relative path of the file.
+        path: String,
+        /// Its size on disk, in bytes.
+        size: u64,
+        /// The cap it exceeded, in bytes.
+        cap: u64,
+    },
+
+    /// A tree nests deeper than this build will walk. Exit 1 — a git-level
+    /// "no" about this repository.
+    ///
+    /// Loud rather than truncated. A walk that stopped quietly at the limit
+    /// would report every path below it as absent from HEAD — a wrong answer
+    /// dressed as a real one. Walking on is not the alternative either: the
+    /// walk recurses once per level and the repository picks the number of
+    /// levels, so a few hundred nested single-entry trees, cheap to write, are
+    /// a stack overflow in a tool whose whole job is to be safe to point at a
+    /// repository you did not write.
+    ///
+    /// Only the limit is named. The depth is repository content, and so is any
+    /// path found at it.
+    #[error(
+        "git {operation}: this repository nests trees more than {limit} levels \
+         deep — {operation} walks the tree recursively, and going deeper would \
+         exhaust the stack. Nothing below that depth was read"
+    )]
+    TreeTooDeep {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The depth limit this build enforces.
+        limit: usize,
+    },
+
+    /// A `--path` argument used git pathspec magic this crate does not
+    /// implement. Exit 2 — usage, and it names the unsupported syntax rather
+    /// than silently matching nothing (B, "no git pathspec magic").
+    #[error(
+        "git {operation}: path '{spec}' uses git pathspec magic \
+         ('{magic}'), which kaish-git does not implement — use a literal path \
+         or a simple glob (*, **, ?) instead"
+    )]
+    PathspecMagic {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The offending `--path` value, verbatim.
+        spec: String,
+        /// The magic token that was recognized.
+        magic: String,
+    },
+
     /// The repository is on disk but malformed, or a file we must read is
     /// unreadable. Exit 1 — a git-level failure about this repository, not a
     /// statement about the environment.
@@ -247,8 +331,14 @@ impl GitError {
     /// cancel) and are deliberately unreachable from here.
     pub fn exit_code(&self) -> i64 {
         match self {
-            GitError::NotARepository { .. } | GitError::Repository { .. } => 1,
-            GitError::Usage { .. } | GitError::NoVerb { .. } => 2,
+            GitError::NotARepository { .. }
+            | GitError::Repository { .. }
+            | GitError::NeedsWorktree { .. }
+            | GitError::BlobTooLarge { .. }
+            | GitError::TreeTooDeep { .. } => 1,
+            GitError::Usage { .. }
+            | GitError::NoVerb { .. }
+            | GitError::PathspecMagic { .. } => 2,
             GitError::NotRealPath { .. }
             | GitError::UnsupportedRefBackend { .. }
             | GitError::UnsupportedRepositoryFormat { .. }
@@ -348,6 +438,21 @@ mod tests {
                 source: Box::new(std::io::Error::other("boom")),
             },
             GitError::VerbNotEnabled { operation: "info" },
+            GitError::NeedsWorktree {
+                operation: "status",
+                repo: repo.clone(),
+            },
+            GitError::PathspecMagic {
+                operation: "status",
+                spec: ":(exclude)src".into(),
+                magic: ":(".into(),
+            },
+            GitError::BlobTooLarge {
+                operation: "status",
+                path: "big.bin".into(),
+                size: 4096,
+                cap: 64,
+            },
         ];
         for e in &variants {
             let code = e.exit_code();
