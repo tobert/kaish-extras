@@ -69,7 +69,6 @@ async fn status_with(
     tool.execute(tool_args("status", argv), &mut ctx).await
 }
 
-
 /// The typed model out of a `--json` result.
 fn json(result: &ExecResult) -> serde_json::Value {
     assert_eq!(result.code, 0, "status failed: {}", result.err);
@@ -603,6 +602,205 @@ async fn status_on_a_bare_repo_needs_a_worktree() {
     let result = status(&mount, "/mnt/bare.git", &["--json"]).await;
     assert_eq!(result.code, 1, "bare status is a git-level no: {}", result.err);
     assert!(result.err.contains("working tree"), "{}", result.err);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Index entries as hostile paths (architecture.md E.2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Build a version-2 `.git/index` carrying exactly the given paths, bypassing
+/// git entirely.
+///
+/// Real git refuses to *write* an index entry with a `..` component, so the
+/// only way to fixture one is to lay the bytes down ourselves — and a
+/// repository handed to an agent was not necessarily written by real git.
+/// Format: `DIRC`, version, count, then per entry 62 fixed bytes (stat fields,
+/// a 20-byte oid, a flags word whose low 12 bits are the path length) followed
+/// by the path, NUL-padded so the entry length is a multiple of 8. The trailer
+/// is a hash over everything before it; `gix-index` only verifies it when the
+/// caller supplies an expected value, which we do not, so zeros are enough.
+fn write_raw_index(git_dir: &Path, paths: &[&str]) {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"DIRC");
+    out.extend_from_slice(&2u32.to_be_bytes());
+    out.extend_from_slice(&(paths.len() as u32).to_be_bytes());
+    for path in paths {
+        let start = out.len();
+        // ctime, mtime, dev, ino: zero. Nothing reads them — status hashes
+        // content rather than trusting the racy-clean stat cache.
+        out.extend_from_slice(&[0u8; 24]);
+        // mode 0o100644, then uid, gid, size.
+        out.extend_from_slice(&0o100644u32.to_be_bytes());
+        out.extend_from_slice(&[0u8; 12]);
+        // A zero oid: the entry is meant to be refused before it is compared.
+        out.extend_from_slice(&[0u8; 20]);
+        let flags = (path.len() as u16).min(0x0fff);
+        out.extend_from_slice(&flags.to_be_bytes());
+        out.extend_from_slice(path.as_bytes());
+        let padded = (out.len() - start + 8) & !7;
+        out.resize(start + padded, 0);
+    }
+    out.extend_from_slice(&[0u8; 20]);
+    std::fs::write(git_dir.join("index"), out).expect("write raw index");
+}
+
+/// An index entry whose *intermediate directory* is a symlink out of the mount
+/// must be refused (exit 4) — the escape a leaf-only `lstat` cannot see.
+///
+/// `symlink_metadata` does not follow the final component, but the kernel
+/// resolves every component before it, so `evil/x` where `evil` is a symlink
+/// lands on a host path outside the mount and `std::fs::read` returns its
+/// bytes. Nothing about the final component is a symlink, so the leaf check
+/// that guards `.git/index` itself never fires.
+#[tokio::test]
+async fn an_index_entry_under_a_symlinked_directory_is_refused() {
+    require_git();
+    let fixture = Fixture::empty();
+
+    // Outside the mount: a directory holding a file at the name the index
+    // tracks, with content the repository is not supposed to be able to learn.
+    let outside = fixture.path("outside");
+    std::fs::create_dir_all(&outside).expect("create outside");
+    write_file(&outside, "x", "OUTSIDE_WORKTREE_SECRET\n");
+
+    let mount = fixture.path("mounted");
+    let repo = mount.join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+    write_file(&repo, "evil/x", "inside\n");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "inside", "--quiet"]);
+
+    // Swap the tracked directory for a symlink out of the mount. The index is
+    // untouched and still carries `evil/x`; only an intermediate component of
+    // the path moved.
+    std::fs::remove_file(repo.join("evil/x")).expect("remove tracked file");
+    std::fs::remove_dir(repo.join("evil")).expect("remove tracked dir");
+    std::os::unix::fs::symlink(&outside, repo.join("evil")).expect("symlink evil outside");
+
+    let result = status(&mount, "/mnt/repo", &["--json"]).await;
+    assert_eq!(
+        result.code, 4,
+        "an index entry reached through a symlinked directory must be refused: \
+         {} {:?}",
+        result.err,
+        result.output()
+    );
+    assert!(result.err.contains("outside the mount"), "{}", result.err);
+    let rendered = format!("{} {:?} {:?}", result.err, result.output(), result.baggage);
+    assert!(
+        !rendered.contains("OUTSIDE_WORKTREE_SECRET")
+            && !rendered.contains(outside.to_str().expect("utf-8 path")),
+        "the refusal must not echo where the path aimed: {rendered}"
+    );
+    // And the row itself is gone: a refusal that still reported `evil/x` as
+    // modified would have leaked the hash comparison it was refusing to make.
+    assert!(!rendered.contains("evil/x"), "{rendered}");
+}
+
+/// An index entry with a `..` component must be refused (exit 4).
+///
+/// `join_repo_relative` is a pure lexical join, so `../../outside/secret`
+/// walks straight out of the working tree before anything is stat'ed. The
+/// screen is lexical on purpose: a repository whose index carries such an
+/// entry is hostile, and the honest answer to the whole operation is a
+/// refusal, not a quietly skipped row.
+#[tokio::test]
+async fn an_index_entry_with_a_parent_component_is_refused() {
+    require_git();
+    let fixture = Fixture::empty();
+
+    let outside = fixture.path("outside");
+    std::fs::create_dir_all(&outside).expect("create outside");
+    write_file(&outside, "secret", "OUTSIDE_INDEX_PATH_SECRET\n");
+
+    let mount = fixture.path("mounted");
+    let repo = mount.join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+    write_raw_index(&repo.join(".git"), &["../../outside/secret"]);
+
+    let result = status(&mount, "/mnt/repo", &["--json"]).await;
+    assert_eq!(
+        result.code, 4,
+        "an index entry with a '..' component must be refused: {} {:?}",
+        result.err,
+        result.output()
+    );
+    assert!(result.err.contains("outside the mount"), "{}", result.err);
+    let rendered = format!("{} {:?} {:?}", result.err, result.output(), result.baggage);
+    assert!(
+        !rendered.contains("OUTSIDE_INDEX_PATH_SECRET")
+            && !rendered.contains("secret")
+            && !rendered.contains(".."),
+        "the refusal must not echo the escaping entry: {rendered}"
+    );
+}
+
+/// An absolute index entry is refused by the same screen.
+///
+/// What it costs to *not* screen it is platform-shaped, which is why the
+/// screen is lexical rather than a bet on one platform's join. On unix
+/// `join_repo_relative` splits on `/` and pushes ordinary names, so
+/// `/etc/hostname` lands under the working tree and status reports a row for
+/// a path that is not in the working tree at all — a lie about the tree, and
+/// an existence probe for `<worktree>/etc/hostname`. On Windows the same push
+/// of a rooted component replaces the base outright, and the read leaves the
+/// mount for real.
+#[tokio::test]
+async fn an_absolute_index_entry_is_refused() {
+    require_git();
+    let fixture = Fixture::empty();
+    let mount = fixture.path("mounted");
+    let repo = mount.join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+    write_raw_index(&repo.join(".git"), &["/etc/hostname"]);
+
+    let result = status(&mount, "/mnt/repo", &["--json"]).await;
+    assert_eq!(
+        result.code, 4,
+        "an absolute index entry must be refused: {} {:?}",
+        result.err,
+        result.output()
+    );
+    let rendered = format!("{} {:?} {:?}", result.err, result.output(), result.baggage);
+    assert!(
+        !rendered.contains("hostname"),
+        "the refusal must not echo the escaping entry: {rendered}"
+    );
+}
+
+/// Over-refusal guard for the containment screen: a symlinked *leaf* is a
+/// legitimate tracked object (git stores the link target as the blob), and a
+/// deep in-tree path with an ordinary directory chain must still be read.
+#[tokio::test]
+async fn deep_paths_and_symlink_leaves_still_work() {
+    let repo = Repo::init("repo");
+    repo.write("a/b/c/deep.txt", "deep content\n");
+    std::os::unix::fs::symlink("a/b/c/deep.txt", repo.root.join("link"))
+        .expect("symlink leaf");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-m", "deep", "--quiet"]);
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    let j = json(&result);
+    assert_eq!(j["clean"], true, "a committed deep tree must be clean: {j}");
+
+    // And the leaf symlink is compared by its target, not by following it: a
+    // retarget is a modification, never a read of the new target.
+    std::fs::remove_file(repo.root.join("link")).expect("remove link");
+    std::os::unix::fs::symlink("a/b/c/other.txt", repo.root.join("link"))
+        .expect("retarget link");
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    let j = json(&result);
+    let link = j["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|e| e["path"] == "link")
+        .unwrap_or_else(|| panic!("expected a row for link: {j}"));
+    assert_eq!(link["worktree"], "modified", "{link}");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

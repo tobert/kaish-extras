@@ -25,7 +25,8 @@
 //! from one [`StatusReport`], so they cannot disagree.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::Path;
+use std::io::ErrorKind;
+use std::path::{Component, Path, PathBuf};
 
 use clap::{Parser, ValueEnum};
 
@@ -320,6 +321,23 @@ pub(crate) fn run(repo: &ReadRepo, opts: &StatusOptions) -> Result<StatusReport,
     if let Some(index) = &index {
         for entry in index.entries() {
             let path = entry.path(index).to_string();
+            // The lexical half of the index-path screen (E.2). Every path here
+            // is about to be joined onto the working tree, and the join is a
+            // string operation: an entry that is absolute or carries `.`,
+            // `..` or an empty component leaves the tree before anything is
+            // stat'ed. Git will not write such an entry, so an index that has
+            // one was not written by git — the honest answer is to refuse the
+            // whole operation rather than skip a row and report the rest as if
+            // the repository were sound. Non-echoing: the entry is repository
+            // content, and repeating it back is an oracle.
+            if !is_repo_relative(&path) {
+                return Err(GitError::EscapesMount {
+                    operation: OP,
+                    what: ESCAPING_INDEX_ENTRY,
+                    repo: work_dir.clone(),
+                    ceiling: repo.ceiling().to_path_buf(),
+                });
+            }
             tracked.insert(path.clone());
             let Some(class) = Class::from_index(entry.mode) else {
                 // A sparse-directory entry (cone mode). This build does not
@@ -350,7 +368,8 @@ pub(crate) fn run(repo: &ReadRepo, opts: &StatusOptions) -> Result<StatusReport,
     stage_the_index(&tree_map, &idx0, &conflicts, &mut entries);
 
     // ── Unstaged half: index stage 0 vs working tree ────────────────────────
-    unstage_the_worktree(OP, &work_dir, &idx0, opts, &mut entries)?;
+    let mut paths = WorktreePaths::new(OP, &work_dir, repo.ceiling());
+    unstage_the_worktree(OP, &mut paths, &idx0, opts, &mut entries)?;
 
     // ── Untracked and ignored: the worktree walk ────────────────────────────
     walk_untracked_and_ignored(repo, &work_dir, index.as_ref(), &tracked, opts, &mut entries)?;
@@ -505,7 +524,7 @@ fn stage_the_index(
 /// Compare each stage-0 index entry against the working tree.
 fn unstage_the_worktree(
     op: &'static str,
-    work_dir: &Path,
+    paths: &mut WorktreePaths<'_>,
     idx0: &BTreeMap<String, (ObjectId, Class)>,
     opts: &StatusOptions,
     out: &mut BTreeMap<String, Building>,
@@ -517,10 +536,17 @@ fn unstage_the_worktree(
         if *class == Class::Commit {
             continue;
         }
-        let full = join_repo_relative(work_dir, path);
+        let Some(full) = paths.leaf(path)? else {
+            // The entry's directory chain is not on disk, so neither is the
+            // entry.
+            out.entry(path.clone())
+                .or_insert_with(|| Building::empty(class.kind()))
+                .worktree = Code::Deleted;
+            continue;
+        };
         let meta = match std::fs::symlink_metadata(&full) {
             Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(e) if e.kind() == ErrorKind::NotFound => {
                 out.entry(path.clone())
                     .or_insert_with(|| Building::empty(class.kind()))
                     .worktree = Code::Deleted;
@@ -566,6 +592,143 @@ fn unstage_the_worktree(
         }
     }
     Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Index paths, contained (architecture.md E.2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// What an escaping index entry is called in a refusal. Never the entry
+/// itself: the path is repository content, and echoing it turns the refusal
+/// into an existence oracle for the host filesystem.
+const ESCAPING_INDEX_ENTRY: &str = "working tree path (an index entry)";
+
+/// Whether a repo-relative index path is one we will resolve at all.
+///
+/// The lexical screen that has to run before any `stat`. Git's own paths are
+/// `/`-separated and carry only ordinary names, so `.`, `..`, an empty
+/// component, or a leading `/` is evidence the index was not written by git.
+///
+/// Both checks earn their place. The `/` split is what sees `.` and `..`,
+/// which `Path::components` normalizes away before a caller can look at them.
+/// `Path::components` is what sees a Windows drive prefix or a backslash
+/// separator, which the `/` split reads as one ordinary name — and
+/// [`join_repo_relative`] pushes each name onto a `PathBuf`, where a rooted
+/// component replaces the base outright.
+fn is_repo_relative(rel: &str) -> bool {
+    !rel.is_empty()
+        && rel
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+        && Path::new(rel)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+/// Resolves repo-relative index paths to host paths that are provably inside
+/// the working tree.
+///
+/// The escape this closes: `symlink_metadata` does not follow the *final*
+/// component, but the kernel resolves every component before it. An index
+/// entry `evil/x` where the working tree's `evil` is a symlink out of the
+/// mount lstats a host file outside the mount and then `std::fs::read`s it —
+/// a leaf check never fires, because nothing about the leaf is a symlink.
+/// `Path::starts_with` cannot see this either; it is component-lexical, and
+/// the symlink is invisible to it.
+///
+/// So this generalizes `repo.rs`'s `open_leaf` to arbitrary depth: resolve the
+/// entry's whole *parent chain* with `canonicalize`, ceiling-check the result
+/// against the canonical working tree, and only then lstat the leaf through
+/// the canonical parent. The leaf itself may be a symlink — git tracks
+/// symlinks, and their blob is the target string, which
+/// [`read_worktree_blob`] reads with `read_link` and never follows.
+///
+/// Parents are cached because index entries share them heavily: one
+/// `canonicalize` per distinct directory rather than one per entry.
+struct WorktreePaths<'a> {
+    op: &'static str,
+    /// The canonical working tree root — the ceiling for every index entry,
+    /// and stricter than the mount root, which is where it has to be: an
+    /// index entry names a path *in the working tree*.
+    work_dir: &'a Path,
+    /// The mount root, named in the refusal. The caller already knows it.
+    ceiling: &'a Path,
+    /// Repo-relative directory → its canonical host path, or `None` for a
+    /// chain that is not on disk.
+    dirs: BTreeMap<String, Option<PathBuf>>,
+}
+
+impl<'a> WorktreePaths<'a> {
+    fn new(op: &'static str, work_dir: &'a Path, ceiling: &'a Path) -> Self {
+        WorktreePaths {
+            op,
+            work_dir,
+            ceiling,
+            dirs: BTreeMap::new(),
+        }
+    }
+
+    /// The host path to lstat `rel` at, or `None` when its directory chain is
+    /// not on disk — which is how an entry gets reported as deleted.
+    fn leaf(&mut self, rel: &str) -> Result<Option<PathBuf>, GitError> {
+        // Defense in depth: `run` screens every index path as it reads the
+        // index, so this is a second reader of the same rule rather than the
+        // only one. It costs one pass over a short string and it is what keeps
+        // this type safe to call from anywhere.
+        if !is_repo_relative(rel) {
+            return Err(self.escapes());
+        }
+        let (dir_rel, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+        let Some(dir) = self.real_dir(dir_rel)? else {
+            return Ok(None);
+        };
+        // `dir` is canonical and inside `work_dir`, and `name` is a single
+        // ordinary component, so the only symlink this path can contain is the
+        // leaf — which is exactly what lstat declines to follow.
+        Ok(Some(dir.join(name)))
+    }
+
+    /// The canonical host path of a repo-relative directory, ceiling-checked.
+    fn real_dir(&mut self, dir_rel: &str) -> Result<Option<PathBuf>, GitError> {
+        if dir_rel.is_empty() {
+            return Ok(Some(self.work_dir.to_path_buf()));
+        }
+        if let Some(cached) = self.dirs.get(dir_rel) {
+            return Ok(cached.clone());
+        }
+        let candidate = join_repo_relative(self.work_dir, dir_rel);
+        let resolved = match std::fs::canonicalize(&candidate) {
+            Ok(real) if real.starts_with(self.work_dir) => Some(real),
+            Ok(_) => return Err(self.escapes()),
+            // The two ways a directory chain is honestly absent: nothing at
+            // that name, or an ordinary file where a directory has to be. Both
+            // mean the entry is gone from the working tree, which is what the
+            // caller is told — the same semantics a missing leaf has always
+            // had here. Nothing else is swallowed.
+            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => None,
+            Err(e) => {
+                // `candidate` is `work_dir` plus screened ordinary components,
+                // so it names nothing the caller cannot already see.
+                return Err(GitError::repository(
+                    self.op,
+                    "resolving a worktree directory",
+                    &candidate,
+                    e,
+                ));
+            }
+        };
+        self.dirs.insert(dir_rel.to_string(), resolved.clone());
+        Ok(resolved)
+    }
+
+    fn escapes(&self) -> GitError {
+        GitError::EscapesMount {
+            operation: self.op,
+            what: ESCAPING_INDEX_ENTRY,
+            repo: self.work_dir.to_path_buf(),
+            ceiling: self.ceiling.to_path_buf(),
+        }
+    }
 }
 
 /// Walk the working tree for untracked and ignored entries, driven by
@@ -1022,7 +1185,6 @@ fn read_worktree_blob(
         std::fs::read(full).map_err(|e| GitError::repository(op, "reading a worktree file", full, e))
     }
 }
-
 
 #[cfg(unix)]
 fn os_path_bytes(path: &Path) -> Vec<u8> {

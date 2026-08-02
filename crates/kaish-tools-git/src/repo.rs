@@ -535,8 +535,19 @@ impl ReadRepo {
     }
 
     /// The working tree root, or `None` for a bare repository.
+    ///
+    /// Canonical and inside [`ReadRepo::ceiling`], established by `discover`.
+    /// A verb that joins repository-controlled names onto it may treat it as
+    /// its own ceiling — see `verbs::status`'s index-path containment.
     pub(crate) fn work_dir(&self) -> Option<&Path> {
         self.work_dir.as_deref()
+    }
+
+    /// The canonical mount root every path this repository reaches must stay
+    /// inside. Named in refusals; never a path the caller did not already
+    /// know.
+    pub(crate) fn ceiling(&self) -> &Path {
+        &self.ceiling
     }
 
     /// The tree HEAD's commit points at, or `None` on an unborn branch.
