@@ -1401,6 +1401,8 @@ dependencies = [
 name = "kaish-tools-git"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "clap",
  "gix-commitgraph",
  "gix-config",
  "gix-diff",
@@ -1413,6 +1415,15 @@ dependencies = [
  "gix-revision",
  "gix-revwalk",
  "gix-traverse",
+ "kaish-tool-api",
+ "kaish-types",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

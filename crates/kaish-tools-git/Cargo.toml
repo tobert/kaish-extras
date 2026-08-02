@@ -7,6 +7,12 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+# `tests/support.rs` is a shared harness, not a test target: architecture.md
+# A.1 names that path, and cargo would otherwise auto-discover it as its own
+# (empty) integration test. Turning autodiscovery off and naming the real
+# targets keeps the documented layout without a `support/mod.rs` detour.
+autotests = false
+
 # Path 2 plumbing pin set (docs/design/architecture.md, Co-architect note 3):
 # built directly on gix's low-level crates, skipping the `gix` facade crate
 # entirely. The facade links gix-command unconditionally (even with
@@ -59,3 +65,47 @@ gix-diff = { version = "=0.66.0", default-features = false, features = ["sha1"] 
 # `from_bytes_no_includes`, which retires the include.path escape by
 # construction rather than trusting gix to refuse it.
 gix-config = { version = "=0.59.0", features = ["sha1"] }
+
+# The kaish tool surface, and the crates a `Tool` impl needs to talk to it.
+# `kaish-tool-api` + `kaish-types` are the whole out-of-tree contract — this
+# crate deliberately does not depend on `kaish-kernel`, so "the public API is
+# sufficient for a non-trivial plugin" (architecture.md G.2) stays a property
+# the compiler checks rather than a claim.
+#
+# Target-scoped like the pin set above, for the same reason: on wasm this
+# crate must fail on its own `compile_error!` with nothing else to compile.
+kaish-tool-api = { workspace = true }
+kaish-types = { workspace = true }
+
+async-trait = "0.1"
+# `string` is not cosmetic here: the tool name is embedder-configurable
+# (`GitConfig::with_tool_name`), so the clap root command is built from a
+# runtime `String`, which `clap::builder::Str` only accepts with that feature.
+clap = { version = "4", features = ["derive", "string"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+tracing = "0.1"
+# `rt` for `Handle::try_current()` / `RuntimeFlavor`, `rt-multi-thread` for
+# `block_in_place` itself — both are what `block_in_place_compat` needs to
+# choose a path instead of panicking on a current-thread runtime (E.3).
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+
+# Dev-dependencies are not target-scoped: `cargo test` only ever runs on a
+# native target, where the crate compiles.
+[dev-dependencies]
+sha2 = "0.10"
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+
+[[test]]
+name = "readonly_fingerprint"
+path = "tests/readonly_fingerprint.rs"
+
+[[test]]
+name = "discovery_ceiling"
+path = "tests/discovery_ceiling.rs"
+
+[[test]]
+name = "write_shaped_identifiers"
+path = "tests/write_shaped_identifiers.rs"
