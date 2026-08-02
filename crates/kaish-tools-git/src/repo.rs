@@ -1029,27 +1029,38 @@ fn contain(
 /// turn that off (`gix_odb::store::init::Options` carries only `slots` and
 /// `use_multi_pack_index`). Left alone, a repository inside the mount could
 /// name `/anywhere/objects` and have gix search it. So the same resolver gix
-/// uses (`gix_odb::alternate::resolve`, matching its parsing, its chain
-/// following and its realpathing exactly) runs first, and every dir it yields
-/// is ceiling-checked before the store is opened. Any escape, or any error
-/// resolving the chain, refuses the store — non-echoing, since the paths came
-/// from repository content.
+/// uses (`gix_odb::alternate::resolve`) runs first, matching its parsing and
+/// its chain following, and every dir it yields is ceiling-checked before the
+/// store is opened. Any escape, or any error resolving the chain, refuses the
+/// store — non-echoing, since the paths came from repository content.
+///
+/// Two things this must get right that a first pass missed:
+///
+/// - `resolve`'s second argument is the *base* it joins a **relative**
+///   alternate entry against (confirmed against the vendored gix-odb 0.83
+///   source: it does `objects_directory.join(parsed_entry)`, then calls
+///   `gix_path::realpath_opts(&path, current_dir, ..)`), not a ceiling —
+///   `gix_odb::alternate::resolve` has no ceiling concept at all. Passing
+///   `objects_dir` is what matches gix's own resolution.
+/// - `resolve` hands back the *lexically* joined path, `..` components and
+///   all — it never realpaths its own return value, only the copy it keeps
+///   for cycle detection. A bare `dir.starts_with(ceiling)` on that raw path
+///   is not a containment check: `objects_dir` itself already starts with
+///   `ceiling`, so `objects_dir.join("../../../../outside/objects")` still
+///   *lexically* starts with `ceiling` no matter how far the `..`s actually
+///   walk — every relative alternate, escaping or not, passed unexamined.
+///   `contain` is what actually resolves each entry and ceiling-checks the
+///   result.
 fn guard_alternates(
     operation: &'static str,
     objects_dir: &Path,
     ceiling: &Path,
 ) -> Result<(), GitError> {
-    let alternates = gix_odb::alternate::resolve(objects_dir.to_path_buf(), ceiling)
-        .map_err(|_| escapes(operation, "object store alternate (objects/info/alternates)", objects_dir, ceiling))?;
+    let what = "object store alternate (objects/info/alternates)";
+    let alternates = gix_odb::alternate::resolve(objects_dir.to_path_buf(), objects_dir)
+        .map_err(|_| escapes(operation, what, objects_dir, ceiling))?;
     for dir in alternates {
-        if !dir.starts_with(ceiling) {
-            return Err(escapes(
-                operation,
-                "object store alternate (objects/info/alternates)",
-                objects_dir,
-                ceiling,
-            ));
-        }
+        contain(operation, what, objects_dir, &dir, ceiling)?;
     }
     Ok(())
 }
