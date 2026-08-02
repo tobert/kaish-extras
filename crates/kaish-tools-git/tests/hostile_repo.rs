@@ -694,6 +694,81 @@ async fn an_alternates_file_inside_the_mount_still_works() {
     );
 }
 
+/// A relative `objects/info/alternates` entry naming another in-mount object
+/// store must be accepted — the case a first pass at `guard_alternates` broke.
+///
+/// `gix_odb::alternate::resolve` joins a relative entry onto the *objects
+/// directory*, not the ceiling; a version of `guard_alternates` that passed
+/// the ceiling as the resolver's base, or that ceiling-checked the resolver's
+/// raw (lexically-joined, un-canonicalized) output instead of a canonicalized
+/// path, could get this wrong in either direction. This fixture is the
+/// positive case: `../shared/objects`, which is exactly what a repository
+/// sharing an object store with a sibling inside the mount looks like.
+#[tokio::test]
+async fn a_relative_alternates_entry_inside_the_mount_still_works() {
+    require_git();
+    let fixture = Fixture::empty();
+    let mount = fixture.path("mounted");
+
+    // The donor store, a sibling of `repo` inside the mount.
+    let shared = mount.join("shared");
+    std::fs::create_dir_all(&shared).expect("create shared donor");
+    git(&shared, &["init", "--initial-branch=main", "--quiet"]);
+    support::write_file(&shared, "d.txt", "donor\n");
+    git(&shared, &["add", "."]);
+    git(&shared, &["commit", "-m", "donor", "--quiet"]);
+
+    let repo = mount.join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+    support::write_file(&repo, "README.md", "inside\n");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "inside", "--quiet"]);
+
+    // Relative from `repo/.git/objects`: `../../../shared/.git/objects`.
+    let info = repo.join(".git/objects/info");
+    std::fs::create_dir_all(&info).expect("create objects/info");
+    std::fs::write(info.join("alternates"), "../../../shared/.git/objects\n")
+        .expect("write a relative in-mount alternates file");
+
+    let result = info_at(mount, "/mnt/repo").await;
+    assert_eq!(
+        result.code, 0,
+        "a relative alternate that resolves inside the mount is legitimate: {}",
+        result.err
+    );
+}
+
+/// The escaping twin of the test above: a relative `objects/info/alternates`
+/// entry with enough `..` to walk past the mount root entirely.
+///
+/// This is the case that shows the raw-path bug is a real refusal gap, not
+/// merely an over-refusal: `gix_odb::alternate::resolve` hands back the
+/// lexically-joined path with its `..` components intact, never realpathed.
+/// A ceiling check that does `dir.starts_with(ceiling)` on that raw value
+/// accepts *any* relative entry unconditionally, because `objects_dir` itself
+/// already starts with `ceiling` and nothing appended after that literal
+/// prefix — however many `..` it carries — can change what a lexical
+/// `starts_with` sees. Only resolving each entry with `canonicalize` before
+/// the ceiling check (what `contain` does) catches this.
+#[tokio::test]
+async fn a_relative_alternates_entry_escaping_the_mount_is_refused() {
+    let (_fixture, mount, outside_head) = sabotaged(|git_dir, _work, _outside| {
+        let info = git_dir.join("objects/info");
+        std::fs::create_dir_all(&info).expect("create objects/info");
+        // repo/.git/objects is mount/repo/.git/objects, three segments below
+        // the mount root; one more ".." walks past `mount` into the fixture
+        // scratch root, landing on `outside/.git/objects`.
+        std::fs::write(
+            info.join("alternates"),
+            "../../../../outside/.git/objects\n",
+        )
+        .expect("write a relative escaping alternates file");
+    });
+    let result = info_at(mount, "/mnt/repo").await;
+    assert_contained(&result, &outside_head);
+}
+
 /// Why there is no positive fixture for the `work_dir` ceiling check.
 ///
 /// The check is defense in depth, and this test records the reasoning it
