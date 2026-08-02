@@ -335,6 +335,100 @@ async fn a_legitimate_worktree_whose_common_dir_is_unmounted_is_refused_helpfull
     );
 }
 
+/// The symlink spelling of the same escape, and the one a lexical ceiling
+/// check cannot see.
+///
+/// `commondir` names `evil`, a symlink *inside* `.git` pointing outside the
+/// mount. Lexically `<git_dir>/evil` is inside the ceiling; to `openat` it is
+/// not. Nothing in kaish's VFS ever inspects this path — we build it ourselves
+/// out of repository content, after `resolve_real_path` has already approved
+/// the perfectly legitimate `/mnt/repo` — so the containment check `LocalFs`
+/// performs never gets a chance to run. Only canonicalizing before the
+/// comparison catches it.
+#[tokio::test]
+async fn a_symlink_inside_dot_git_cannot_smuggle_the_common_dir_out() {
+    let (_fixture, mount, outside) = escape_fixture(|git_dir, outside| {
+        std::os::unix::fs::symlink(outside.join(".git"), git_dir.join("evil"))
+            .expect("plant the symlink inside .git");
+        // Relative, and lexically innocent: `<git_dir>/evil` is under the
+        // ceiling by every string comparison there is.
+        "evil".to_string()
+    });
+
+    let result = info_at(mount, "/mnt/repo").await;
+    assert_refused_without_reading(&result, &outside);
+}
+
+/// The `..`-through-a-symlink spelling, and why the two path helpers must run
+/// in the order they do.
+///
+/// `<git_dir>/evil/..` is `<outside>` to the kernel, because `..` applies to
+/// what `evil` *points at*. It never gets that far: `resolve_common_dir`
+/// normalizes lexically first, folding `evil/..` back to `<git_dir>` before
+/// any syscall, and `canonicalize` then confirms that result is inside the
+/// ceiling. The repository reads its own data and the symlink is never
+/// traversed.
+///
+/// Lexical-then-canonical is the safe order, and this test pins it. Canonical
+/// alone would resolve `evil` and land outside; lexical alone would miss the
+/// plain `evil` spelling the previous test covers. Each helper closes the
+/// other's hole, which is why neither may be dropped as redundant.
+#[tokio::test]
+async fn a_dotdot_through_a_symlink_folds_back_inside_and_reads_our_own_data() {
+    let (_fixture, mount, outside) = escape_fixture(|git_dir, outside| {
+        // `evil` -> <outside>/.git, so to the kernel `evil/..` is <outside>.
+        std::os::unix::fs::symlink(outside.join(".git"), git_dir.join("evil"))
+            .expect("plant the symlink inside .git");
+        "evil/..".to_string()
+    });
+
+    let result = info_at(mount, "/mnt/repo").await;
+    assert_eq!(
+        result.code, 0,
+        "lexical normalization folds this back to the repository's own git \
+         dir, which is readable: {}",
+        result.err
+    );
+
+    // The assertion that matters whichever way it resolved: nothing from
+    // beyond the mount reached the caller.
+    let rendered = format!("{} {:?} {:?}", result.err, result.output(), result.baggage);
+    assert!(
+        !rendered.contains(&outside.head_oid),
+        "the outside repository's HEAD oid reached the caller: {rendered}"
+    );
+}
+
+/// A mount that is itself reached through a symlink must still work.
+///
+/// This is what over-canonicalizing would break: resolve one side of the
+/// comparison and not the other and every repository under a symlinked mount
+/// root is refused. `/tmp` on macOS is exactly this shape, so it is not a
+/// hypothetical.
+#[tokio::test]
+async fn a_symlinked_mount_root_still_works() {
+    require_git();
+    let fixture = Fixture::empty();
+    let real = fixture.path("real-mount");
+    let repo = real.join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+    support::write_file(&repo, "README.md", "inside\n");
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-m", "inside", "--quiet"]);
+
+    // The mount root handed to us is a symlink to the real directory.
+    let link = fixture.path("mount-link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink the mount root");
+
+    let result = info_at(link, "/mnt/repo").await;
+    assert_eq!(
+        result.code, 0,
+        "a mount root reached through a symlink must still resolve: {}",
+        result.err
+    );
+}
+
 /// Why there is no positive fixture for the `work_dir` ceiling check.
 ///
 /// The check is defense in depth, and this test records the reasoning it

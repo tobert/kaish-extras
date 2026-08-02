@@ -141,16 +141,16 @@ impl ReadRepo {
         })?;
 
         let (git_dir, work_dir) = path.into_repository_and_work_tree_directories();
-        let git_dir = normalize(&git_dir);
-        let work_dir = work_dir.as_deref().map(normalize);
 
         // ── The ceiling invariant ───────────────────────────────────────────
         //
-        // Every directory this type will read from must be inside the ceiling.
-        // Not "discovery is ceilinged" — discovery is only the first of three
-        // ways a path gets chosen here, and the other two are chosen by
-        // *content of the repository*, which is attacker-controlled the moment
-        // you open a repository you did not create:
+        // Every directory this type will read from must be inside the ceiling,
+        // as the operating system resolves it.
+        //
+        // Two things make that harder than one `starts_with`. First, discovery
+        // is only one of three ways a directory gets chosen here, and the
+        // other two are named by *repository content* — attacker-controlled
+        // the moment you open a repository you did not create:
         //
         //   git_dir     — discovery, but a `.git` *file* can name it
         //                 (`gitdir: /anywhere`), so it is repo-controlled too
@@ -158,12 +158,20 @@ impl ReadRepo {
         //                 is a path, absolute or `..`-bearing
         //   work_dir    — discovery's physical parent today
         //
-        // Checking only `git_dir` left `common_dir` free to redirect the
-        // config read and the object store at any host path — the escape the
-        // ceiling exists to prevent, reached without discovery ever leaving
-        // the mount. So the check is stated once, over every path, at the one
-        // place they are all known and before any of them is read.
-        let ceiling = normalize(ceiling);
+        // Second, a repository owns every byte under its own `.git`, symlinks
+        // included, and a lexical check walks straight through one: a
+        // `commondir` of `evil` where `.git/evil` is a symlink is inside the
+        // ceiling to a string comparison and outside it to `openat`. So every
+        // path — and the ceiling itself — is resolved with `canonicalize`
+        // before it is compared, and the comparison happens before any of them
+        // is read.
+        let ceiling = real_dir(operation, "mount root", ceiling)?;
+        let git_dir = real_dir(operation, "git directory", &git_dir)?;
+        let work_dir = work_dir
+            .as_deref()
+            .map(|w| real_dir(operation, "working tree", w))
+            .transpose()?;
+
         if !git_dir.starts_with(&ceiling) {
             // Two very different situations reach here, and collapsing them
             // would either leak or mislead.
@@ -196,8 +204,15 @@ impl ReadRepo {
 
         // `commondir` is read out of `git_dir`, which the check above has
         // already placed inside the ceiling — so this read is safe to make
-        // before the result is trusted.
-        let common_dir = resolve_common_dir(operation, &git_dir)?;
+        // before the result is trusted. `real_dir` is what makes the check
+        // that follows meaningful: `resolve_common_dir` only joins and
+        // normalizes lexically, and the path it produces may traverse a
+        // symlink the repository put there.
+        let common_dir = real_dir(
+            operation,
+            "common directory",
+            &resolve_common_dir(operation, &git_dir)?,
+        )?;
         if !common_dir.starts_with(&ceiling) {
             // Different from the case above, and a different code: a
             // repository *was* found inside the mount. Either it is a linked
@@ -683,9 +698,33 @@ fn resolve_common_dir(operation: &'static str, git_dir: &Path) -> Result<PathBuf
     })
 }
 
+/// Resolve a path the way the operating system will, for ceiling comparison.
+///
+/// [`normalize`] is lexical and the kernel is not, and the gap between them is
+/// an escape: `<git_dir>/link/..` is `<git_dir>` to a string walk and the
+/// parent of `link`'s *target* to `openat`. A repository controls every byte
+/// under its own `.git`, symlinks included, so a lexical ceiling check can be
+/// walked straight through — confirmed by fixture, not reasoned about.
+///
+/// kaish's own `LocalFs` canonicalizes before its containment check and
+/// returns `PermissionDenied` when the real path leaves the mount root
+/// (`kaish-vfs`, `local.rs`). Checking anything weaker here would make this
+/// crate a bypass of a guarantee the platform already enforces and tests —
+/// a worse failure than never having offered the guarantee.
+///
+/// Both sides of every comparison go through this, so a mount that is itself
+/// reached through a symlink compares equal instead of refusing everything.
+fn real_dir(operation: &'static str, what: &'static str, path: &Path) -> Result<PathBuf, GitError> {
+    std::fs::canonicalize(path)
+        .map_err(|e| GitError::repository(operation, format!("resolving the {what}"), path, e))
+}
+
 /// Lexically normalize a path: drop `.`, resolve `..` against the preceding
 /// component. Never touches the filesystem — the same discipline the kernel's
 /// own `resolve_path` follows.
+///
+/// Cheap and correct for *building* a path. Never sufficient for deciding one
+/// is inside the ceiling: [`real_dir`] is what that requires.
 fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {

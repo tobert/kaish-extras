@@ -60,22 +60,28 @@ did not create:
 | `common_dir` | `<git_dir>/commondir`, whose whole content is a path |
 | `work_dir` | discovery's physical parent |
 
-So the ceiling is checked over all three, before any of them is read.
-`tests/discovery_ceiling.rs` covers discovery; `tests/hostile_repo.rs` covers
-the two the repository names — including the refusal declining to echo the
-path it refused, since a message that repeated it back would be an oracle for
-probing the host filesystem.
+So the ceiling is checked over all three, before any of them is read — and it
+is checked against paths resolved the way the operating system resolves them,
+not lexically. A repository owns every byte under its own `.git`, symlinks
+included, and a lexical check walks straight through one: a `commondir` of
+`evil`, where `.git/evil` is a symlink, is inside the ceiling to a string
+comparison and outside it to `openat`. kaish's own `LocalFs` canonicalizes
+before its containment check, so anything weaker here would make this crate a
+bypass of a guarantee the platform already enforces.
+
+The two path helpers run lexical-first, canonical-second, and both are load
+bearing. Canonical alone would resolve a symlink that lexical `..`-folding
+makes harmless; lexical alone misses the plain symlink. `tests/hostile_repo.rs`
+pins each case, including the refusal declining to echo the path it refused —
+a message that repeated it back would be an oracle for probing the host
+filesystem.
+
+`tests/discovery_ceiling.rs` covers the discovery side.
 
 A repository whose common dir legitimately lives outside the mount (a linked
 worktree whose main repository is not mounted) is refused too, and says so,
 because under the sandbox model it genuinely cannot be read. The fix is to
 mount the common dir as well.
-
-**Known gap, not yet closed:** the ceiling check is lexical, so a symlink
-inside the mount whose target is outside it is followed. Whether to close that
-by canonicalizing under the ceiling or by refusing symlinked components is a
-design decision that belongs with kaish's own VFS policy, not with this crate
-alone; it is deliberately not fixed here.
 
 ## Tests
 
