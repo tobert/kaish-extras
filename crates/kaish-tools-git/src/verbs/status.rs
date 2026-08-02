@@ -609,20 +609,37 @@ const ESCAPING_INDEX_ENTRY: &str = "working tree path (an index entry)";
 /// `/`-separated and carry only ordinary names, so `.`, `..`, an empty
 /// component, or a leading `/` is evidence the index was not written by git.
 ///
-/// Both checks earn their place. The `/` split is what sees `.` and `..`,
-/// which `Path::components` normalizes away before a caller can look at them.
-/// `Path::components` is what sees a Windows drive prefix or a backslash
-/// separator, which the `/` split reads as one ordinary name — and
-/// [`join_repo_relative`] pushes each name onto a `PathBuf`, where a rooted
-/// component replaces the base outright.
+/// The screen runs **per `/`-separated segment**, because `/` is the only
+/// separator the code downstream knows: [`WorktreePaths::leaf`] splits on it
+/// and [`join_repo_relative`] pushes each piece onto a `PathBuf` one at a time.
+/// Screening the whole string instead would let a segment that *this platform*
+/// reads as several components through as one — `evil\secret.txt` is a single
+/// segment to the split and two components to a Windows `join`, so the
+/// intermediate `evil` would be built by a screen it never passed. Per-segment
+/// is also what keeps unix honest in the other direction: there the same name
+/// is one ordinary file, and refusing it would be a lie about a legal path.
 fn is_repo_relative(rel: &str) -> bool {
-    !rel.is_empty()
-        && rel
-            .split('/')
-            .all(|component| !component.is_empty() && component != "." && component != "..")
-        && Path::new(rel)
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
+    !rel.is_empty() && rel.split('/').all(is_ordinary_component)
+}
+
+/// Whether one `/`-separated segment is an ordinary name we will join.
+///
+/// Two independent readings, and both earn their place. The string checks see
+/// `.`, `..` and the empty segment without asking the platform anything. The
+/// `Path::components` check is the platform's own reading of the same bytes,
+/// and it is what catches a separator or a drive prefix the string checks have
+/// no way to know about — a segment that yields anything but exactly one
+/// `Normal` is one the `/` split did not really split.
+///
+/// A NUL byte is refused here rather than left to fail somewhere below. It
+/// cannot occur in a path git wrote, every syscall wrapper would reject it
+/// anyway, and a barrier that holds by coincidence is not one.
+fn is_ordinary_component(segment: &str) -> bool {
+    if segment.is_empty() || segment == "." || segment == ".." || segment.contains('\0') {
+        return false;
+    }
+    let mut components = Path::new(segment).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
 /// Resolves repo-relative index paths to host paths that are provably inside
@@ -1265,6 +1282,77 @@ mod tests {
             EntryStatus::Typechange => 'T',
             EntryStatus::Untracked => '?',
             EntryStatus::Ignored => '!',
+        }
+    }
+
+    /// The index-path screen accepts what git writes and refuses what it does
+    /// not.
+    #[test]
+    fn the_index_path_screen_accepts_only_ordinary_relative_paths() {
+        for ok in ["a", "a/b", "a/b/c.txt", "a b/c", "..hidden", "a..b"] {
+            assert!(is_repo_relative(ok), "must accept '{ok}'");
+        }
+        for bad in ["", "/", "/etc/passwd", "a//b", "../x", "a/../b", "./a", "a/."] {
+            assert!(!is_repo_relative(bad), "must refuse '{bad}'");
+        }
+    }
+
+    /// A NUL byte never reaches a syscall. It cannot appear in a real git path,
+    /// and every downstream `CString` conversion would fail on it anyway — the
+    /// barrier belongs here, where the refusal is deliberate rather than a
+    /// coincidence of the layer below.
+    #[test]
+    fn the_index_path_screen_refuses_a_nul_byte() {
+        assert!(!is_repo_relative("a\0b"));
+        assert!(!is_repo_relative("dir/a\0b"));
+        assert!(!is_repo_relative("\0"));
+    }
+
+    /// The screen must run per `/`-segment, because [`WorktreePaths::leaf`] and
+    /// [`join_repo_relative`] split on `/` and nothing else.
+    ///
+    /// On Windows a backslash is a directory separator, so `evil\secret` is one
+    /// segment to the split and two components to `PathBuf::join` — an
+    /// intermediate directory that never met the screen. On unix the same name
+    /// is one ordinary file, and refusing it would be a lie about a legal path.
+    #[test]
+    fn the_index_path_screen_is_per_slash_segment() {
+        #[cfg(windows)]
+        assert!(
+            !is_repo_relative("evil\\secret.txt"),
+            "a backslash is a separator here, so this is two unscreened components"
+        );
+        #[cfg(not(windows))]
+        assert!(
+            is_repo_relative("evil\\secret.txt"),
+            "a backslash is an ordinary character in a unix filename"
+        );
+    }
+
+    /// The same rule as a property, so it holds on whichever platform runs it:
+    /// nothing the screen accepts may contain a segment that this platform's
+    /// `Path` reads as more than one component. The `\` case is the one that
+    /// makes it bite on Windows and stay quiet on unix.
+    #[test]
+    fn no_accepted_segment_is_more_than_one_component() {
+        for rel in [
+            "a",
+            "a/b/c",
+            "evil\\secret.txt",
+            "a\\b/c\\d",
+            "C:once",
+            "\\\\server\\share",
+        ] {
+            if !is_repo_relative(rel) {
+                continue;
+            }
+            for segment in rel.split('/') {
+                assert_eq!(
+                    Path::new(segment).components().count(),
+                    1,
+                    "accepted '{rel}' has a multi-component segment '{segment}'"
+                );
+            }
         }
     }
 

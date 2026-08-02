@@ -976,8 +976,10 @@ over three primitives, not the one comparison above:
   `contain` / `guard_alternates` helpers).
 
 - **Working-tree paths named by index entries** — every stage-0 path `git
-  status` compares against the working tree: screened lexically (no absolute,
-  `.`, `..` or empty component), then its whole parent chain canonicalized and
+  status` compares against the working tree: screened lexically per
+  `/`-separated segment (each segment exactly one ordinary component, so no
+  absolute, `.`, `..`, empty, NUL, or — on a platform where `\` separates — a
+  segment that is secretly two), then its whole parent chain canonicalized and
   ceiling-checked against the working tree root before the leaf is `lstat`ed
   through that canonical parent (the `WorktreePaths` helper in
   `verbs/status.rs`). A leaf-only check is not enough here: `lstat` does not
