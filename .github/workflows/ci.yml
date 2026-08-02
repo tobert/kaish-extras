@@ -84,3 +84,119 @@ jobs:
           python3 -m http.server -d site 8137 &
           sleep 1
           deno run --allow-net --allow-run scripts/e2e.ts
+
+  git-tool:
+    name: kaish-tools-git (native)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable branch, pinned 2026-07-05
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: git-tool-native
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy -p kaish-tools-git --all-targets --locked -- -D warnings
+
+      - name: Build
+        run: cargo build -p kaish-tools-git --locked
+
+  git-tool-dependency-tripwires:
+    name: kaish-tools-git dependency tripwire (${{ matrix.pkg }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # docs/design/architecture.md §A.4/D.3: a default kaish-tools-git
+        # build must not be able to spawn a subprocess, and must not drag in
+        # a C TLS/crypto stack. Scoped `--workspace` (the whole lockfile),
+        # deliberately: these seven packages must never appear anywhere in
+        # this repo's dependency graph, not only under kaish-tools-git, so a
+        # regression introduced by any workspace member — kaish-web included
+        # — trips the same wire.
+        pkg:
+          - gix-command
+          - gix-transport
+          - gix-filter
+          - aws-lc-sys
+          - openssl-sys
+          - native-tls
+          - curl-sys
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable branch, pinned 2026-07-05
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: git-tool-tripwires
+
+      # `cargo tree -i <pkg>` exits non-zero with "did not match any
+      # packages" when the package is genuinely absent, and exits 0 and
+      # prints the reverse-dependency tree when it is present — so success
+      # is the failure case here. Distinguish "cleanly absent" from any
+      # other cargo error so a broken invocation can't pass by accident.
+      - name: Assert ${{ matrix.pkg }} is absent from the workspace lockfile
+        run: |
+          set +e
+          out=$(cargo tree -i ${{ matrix.pkg }} --workspace --locked 2>&1)
+          code=$?
+          set -e
+          echo "$out"
+          if [ "$code" -eq 0 ]; then
+            echo "::error::${{ matrix.pkg }} IS present in the dependency graph — expected absent"
+            exit 1
+          fi
+          if ! echo "$out" | grep -q "did not match any packages"; then
+            echo "::error::cargo tree failed for a reason other than a clean 'not found'"
+            exit 1
+          fi
+
+  git-tool-wasm-guard:
+    name: kaish-tools-git wasm guard fires
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable branch, pinned 2026-07-05
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: git-tool-wasm-guard
+
+      # The pin set is target-scoped to `cfg(not(target_family = "wasm"))`
+      # (see crates/kaish-tools-git/Cargo.toml) specifically so this build
+      # has zero dependencies to compile on wasm and fails on our own
+      # `compile_error!` immediately — not on gix-sec deep in the graph with
+      # an unrelated native-code error. Assert both that the build fails and
+      # that it fails with our message.
+      - name: Assert the build fails with our compile_error, not a transitive one
+        run: |
+          set +e
+          out=$(cargo build -p kaish-tools-git --target wasm32-unknown-unknown --locked 2>&1)
+          code=$?
+          set -e
+          echo "$out"
+          if [ "$code" -eq 0 ]; then
+            echo "::error::kaish-tools-git built for wasm32-unknown-unknown — the guard did not fire"
+            exit 1
+          fi
+          if ! echo "$out" | grep -q "kaish-tools-git does not build for wasm targets yet: gix-sec fails to compile on wasm32-unknown-unknown"; then
+            echo "::error::build failed, but not on our compile_error! guard — see output above"
+            exit 1
+          fi

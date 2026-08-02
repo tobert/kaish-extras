@@ -1,0 +1,61 @@
+[package]
+name = "kaish-tools-git"
+description = "A shallow, safety-first git read surface for kaish, built on gitoxide plumbing (not the gix facade) to keep spawn-capable machinery out of the dependency graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# Path 2 plumbing pin set (docs/design/architecture.md, Co-architect note 3):
+# built directly on gix's low-level crates, skipping the `gix` facade crate
+# entirely. The facade links gix-command unconditionally (even with
+# `--no-default-features`) via gix-command -> gix-transport -> gix-protocol ->
+# gix, which reintroduces subprocess-spawn machinery into a build that must
+# not have any (kaish-extras#4). This plumbing set is empirically verified
+# spawn-free: `cargo tree -i` for gix-command/gix-transport/gix-filter finds
+# nothing on this crate's dependency tree. Exact patch pins per house rule
+# (bump policy is issue #14) recorded at the minor versions the design
+# verified; do not bump without re-running the tripwires.
+#
+# Every one of these crates gates its hash implementation behind its own
+# `sha1`/`sha256` feature (gix-hash itself has `default = []` — it will not
+# even compile without one selected). None of them turn `sha1` on by
+# default, and Cargo does not infer it from a sibling crate's choice, so it
+# is requested explicitly on every edge below rather than left to unify by
+# accident.
+#
+# These are `target`-scoped, not plain `[dependencies]`, and that is load-
+# bearing, not cosmetic: `gix-discover` and `gix-config` both pull `gix-sec`,
+# which does not compile on `wasm32-unknown-unknown` (the ownership check
+# uses `geteuid`/`MetadataExt::uid`, see src/lib.rs's guard). Cargo compiles
+# a crate's dependencies before the crate itself, so if these were plain
+# dependencies, `cargo build --target wasm32-unknown-unknown` would fail on
+# `gix-sec` deep in the graph *before* ever reaching this crate's own
+# `compile_error!` — surfacing a confusing native-code error instead of the
+# one honest message naming the real blocker. Scoping the whole pin set to
+# `cfg(not(target_family = "wasm"))` means a wasm build has zero dependencies
+# to compile, so `cargo build -p kaish-tools-git --target
+# wasm32-unknown-unknown` fails fast on the guard, with only our message.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+gix-object = { version = "=0.63.0", features = ["sha1"] }
+gix-odb = { version = "=0.83.0", features = ["sha1"] }
+gix-ref = { version = "=0.66.0", features = ["sha1"] }
+gix-traverse = { version = "=0.60.0", features = ["sha1"] }
+gix-revision = { version = "=0.48.0", features = ["sha1"] }
+gix-revwalk = { version = "=0.34.0", features = ["sha1"] }
+gix-commitgraph = { version = "=0.38.0", features = ["sha1"] }
+gix-discover = { version = "=0.54.0", features = ["sha1"] }
+gix-index = { version = "=0.54.0", features = ["sha1"] }
+gix-pack = { version = "=0.73.0", features = ["sha1"] }
+# default-features = false and WITHOUT the `blob` feature: `blob` pulls in
+# gix-command (textconv/filter machinery) via its rewrite/rename tracker.
+# Losing that feature means rename detection is exact-match-only — reported
+# honestly to callers, not silently degraded (architecture.md Co-architect
+# note 3).
+gix-diff = { version = "=0.66.0", default-features = false, features = ["sha1"] }
+# `gix-config` (not `gix::config`) parses repo-local `.git/config` without
+# gix-command. We resolve `include.path` ourselves via
+# `from_bytes_no_includes`, which retires the include.path escape by
+# construction rather than trusting gix to refuse it.
+gix-config = { version = "=0.59.0", features = ["sha1"] }
