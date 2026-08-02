@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kaish-web"]
+members = ["crates/kaish-web", "crates/kaish-tools-git"]
 
 [workspace.package]
 version = "0.1.0"
