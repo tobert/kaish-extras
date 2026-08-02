@@ -224,6 +224,34 @@ pub enum GitError {
         repo: PathBuf,
     },
 
+    /// A working-tree file a verb had to read whole is larger than the
+    /// embedder's `max_blob_bytes`. Exit 1 — a git-level "no" about this
+    /// working tree.
+    ///
+    /// Loud on purpose, and named on purpose. Skipping the file would make the
+    /// answer silently wrong about a tracked path, and reading it would let a
+    /// repository choose our allocation size — `git status` hashes every
+    /// tracked file, so a multi-GB blob is an OOM in a tool whose whole job is
+    /// to be safe to point at a repository you did not write. The path is
+    /// inside the mount and the caller can already see it, so naming it leaks
+    /// nothing and is the only way an embedder can act on this.
+    #[error(
+        "git {operation}: working-tree file '{path}' is {size} bytes, over \
+         this build's {cap}-byte cap (GitConfig limits, max_blob_bytes) — \
+         {operation} hashes every tracked file to compare it against the \
+         index, so it will not read this one. Raise the cap to include it"
+    )]
+    BlobTooLarge {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The repo-relative path of the file.
+        path: String,
+        /// Its size on disk, in bytes.
+        size: u64,
+        /// The cap it exceeded, in bytes.
+        cap: u64,
+    },
+
     /// A `--path` argument used git pathspec magic this crate does not
     /// implement. Exit 2 — usage, and it names the unsupported syntax rather
     /// than silently matching nothing (B, "no git pathspec magic").
@@ -280,7 +308,8 @@ impl GitError {
         match self {
             GitError::NotARepository { .. }
             | GitError::Repository { .. }
-            | GitError::NeedsWorktree { .. } => 1,
+            | GitError::NeedsWorktree { .. }
+            | GitError::BlobTooLarge { .. } => 1,
             GitError::Usage { .. }
             | GitError::NoVerb { .. }
             | GitError::PathspecMagic { .. } => 2,
@@ -391,6 +420,12 @@ mod tests {
                 operation: "status",
                 spec: ":(exclude)src".into(),
                 magic: ":(".into(),
+            },
+            GitError::BlobTooLarge {
+                operation: "status",
+                path: "big.bin".into(),
+                size: 4096,
+                cap: 64,
             },
         ];
         for e in &variants {

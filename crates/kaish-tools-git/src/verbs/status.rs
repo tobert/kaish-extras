@@ -107,6 +107,10 @@ pub(crate) struct StatusOptions {
     pub paths: Vec<String>,
     /// The effective row cap: the smaller of `--limit` and the embedder's cap.
     pub limit: usize,
+    /// The embedder's `max_blob_bytes`. Status hashes every tracked file's
+    /// content, so this is what stands between a repository and an allocation
+    /// it chose.
+    pub max_blob_bytes: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -346,7 +350,7 @@ pub(crate) fn run(repo: &ReadRepo, opts: &StatusOptions) -> Result<StatusReport,
     stage_the_index(&tree_map, &idx0, &conflicts, &mut entries);
 
     // ── Unstaged half: index stage 0 vs working tree ────────────────────────
-    unstage_the_worktree(OP, &work_dir, &idx0, &mut entries)?;
+    unstage_the_worktree(OP, &work_dir, &idx0, opts, &mut entries)?;
 
     // ── Untracked and ignored: the worktree walk ────────────────────────────
     walk_untracked_and_ignored(repo, &work_dir, index.as_ref(), &tracked, opts, &mut entries)?;
@@ -503,6 +507,7 @@ fn unstage_the_worktree(
     op: &'static str,
     work_dir: &Path,
     idx0: &BTreeMap<String, (ObjectId, Class)>,
+    opts: &StatusOptions,
     out: &mut BTreeMap<String, Building>,
 ) -> Result<(), GitError> {
     for (path, (oid, class)) in idx0 {
@@ -550,7 +555,7 @@ fn unstage_the_worktree(
             continue;
         }
 
-        let content = read_worktree_blob(op, &full, &meta)?;
+        let content = read_worktree_blob(op, path, &full, &meta, opts.max_blob_bytes)?;
         let fs_oid = gix_object::compute_hash(gix_index::hash::Kind::Sha1, gix_object::Kind::Blob, &content)
             .map_err(|e| GitError::repository(op, "hashing a worktree file", &full, e))?;
         let changed = fs_oid != *oid || *class != fs_class;
@@ -985,19 +990,39 @@ fn join_repo_relative(base: &Path, rel: &str) -> std::path::PathBuf {
 
 /// Read a worktree path's git blob content: the file's bytes, or a symlink's
 /// target (which is what git stores as the link's blob).
+///
+/// `rel` is the repo-relative path, for the one error that names it; `full` is
+/// the contained host path [`WorktreePaths::leaf`] resolved.
+///
+/// The cap is checked against the size already in `meta`, *before* the read:
+/// `std::fs::read` sizes its buffer from the same stat, so measuring after
+/// reading would measure an allocation the repository chose. Symlinks are
+/// exempt — `read_link` returns a path, not file content, and its size is the
+/// kernel's `PATH_MAX`, not the repository's to pick.
 fn read_worktree_blob(
     op: &'static str,
+    rel: &str,
     full: &Path,
     meta: &std::fs::Metadata,
+    max_blob_bytes: u64,
 ) -> Result<Vec<u8>, GitError> {
     if meta.file_type().is_symlink() {
         let target = std::fs::read_link(full)
             .map_err(|e| GitError::repository(op, "reading a symlink", full, e))?;
         Ok(os_path_bytes(&target))
     } else {
+        if meta.len() > max_blob_bytes {
+            return Err(GitError::BlobTooLarge {
+                operation: op,
+                path: rel.to_string(),
+                size: meta.len(),
+                cap: max_blob_bytes,
+            });
+        }
         std::fs::read(full).map_err(|e| GitError::repository(op, "reading a worktree file", full, e))
     }
 }
+
 
 #[cfg(unix)]
 fn os_path_bytes(path: &Path) -> Vec<u8> {

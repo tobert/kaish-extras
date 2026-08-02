@@ -17,7 +17,7 @@ use std::sync::Arc;
 use kaish_tool_api::Tool;
 use kaish_types::{ExecResult, ToolArgs, Value};
 
-use kaish_tools_git::GitConfig;
+use kaish_tools_git::{GitConfig, Limits};
 
 use support::{git, require_git, write_file, Fixture, StrictBackend, TestCtx};
 
@@ -52,11 +52,23 @@ fn tool_args(verb: &str, argv: &[&str]) -> ToolArgs {
 
 /// Run `git status` against `mount_real` mounted at `/mnt`, from `cwd`.
 async fn status(mount_real: &Path, cwd: &str, argv: &[&str]) -> ExecResult {
+    status_with(GitConfig::read_only(), mount_real, cwd, argv).await
+}
+
+/// The same, with an embedder config the test chose — how a [`Limits`] cap is
+/// exercised without a fixture large enough to hit the default.
+async fn status_with(
+    config: GitConfig,
+    mount_real: &Path,
+    cwd: &str,
+    argv: &[&str],
+) -> ExecResult {
     let backend = Arc::new(StrictBackend::single(PathBuf::from(MOUNT), mount_real.to_path_buf()));
     let mut ctx = TestCtx::new(backend, cwd);
-    let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("read-only config");
+    let tool = kaish_tools_git::tool(config).expect("config");
     tool.execute(tool_args("status", argv), &mut ctx).await
 }
+
 
 /// The typed model out of a `--json` result.
 fn json(result: &ExecResult) -> serde_json::Value {
@@ -591,6 +603,61 @@ async fn status_on_a_bare_repo_needs_a_worktree() {
     let result = status(&mount, "/mnt/bare.git", &["--json"]).await;
     assert_eq!(result.code, 1, "bare status is a git-level no: {}", result.err);
     assert!(result.err.contains("working tree"), "{}", result.err);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The blob cap (Limits::max_blob_bytes)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A tracked file larger than the embedder's `max_blob_bytes` is a loud
+/// refusal, not an unbounded read.
+///
+/// Status hashes every tracked file's content, so an unchecked
+/// `std::fs::read` is a multi-GB allocation waiting for a repository that
+/// wants one. The path is inside the mount and the caller already knows it, so
+/// this one names itself — nothing to leak.
+#[tokio::test]
+async fn a_tracked_file_over_the_blob_cap_is_refused() {
+    let repo = Repo::init("repo");
+    repo.write("small.txt", "ok\n");
+    repo.write("big.txt", &"x".repeat(4096));
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add both", "--quiet"]);
+
+    let config = GitConfig::read_only().with_limits(Limits {
+        max_blob_bytes: 64,
+        ..Limits::default()
+    });
+    let result = status_with(config, &repo.mount(), "/mnt/repo", &["--json"]).await;
+    assert_eq!(
+        result.code, 1,
+        "an over-cap tracked file is a git-level no: {} {:?}",
+        result.err,
+        result.output()
+    );
+    assert!(result.err.contains("big.txt"), "{}", result.err);
+    assert!(result.err.contains("4096"), "{}", result.err);
+    assert!(result.err.contains("64"), "{}", result.err);
+}
+
+/// The cap's over-refusal guard: a symlink whose *target string* is long is
+/// still read, because `read_link` allocates nothing the repository controls
+/// beyond a path, and the default cap never fires on ordinary files.
+#[tokio::test]
+async fn the_blob_cap_does_not_fire_on_symlinks_or_ordinary_files() {
+    let repo = Repo::init("repo");
+    repo.write("small.txt", "ok\n");
+    std::os::unix::fs::symlink("small.txt", repo.root.join("link")).expect("symlink");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-m", "add", "--quiet"]);
+
+    let config = GitConfig::read_only().with_limits(Limits {
+        max_blob_bytes: 8,
+        ..Limits::default()
+    });
+    let result = status_with(config, &repo.mount(), "/mnt/repo", &["--json"]).await;
+    let j = json(&result);
+    assert_eq!(j["clean"], true, "a 9-char symlink target is not a blob read: {j}");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

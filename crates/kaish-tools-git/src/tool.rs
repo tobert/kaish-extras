@@ -149,6 +149,10 @@ impl GitTool {
 
         // The embedder's `max_rows` is a hard cap; `--limit` may only lower it.
         let limit = parsed.limit.min(self.config.limits().max_rows);
+        // Not lowerable by an argument: this one caps a read, not an output.
+        // Status hashes every tracked file, so it is the only thing standing
+        // between a repository and an allocation the repository picked.
+        let max_blob_bytes = self.config.limits().max_blob_bytes;
         let untracked = parsed.untracked;
         let ignored = parsed.ignored;
         let path_args = parsed.path.clone();
@@ -177,6 +181,7 @@ impl GitTool {
                 ignored,
                 paths,
                 limit,
+                max_blob_bytes,
             };
             let root = repo.root().display().to_string();
             verbs::status::run(&repo, &opts).map(|model| (model, root))
