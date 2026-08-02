@@ -42,26 +42,50 @@ const MOUNT: &str = "/mnt";
 /// integration test is a separate crate, so an exhaustive `match` on it does
 /// not compile; the closest honest equivalent is the length-and-name check
 /// below, which fails loudly the moment a verb is added without coverage.
-const VERB_MATRIX: &[(&str, &[&[&str]])] = &[(
-    "info",
-    &[
-        // Bare, from the repository root: the default everything else varies
-        // from.
-        &[],
-        // Structured output, which walks a different rendering path.
-        &["--json"],
-        // Upward discovery from a subdirectory — the capability v2 added, and
-        // the one the ceiling exists to bound.
-        &["--repo", "/mnt/main/src"],
-        // An explicit repository selector naming the root.
-        &["--repo", "/mnt/main"],
-        // A linked worktree, whose git dir is private and whose common dir is
-        // the main repository's.
-        &["--repo", "/mnt/wt-side"],
-        // Both at once, since `--json` and `--repo` bind independently.
-        &["--repo", "/mnt/wt-side", "--json"],
-    ],
-)];
+const VERB_MATRIX: &[(&str, &[&[&str]])] = &[
+    (
+        "info",
+        &[
+            // Bare, from the repository root: the default everything else
+            // varies from.
+            &[],
+            // Structured output, which walks a different rendering path.
+            &["--json"],
+            // Upward discovery from a subdirectory — the capability v2 added,
+            // and the one the ceiling exists to bound.
+            &["--repo", "/mnt/main/src"],
+            // An explicit repository selector naming the root.
+            &["--repo", "/mnt/main"],
+            // A linked worktree, whose git dir is private and whose common dir
+            // is the main repository's.
+            &["--repo", "/mnt/wt-side"],
+            // Both at once, since `--json` and `--repo` bind independently.
+            &["--repo", "/mnt/wt-side", "--json"],
+        ],
+    ),
+    (
+        "status",
+        &[
+            // Bare, over a dirty tree (staged, unstaged, untracked all present
+            // in the fixture): the index read, the worktree walk, the tree↔
+            // index compare — and none of it may touch `.git`. This is the case
+            // that catches a persisted stat-cache refresh (D.4).
+            &[],
+            // Structured output: the words path, and a different renderer.
+            &["--json"],
+            // The full untracked walk, which recurses every untracked dir.
+            &["--untracked", "all", "--json"],
+            // No untracked, and ignored included — two more walk modes.
+            &["--untracked", "no"],
+            &["--ignored", "--json"],
+            // A path filter and a hard limit, the two truncation-adjacent paths.
+            &["--path", "src", "--json"],
+            &["--limit", "1"],
+            // A linked worktree has its own index at its private git dir.
+            &["--repo", "/mnt/wt-side", "--json"],
+        ],
+    ),
+];
 
 /// Split an argv slice into the `ToolArgs` the kernel would have built.
 ///

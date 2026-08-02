@@ -16,6 +16,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use gix_object::FindExt;
 use gix_ref::file::ReferenceExt;
 
 use crate::error::GitError;
@@ -324,6 +325,16 @@ impl ReadRepo {
         // this PR makes. For the read verbs the residual is a read that lands
         // outside and almost always fails to parse as a git object, not a
         // general file-exfiltration primitive. Tracked as design input.
+        //
+        // `git status` widens this residual by exactly one shape, named so it
+        // is not silent: `gix-worktree` reads per-directory `.gitignore` files
+        // itself as it descends the working tree (`walk_untracked_and_ignored`
+        // in verbs/status.rs). Those reads are bounded by the working tree,
+        // which is ceiling-checked above; a `.gitignore` symlinked out of the
+        // mount would be followed, the same interceptability gap as gix opening
+        // an object by name. The two fixed-name leaves status opens *itself* —
+        // the index and `info/exclude` — go through `open_leaf` and are not in
+        // the carve-out.
 
         // `WriteReflog::Disable` is not an optimization. The files ref store
         // appends to a reflog on ref *writes*; we make none, and setting this
@@ -502,6 +513,138 @@ impl ReadRepo {
             }
         }
         Ok(count)
+    }
+
+    // ── Accessors the status composition reads through (B.2) ────────────────
+    //
+    // These lend `git status` the raw materials it hand-composes from — the
+    // index, the HEAD tree id, `info/exclude`, and the object store — with the
+    // ceiling invariant already enforced on every fixed-name leaf they open.
+    // `objects()` lends the odb handle to a sibling module, not to a caller
+    // outside the crate; it is read-only in practice, and the
+    // `write_shaped_identifiers` scan (D.1) is what keeps it that way.
+
+    /// The object store, for reading trees and blobs.
+    pub(crate) fn objects(&self) -> &gix_odb::Handle {
+        &self.objects
+    }
+
+    /// The common directory (`objects/`, `refs/`, `info/` live here).
+    pub(crate) fn common_dir(&self) -> &Path {
+        &self.common_dir
+    }
+
+    /// The working tree root, or `None` for a bare repository.
+    pub(crate) fn work_dir(&self) -> Option<&Path> {
+        self.work_dir.as_deref()
+    }
+
+    /// The tree HEAD's commit points at, or `None` on an unborn branch.
+    ///
+    /// The staged half of `git status` diffs this tree against the index; an
+    /// unborn HEAD (`git init` then nothing) has no commit and therefore no
+    /// tree, which is a first-class state, not an error — every staged file is
+    /// then an addition against the empty tree.
+    pub(crate) fn head_tree_id(&self) -> Result<Option<gix_index::hash::ObjectId>, GitError> {
+        let head = self.refs.find("HEAD").map_err(|e| {
+            GitError::repository(self.operation, "reading HEAD", &self.git_dir, e)
+        })?;
+
+        if let gix_ref::Target::Symbolic(name) = &head.target {
+            let exists = self
+                .refs
+                .try_find(name.as_ref())
+                .map_err(|e| {
+                    GitError::repository(self.operation, "reading HEAD's branch", &self.common_dir, e)
+                })?
+                .is_some();
+            if !exists {
+                return Ok(None);
+            }
+        }
+
+        let mut head = head;
+        let commit_id = head
+            .peel_to_id(&self.refs, &self.objects)
+            .map_err(|e| GitError::repository(self.operation, "resolving HEAD", &self.git_dir, e))?;
+
+        let mut buf = Vec::new();
+        let data = self.objects.find(&commit_id, &mut buf).map_err(|e| {
+            GitError::repository(self.operation, "reading the HEAD commit", &self.git_dir, e)
+        })?;
+        let tree_id = match data.decode().map_err(|e| {
+            GitError::repository(self.operation, "decoding the HEAD commit", &self.git_dir, e)
+        })? {
+            gix_object::ObjectRef::Commit(commit) => commit.tree(),
+            // HEAD peeled to something that is not a commit — a tag of a tree,
+            // say. Nothing this build reads produces that, and treating it as a
+            // commit would be a wrong answer.
+            other => {
+                return Err(GitError::repository(
+                    self.operation,
+                    "resolving HEAD to a commit",
+                    &self.git_dir,
+                    std::io::Error::other(format!("HEAD is a {}, not a commit", other.kind())),
+                ))
+            }
+        };
+        Ok(Some(tree_id))
+    }
+
+    /// The parsed index, or `None` when the repository has never had one.
+    ///
+    /// Read as bytes through [`open_leaf`], so an `index` symlinked out of the
+    /// mount is refused, not followed — the containment invariant `discover`
+    /// holds for every leaf, extended to the index. The index is per-worktree,
+    /// so it lives at `<git_dir>/index` for a linked worktree exactly as for
+    /// the main one. Decoding never writes: a refreshed stat-cache is not
+    /// persisted, which is what keeps the fingerprint test (D.4) green over
+    /// status.
+    pub(crate) fn open_index(&self) -> Result<Option<gix_index::State>, GitError> {
+        let Some(path) = open_leaf(self.operation, "index (.git/index)", &self.git_dir, "index", &self.ceiling)?
+            .path()
+            .map(Path::to_path_buf)
+        else {
+            return Ok(None);
+        };
+        let bytes = std::fs::read(&path)
+            .map_err(|e| GitError::repository(self.operation, "reading the index", &path, e))?;
+        let (state, _checksum) = gix_index::State::from_bytes(
+            &bytes,
+            // Zero, deliberately: we never write the index back and detect
+            // modification by hashing, not by the racy-clean stat cache, so the
+            // pass-through timestamp is unused.
+            filetime::FileTime::zero(),
+            gix_index::hash::Kind::Sha1,
+            gix_index::decode::Options::default(),
+        )
+        .map_err(|e| GitError::repository(self.operation, "decoding the index", &path, e))?;
+        Ok(Some(state))
+    }
+
+    /// The bytes of `info/exclude`, or empty when it is absent.
+    ///
+    /// Both `info/` and the `exclude` leaf under it go through [`open_leaf`], so
+    /// an `exclude` symlinked out of the mount is refused rather than read. The
+    /// per-directory `.gitignore` files are read by `gix-worktree` internally
+    /// as it descends — that is the documented residual carve-out (see the
+    /// containment note in `discover`), the same shape as gix opening objects
+    /// by name, and it stays inside the ceiling because the working tree does.
+    pub(crate) fn read_info_exclude(&self) -> Result<Vec<u8>, GitError> {
+        let Some(info) = open_leaf(self.operation, "info directory", &self.common_dir, "info", &self.ceiling)?
+            .path()
+            .map(Path::to_path_buf)
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(exclude) = open_leaf(self.operation, "info/exclude", &info, "exclude", &self.ceiling)?
+            .path()
+            .map(Path::to_path_buf)
+        else {
+            return Ok(Vec::new());
+        };
+        std::fs::read(&exclude)
+            .map_err(|e| GitError::repository(self.operation, "reading info/exclude", &exclude, e))
     }
 
     /// How many submodules the working tree's `.gitmodules` declares.

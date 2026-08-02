@@ -117,6 +117,106 @@ impl GitTool {
         }
         result
     }
+
+    #[tracing::instrument(
+        level = "info",
+        name = "git.verb",
+        skip_all,
+        fields(verb = "status", repo)
+    )]
+    async fn run_status(
+        &self,
+        args: ToolArgs,
+        consumed: usize,
+        ctx: &mut dyn ToolCtx,
+    ) -> ExecResult {
+        const OP: &str = "status";
+        if let Err(e) = verb_enabled(&self.config, Verb::Status, OP) {
+            return failure(e);
+        }
+
+        let parsed = match parse_leaf::<verbs::status::StatusArgs>(&args, consumed, OP) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+
+        let resolved = match resolve_repo_paths(OP, ctx, parsed.repo.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return failure(e),
+        };
+        tracing::Span::current().record("repo", tracing::field::display(resolved.real.display()));
+
+        // The embedder's `max_rows` is a hard cap; `--limit` may only lower it.
+        let limit = parsed.limit.min(self.config.limits().max_rows);
+        let untracked = parsed.untracked;
+        let ignored = parsed.ignored;
+        let path_args = parsed.path.clone();
+
+        let outcome = block_in_place_compat(move || {
+            let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
+            // `--path` values are relative to the caller's cwd within the repo,
+            // exactly as git's pathspecs are. Prefix them with the cwd's
+            // repo-relative directory so a filter from a subdirectory means what
+            // it says. A pathspec-magic value (leading `:`) is left untouched so
+            // the parser can reject it by name rather than hide it behind a
+            // prefix.
+            let prefix = cwd_prefix(&resolved.real, repo.root());
+            let paths = path_args
+                .iter()
+                .map(|spec| {
+                    if prefix.is_empty() || spec.starts_with(':') {
+                        spec.clone()
+                    } else {
+                        format!("{prefix}/{spec}")
+                    }
+                })
+                .collect();
+            let opts = verbs::status::StatusOptions {
+                untracked,
+                ignored,
+                paths,
+                limit,
+            };
+            let root = repo.root().display().to_string();
+            verbs::status::run(&repo, &opts).map(|model| (model, root))
+        });
+
+        let (model, repo_root) = match outcome {
+            Ok(pair) => pair,
+            Err(e) => return failure(e),
+        };
+
+        let mut result = ExecResult::with_output(crate::render::status(&model));
+        // Truncation is always reported — a stderr note beside the JSON's
+        // `truncated: true` (E.5). The exit code stays 0: a truncated status is
+        // a successful answer that ran up against `--limit`.
+        if model.truncated {
+            result.err = format!(
+                "git status: output truncated at {} entries (--limit); \
+                 'truncated' is true in --json",
+                model.entries.len()
+            );
+        }
+        result.baggage.insert("git.repo".to_string(), repo_root);
+        if let Some(oid) = &model.head.oid {
+            result.baggage.insert("git.head_oid".to_string(), oid.clone());
+        }
+        result
+    }
+}
+
+/// The repo-relative, slash-separated directory of `real` within `root`, or
+/// empty when `real` is the root itself or cannot be placed under it.
+fn cwd_prefix(real: &Path, root: &Path) -> String {
+    let canonical = std::fs::canonicalize(real).unwrap_or_else(|_| real.to_path_buf());
+    let Ok(rest) = canonical.strip_prefix(root) else {
+        return String::new();
+    };
+    rest.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[async_trait]
@@ -134,6 +234,9 @@ impl Tool for GitTool {
         if self.config.has(Verb::Info) {
             cmd = cmd.subcommand(verbs::info::InfoArgs::command().name("info"));
         }
+        if self.config.has(Verb::Status) {
+            cmd = cmd.subcommand(verbs::status::StatusArgs::command().name("status"));
+        }
         schema_tree_from_clap(&cmd, self.config.tool_name(), DESCRIPTION, EXAMPLES)
     }
 
@@ -148,6 +251,7 @@ impl Tool for GitTool {
 
         match verb.as_str() {
             "info" => self.run_info(args, consumed, ctx).await,
+            "status" => self.run_status(args, consumed, ctx).await,
             // Unreachable: `route` only returns names it found in the schema,
             // and the schema is built from the verbs this file dispatches.
             // Reached anyway means a verb was added to `schema()` without a
@@ -386,8 +490,12 @@ mod tests {
 
     #[test]
     fn tool_rejects_a_config_with_no_verbs() {
-        let err = tool(GitConfig::read_only().without_verb(Verb::Info))
-            .expect_err("a tool with no verbs cannot run anything");
+        let err = tool(
+            GitConfig::read_only()
+                .without_verb(Verb::Info)
+                .without_verb(Verb::Status),
+        )
+        .expect_err("a tool with no verbs cannot run anything");
         assert_eq!(err, ConfigError::NoVerbsEnabled);
     }
 
@@ -395,6 +503,14 @@ mod tests {
     fn schema_carries_only_the_enabled_verbs() {
         let full = tool(GitConfig::read_only()).expect("read-only config").schema();
         let names: Vec<&str> = full.subcommands.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["info", "status"]);
+
+        // Subtract one, and only the other survives — the schema is built from
+        // the config, so a disabled verb is absent, not merely rejected.
+        let narrowed = tool(GitConfig::read_only().without_verb(Verb::Status))
+            .expect("info alone is a valid config")
+            .schema();
+        let names: Vec<&str> = narrowed.subcommands.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["info"]);
     }
 
@@ -403,9 +519,11 @@ mod tests {
     #[test]
     fn a_subtracted_verb_is_absent_from_the_schema_and_unroutable() {
         // `tool()` refuses an empty verb set, so exercise the schema builder
-        // directly with a config that has the verb subtracted.
+        // directly with a config that has every verb subtracted.
         let git = GitTool {
-            config: GitConfig::read_only().without_verb(Verb::Info),
+            config: GitConfig::read_only()
+                .without_verb(Verb::Info)
+                .without_verb(Verb::Status),
         };
         let schema = git.schema();
         assert!(
@@ -526,7 +644,7 @@ mod tests {
         let caps = git.capabilities();
         assert_eq!(caps.limits.max_rows, 7);
         assert_eq!(caps.profiles, ["read"]);
-        assert_eq!(caps.verbs, ["info"]);
+        assert_eq!(caps.verbs, ["info", "status"]);
     }
 
 }

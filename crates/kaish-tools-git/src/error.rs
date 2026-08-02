@@ -210,6 +210,37 @@ pub enum GitError {
         repo: PathBuf,
     },
 
+    /// A verb that needs a working tree was run against a bare repository.
+    /// Exit 1 — a git-level "no", the same class git returns for
+    /// `git status` in a bare repo.
+    #[error(
+        "git {operation}: repository '{repo}' is bare — {operation} needs a \
+         working tree, and a bare repository has none"
+    )]
+    NeedsWorktree {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The bare repository.
+        repo: PathBuf,
+    },
+
+    /// A `--path` argument used git pathspec magic this crate does not
+    /// implement. Exit 2 — usage, and it names the unsupported syntax rather
+    /// than silently matching nothing (B, "no git pathspec magic").
+    #[error(
+        "git {operation}: path '{spec}' uses git pathspec magic \
+         ('{magic}'), which kaish-git does not implement — use a literal path \
+         or a simple glob (*, **, ?) instead"
+    )]
+    PathspecMagic {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The offending `--path` value, verbatim.
+        spec: String,
+        /// The magic token that was recognized.
+        magic: String,
+    },
+
     /// The repository is on disk but malformed, or a file we must read is
     /// unreadable. Exit 1 — a git-level failure about this repository, not a
     /// statement about the environment.
@@ -247,8 +278,12 @@ impl GitError {
     /// cancel) and are deliberately unreachable from here.
     pub fn exit_code(&self) -> i64 {
         match self {
-            GitError::NotARepository { .. } | GitError::Repository { .. } => 1,
-            GitError::Usage { .. } | GitError::NoVerb { .. } => 2,
+            GitError::NotARepository { .. }
+            | GitError::Repository { .. }
+            | GitError::NeedsWorktree { .. } => 1,
+            GitError::Usage { .. }
+            | GitError::NoVerb { .. }
+            | GitError::PathspecMagic { .. } => 2,
             GitError::NotRealPath { .. }
             | GitError::UnsupportedRefBackend { .. }
             | GitError::UnsupportedRepositoryFormat { .. }
@@ -348,6 +383,15 @@ mod tests {
                 source: Box::new(std::io::Error::other("boom")),
             },
             GitError::VerbNotEnabled { operation: "info" },
+            GitError::NeedsWorktree {
+                operation: "status",
+                repo: repo.clone(),
+            },
+            GitError::PathspecMagic {
+                operation: "status",
+                spec: ":(exclude)src".into(),
+                magic: ":(".into(),
+            },
         ];
         for e in &variants {
             let code = e.exit_code();

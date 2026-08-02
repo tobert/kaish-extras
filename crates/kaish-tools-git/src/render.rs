@@ -8,7 +8,7 @@
 
 use kaish_types::{OutputData, OutputNode};
 
-use crate::model::RepoInfo;
+use crate::model::{RepoInfo, StatusReport};
 
 /// Render [`RepoInfo`] as a `FIELD`/`VALUE` table carrying the full object as
 /// `rich_json`.
@@ -69,6 +69,40 @@ pub fn repo_info(info: &RepoInfo) -> OutputData {
         // and losing --json silently would be worse than saying so.
         Err(e) => {
             tracing::warn!(error = %e, "git info: could not build the --json payload");
+            table
+        }
+    }
+}
+
+/// Render a [`StatusReport`] as the porcelain `XY`/`PATH` table (B.2), carrying
+/// the full word-valued model as `rich_json`.
+///
+/// Letters in the text surface, words in JSON (decision 9): the table speaks
+/// git's `XY` pair — the spelling deep in model training — while `--json`
+/// carries `"index":"modified"` and friends. Both are derived from one
+/// `StatusReport`, so they cannot disagree.
+pub fn status(report: &StatusReport) -> OutputData {
+    let rows: Vec<OutputNode> = report
+        .entries
+        .iter()
+        .map(|entry| {
+            let xy: String = entry.porcelain.iter().collect();
+            let path = match &entry.orig_path {
+                Some(orig) => format!("{} ← {orig}", entry.path),
+                None => entry.path.clone(),
+            };
+            OutputNode::new(xy).with_cells(vec![path])
+        })
+        .collect();
+
+    let table = OutputData::table(vec!["XY".to_string(), "PATH".to_string()], rows);
+    match serde_json::to_value(report) {
+        Ok(json) => table.with_rich_json(json),
+        // A model of owned scalars cannot fail to serialize in practice; the
+        // table is still a correct answer, and losing --json silently would be
+        // worse than saying so.
+        Err(e) => {
+            tracing::warn!(error = %e, "git status: could not build the --json payload");
             table
         }
     }

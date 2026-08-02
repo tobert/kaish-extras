@@ -112,6 +112,124 @@ pub struct RepoInfo {
     pub capabilities: Capabilities,
 }
 
+/// One column of a status entry, in JSON's self-describing words (B.2).
+///
+/// The text surface speaks git's porcelain `XY` letters; this is the other
+/// half of decision 9 — words in JSON, so a script never has to know that a
+/// leading space means "unmodified" or that `?` means "untracked". Each of the
+/// two columns (`index`, `worktree`) takes exactly one of these.
+///
+/// There is deliberately no `unmerged`/`conflicted` word: a conflict is the
+/// `conflicted` boolean on the entry (B.2), and this column then carries the
+/// side's own change (`modified`, `added`, `deleted`) so the two halves of the
+/// model never disagree about *what* changed, only about whether it conflicts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum EntryStatus {
+    /// No change on this side (`git`'s space in the `XY` pair).
+    None,
+    /// Added: present on this side, absent from the comparison base.
+    Added,
+    /// Modified: content changed.
+    Modified,
+    /// Deleted: removed on this side.
+    Deleted,
+    /// Renamed from [`StatusEntry::orig_path`] — exact-match only (B.2), never
+    /// a similarity score.
+    Renamed,
+    /// Copied. Never produced by this build — copy detection needs the
+    /// `gix-diff` `blob` feature, which is exactly what pulls `gix-command`
+    /// (A.2). The variant exists so the word set is git-shaped.
+    Copied,
+    /// The item's type changed (file ↔ symlink ↔ submodule).
+    Typechange,
+    /// Untracked: in the worktree, in neither the index nor `.gitignore`.
+    Untracked,
+    /// Ignored: matched by a `.gitignore` / `info/exclude` rule.
+    Ignored,
+}
+
+/// What kind of thing a status entry describes.
+///
+/// `commit` is how a submodule gitlink appears (B.6 names it plainly); `dir` is
+/// how an untracked directory appears in `--untracked normal`, where git
+/// collapses a wholly-untracked directory to a single `path/` row rather than
+/// listing its contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum EntryKind {
+    /// A regular file (executable or not).
+    File,
+    /// A symbolic link.
+    Symlink,
+    /// A submodule gitlink.
+    Commit,
+    /// A directory — only produced for a collapsed untracked directory.
+    Dir,
+}
+
+/// One changed path in a [`StatusReport`] (architecture.md B.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StatusEntry {
+    /// The repository-relative path, slash-separated.
+    pub path: String,
+    /// The rename source, set only when `index` or `worktree` is
+    /// [`EntryStatus::Renamed`]. Exact-match renames only.
+    pub orig_path: Option<String>,
+    /// What kind of item this is.
+    pub kind: EntryKind,
+    /// The staged column (index vs `HEAD`).
+    pub index: EntryStatus,
+    /// The unstaged column (worktree vs index).
+    pub worktree: EntryStatus,
+    /// Whether this path is unmerged (a nonzero index stage).
+    pub conflicted: bool,
+    /// The two porcelain letters this entry renders as, `XY` (B.2). Carried on
+    /// the model so the text renderer and the JSON words are computed from one
+    /// source; skipped from `--json`, which speaks words, not letters.
+    #[serde(skip)]
+    pub porcelain: [char; 2],
+}
+
+/// The five running counts a status reports (architecture.md B.2).
+///
+/// `staged` and `unstaged` count *columns*, not entries: a path modified and
+/// re-modified without staging (git's `MM`) counts in both, exactly as
+/// `git status` totals it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub struct StatusTotals {
+    /// Entries with a staged change (a non-empty index column).
+    pub staged: usize,
+    /// Entries with an unstaged change (a non-empty worktree column).
+    pub unstaged: usize,
+    /// Untracked entries.
+    pub untracked: usize,
+    /// Ignored entries (only ever nonzero with `--ignored`).
+    pub ignored: usize,
+    /// Unmerged (conflicted) entries.
+    pub conflicted: usize,
+}
+
+/// `git status`'s result (architecture.md B.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StatusReport {
+    /// Where HEAD points.
+    pub head: Head,
+    /// The changed paths, capped at the effective `--limit`.
+    pub entries: Vec<StatusEntry>,
+    /// The running counts, taken over the *untruncated* set — a total is a
+    /// fact about the repository, not about how many rows fit under `--limit`.
+    pub totals: StatusTotals,
+    /// Whether the working tree is clean: no staged, unstaged, untracked or
+    /// conflicted changes. Ignored entries do not make a tree dirty.
+    pub clean: bool,
+    /// Whether the entry list was truncated by `--limit`. Always reported,
+    /// never silent (E.5); a stderr note fires alongside it.
+    pub truncated: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +290,57 @@ mod tests {
             assert!(
                 json["capabilities"].get(key).is_some(),
                 "capabilities.{key} is missing: {json}"
+            );
+        }
+    }
+
+    /// B.2 in JSON speaks words, and the porcelain letters must not leak into
+    /// it — the letters are the *text* surface, and a script reading `--json`
+    /// should never have to know that `?` means untracked.
+    #[test]
+    fn status_entry_serializes_words_not_letters() {
+        let entry = StatusEntry {
+            path: "src/lib.rs".into(),
+            orig_path: None,
+            kind: EntryKind::File,
+            index: EntryStatus::Modified,
+            worktree: EntryStatus::None,
+            conflicted: false,
+            porcelain: ['M', ' '],
+        };
+        let json = serde_json::to_value(&entry).expect("StatusEntry serializes");
+        assert_eq!(json["index"], "modified");
+        assert_eq!(json["worktree"], "none");
+        assert_eq!(json["kind"], "file");
+        assert!(json["orig_path"].is_null());
+        assert!(
+            json.get("porcelain").is_none(),
+            "the porcelain letters must not appear in JSON: {json}"
+        );
+    }
+
+    /// The report's key names are the B.2 wire contract, same as B.1's.
+    #[test]
+    fn status_report_serializes_with_the_documented_keys() {
+        let report = StatusReport {
+            head: Head {
+                branch: Some("main".into()),
+                oid: Some("0".repeat(40)),
+                detached: false,
+            },
+            entries: vec![],
+            totals: StatusTotals::default(),
+            clean: true,
+            truncated: false,
+        };
+        let json = serde_json::to_value(&report).expect("StatusReport serializes");
+        for key in ["head", "entries", "totals", "clean", "truncated"] {
+            assert!(json.get(key).is_some(), "B.2 key {key} missing: {json}");
+        }
+        for key in ["staged", "unstaged", "untracked", "ignored", "conflicted"] {
+            assert!(
+                json["totals"].get(key).is_some(),
+                "totals.{key} missing: {json}"
             );
         }
     }
