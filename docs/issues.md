@@ -44,6 +44,33 @@ fixture asserted against real `git status --porcelain` before fixing.
   `gix_odb::alternate::resolve` (raised by gemini-pro in the PR #23 re-review;
   behavioral, do not reason it out — build the fixture).
 
+## git log — known limitations (accepted for the read profile)
+
+- **L1 — `--stat` does not detect renames.** A renamed file is counted as one
+  deletion plus one addition, so `files` is 2 and the line counts are the whole
+  file twice. `status` has exact-match rename pairing and `log` does not,
+  because the tree comparison here is per-commit and pairing would need the same
+  oid-reappearance pass run against every commit walked. Git's own default
+  (`git log --stat` without `-M`) also does not detect renames, so this matches
+  the tool an agent is comparing against — but it is a divergence from `status`
+  within our own surface, which is the part worth closing. Revisit when PR 5
+  (`diff`) factors the rename pairing out of `status`.
+
+- **L2 — a filtered `log` walks history rather than stopping at `--limit`.**
+  No filter (`--author`, `--path`, a date window) is sorted along ancestry, so
+  the walk cannot stop when it has enough matches — it stops when it has enough
+  matches *or* has examined `MAX_COMMITS_EXAMINED` (100k) commits. On a large
+  repository an unmatched filter therefore pays a full-history walk and reports
+  `truncated: true`. Correct and bounded, but a commit-graph-backed date cutoff
+  (`gix-traverse`'s `ByCommitTimeCutoff`) would make the date case much cheaper.
+  Not worth the complexity until a real repository makes it hurt.
+
+- **L3 — `--stat` line counts read whole blobs.** Counting lines needs both
+  sides of every changed file in memory, bounded per blob by the embedder's
+  `max_blob_bytes` but not in aggregate across a commit. A commit touching very
+  many just-under-cap files is a large transient allocation. The row cap bounds
+  commits, not bytes per commit.
+
 ## Upstream
 
 - **R4 — unbounded recursion decoding the index cache-tree (gix-index).**
