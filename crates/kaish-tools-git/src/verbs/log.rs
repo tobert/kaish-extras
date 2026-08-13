@@ -208,25 +208,54 @@ pub(crate) fn parse_date(operation: &'static str, flag: &str, value: &str) -> Re
         return Ok(ts.as_second());
     }
     // A bare civil date means midnight UTC, stated rather than inferred.
-    if let Ok(date) = value.parse::<jiff::civil::Date>() {
-        let midnight = date.to_datetime(jiff::civil::Time::midnight());
-        // A civil date at UTC always maps to exactly one instant — there is no
-        // DST gap in UTC — so this cannot fail for any date `jiff` parsed.
-        if let Ok(zoned) = midnight.to_zoned(jiff::tz::TimeZone::UTC) {
-            return Ok(zoned.timestamp().as_second());
+    //
+    // The shape is checked HERE rather than left to `jiff`, because
+    // `civil::Date`'s parser also accepts a full datetime and returns just its
+    // date: `"2026-08-01T10:00:00"` would parse, and the caller's 10:00 would
+    // vanish into midnight without a word. Requiring exactly `YYYY-MM-DD` means
+    // a timestamp that failed the RFC3339 parse above — because it carries no
+    // zone — falls through to the refusal instead of being silently rounded
+    // down to its date. `jiff` still validates that the date is real, so
+    // `2026-02-30` is refused rather than shifted.
+    if is_plain_date(value) {
+        if let Ok(date) = value.parse::<jiff::civil::Date>() {
+            let midnight = date.to_datetime(jiff::civil::Time::midnight());
+            // A civil date at UTC always maps to exactly one instant — there is
+            // no DST gap in UTC — so this cannot fail for a date jiff parsed.
+            if let Ok(zoned) = midnight.to_zoned(jiff::tz::TimeZone::UTC) {
+                return Ok(zoned.timestamp().as_second());
+            }
         }
     }
     Err(GitError::Usage {
         operation,
         message: format!(
             "{flag} '{value}' is not a date this build accepts — give RFC3339 \
-             ('2026-08-01T10:00:00Z', or with an offset) or 'YYYY-MM-DD' \
-             (midnight UTC). Relative forms like '2 weeks ago' are git's \
-             approxidate, which kaish-git does not parse: it resolves what it \
-             cannot understand to the current time, which would answer with a \
+             with a zone ('2026-08-01T10:00:00Z', or an offset like \
+             '+09:00'), or 'YYYY-MM-DD' for midnight UTC. A timestamp with no \
+             zone is refused rather than guessed at, and so are relative forms \
+             like '2 weeks ago': that is git's approxidate, which resolves what \
+             it cannot understand to the current time and would answer with a \
              window you did not ask for"
         ),
     })
+}
+
+/// Whether a string is exactly the documented `YYYY-MM-DD` spelling.
+///
+/// Shape only — whether those digits name a real day is `jiff`'s job. This
+/// exists to keep the plain-date branch from swallowing spellings the surface
+/// does not document (a zoneless timestamp, basic ISO `20260801`), each of
+/// which would otherwise resolve to an instant the caller did not ask for.
+fn is_plain_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b
+            .iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -739,6 +768,48 @@ mod tests {
         }
     }
 
+    /// A timestamp with no zone must be REFUSED, not silently read as a date.
+    ///
+    /// Found by probe, not by reasoning: `jiff`'s `civil::Date` parser happily
+    /// accepts a full datetime string and hands back just the date, so
+    /// `--since 2026-08-01T10:00:00` was accepted as midnight — the caller's
+    /// 10:00 dropped on the floor, no complaint, a ten-hour error in the
+    /// window. That is precisely the confidently-wrong answer this whole gate
+    /// exists to prevent, arriving through our own parser instead of git's
+    /// approxidate.
+    #[test]
+    fn a_zoneless_timestamp_is_refused_not_truncated_to_a_date() {
+        for bad in [
+            "2026-08-01T10:00:00",
+            "2026-08-01T10:00:00.500",
+            "2026-08-01T00:00:00",
+        ] {
+            let err = parse_date("log", "--since", bad)
+                .expect_err("a timestamp with no zone must be refused");
+            assert_eq!(err.exit_code(), 2, "{bad}");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("zone") || msg.contains("offset"),
+                "the refusal says what is missing: {msg}"
+            );
+        }
+    }
+
+    /// The plain-date form is exactly `YYYY-MM-DD` and nothing adjacent. Basic
+    /// ISO (`20260801`) resolves to the right instant but is outside the
+    /// documented surface, and accepting undocumented spellings is how a
+    /// surface stops meaning what it says.
+    #[test]
+    fn only_the_documented_plain_date_spelling_is_accepted() {
+        assert!(parse_date("log", "--since", "2026-08-01").is_ok());
+        for bad in ["20260801", "2026-8-1", "2026/08/01", "2026-08-01T", "2026-08"] {
+            assert!(
+                parse_date("log", "--since", bad).is_err(),
+                "{bad} is not the documented spelling"
+            );
+        }
+    }
+
     /// A summary-only message has an empty body, and a body keeps its interior
     /// blank lines — only the separator and the trailing newline go.
     #[test]
@@ -752,3 +823,4 @@ mod tests {
         assert_eq!(b, "body line one\n\nbody line two");
     }
 }
+
