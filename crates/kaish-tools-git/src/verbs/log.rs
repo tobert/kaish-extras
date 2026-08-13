@@ -49,6 +49,13 @@ use crate::model::{CommitInfo, LogReport, Signature, StatSummary};
 use crate::pathfilter::PathFilter;
 use crate::repo::ReadRepo;
 
+/// Where `git log` starts when the caller names no revision.
+///
+/// Named rather than inlined because the dispatcher compares against it to
+/// tell "the caller wrote `--rev HEAD`" from "the caller wrote nothing" — the
+/// difference between a redundant argument and a conflicting one.
+pub(crate) const DEFAULT_REV: &str = "HEAD";
+
 /// `git log`'s argv surface (architecture.md B.3).
 #[derive(Parser, Debug)]
 #[command(
@@ -59,7 +66,8 @@ pub(crate) struct LogArgs {
     /// Revision to start from: `HEAD` (the default), a branch, a tag, an oid,
     /// or any of those with a `~N` / `^N` suffix. Range syntax (`A..B`) and
     /// reflog syntax (`@{...}`) are usage errors, not silent reinterpretations.
-    #[arg(long = "rev", value_name = "REV", default_value = "HEAD")]
+    /// Also accepted as a bare operand, git's spelling: `git log main`.
+    #[arg(long = "rev", value_name = "REV", default_value = DEFAULT_REV)]
     pub rev: String,
 
     /// Maximum commits to report. Truncation is always reported
@@ -125,8 +133,11 @@ pub(crate) struct LogArgs {
     #[command(flatten)]
     pub global: GlobalFlags,
 
-    /// Validation-only sink: `ToolArgs::to_argv()` always emits `--` before
-    /// positionals, and `log` takes none. Read nothing off this field.
+    /// Bound so clap can accept the `--`-terminated tail `ToolArgs::to_argv()`
+    /// always emits. The real operands are read off `args.positional` in
+    /// `tool.rs` — the kernel's own convention, because `to_argv` inserts a
+    /// `--` of its own and clap cannot tell it from the caller's. Do not read
+    /// this field; it cannot distinguish them either.
     #[arg(hide = true)]
     pub operands: Vec<String>,
 }

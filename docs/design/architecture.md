@@ -409,6 +409,15 @@ Settled while building it (PR 3), each pinned by a test against real git:
 
 - **`rev` echoes the caller's spelling**, not the oid it resolved to. An agent
   that asked for `HEAD~2` reads `HEAD~2` back.
+- **Operands take git's shape**: `git log [<rev>] [-- <path>...]`. A positional
+  before `--` is a **revision, always** — where git guesses (it tries the
+  string as a rev, then as a path, and errors only when it is both or neither),
+  we do not. One rule and a refusal that names the other spelling beats a
+  heuristic that silently answers about a path when the caller meant a branch;
+  it is the same reasoning that keeps the revision grammar small and refuses
+  approxidate. A revision given twice — positional plus `--rev` — is a usage
+  error rather than a silent pick. `status` takes only pathspecs, on either
+  side of the marker; `info` takes no operands and says so.
 - **Times carry the commit's own UTC offset** (`+09:00`), not a normalized `Z`.
   Git records the zone the author was in; that is a fact about the commit, and
   the instant is identical either way.
