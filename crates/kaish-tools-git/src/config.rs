@@ -58,24 +58,27 @@ pub enum Verb {
     Info,
     /// `git status` — staged, unstaged, untracked, ignored, conflicted.
     Status,
+    /// `git log` — commit history from a starting revision.
+    Log,
 }
 
 impl Verb {
     /// Every verb this build knows how to execute.
-    pub const ALL: &'static [Verb] = &[Verb::Info, Verb::Status];
+    pub const ALL: &'static [Verb] = &[Verb::Info, Verb::Status, Verb::Log];
 
     /// The verb's argv spelling — the word an agent types.
     pub fn as_str(&self) -> &'static str {
         match self {
             Verb::Info => "info",
             Verb::Status => "status",
+            Verb::Log => "log",
         }
     }
 
     /// The profile that grants this verb.
     pub fn profile(&self) -> Profile {
         match self {
-            Verb::Info | Verb::Status => Profile::Read,
+            Verb::Info | Verb::Status | Verb::Log => Profile::Read,
         }
     }
 }
@@ -266,6 +269,7 @@ mod tests {
         let narrowed = GitConfig::read_only()
             .without_verb(Verb::Info)
             .without_verb(Verb::Status)
+            .without_verb(Verb::Log)
             .with_tool_name("kgit")
             .with_limits(Limits {
                 max_rows: 5,

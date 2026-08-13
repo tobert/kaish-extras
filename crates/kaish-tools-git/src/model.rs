@@ -230,6 +230,97 @@ pub struct StatusReport {
     pub truncated: bool,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// git log (architecture.md B.3)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A commit's author or committer: who acted, and when (B.3).
+///
+/// `time` is RFC3339 with the actor's own timezone offset preserved
+/// (`2026-08-01T10:00:00+00:00`) — the instant is always correct, and the
+/// offset is the commit's, not the reader's. Native-only: `git log` does not
+/// build for wasm, so this reaches for the commit's fixed offset rather than a
+/// named-zone table (kaish #225).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Signature {
+    /// The actor's name, as recorded on the commit.
+    pub name: String,
+    /// The actor's email, as recorded on the commit.
+    pub email: String,
+    /// When they acted, RFC3339 with the commit's own offset.
+    pub time: String,
+}
+
+/// A commit's `--stat` summary: how much it changed against its first parent
+/// (B.3).
+///
+/// This is an aggregate over the commit, not a per-file listing — the file
+/// count plus total added and deleted lines, exactly what `git log --shortstat`
+/// reduces a commit to. A root commit is diffed against the empty tree, so its
+/// lines are all additions. A merge (two or more parents) reports zeros: git
+/// shows no diffstat for a merge by default, and this matches that.
+///
+/// Line deltas come from diffing blob contents, so they are bounded by the
+/// embedder's `max_blob_bytes`. A changed file whose old or new blob is over
+/// that cap still counts in `files`, but its line delta is left out of
+/// `additions`/`deletions` and counted in `lines_capped` instead — the counts
+/// are then an honest lower bound rather than a lie or an unbounded read.
+/// Binary files (and submodule gitlinks) count in `files` with no line delta,
+/// the same way `git`'s shortstat leaves them out of its insertion/deletion
+/// totals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub struct StatSummary {
+    /// How many files changed against the first parent.
+    pub files: usize,
+    /// Total lines added across those files (excluding capped/binary ones).
+    pub additions: u64,
+    /// Total lines deleted across those files (excluding capped/binary ones).
+    pub deletions: u64,
+    /// How many changed files had a side over `max_blob_bytes`, so their line
+    /// delta is absent from `additions`/`deletions`. Zero in the common case.
+    pub lines_capped: usize,
+}
+
+/// One commit in a [`LogReport`] (architecture.md B.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommitInfo {
+    /// The full commit oid.
+    pub oid: String,
+    /// The abbreviated oid — the first seven hex characters, git's default.
+    pub short_oid: String,
+    /// Every parent oid, in order. The first is the mainline; a merge has two
+    /// or more. Always the full parent set, even under `--first-parent`, which
+    /// changes what is *walked*, not what a commit *is*.
+    pub parents: Vec<String>,
+    /// Who wrote the change.
+    pub author: Signature,
+    /// Who committed it (often the author; differs after a rebase or amend).
+    pub committer: Signature,
+    /// The first line of the commit message.
+    pub summary: String,
+    /// The full message body below the summary, or `None` unless `--body` was
+    /// given. `None` and an empty body are distinct: a commit with only a
+    /// summary has no body to show.
+    pub body: Option<String>,
+    /// The per-commit change summary, or `None` unless `--stat` was given.
+    pub stat: Option<StatSummary>,
+}
+
+/// `git log`'s result (architecture.md B.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LogReport {
+    /// The starting revision, verbatim as the caller spelled it (`HEAD`, a
+    /// branch, a tag, an oid) — not the oid it resolved to.
+    pub rev: String,
+    /// The commits, newest first, capped at the effective `--limit`.
+    pub commits: Vec<CommitInfo>,
+    /// Whether the walk stopped at `--limit` with more history behind it.
+    /// Always reported, never silent (E.5); a stderr note fires alongside it.
+    /// With a filter (`--path`, `--author`, a date window) in effect this means
+    /// the walk had more commits to examine, not that more would have matched.
+    pub truncated: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +434,93 @@ mod tests {
                 "totals.{key} missing: {json}"
             );
         }
+    }
+
+    /// The B.3 key names are the `git log` wire contract, same standing as
+    /// B.1's and B.2's. A rename here silently breaks every prompt taught the
+    /// documented shape.
+    #[test]
+    fn log_report_serializes_with_the_documented_keys() {
+        let report = LogReport {
+            rev: "HEAD".into(),
+            commits: vec![CommitInfo {
+                oid: "a".repeat(40),
+                short_oid: "aaaaaaa".into(),
+                parents: vec!["b".repeat(40)],
+                author: Signature {
+                    name: "Amy".into(),
+                    email: "amy@example.invalid".into(),
+                    time: "2026-08-01T10:00:00+00:00".into(),
+                },
+                committer: Signature {
+                    name: "Amy".into(),
+                    email: "amy@example.invalid".into(),
+                    time: "2026-08-01T10:00:00+00:00".into(),
+                },
+                summary: "fix the thing".into(),
+                body: None,
+                stat: Some(StatSummary {
+                    files: 3,
+                    additions: 40,
+                    deletions: 7,
+                    lines_capped: 0,
+                }),
+            }],
+            truncated: true,
+        };
+        let json = serde_json::to_value(&report).expect("LogReport serializes");
+        for key in ["rev", "commits", "truncated"] {
+            assert!(json.get(key).is_some(), "B.3 key {key} missing: {json}");
+        }
+        let commit = &json["commits"][0];
+        for key in [
+            "oid",
+            "short_oid",
+            "parents",
+            "author",
+            "committer",
+            "summary",
+            "body",
+            "stat",
+        ] {
+            assert!(commit.get(key).is_some(), "B.3 commit key {key} missing: {commit}");
+        }
+        for key in ["name", "email", "time"] {
+            assert!(commit["author"].get(key).is_some(), "author.{key} missing");
+        }
+        for key in ["files", "additions", "deletions"] {
+            assert!(commit["stat"].get(key).is_some(), "stat.{key} missing");
+        }
+        assert_eq!(json["truncated"], true);
+        assert!(commit["body"].is_null(), "body is null unless --body");
+    }
+
+    /// `body` and `stat` are null unless their flag was given — the default
+    /// `git log` is a summary, not the whole message and not a diffstat.
+    #[test]
+    fn body_and_stat_default_to_null() {
+        let commit = CommitInfo {
+            oid: "a".repeat(40),
+            short_oid: "aaaaaaa".into(),
+            parents: vec![],
+            author: Signature {
+                name: "A".into(),
+                email: "a@b.invalid".into(),
+                time: "2026-08-01T10:00:00+00:00".into(),
+            },
+            committer: Signature {
+                name: "A".into(),
+                email: "a@b.invalid".into(),
+                time: "2026-08-01T10:00:00+00:00".into(),
+            },
+            summary: "only a summary".into(),
+            body: None,
+            stat: None,
+        };
+        let json = serde_json::to_value(&commit).expect("CommitInfo serializes");
+        assert!(json["body"].is_null());
+        assert!(json["stat"].is_null());
+        assert_eq!(json["parents"].as_array().expect("parents is an array").len(), 0);
     }
 
     /// An unborn branch is a real state (`git init` then `git info`), and the

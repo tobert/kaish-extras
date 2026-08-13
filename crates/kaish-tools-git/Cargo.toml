@@ -45,6 +45,11 @@ autotests = false
 # wasm32-unknown-unknown` fails fast on the guard, with only our message.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 gix-object = { version = "=0.63.0", features = ["sha1"] }
+# `CommitRef::author()`/`committer()` hand back a `gix_actor::SignatureRef`, and
+# gix-object does not re-export the crate that owns it. `git log` names the type,
+# so it pins the crate rather than reaching for a re-export that is not there.
+# Already in the graph under gix-object; pinned because we use it directly.
+gix-actor = "=0.41.2"
 gix-odb = { version = "=0.83.0", features = ["sha1"] }
 gix-ref = { version = "=0.66.0", features = ["sha1"] }
 gix-traverse = { version = "=0.60.0", features = ["sha1"] }
@@ -75,13 +80,35 @@ filetime = "0.2"
 # gix-command (textconv/filter machinery) via its rewrite/rename tracker.
 # Losing that feature means rename detection is exact-match-only — reported
 # honestly to callers, not silently degraded (architecture.md Co-architect
-# note 3).
+# note 3). `git log --stat` uses only the low-level `gix_diff::tree()` name/
+# status walk, which is available without `blob`.
 gix-diff = { version = "=0.66.0", default-features = false, features = ["sha1"] }
+# The line-diff engine `git log --stat` counts additions/deletions with — the
+# same crate `gix-diff`'s `blob` feature would have pulled, taken directly so
+# `blob` (and its `gix-command` edge) stays out of the graph. Its only runtime
+# dependencies are `bstr` and `hashbrown`; it links no spawn machinery, so the
+# CI tripwires stay green. `Algorithm::Myers` matches git's default diff, so the
+# counts agree with `git log --numstat` on ordinary text (architecture.md B.3).
+gix-imara-diff = { version = "=0.2.4", default-features = false }
+# `git log` renders each commit's author/committer time as RFC3339 with the
+# commit's own offset preserved (`Time::format(ISO8601_STRICT)`). Already in the
+# graph via gix-object; pinned here for direct use. Native-only like the rest —
+# `git log` does not build for wasm — so a fixed offset is what is wanted, not a
+# named-zone table (kaish #225).
+gix-date = "=0.15.6"
 # `gix-config` (not `gix::config`) parses repo-local `.git/config` without
 # gix-command. We resolve `include.path` ourselves via
 # `from_bytes_no_includes`, which retires the include.path escape by
 # construction rather than trusting gix to refuse it.
 gix-config = { version = "=0.59.0", features = ["sha1"] }
+# `--since` / `--until` accept RFC3339 or `YYYY-MM-DD` and nothing else, so the
+# parser must be *strict*: git's `approxidate` ("2 weeks ago") is a pattern
+# language we deliberately do not accept. `jiff` parses both accepted forms and
+# rejects the rest, and — used for a fixed-offset instant and a UTC civil date —
+# it reads no system timezone database, keeping the parse hermetic. Already in
+# the graph via gix-date. Not a gix crate, so it stays out of the reported pin
+# set.
+jiff = "0.2"
 
 # The kaish tool surface, and the crates a `Tool` impl needs to talk to it.
 # `kaish-tool-api` + `kaish-types` are the whole out-of-tree contract — this
@@ -130,6 +157,10 @@ path = "tests/hostile_repo.rs"
 [[test]]
 name = "status"
 path = "tests/status.rs"
+
+[[test]]
+name = "log"
+path = "tests/log.rs"
 
 [[test]]
 name = "write_shaped_identifiers"

@@ -792,6 +792,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gix-imara-diff"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a791e6620676a875f362f3156ed213e73ca099a09bf992c18812abe65cc37b1"
+dependencies = [
+ "bstr",
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "gix-index"
 version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1433,12 +1443,15 @@ dependencies = [
  "async-trait",
  "clap",
  "filetime",
+ "gix-actor",
  "gix-commitgraph",
  "gix-config",
+ "gix-date",
  "gix-diff",
  "gix-discover",
  "gix-glob",
  "gix-ignore",
+ "gix-imara-diff",
  "gix-index",
  "gix-object",
  "gix-odb",
@@ -1448,6 +1461,7 @@ dependencies = [
  "gix-revwalk",
  "gix-traverse",
  "gix-worktree",
+ "jiff",
  "kaish-tool-api",
  "kaish-types",
  "serde",
