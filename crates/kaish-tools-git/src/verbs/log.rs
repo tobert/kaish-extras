@@ -2,15 +2,18 @@
 //!
 //! Composed on the plumbing like every other verb. The pieces:
 //!
-//! - **The walk** — `gix-traverse`'s commit ancestry iterator from the resolved
-//!   `--rev`, newest first in commit-date order (git's default), or first-parent
-//!   only under `--first-parent`.
+//! - **The walk** — a commit-time max-heap from the resolved `--rev`, newest
+//!   first (git's default ordering), or first-parent only under
+//!   `--first-parent`. Ours rather than `gix-traverse`'s because git's history
+//!   simplification decides which *parents to follow*, which cannot be
+//!   expressed as a filter over a traversal that enqueues them all.
 //! - **The filters** — `--author` (literal substring, never a regex),
 //!   `--since`/`--until` (two unambiguous date forms, everything else refused
 //!   loudly), `--merges`/`--no-merges` (parent count), and `--path` (a commit
-//!   is kept when its tree differs, under one of the paths, from *every* parent
-//!   — git's default history simplification, so a merge that only carried a
-//!   side branch's change through is not reported as having made it). Filters
+//!   whose tree matches some parent's under the paths introduced nothing there,
+//!   so it is not reported AND the walk follows only that parent — git's
+//!   default history simplification, which prunes a branch a merge discarded).
+//!   Filters
 //!   narrow what is *reported*; they never stop the walk early, because history
 //!   is neither sorted by author nor by path — nor, reliably, by date.
 //! - **`--stat`** — a tree comparison against the first parent for the
@@ -29,7 +32,8 @@
 //! confidently wrong window. We accept RFC3339 and `YYYY-MM-DD`, and reject
 //! everything else by name.
 
-use std::collections::BTreeSet;
+use std::cmp::Ordering;
+use std::collections::{BTreeSet, BinaryHeap, HashSet};
 
 use clap::Parser;
 
@@ -267,6 +271,74 @@ fn is_plain_date(s: &str) -> bool {
 // The walk
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// One commit waiting to be walked, ordered newest-first by committer time.
+///
+/// The tie-break on oid is not cosmetic: two commits sharing a timestamp is
+/// ordinary (a scripted import, a fast rebase), and without a total order the
+/// heap's output would depend on insertion order, making the same repository
+/// answer differently between runs.
+#[derive(PartialEq, Eq)]
+struct Pending {
+    seconds: i64,
+    oid: ObjectId,
+}
+
+impl Ord for Pending {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.seconds
+            .cmp(&other.seconds)
+            .then_with(|| self.oid.cmp(&other.oid))
+    }
+}
+
+impl PartialOrd for Pending {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Queue a commit to be walked, unless it has been queued before.
+///
+/// Reading the commit here is what buys the ordering — the heap needs the
+/// committer time to place it. The `seen` set is what keeps a diamond in the
+/// history from being walked, or reported, twice.
+fn enqueue(
+    repo: &ReadRepo,
+    heap: &mut BinaryHeap<Pending>,
+    seen: &mut HashSet<ObjectId>,
+    oid: ObjectId,
+) -> Result<(), GitError> {
+    const OP: &str = "log";
+    if !seen.insert(oid) {
+        return Ok(());
+    }
+    let mut buf = Vec::new();
+    let commit = repo
+        .objects()
+        .find_commit(&oid, &mut buf)
+        .map_err(|e| GitError::repository(OP, "reading a commit", repo.git_dir(), e))?;
+    let seconds = commit
+        .committer()
+        .map_err(|e| GitError::repository(OP, "decoding a commit committer", repo.git_dir(), e))?
+        .time()
+        .map_err(|e| GitError::repository(OP, "decoding a commit time", repo.git_dir(), e))?
+        .seconds;
+    heap.push(Pending { seconds, oid });
+    Ok(())
+}
+
+/// Whether a commit's tree matches a parent's under the path filter — git's
+/// "TREESAME". A `None` parent is the empty tree, for a root commit.
+fn treesame(
+    repo: &ReadRepo,
+    commit: ObjectId,
+    parent: Option<ObjectId>,
+    filter: &PathFilter,
+) -> Result<bool, GitError> {
+    let changes = changes_against(repo, commit, parent)?;
+    Ok(!changes.iter().any(|c| filter.matches(&c.path)))
+}
+
 /// Gather everything `git log` reports.
 ///
 /// Runs entirely inside the caller's blocking closure and returns an owned
@@ -287,35 +359,81 @@ pub(crate) fn run(repo: &ReadRepo, opts: &LogOptions) -> Result<LogReport, GitEr
     let mut truncated = false;
     let mut examined = 0usize;
 
-    // The ancestry walk. `Sorting::ByCommitTimeNewestFirst` is git's default
-    // ordering, so the first page matches what a human would see.
-    let mut walk = gix_traverse::commit::Simple::new(Some(start), objects)
-        .sorting(gix_traverse::commit::simple::Sorting::ByCommitTime(
-            gix_traverse::commit::simple::CommitTimeOrder::NewestFirst,
-        ))
-        .map_err(|e| GitError::repository(OP, "starting the commit walk", repo.git_dir(), e))?;
-    if opts.first_parent {
-        walk = walk.parents(gix_traverse::commit::Parents::First);
-    }
+    // The walk is ours rather than `gix-traverse`'s, because git's default
+    // history simplification cannot be expressed as a filter over someone
+    // else's traversal: it decides which *parents to follow*, not merely which
+    // commits to report. `Simple` enqueues every parent unconditionally, so a
+    // side branch whose change a merge discarded would still be walked and its
+    // commits still reported — see `simplification` below. A max-heap keyed on
+    // committer time reproduces `Sorting::ByCommitTime(NewestFirst)`, which is
+    // git's default ordering.
+    let mut heap: BinaryHeap<Pending> = BinaryHeap::new();
+    let mut seen: HashSet<ObjectId> = HashSet::new();
+    enqueue(repo, &mut heap, &mut seen, start)?;
 
-    while let Some(step) = walk.next() {
-        let info = step.map_err(|e| {
-            GitError::repository(OP, "walking commit ancestry", repo.git_dir(), e)
-        })?;
-
+    while let Some(Pending { oid, .. }) = heap.pop() {
         examined += 1;
         if examined > MAX_COMMITS_EXAMINED {
             truncated = true;
             break;
         }
 
-        let oid = info.id;
         let mut buf = Vec::new();
         let commit = objects
             .find_commit(&oid, &mut buf)
             .map_err(|e| GitError::repository(OP, "reading a commit", repo.git_dir(), e))?;
 
         let parents: Vec<ObjectId> = commit.parents().collect();
+
+        // Which parents this walk may follow at all. `--first-parent` is a
+        // traversal choice, so it narrows the set before simplification sees
+        // it.
+        let followable: &[ObjectId] = if opts.first_parent {
+            &parents[..parents.len().min(1)]
+        } else {
+            &parents
+        };
+
+        // ── History simplification (git's default under a pathspec) ─────────
+        //
+        // If this commit's tree matches some parent's under the paths, then it
+        // introduced nothing there: git does not report it, and follows *only*
+        // that parent, dropping the other branches. That pruning is the half
+        // that matters. Without it a merge that discarded a side branch's
+        // change still leads the walk down that branch, whose commits then look
+        // like they touched the path — and an agent reads a change that the
+        // merge threw away as present.
+        //
+        // A root commit is compared against the empty tree, so one that adds
+        // nothing under the paths is simplified away with no parent to follow.
+        let mut simplified_away = false;
+        let mut follow: Option<ObjectId> = None;
+        if filtering_paths {
+            if parents.is_empty() {
+                simplified_away = treesame(repo, oid, None, &filter)?;
+            } else {
+                for parent in followable {
+                    if treesame(repo, oid, Some(*parent), &filter)? {
+                        simplified_away = true;
+                        follow = Some(*parent);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Enqueue what the walk continues into, before any reporting filter
+        // can `continue` past it: `--author` or a date window narrows what is
+        // *shown*, never what is reachable.
+        match follow {
+            Some(parent) => enqueue(repo, &mut heap, &mut seen, parent)?,
+            None if simplified_away => {}
+            None => {
+                for parent in followable {
+                    enqueue(repo, &mut heap, &mut seen, *parent)?;
+                }
+            }
+        }
 
         // Parent-count filter: cheap, so it runs before anything that reads
         // more objects.
@@ -378,9 +496,10 @@ pub(crate) fn run(repo: &ReadRepo, opts: &LogOptions) -> Result<LogReport, GitEr
         }
 
         // The path filter needs a tree comparison, so it runs last among the
-        // filters — it is the expensive one.
+        // filters — it is the expensive one — but its *traversal* half already
+        // ran above, because it decides which parents get enqueued.
         let first_parent = parents.first().copied();
-        if filtering_paths && !commit_touches_paths(repo, oid, &parents, &filter)? {
+        if simplified_away {
             continue;
         }
 
@@ -427,18 +546,12 @@ pub(crate) fn run(repo: &ReadRepo, opts: &LogOptions) -> Result<LogReport, GitEr
             // would go asking for a second page that is empty. So actually ask
             // the walk for one more step. A step that errors is a real read
             // failure and stays loud rather than being read as "no more".
-            truncated = match walk.next() {
-                Some(Ok(_)) => true,
-                None => false,
-                Some(Err(e)) => {
-                    return Err(GitError::repository(
-                        OP,
-                        "walking commit ancestry",
-                        repo.git_dir(),
-                        e,
-                    ))
-                }
-            };
+            // Anything still queued is history this walk had not reached, so
+            // the flag states a fact rather than an assumption. A repository
+            // with exactly `--limit` commits empties the queue and reports
+            // `false`, instead of sending an agent after a page that is not
+            // there.
+            truncated = !heap.is_empty();
             break;
         }
     }
@@ -595,44 +708,6 @@ fn changes_against(
         }
     }
     Ok(out)
-}
-
-/// Whether a commit changed anything under one of the `--path` filters.
-///
-/// A root commit is compared against the empty tree, so its every file counts
-/// as touched — which is what git reports for the first commit of a path.
-///
-/// **A merge is judged against every parent, not just the first.** This is
-/// git's default history simplification (its "TREESAME" rule): a merge whose
-/// tree matches *any* parent under the paths brought no change of its own to
-/// them, and the commits it merged already report that change. Judging a merge
-/// against its first parent alone would report the merge as well, which is
-/// git's `--full-history`, not its default — and would double-count every
-/// side-branch change in the one view an agent uses to ask "what touched this
-/// file".
-fn commit_touches_paths(
-    repo: &ReadRepo,
-    commit: ObjectId,
-    parents: &[ObjectId],
-    filter: &PathFilter,
-) -> Result<bool, GitError> {
-    let touches = |parent: Option<ObjectId>| -> Result<bool, GitError> {
-        let changes = changes_against(repo, commit, parent)?;
-        Ok(changes.iter().any(|c| filter.matches(&c.path)))
-    };
-
-    if parents.is_empty() {
-        // A root commit: compared against the empty tree.
-        return touches(None);
-    }
-    for parent in parents {
-        if !touches(Some(*parent))? {
-            // Same as this parent under the paths, so the merge introduced
-            // nothing here.
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 /// A commit's `--stat` summary against its first parent.

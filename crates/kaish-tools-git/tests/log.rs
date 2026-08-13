@@ -557,6 +557,75 @@ async fn path_filter_matches_git() {
     }
 }
 
+/// A merge that DISCARDS a side branch's change must prune that branch.
+///
+/// The shape `History` does not have, and the one that exposes the difference
+/// between reporting-only TREESAME and git's real history simplification:
+///
+/// ```text
+///   A ── B(edits f) ── M(keeps main's f)
+///     \               /
+///      C(edits f) ───
+/// ```
+///
+/// `M` is TREESAME to `B`, so git follows `B` and drops `C`'s branch entirely:
+/// `git log -- f.txt` reports `{B, A}`. Reporting-only TREESAME hides `M` but
+/// still walks into `C`, which does differ from *its* parent under `f.txt`, and
+/// reports `{B, C, A}` — telling an agent a change is present that the merge
+/// threw away.
+#[tokio::test]
+async fn a_reverting_merge_prunes_the_discarded_branch() {
+    require_git();
+    let fixture = Fixture::empty();
+    let root = fixture.path("repo");
+    std::fs::create_dir_all(&root).expect("create repo dir");
+    let amy = ("Amy Tobey", "amy@example.invalid");
+
+    git(&root, &["init", "--initial-branch=main", "--quiet"]);
+    write_file(&root, "f.txt", "base\n");
+    git_as(&root, amy, "2026-01-01T00:00:00+00:00", &["add", "f.txt"]);
+    git_as(&root, amy, "2026-01-01T00:00:00+00:00", &["commit", "-m", "A", "--quiet"]);
+
+    write_file(&root, "f.txt", "main-edit\n");
+    git_as(&root, amy, "2026-02-01T00:00:00+00:00", &["add", "f.txt"]);
+    git_as(&root, amy, "2026-02-01T00:00:00+00:00", &["commit", "-m", "B edits f", "--quiet"]);
+
+    git(&root, &["checkout", "--quiet", "-b", "side", "HEAD~1"]);
+    write_file(&root, "f.txt", "side-edit\n");
+    git_as(&root, amy, "2026-03-01T00:00:00+00:00", &["add", "f.txt"]);
+    git_as(&root, amy, "2026-03-01T00:00:00+00:00", &["commit", "-m", "C edits f", "--quiet"]);
+
+    // The merge conflicts; resolve it to main's content, so the merge keeps
+    // main's `f.txt` and discards the side's.
+    git(&root, &["checkout", "--quiet", "main"]);
+    let _ = git_allow_fail(&root, &["merge", "--no-ff", "side", "-m", "M reverts side"]);
+    write_file(&root, "f.txt", "main-edit\n");
+    git_as(&root, amy, "2026-04-01T00:00:00+00:00", &["add", "f.txt"]);
+    git_as(&root, amy, "2026-04-01T00:00:00+00:00", &["commit", "-m", "M reverts side", "--quiet"]);
+
+    let scratch = fixture.root();
+    let result = log(&scratch, "/mnt/repo", &["--path", "f.txt"]).await;
+    assert_eq!(result.code, 0, "stderr: {}", result.err);
+
+    let ours = oids(&result);
+    let theirs = git_oids(&root, &["--", "f.txt"]);
+    assert_eq!(ours, theirs, "git's default simplification is the contract");
+
+    // And say plainly what the divergence would have been, so a regression
+    // reads as the real thing rather than as an oracle disagreement.
+    let side_commit = git(&root, &["rev-parse", "side"]);
+    assert!(
+        !ours.contains(&side_commit),
+        "the discarded branch's commit must be pruned, not reported"
+    );
+    // It IS in --full-history, so the assertion above tests pruning rather than
+    // a commit that was never reachable.
+    assert!(
+        git_oids(&root, &["--full-history", "--", "f.txt"]).contains(&side_commit),
+        "the commit is reachable — git only hides it via simplification"
+    );
+}
+
 /// `--path` is repeatable, and the result is the union.
 #[tokio::test]
 async fn repeated_paths_union() {
@@ -829,4 +898,21 @@ async fn the_table_and_the_json_agree() {
         .collect();
     assert_eq!(rows, short, "one row per commit, same order, same oid");
     assert!(!rows.is_empty());
+}
+
+/// Run git without asserting success — for the merge that is *meant* to
+/// conflict, where a nonzero exit is the point.
+fn git_allow_fail(cwd: &Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Amy Tobey")
+        .env("GIT_AUTHOR_EMAIL", "amy@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Amy Tobey")
+        .env("GIT_COMMITTER_EMAIL", "amy@example.invalid")
+        .output()
+        .expect("git runs")
 }
