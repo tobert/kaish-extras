@@ -81,6 +81,10 @@ impl GitTool {
         };
         parsed.global.apply(ctx);
 
+        if let Err(e) = no_operands(OP, &operands(&args, consumed)) {
+            return failure(e);
+        }
+
         let resolved = match resolve_repo_paths(OP, ctx, parsed.repo.as_deref()) {
             Ok(r) => r,
             Err(e) => return failure(e),
@@ -155,7 +159,11 @@ impl GitTool {
         let max_blob_bytes = self.config.limits().max_blob_bytes;
         let untracked = parsed.untracked;
         let ignored = parsed.ignored;
-        let path_args = parsed.path.clone();
+        // `git status [--] <path>...` — every operand is a pathspec on either
+        // side of the marker, because status takes no revision. They join the
+        // `--path` flags rather than replacing them.
+        let mut path_args = parsed.path.clone();
+        path_args.extend(operands(&args, consumed).all());
 
         let outcome = block_in_place_compat(move || {
             let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
@@ -289,12 +297,49 @@ impl GitTool {
             // it — and `(false, false)` is the documented default.
             _ => verbs::log::MergeFilter::Both,
         };
-        let rev = parsed.rev.clone();
+        // `git log [<rev>] [-- <path>...]`, git's own shape.
+        //
+        // A positional before `--` is a **revision**, always. Git would guess:
+        // it tries the string as a rev, then as a path, and errors only when
+        // the string is both or neither. We do not guess — the same reason the
+        // revision grammar is small and approxidate is refused. One rule, and
+        // a failure that names the other spelling, beats a heuristic that
+        // silently answers about a path when the caller meant a branch.
+        let ops = operands(&args, consumed);
+        if ops.before.len() > 1 {
+            return failure(GitError::Usage {
+                operation: OP,
+                message: format!(
+                    "takes at most one revision, but got '{}'. A range is \
+                     '--rev A' plus '--rev B' in two calls, not 'A B'; paths \
+                     go after '--'",
+                    ops.before.join("' '")
+                ),
+            });
+        }
+        let rev = match ops.before.first() {
+            Some(positional) if parsed.rev != verbs::log::DEFAULT_REV => {
+                // Both spellings, disagreeing. Picking one silently would
+                // answer about a revision the caller did not choose.
+                return failure(GitError::Usage {
+                    operation: OP,
+                    message: format!(
+                        "got a revision twice — '{positional}' and '--rev \
+                         {}'. Give it once",
+                        parsed.rev
+                    ),
+                });
+            }
+            Some(positional) => positional.clone(),
+            None => parsed.rev.clone(),
+        };
         let author = parsed.author.clone();
         let first_parent = parsed.first_parent;
         let body = parsed.body;
         let stat = parsed.stat;
-        let path_args = parsed.path.clone();
+        // Operands after `--` are pathspecs, joining the `--path` flags.
+        let mut path_args = parsed.path.clone();
+        path_args.extend(ops.after.iter().cloned());
 
         let outcome = block_in_place_compat(move || {
             let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
@@ -538,6 +583,80 @@ fn parse_leaf<P: Parser>(
         .map_err(|e| Box::new(ExecResult::failure(2, format!("git {operation}: {e}"))))?;
     P::try_parse_from(std::iter::once(format!("git {operation}")).chain(argv))
         .map_err(|e| Box::new(ExecResult::failure(2, format!("git {operation}: {e}"))))
+}
+
+/// A verb's operands, split at git's `--` end-of-options marker.
+///
+/// The kernel hands a literal `--` through as a positional `Value::String`, so
+/// the split git users rely on survives all the way here. Reading operands off
+/// `args.positional` rather than off the clap-parsed struct is the kernel's own
+/// convention — every builtin does it, because `ToolArgs::to_argv()` always
+/// emits `--` before positionals and clap therefore cannot tell a caller's
+/// marker from the binder's.
+struct Operands {
+    /// Positionals before `--`. A revision, for a verb that takes one.
+    before: Vec<String>,
+    /// Positionals after `--`. Always pathspecs, for every verb.
+    after: Vec<String>,
+}
+
+impl Operands {
+    /// Every operand, in order — for verbs where both halves mean the same
+    /// thing (`status` takes only pathspecs, with or without the marker).
+    fn all(&self) -> Vec<String> {
+        let mut out = self.before.clone();
+        out.extend(self.after.iter().cloned());
+        out
+    }
+
+    fn is_empty(&self) -> bool {
+        self.before.is_empty() && self.after.is_empty()
+    }
+}
+
+/// Split the operands a verb was given at the `--` marker.
+fn operands(args: &ToolArgs, consumed: usize) -> Operands {
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    let mut seen_marker = false;
+    for value in args.positional.iter().skip(consumed) {
+        // Only a string operand can be a revision or a pathspec. A typed
+        // value here (an int from a pipeline, say) is not one, and coercing it
+        // to text would invent an argument the caller did not write.
+        let Value::String(text) = value else {
+            continue;
+        };
+        let text = text.clone();
+        if !seen_marker && text == "--" {
+            seen_marker = true;
+            continue;
+        }
+        if seen_marker {
+            after.push(text);
+        } else {
+            before.push(text);
+        }
+    }
+    Operands { before, after }
+}
+
+/// Refuse operands for a verb that takes none, naming what was given.
+///
+/// Silence here is what made this a bug: the operands used to land in a hidden
+/// clap sink and vanish, so `git info /some/path` answered about the cwd with
+/// exit 0 — a different question than the one asked, and nothing in the output
+/// said so.
+fn no_operands(operation: &'static str, ops: &Operands) -> Result<(), GitError> {
+    if ops.is_empty() {
+        return Ok(());
+    }
+    Err(GitError::Usage {
+        operation,
+        message: format!(
+            "takes no operands, but got '{}'. Name the repository with --repo",
+            ops.all().join("' '")
+        ),
+    })
 }
 
 /// Everything the E.2 bridge produces for one invocation.
