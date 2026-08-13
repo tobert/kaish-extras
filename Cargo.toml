@@ -13,17 +13,25 @@ repository = "https://github.com/tobert/kaish-extras"
 # kaish-* dependency to the published crates.io release before any release of
 # the crates in this workspace.
 [workspace.dependencies]
-# Every kaish crate must pin the SAME rev — mixing revs would put two copies
-# of a kaish crate in the graph. Currently kaish main post-v0.13.0, ledger-spec
-# era (post-#271; includes jobctl #248, spill #249, CSPRNG nonces #259).
-kaish-kernel = { git = "https://github.com/tobert/kaish.git", rev = "e4e2ca9523263f303b2fd4341a3ef61b872a84b1", default-features = false }
-kaish-client = { git = "https://github.com/tobert/kaish.git", rev = "e4e2ca9523263f303b2fd4341a3ef61b872a84b1" }
+# Every kaish crate must pin the SAME version — mixing them would put two
+# copies of a kaish crate in the graph.
+#
+# These are **published crates.io versions**, not git revs. That is the state
+# AGENTS.md has been pointing at all along ("before any crates.io release of
+# these crates, pins move to published kaish versions"): kaish 0.14.0 shipped
+# all nine crates on 2026-08-13, so an honest external embedder can now depend
+# on kaish the way any other embedder would — which is the whole posture this
+# repo exists to keep true. A git rev is a development affordance; depending on
+# a rev while claiming to be an ordinary consumer was the last place the claim
+# was weaker than it looked.
+kaish-kernel = { version = "0.14.0", default-features = false }
+kaish-client = "0.14.0"
 # The out-of-tree tool surface: `kaish-tools-git` implements `Tool` against
 # these two and never touches `kaish-kernel`, which is the whole point of the
 # honest-external-embedder posture — `kaish-tools-host` (kaish's own
 # out-of-tree bundle) depends on exactly this pair and nothing more.
-kaish-tool-api = { git = "https://github.com/tobert/kaish.git", rev = "e4e2ca9523263f303b2fd4341a3ef61b872a84b1" }
-kaish-types = { git = "https://github.com/tobert/kaish.git", rev = "e4e2ca9523263f303b2fd4341a3ef61b872a84b1" }
+kaish-tool-api = "0.14.0"
+kaish-types = "0.14.0"
 
 [profile.release]
 # The wasm bundle ships over the network — favor size.

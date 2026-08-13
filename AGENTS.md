@@ -33,18 +33,23 @@ has caught real broken deploys.
 
 ## kaish dependency pinning
 
-`[workspace.dependencies]` in the root `Cargo.toml` pins both `kaish-kernel`
-and `kaish-client` by git rev. Rules:
+`[workspace.dependencies]` in the root `Cargo.toml` pins all four kaish crates
+to **published crates.io versions** (0.14.0 as of 2026-08-13). Rules:
 
-- **Both crates must pin the SAME rev** — mixed revs put two copies of
-  kaish-kernel in the dependency graph.
+- **All four must pin the SAME version** — mixing them puts two copies of a
+  kaish crate in the dependency graph.
 - `kaish-kernel` is `default-features = false`. Keep it that way: a sibling
   crate enabling kernel default features tramples the no-default choice
   (`localfs` etc. must not leak into the browser build).
-- Workflow for changes that need a kaish-side seam: open a kaish PR, pin both
-  crates here to the PR branch head to develop against it, then bump both pins
-  to the merged main sha once the PR lands. Before any crates.io release of
-  these crates, pins move to published kaish versions.
+- **A published version is the default state, not a git rev.** Depending on a
+  rev while claiming to be an ordinary consumer is the one place the
+  honest-embedder posture is weaker than it looks: a rev is an affordance no
+  real embedder has. Go back to one only while developing against an unreleased
+  kaish seam, and come back off it.
+- Workflow for changes that need a kaish-side seam: open a kaish PR, pin all
+  four here to the PR branch head to develop against it, then move back to the
+  published version once the release carrying it lands — not to the merged main
+  sha, unless the wait is genuinely blocking.
 
 ## Cross-model review with kaibo
 
