@@ -65,6 +65,16 @@ fixture asserted against real `git status --porcelain` before fixing.
   (`gix-traverse`'s `ByCommitTimeCutoff`) would make the date case much cheaper.
   Not worth the complexity until a real repository makes it hurt.
 
+- **L4 — `@` is not accepted as a synonym for `HEAD`.** Git takes bare `@`
+  wherever it takes `HEAD`. `resolve_commit` does not: `@` is not a valid ref
+  name, is not hex, and so exits 1 "does not name a commit". That is a refusal,
+  not a wrong answer — a probe over the whole grammar (`@`, `HEAD@`, `^{}`,
+  `-`, `HEAD~0`, `HEAD^^^`, `HEAD~2~3`, `HEAD~-1`, `HEAD~1x`, oversized `~N`,
+  trailing whitespace, empty) found no input that resolves to a *surprising*
+  commit, which is the property that matters. But an agent that types `@` gets
+  a confusing error rather than the log it wanted. Either accept it as an alias
+  or name it in `unsupported_revspec` so the error says "use HEAD".
+
 - **L3 — `--stat` line counts read whole blobs.** Counting lines needs both
   sides of every changed file in memory, bounded per blob by the embedder's
   `max_blob_bytes` but not in aggregate across a commit. A commit touching very
