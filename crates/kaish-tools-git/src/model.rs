@@ -260,24 +260,32 @@ pub struct Signature {
 /// lines are all additions. A merge (two or more parents) reports zeros: git
 /// shows no diffstat for a merge by default, and this matches that.
 ///
-/// Line deltas come from diffing blob contents, so they are bounded by the
-/// embedder's `max_blob_bytes`. A changed file whose old or new blob is over
-/// that cap still counts in `files`, but its line delta is left out of
-/// `additions`/`deletions` and counted in `lines_capped` instead — the counts
-/// are then an honest lower bound rather than a lie or an unbounded read.
-/// Binary files (and submodule gitlinks) count in `files` with no line delta,
-/// the same way `git`'s shortstat leaves them out of its insertion/deletion
-/// totals.
+/// Line deltas come from diffing blob contents, so the embedder bounds them
+/// twice: `max_blob_bytes` bounds each side that is read, and `max_diff_files`
+/// bounds how many of one commit's files are diffed at all. A changed file
+/// declined by either cap still counts in `files`, contributes nothing to
+/// `additions`/`deletions`, and is counted in `lines_capped` — so the counts
+/// are an honest lower bound with the shortfall stated, rather than a lie or an
+/// unbounded read.
+///
+/// `lines_capped` means **we declined to read it**, and nothing else. Binary
+/// files and submodule gitlinks count in `files` with no line delta and are
+/// *not* counted there: nothing was withheld, there were no lines to withhold.
+/// Git's shortstat leaves them out of its totals the same way. Conflating the
+/// two would have an agent read `lines_capped: 1` and conclude a file was too
+/// large when the repository merely contains a PNG.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub struct StatSummary {
-    /// How many files changed against the first parent.
+    /// How many files changed against the first parent. The true count, even
+    /// when a cap stopped us from diffing all of them.
     pub files: usize,
-    /// Total lines added across those files (excluding capped/binary ones).
+    /// Total lines added across the files that were diffed.
     pub additions: u64,
-    /// Total lines deleted across those files (excluding capped/binary ones).
+    /// Total lines deleted across the files that were diffed.
     pub deletions: u64,
-    /// How many changed files had a side over `max_blob_bytes`, so their line
-    /// delta is absent from `additions`/`deletions`. Zero in the common case.
+    /// How many changed files a cap kept us from diffing — a side over
+    /// `max_blob_bytes`, or a file past `max_diff_files`. Their line deltas are
+    /// absent from `additions`/`deletions`. Zero in the common case.
     pub lines_capped: usize,
 }
 

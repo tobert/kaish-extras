@@ -259,6 +259,42 @@ async fn a_complete_walk_is_not_truncated() {
     assert_eq!(oids(&result).len(), git_oids(&h.root, &[]).len());
 }
 
+/// A limit that exactly equals the history length is NOT truncation.
+///
+/// The regression test for a real bug: `truncated` was set whenever the report
+/// filled `--limit`, without asking the walk whether anything was left. A
+/// repository with exactly N commits under `-n N` therefore claimed more
+/// history existed, and an agent would go fetch an empty second page.
+/// `a_complete_walk_is_not_truncated` could not catch it — it asks for 50
+/// against six commits, so the limit is never reached at all.
+#[tokio::test]
+async fn a_limit_equal_to_the_history_is_not_truncated() {
+    let h = History::build();
+    let total = git_oids(&h.root, &[]).len();
+    let result = log(&h.scratch(), "/mnt/repo", &["--limit", &total.to_string()]).await;
+    assert_eq!(oids(&result).len(), total, "every commit is reported");
+    assert_eq!(
+        json(&result)["truncated"],
+        false,
+        "the walk reached the root commit, so nothing was truncated"
+    );
+    assert!(
+        result.err.is_empty(),
+        "and no truncation note on stderr: {:?}",
+        result.err
+    );
+
+    // One less, and it IS truncated — so the assertion above is testing the
+    // boundary rather than a flag that is always false.
+    let short = log(
+        &h.scratch(),
+        "/mnt/repo",
+        &["--limit", &(total - 1).to_string()],
+    )
+    .await;
+    assert_eq!(json(&short)["truncated"], true);
+}
+
 /// The embedder's `max_rows` is a ceiling `--limit` cannot raise.
 #[tokio::test]
 async fn embedder_row_cap_outranks_the_flag() {
@@ -693,6 +729,54 @@ async fn an_oversized_blob_is_counted_but_not_read() {
     assert_eq!(stat["files"], 1, "the file still counts as changed");
     assert_eq!(stat["lines_capped"], 1, "and its lines are declared absent");
     assert_eq!(stat["additions"], 0, "no lines were counted from it");
+}
+
+/// A binary file is a changed file with no lines — NOT a capped read.
+///
+/// `lines_capped` means "we declined to read this", and an agent reading
+/// `lines_capped: 1` should conclude a file was too large, not that a PNG
+/// exists. The two were collapsed into one `None` before this test.
+#[tokio::test]
+async fn a_binary_file_is_not_reported_as_capped() {
+    let h = History::build();
+    // A NUL byte is git's own binary heuristic, and ours.
+    std::fs::write(h.root.join("logo.bin"), [0u8, 1, 2, 3, 0, 4]).expect("write binary");
+    git(&h.root, &["add", "logo.bin"]);
+    git(&h.root, &["commit", "-m", "add a binary file", "--quiet"]);
+
+    let result = log(&h.scratch(), "/mnt/repo", &["--limit", "1", "--stat"]).await;
+    let stat = &json(&result)["commits"][0]["stat"];
+    assert_eq!(stat["files"], 1, "the binary file counts as changed");
+    assert_eq!(
+        stat["lines_capped"], 0,
+        "nothing was withheld — a binary file has no lines to withhold"
+    );
+    assert_eq!(stat["additions"], 0);
+    assert_eq!(stat["deletions"], 0);
+}
+
+/// The embedder's `max_diff_files` bounds how many files one commit's `--stat`
+/// will diff. Each blob is bounded by `max_blob_bytes`; without this, a commit
+/// touching very many just-under-cap files is bounded memory but unbounded
+/// time.
+#[tokio::test]
+async fn the_embedder_file_cap_bounds_one_commits_stat() {
+    let h = History::build();
+    for i in 0..6 {
+        write_file(&h.root, &format!("many/f{i}.txt"), "a\nb\nc\n");
+    }
+    git(&h.root, &["add", "many"]);
+    git(&h.root, &["commit", "-m", "six files", "--quiet"]);
+
+    let config = GitConfig::read_only().with_limits(Limits {
+        max_diff_files: 2,
+        ..Default::default()
+    });
+    let result = log_with(config, &h.scratch(), "/mnt/repo", &["--limit", "1", "--stat"]).await;
+    let stat = &json(&result)["commits"][0]["stat"];
+    assert_eq!(stat["files"], 6, "the true changed-file count is still told");
+    assert_eq!(stat["lines_capped"], 4, "four were declined past the cap");
+    assert_eq!(stat["additions"], 6, "only the first two were diffed");
 }
 
 /// `--patch` is refused with exit 4, naming the missing capability. Answering

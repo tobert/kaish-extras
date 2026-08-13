@@ -281,6 +281,7 @@ impl GitTool {
         // `--stat` reads blob pairs to count lines, so this is what stands
         // between a repository and an allocation the repository picked.
         let max_blob_bytes = self.config.limits().max_blob_bytes;
+        let max_diff_files = self.config.limits().max_diff_files;
         let merges = match (parsed.merges, parsed.no_merges) {
             (true, false) => verbs::log::MergeFilter::Only,
             (false, true) => verbs::log::MergeFilter::Exclude,
@@ -322,6 +323,7 @@ impl GitTool {
                 body,
                 stat,
                 max_blob_bytes,
+                max_diff_files,
             };
             let root = repo.root().display().to_string();
             verbs::log::run(&repo, &opts).map(|model| (model, root))
@@ -337,11 +339,25 @@ impl GitTool {
         // `truncated: true` (E.5). The exit code stays 0: a truncated log is a
         // successful answer that ran up against `--limit`.
         if model.truncated {
-            result.err = format!(
-                "git log: output truncated at {} commits (--limit); \
-                 'truncated' is true in --json",
-                model.commits.len()
-            );
+            // Naming `--limit` unconditionally would be a small lie whenever
+            // the walk budget stopped us instead: an agent would lower a limit
+            // that was never the constraint. A report short of the limit can
+            // only have come from the budget.
+            result.err = if model.commits.len() >= limit {
+                format!(
+                    "git log: output truncated at {} commits (--limit); \
+                     'truncated' is true in --json",
+                    model.commits.len()
+                )
+            } else {
+                format!(
+                    "git log: stopped after examining the maximum number of \
+                     commits without filling --limit ({} matched); \
+                     'truncated' is true in --json. Narrow the search with \
+                     --rev or a date window",
+                    model.commits.len()
+                )
+            };
         }
         result.baggage.insert("git.repo".to_string(), repo_root);
         if let Some(first) = model.commits.first() {

@@ -36,6 +36,7 @@ use clap::Parser;
 use gix_index::hash::ObjectId;
 use gix_object::bstr::ByteSlice;
 use gix_object::FindExt;
+use gix_odb::HeaderExt;
 
 use kaish_tool_api::GlobalFlags;
 
@@ -165,6 +166,10 @@ pub(crate) struct LogOptions {
     /// lines, so this is what stands between a repository and an allocation it
     /// chose.
     pub max_blob_bytes: u64,
+    /// The embedder's `max_diff_files`. Bounds how many of a commit's changed
+    /// files `--stat` will diff — `max_blob_bytes` bounds each read, this
+    /// bounds how many reads one commit can ask for.
+    pub max_diff_files: usize,
 }
 
 /// How deep a `--stat` tree comparison may recurse before it is refused.
@@ -293,7 +298,7 @@ pub(crate) fn run(repo: &ReadRepo, opts: &LogOptions) -> Result<LogReport, GitEr
         walk = walk.parents(gix_traverse::commit::Parents::First);
     }
 
-    for step in walk {
+    while let Some(step) = walk.next() {
         let info = step.map_err(|e| {
             GitError::repository(OP, "walking commit ancestry", repo.git_dir(), e)
         })?;
@@ -379,7 +384,16 @@ pub(crate) fn run(repo: &ReadRepo, opts: &LogOptions) -> Result<LogReport, GitEr
             continue;
         }
 
-        let (summary, body) = split_message(commit.message.as_bstr().to_str_lossy().as_ref());
+        // The body is only split out when it was asked for: a commit message
+        // can be arbitrarily large, and copying one into a String to drop it
+        // unread is an allocation the caller did not ask for.
+        let message = commit.message.as_bstr().to_str_lossy();
+        let (summary, body) = if opts.body {
+            let (s, b) = split_message(message.as_ref());
+            (s, Some(b))
+        } else {
+            (summary_of(message.as_ref()), None)
+        };
 
         let stat = if opts.stat {
             Some(commit_stat(
@@ -388,6 +402,7 @@ pub(crate) fn run(repo: &ReadRepo, opts: &LogOptions) -> Result<LogReport, GitEr
                 first_parent,
                 is_merge,
                 opts.max_blob_bytes,
+                opts.max_diff_files,
             )?)
         } else {
             None
@@ -400,15 +415,30 @@ pub(crate) fn run(repo: &ReadRepo, opts: &LogOptions) -> Result<LogReport, GitEr
             author,
             committer,
             summary,
-            body: if opts.body { Some(body) } else { None },
+            body,
             stat,
         });
 
         if commits.len() >= opts.limit {
-            // There may or may not be more history behind this point. Rather
-            // than claim either way, ask the walk for one more step: that is
-            // the difference between "capped" and "this was the whole story".
-            truncated = true;
+            // There may or may not be more history behind this point, and
+            // claiming either way without checking is how `truncated` stops
+            // meaning anything: a repository with exactly `--limit` commits
+            // would report more history that does not exist, and an agent
+            // would go asking for a second page that is empty. So actually ask
+            // the walk for one more step. A step that errors is a real read
+            // failure and stays loud rather than being read as "no more".
+            truncated = match walk.next() {
+                Some(Ok(_)) => true,
+                None => false,
+                Some(Err(e)) => {
+                    return Err(GitError::repository(
+                        OP,
+                        "walking commit ancestry",
+                        repo.git_dir(),
+                        e,
+                    ))
+                }
+            };
             break;
         }
     }
@@ -447,6 +477,10 @@ fn signature(sig: &gix_actor::SignatureRef<'_>) -> Signature {
 /// the blank line after it, trimmed. A message with only a summary has an empty
 /// body — distinct from a body that was not asked for, which the model spells
 /// `None`.
+fn summary_of(message: &str) -> String {
+    message.split('\n').next().unwrap_or_default().trim_end().to_string()
+}
+
 fn split_message(message: &str) -> (String, String) {
     let mut lines = message.splitn(2, '\n');
     let summary = lines.next().unwrap_or_default().trim_end().to_string();
@@ -608,6 +642,7 @@ fn commit_stat(
     first_parent: Option<ObjectId>,
     is_merge: bool,
     max_blob_bytes: u64,
+    max_diff_files: usize,
 ) -> Result<StatSummary, GitError> {
     // Git shows no diffstat for a merge by default — a merge's changes are
     // already reported by the commits it merged — and this matches that rather
@@ -622,16 +657,44 @@ fn commit_stat(
         ..StatSummary::default()
     };
 
-    for change in &changes {
+    for (i, change) in changes.iter().enumerate() {
+        // Past the embedder's file cap, stop diffing. Each blob is bounded by
+        // `max_blob_bytes`, but a commit touching a hundred thousand
+        // just-under-cap files is a hundred thousand Myers diffs — bounded
+        // memory, unbounded time. The remainder is declared, not dropped.
+        if i >= max_diff_files {
+            summary.lines_capped += changes.len() - i;
+            break;
+        }
         match line_delta(repo, change, max_blob_bytes)? {
-            Some((added, deleted)) => {
+            LineDelta::Counted { added, deleted } => {
                 summary.additions += added;
                 summary.deletions += deleted;
             }
-            None => summary.lines_capped += 1,
+            // Declined by a limit — the caller is owed the count.
+            LineDelta::OverCap => summary.lines_capped += 1,
+            // No lines to count by nature. Git's shortstat leaves these out of
+            // its totals too, and they are not "capped": nothing was withheld,
+            // there was nothing there.
+            LineDelta::NotText => {}
         }
     }
     Ok(summary)
+}
+
+/// What counting one changed file's lines produced.
+///
+/// Three outcomes, not two. Collapsing "declined by a limit" and "has no lines"
+/// into one `None` made `lines_capped` mean "files with no delta for any
+/// reason", so an agent reading `lines_capped: 3` on a commit touching three
+/// PNGs would believe three files were too large to read.
+enum LineDelta {
+    /// Both sides were read and diffed.
+    Counted { added: u64, deleted: u64 },
+    /// A side was over `max_blob_bytes`, so the delta was declined.
+    OverCap,
+    /// Binary content or a submodule gitlink — no line count exists to report.
+    NotText,
 }
 
 /// Added and deleted line counts for one changed path, or `None` when a side
@@ -644,18 +707,21 @@ fn line_delta(
     repo: &ReadRepo,
     change: &Change,
     max_blob_bytes: u64,
-) -> Result<Option<(u64, u64)>, GitError> {
+) -> Result<LineDelta, GitError> {
     let old = read_blob(repo, change.old, max_blob_bytes)?;
     let new = read_blob(repo, change.new, max_blob_bytes)?;
     let (old, new) = match (old, new) {
-        (Some(o), Some(n)) => (o, n),
-        // Either side was over the cap, or unreadable as a blob.
-        _ => return Ok(None),
+        (Blob::Text(o), Blob::Text(n)) => (o, n),
+        // A gitlink on either side: a commit in another repository, with no
+        // blob here to count lines in.
+        (Blob::Gitlink, _) | (_, Blob::Gitlink) => return Ok(LineDelta::NotText),
+        // Either side was over the embedder's cap.
+        _ => return Ok(LineDelta::OverCap),
     };
     // A NUL byte is git's own binary heuristic, and a binary file has no line
     // count worth reporting — git leaves those out of its shortstat totals too.
     if old.contains(&0) || new.contains(&0) {
-        return Ok(None);
+        return Ok(LineDelta::NotText);
     }
 
     let old_text = String::from_utf8_lossy(&old);
@@ -667,10 +733,21 @@ fn line_delta(
         gix_imara_diff::sources::lines(new_text.as_ref()),
     );
     let diff = gix_imara_diff::Diff::compute(gix_imara_diff::Algorithm::Myers, &input);
-    Ok(Some((
-        u64::from(diff.count_additions()),
-        u64::from(diff.count_removals()),
-    )))
+    Ok(LineDelta::Counted {
+        added: u64::from(diff.count_additions()),
+        deleted: u64::from(diff.count_removals()),
+    })
+}
+
+/// One side of a changed path, as far as the cap allowed us to read it.
+enum Blob {
+    /// Content we are allowed to diff. An absent side (an add or a delete) is
+    /// genuinely empty, not a declined read.
+    Text(Vec<u8>),
+    /// A side over `max_blob_bytes`.
+    OverCap,
+    /// The oid names a submodule gitlink — a commit in another repository.
+    Gitlink,
 }
 
 /// Read a blob, refusing one larger than the embedder's cap.
@@ -685,34 +762,39 @@ fn read_blob(
     repo: &ReadRepo,
     oid: Option<ObjectId>,
     max_blob_bytes: u64,
-) -> Result<Option<Vec<u8>>, GitError> {
+) -> Result<Blob, GitError> {
     const OP: &str = "log";
     let Some(oid) = oid else {
         // An absent side is a real, empty side: an added file's "old" content
         // is genuinely zero lines, not a declined read.
-        return Ok(Some(Vec::new()));
+        return Ok(Blob::Text(Vec::new()));
     };
-    let mut buf = Vec::new();
-    let data = match repo.objects().find(&oid, &mut buf) {
-        Ok(d) => d,
-        Err(e) => {
-            return Err(GitError::repository(
-                OP,
-                "reading a blob",
-                repo.git_dir(),
-                e,
-            ))
-        }
-    };
-    if data.kind != gix_object::Kind::Blob {
+    // The header first, and the content only if the header says it fits.
+    // `find` decompresses the whole object into `buf` before returning, so
+    // checking the size afterwards would mean a multi-gigabyte blob is fully
+    // materialized and *then* declined — the cap would bound the line count
+    // and not the allocation it exists to bound. `header` reads only the
+    // object's type and size, which is the object-store equivalent of the
+    // `meta.len()` check `status` does before `std::fs::read`.
+    let header = repo
+        .objects()
+        .header(oid)
+        .map_err(|e| GitError::repository(OP, "reading an object header", repo.git_dir(), e))?;
+    if header.kind() != gix_object::Kind::Blob {
         // A gitlink points at a commit in another repository; there is no blob
         // here to count lines in.
-        return Ok(None);
+        return Ok(Blob::Gitlink);
     }
-    if data.data.len() as u64 > max_blob_bytes {
-        return Ok(None);
+    if header.size() > max_blob_bytes {
+        return Ok(Blob::OverCap);
     }
-    Ok(Some(data.data.to_vec()))
+
+    let mut buf = Vec::new();
+    let data = repo
+        .objects()
+        .find(&oid, &mut buf)
+        .map_err(|e| GitError::repository(OP, "reading a blob", repo.git_dir(), e))?;
+    Ok(Blob::Text(data.data.to_vec()))
 }
 
 #[cfg(test)]
