@@ -823,3 +823,88 @@ fn work_dir_is_bounded_by_discovery() {
          mount"
     );
 }
+
+/// A `gitdir:` line must not report whether its target exists on the host.
+///
+/// The oracle this crate keeps growing back, found by cross-model review of
+/// PR 3 and confirmed by probe. `git_dir` is the one discovery output a
+/// repository controls: a `.git` **file** inside the sandbox names it, and can
+/// name any absolute path on the host. The two ways that can fail us — the
+/// path resolves outside the mount, or it does not resolve at all — used to
+/// take different exits (4 vs 1), which is a reliable one-bit read of arbitrary
+/// host paths: point `gitdir:` at a path, read the exit code, repeat.
+///
+/// Both cases are the same refusal now. The exit depends only on whether the
+/// attacker's own working tree is inside the mount — something it already
+/// knows — and never on the host.
+///
+/// This is the same rule `contain` and `open_leaf` already hold for
+/// `commondir`, alternates and symlinked leaves; only this branch was written
+/// before the rule existed.
+#[tokio::test]
+async fn a_gitdir_line_cannot_report_whether_its_target_exists() {
+    require_git();
+
+    /// Build a mount holding a worktree whose `.git` file points outside, and
+    /// return `(exit code, stderr)`.
+    async fn probe(target_exists: bool) -> (i64, String) {
+        let fixture = Fixture::empty();
+        let mount = fixture.path("mount");
+        let outside = fixture.path("outside");
+        std::fs::create_dir_all(&mount).expect("create mount");
+        std::fs::create_dir_all(&outside).expect("create outside");
+
+        // The path the `.git` file will name. It is a real repository in one
+        // case and absent in the other; nothing else differs.
+        let target = outside.join("realrepo.git");
+        if target_exists {
+            git(&outside, &["init", "--bare", "--quiet", "realrepo.git"]);
+        }
+
+        let wt = mount.join("wt");
+        std::fs::create_dir_all(&wt).expect("create worktree dir");
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", target.display()))
+            .expect("write .git file");
+
+        let result = info_at(mount.clone(), "/mnt/wt").await;
+        // Normalize the fixture's own temp root out of the message: each probe
+        // builds its own, and that difference is ours, not the repository's.
+        let err = result
+            .err
+            .replace(&mount.display().to_string(), "<MOUNT>")
+            .replace(&fixture.root().display().to_string(), "<FIXTURE>");
+        (result.code, err)
+    }
+
+    let (code_present, err_present) = probe(true).await;
+    let (code_absent, err_absent) = probe(false).await;
+
+    assert_eq!(
+        code_present, code_absent,
+        "the exit code must not depend on whether the host path exists — it \
+         did (present={code_present}, absent={code_absent}), which is a 1-bit \
+         read of any path on the host"
+    );
+    assert_eq!(
+        code_present, 4,
+        "and both are the environment refusal, not a missing repository: \
+         {err_present}"
+    );
+
+    // The messages must not differ either: a caller who can tell the two
+    // apart by wording has the same oracle in prose.
+    assert_eq!(
+        err_present, err_absent,
+        "the refusals must be indistinguishable in wording too"
+    );
+
+    // Neither may echo the outside path back — that would hand over the
+    // target directly rather than one bit about it.
+    for err in [&err_present, &err_absent] {
+        assert!(
+            !err.contains("realrepo.git"),
+            "the refusal must not echo the path the repository asked us to \
+             read: {err}"
+        );
+    }
+}

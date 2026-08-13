@@ -121,6 +121,21 @@ impl ReadRepo {
             ..Default::default()
         };
 
+        // Screen a `.git` *file*'s `gitdir:` line BEFORE discovery reads it.
+        //
+        // This has to happen first, and that ordering is the whole fix.
+        // gix-discover validates the target itself: a `gitdir:` naming a real
+        // git directory outside the mount succeeds (and our ceiling check then
+        // refuses it, exit 4), while one naming a path that does not exist
+        // fails discovery outright (exit 1). The difference between those two
+        // exits is a one-bit read of any path on the host — point `gitdir:` at
+        // it and look at the code. No check placed *after* `upwards_opts` can
+        // close that, because the leak already happened inside it.
+        //
+        // Screening here refuses an escaping `gitdir:` on the strength of
+        // where it points, never on whether it is there.
+        screen_gitdir_file(operation, real_path, &real_dir(operation, "mount root", ceiling)?)?;
+
         let (path, _trust) = gix_discover::upwards_opts(real_path, options).map_err(|e| {
             use gix_discover::upwards::Error;
             match e {
@@ -178,14 +193,10 @@ impl ReadRepo {
         // through `open_leaf`, which refuses a symlinked leaf that escapes.
         let ceiling = real_dir(operation, "mount root", ceiling)?;
 
-        // `git_dir` is discovery's output, but a `.git` file's `gitdir:` line
-        // can make it repository-controlled — so a value that will not resolve
-        // is folded into "no repository" rather than echoed back.
-        let git_dir = std::fs::canonicalize(&git_dir).map_err(|_| GitError::NotARepository {
-            operation,
-            start: real_path.to_path_buf(),
-            ceiling: ceiling.clone(),
-        })?;
+        // The working tree first, because whether it is inside the mount is
+        // what decides how a bad `git_dir` may be reported. It is discovery's
+        // own output — a directory the caller named or walked up from — so
+        // naming it leaks nothing.
         let work_dir = match work_dir {
             Some(w) => Some(std::fs::canonicalize(&w).map_err(|_| GitError::NotARepository {
                 operation,
@@ -194,36 +205,59 @@ impl ReadRepo {
             })?),
             None => None,
         };
+        let contained_work_dir = work_dir
+            .as_ref()
+            .filter(|w| w.starts_with(&ceiling))
+            .cloned();
 
-        if !git_dir.starts_with(&ceiling) {
-            // Two very different situations reach here, and collapsing them
-            // would either leak or mislead.
-            //
-            // If a working tree was found *inside* the mount, then a `.git`
-            // file inside the sandbox named a git dir outside it — the same
-            // shape as the `commondir` case below, and the ordinary result of
-            // mounting only a linked worktree and not its main repository.
-            // The caller already knows about the path we name, so saying so
-            // costs nothing and tells an embedder how to fix their layout.
-            //
-            // Otherwise discovery itself walked out of the mount, and from
-            // inside the mount there simply is no repository. That is all we
-            // say: confirming one exists above would answer a question the
-            // caller was never entitled to ask.
-            if let Some(work_dir) = work_dir.filter(|w| w.starts_with(&ceiling)) {
-                return Err(GitError::EscapesMount {
+        // `git_dir` is different: a `.git` *file* inside the sandbox can name
+        // any path on the host through its `gitdir:` line, which makes this
+        // value **repository-controlled**. So the two ways it can fail us —
+        // it does not resolve at all, or it resolves outside the mount — must
+        // be *indistinguishable*, exactly as `contain` and `open_leaf` already
+        // make them for `commondir`, alternates and symlinked leaves.
+        //
+        // They were not. `canonicalize` failing produced `NotARepository`
+        // (exit 1) while resolving-outside produced `EscapesMount` (exit 4),
+        // so a hostile repository could read one bit about any host path per
+        // probe: point `gitdir:` at it and read the exit code. That is the
+        // same oracle shape the earlier round retired everywhere else, and it
+        // survived here because this branch was written before that rule
+        // existed.
+        //
+        // Now the refusal depends only on what the attacker already knows —
+        // whether the working tree it planted is inside the mount — and never
+        // on the host.
+        let refuse_git_dir = |ceiling: PathBuf| -> GitError {
+            match contained_work_dir.clone() {
+                // A working tree inside the mount named a git dir we will not
+                // read. The caller already knows this path, and an embedder
+                // who mounted only a linked worktree needs to be told how to
+                // fix their layout, so naming it costs nothing.
+                Some(work_dir) => GitError::EscapesMount {
                     operation,
                     what: "git directory (the `gitdir:` line in its .git file)",
                     repo: work_dir,
                     ceiling,
-                });
+                },
+                // Discovery itself walked out of the mount. From inside the
+                // mount there simply is no repository, and that is all we say:
+                // confirming one exists above would answer a question the
+                // caller was never entitled to ask.
+                None => GitError::NotARepository {
+                    operation,
+                    start: real_path.to_path_buf(),
+                    ceiling,
+                },
             }
-            return Err(GitError::NotARepository {
-                operation,
-                start: real_path.to_path_buf(),
-                ceiling,
-            });
-        }
+        };
+
+        let git_dir = match std::fs::canonicalize(&git_dir) {
+            Ok(dir) if dir.starts_with(&ceiling) => dir,
+            // Resolves outside the mount, or does not resolve at all. One
+            // answer for both — that indistinguishability IS the fix.
+            Ok(_) | Err(_) => return Err(refuse_git_dir(ceiling)),
+        };
 
         if let Some(work_dir) = work_dir.as_deref() {
             // Defense in depth. Today `work_dir` is discovery's own physical
@@ -1127,6 +1161,107 @@ impl Leaf {
         match self {
             Leaf::At(p) => Some(p),
             Leaf::Absent => None,
+        }
+    }
+}
+
+/// How much of a `.git` file we will read before calling it malformed. A real
+/// one is a single short line; this only stops a hostile "file" from being a
+/// terabyte.
+const MAX_DOT_GIT_FILE_BYTES: u64 = 4096;
+
+/// Refuse a `.git` *file* whose `gitdir:` line leaves the mount, before
+/// discovery ever resolves it.
+///
+/// Walks from `start` up to `ceiling` looking for the `.git` entry discovery
+/// would find. A directory is an ordinary repository and needs no screening. A
+/// file is the one discovery input a repository fully controls — its
+/// `gitdir:` line can name any absolute path on the host — so its target goes
+/// through [`contain`], which answers "outside the mount" and "does not
+/// resolve" with the *same* refusal.
+///
+/// A `.git` that is itself a symlink is handled by [`open_leaf`], on the same
+/// terms.
+fn screen_gitdir_file(
+    operation: &'static str,
+    start: &Path,
+    ceiling: &Path,
+) -> Result<(), GitError> {
+    const WHAT: &str = "git directory (the `gitdir:` line in its .git file)";
+
+    // Start from a canonical directory so `open_leaf`'s "real leaf under a
+    // canonical parent is contained by construction" reasoning holds.
+    let Ok(mut dir) = std::fs::canonicalize(start) else {
+        // Nothing we can screen; discovery will report the missing path.
+        return Ok(());
+    };
+    if !dir.starts_with(ceiling) {
+        return Ok(());
+    }
+
+    loop {
+        match open_leaf(operation, ".git entry", &dir, ".git", ceiling)? {
+            Leaf::At(dot_git) => {
+                let meta = match std::fs::symlink_metadata(&dot_git) {
+                    Ok(m) => m,
+                    Err(_) => return Ok(()),
+                };
+                if meta.is_dir() {
+                    // An ordinary repository: nothing repository-controlled
+                    // about where its git dir lives.
+                    return Ok(());
+                }
+                if meta.len() > MAX_DOT_GIT_FILE_BYTES {
+                    return Err(GitError::repository(
+                        operation,
+                        "reading the .git file",
+                        &dir,
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "the .git file is {} bytes; a real one names a \
+                                 single directory",
+                                meta.len()
+                            ),
+                        ),
+                    ));
+                }
+                let Ok(text) = std::fs::read_to_string(&dot_git) else {
+                    // Unreadable or not UTF-8 — discovery will say so, and it
+                    // is not a containment question.
+                    return Ok(());
+                };
+                let Some(target) = text
+                    .lines()
+                    .find_map(|l| l.trim().strip_prefix("gitdir:"))
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                else {
+                    return Ok(());
+                };
+                // A relative `gitdir:` is relative to the directory holding
+                // the `.git` file, exactly as git resolves it.
+                let candidate = {
+                    let raw = Path::new(target);
+                    if raw.is_absolute() {
+                        raw.to_path_buf()
+                    } else {
+                        dir.join(raw)
+                    }
+                };
+                contain(operation, WHAT, &dir, &candidate, ceiling)?;
+                return Ok(());
+            }
+            // No `.git` here — keep walking up, but never past the mount.
+            Leaf::Absent => {
+                if dir == ceiling {
+                    return Ok(());
+                }
+                match dir.parent() {
+                    Some(parent) if parent.starts_with(ceiling) => dir = parent.to_path_buf(),
+                    _ => return Ok(()),
+                }
+            }
         }
     }
 }
