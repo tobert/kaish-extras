@@ -97,6 +97,40 @@ pub fn git(cwd: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// Run `git` in `cwd` with the same hermetic environment as [`git`], but with
+/// the identity and the clock the caller chose.
+///
+/// `git` pins one author, one committer and one instant, which is exactly right
+/// for a fixture that must not vary. `log` needs the opposite: history whose
+/// commits differ in author and in date, so `--author`, `--since` and `--until`
+/// have something real to select from. Everything else stays pinned.
+pub fn git_as(cwd: &Path, author: (&str, &str), date: &str, args: &[&str]) -> String {
+    let (name, email) = author;
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_AUTHOR_NAME", name)
+        .env("GIT_AUTHOR_EMAIL", email)
+        .env("GIT_COMMITTER_NAME", name)
+        .env("GIT_COMMITTER_EMAIL", email)
+        .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_DATE", date)
+        .output()
+        .unwrap_or_else(|e| panic!("git {args:?} in {}: {e}", cwd.display()));
+    assert!(
+        out.status.success(),
+        "git {args:?} in {} failed ({}): {}",
+        cwd.display(),
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 /// Whether real git is on PATH.
 ///
 /// The oracle is a hard requirement, not an optional extra: a suite that

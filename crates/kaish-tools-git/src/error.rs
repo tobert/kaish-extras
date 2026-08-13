@@ -294,6 +294,78 @@ pub enum GitError {
         magic: String,
     },
 
+    /// A `--rev` (or a revision derived from one) names nothing this repository
+    /// contains. Exit 1 — a git-level "no such revision", the same class git
+    /// returns for an unknown ref or oid.
+    ///
+    /// The rev is the caller's own argument, echoed so an agent reading only
+    /// stderr can see what it typed. It is not repository content — it is what
+    /// the caller asked for — so there is no oracle here to withhold.
+    #[error(
+        "git {operation}: '{rev}' does not name a commit in repository '{repo}' \
+         — no such ref, and no object with that id. kaish-git resolves HEAD, a \
+         branch, a tag, a full or >=4-char unambiguous oid, and the ~/^ \
+         suffixes on any of those"
+    )]
+    NoSuchRevision {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The revision, as the caller spelled it.
+        rev: String,
+        /// The repository the lookup ran against.
+        repo: PathBuf,
+    },
+
+    /// A short oid in `--rev` matches more than one object. Exit 1 — a
+    /// git-level "no", the same as git's "ambiguous argument".
+    #[error(
+        "git {operation}: oid prefix '{rev}' is ambiguous in repository \
+         '{repo}' — it matches more than one object. Give more characters"
+    )]
+    AmbiguousRevision {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The ambiguous prefix, as the caller spelled it.
+        rev: String,
+        /// The repository the lookup ran against.
+        repo: PathBuf,
+    },
+
+    /// A `--rev` used revision syntax outside this crate's small grammar.
+    /// Exit 2 — usage, and it names the unsupported form rather than resolving
+    /// it to a wrong or surprising commit (B, "Revisions accept a deliberately
+    /// small grammar").
+    #[error(
+        "git {operation}: revision '{spec}' uses '{syntax}', which kaish-git \
+         does not parse — the accepted forms are HEAD, a branch, a tag, \
+         refs/..., a full or >=4-char oid, and the ~N / ^ / ^N suffixes"
+    )]
+    UnsupportedRevspec {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The offending `--rev` value, verbatim.
+        spec: String,
+        /// The unsupported token that was recognized.
+        syntax: String,
+    },
+
+    /// `--patch` was asked of a build that has no unified-diff assembly. Exit 4
+    /// — an environment/capability gap, the same class and code E.5 gives a
+    /// `--patch` on a build without `textdiff`.
+    ///
+    /// Loud and specific on purpose: an agent that passes `--patch` deserves
+    /// "this build cannot", naming the feature, not a generic "unknown flag".
+    #[error(
+        "git {operation}: --patch needs per-commit unified-diff text, which \
+         this build does not assemble — that is the 'textdiff' feature, built \
+         in a later phase (architecture.md H.5/H.6). Use --stat for changed-file \
+         and line counts, which this build does compute"
+    )]
+    PatchNeedsTextdiff {
+        /// The verb that was asked for.
+        operation: &'static str,
+    },
+
     /// The repository is on disk but malformed, or a file we must read is
     /// unreadable. Exit 1 — a git-level failure about this repository, not a
     /// statement about the environment.
@@ -335,10 +407,13 @@ impl GitError {
             | GitError::Repository { .. }
             | GitError::NeedsWorktree { .. }
             | GitError::BlobTooLarge { .. }
-            | GitError::TreeTooDeep { .. } => 1,
+            | GitError::TreeTooDeep { .. }
+            | GitError::NoSuchRevision { .. }
+            | GitError::AmbiguousRevision { .. } => 1,
             GitError::Usage { .. }
             | GitError::NoVerb { .. }
-            | GitError::PathspecMagic { .. } => 2,
+            | GitError::PathspecMagic { .. }
+            | GitError::UnsupportedRevspec { .. } => 2,
             GitError::NotRealPath { .. }
             | GitError::UnsupportedRefBackend { .. }
             | GitError::UnsupportedRepositoryFormat { .. }
@@ -346,7 +421,8 @@ impl GitError {
             | GitError::EscapingInclude { .. }
             | GitError::EscapesMount { .. }
             | GitError::NoContainingMount { .. }
-            | GitError::UntrustedRepository { .. } => 4,
+            | GitError::UntrustedRepository { .. }
+            | GitError::PatchNeedsTextdiff { .. } => 4,
             GitError::VerbNotEnabled { .. } => 5,
         }
     }
@@ -453,6 +529,22 @@ mod tests {
                 size: 4096,
                 cap: 64,
             },
+            GitError::NoSuchRevision {
+                operation: "log",
+                rev: "nonesuch".into(),
+                repo: repo.clone(),
+            },
+            GitError::AmbiguousRevision {
+                operation: "log",
+                rev: "abcd".into(),
+                repo: repo.clone(),
+            },
+            GitError::UnsupportedRevspec {
+                operation: "log",
+                spec: "A..B".into(),
+                syntax: "..".into(),
+            },
+            GitError::PatchNeedsTextdiff { operation: "log" },
         ];
         for e in &variants {
             let code = e.exit_code();

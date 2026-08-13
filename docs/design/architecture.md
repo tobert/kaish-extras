@@ -395,15 +395,48 @@ Table rendering: the `XY` pair, then `PATH` (+ `← ORIG` on renames).
 ```json
 {"rev":"HEAD","commits":[
   {"oid":"…","short_oid":"a1b2c3d","parents":["…"],
-   "author":{"name":"Amy","email":"…","time":"2026-08-01T10:00:00Z"},
+   "author":{"name":"Amy","email":"…","time":"2026-08-01T10:00:00+00:00"},
    "committer":{…},"summary":"fix the thing","body":null,
-   "stat":{"files":3,"additions":40,"deletions":7}}],
+   "stat":{"files":3,"additions":40,"deletions":7,"lines_capped":0}}],
  "truncated":true}
 ```
 
 No `--graph` (ASCII art is a human affordance and a non-goal). No `--grep`
 (regex). Date parsing accepts two unambiguous forms and rejects everything else
 loudly — git's `approxidate` ("2 weeks ago") is a pattern language in disguise.
+
+Settled while building it (PR 3), each pinned by a test against real git:
+
+- **`rev` echoes the caller's spelling**, not the oid it resolved to. An agent
+  that asked for `HEAD~2` reads `HEAD~2` back.
+- **Times carry the commit's own UTC offset** (`+09:00`), not a normalized `Z`.
+  Git records the zone the author was in; that is a fact about the commit, and
+  the instant is identical either way.
+- **`--since` / `--until` are inclusive**, and neither stops the walk. Commit
+  dates are not monotonic along ancestry — a rebase or a skewed clock can date a
+  child before its parent — so breaking early would silently drop history behind
+  the first out-of-window commit.
+- **`--path` implements git's default history simplification**, which is a
+  *traversal* rule and not only a reporting one. When a commit's tree matches
+  some parent's under the paths, it introduced nothing there: it is not
+  reported, and the walk follows **only that parent**, pruning the branches the
+  merge did not take. Both halves are load-bearing. Reporting alone hides the
+  merge but still walks the discarded branch, whose commits differ from *their*
+  parents and get reported — so `git log --path f` would name a change that a
+  reverting merge threw away. That pruning is why the walk is ours rather than
+  `gix-traverse`'s: `Simple` enqueues every parent unconditionally, and the
+  choice of which parent to follow cannot be expressed as a filter over it.
+- **`--stat` is first-parent, and zero for a merge**, matching git's default of
+  showing no diffstat for a merge. Line counts are bounded by the embedder's
+  `max_blob_bytes`: a changed file whose blob is over the cap still counts in
+  `files`, contributes no lines, and is counted in **`lines_capped`** — an
+  honest lower bound rather than a lie or an unbounded read. Binary files and
+  gitlinks are counted the same way, as git's shortstat also leaves them out of
+  its line totals.
+- **`--limit` and the filters interact honestly.** A filter cannot stop the walk
+  (history is sorted by none of author, path, or reliably date), so a filtered
+  log walks until it fills `--limit` or exhausts history, bounded by an internal
+  examined-commit cap. Hitting either sets `truncated`.
 
 ### B.4 `git diff`
 

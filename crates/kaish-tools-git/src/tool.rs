@@ -209,6 +209,164 @@ impl GitTool {
         }
         result
     }
+
+    #[tracing::instrument(
+        level = "info",
+        name = "git.verb",
+        skip_all,
+        fields(verb = "log", repo)
+    )]
+    async fn run_log(&self, args: ToolArgs, consumed: usize, ctx: &mut dyn ToolCtx) -> ExecResult {
+        const OP: &str = "log";
+        if let Err(e) = verb_enabled(&self.config, Verb::Log, OP) {
+            return failure(e);
+        }
+
+        let parsed = match parse_leaf::<verbs::log::LogArgs>(&args, consumed, OP) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+
+        // `--patch` is refused before anything is read. This build assembles no
+        // unified-diff text, and answering a `--patch` request with a stat — or
+        // with a silently flag-less log — would be a wrong answer rather than a
+        // missing one (E.5's precedent).
+        if parsed.patch {
+            return failure(GitError::PatchNeedsTextdiff { operation: OP });
+        }
+
+        let resolved = match resolve_repo_paths(OP, ctx, parsed.repo.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return failure(e),
+        };
+        tracing::Span::current().record("repo", tracing::field::display(resolved.real.display()));
+
+        // Dates are parsed here, on the caller's own argument, so a bad one is
+        // a usage error before a repository is even opened.
+        let since = match parsed.since.as_deref() {
+            Some(v) => match verbs::log::parse_date(OP, "--since", v) {
+                Ok(t) => Some(t),
+                Err(e) => return failure(e),
+            },
+            None => None,
+        };
+        let until = match parsed.until.as_deref() {
+            Some(v) => match verbs::log::parse_date(OP, "--until", v) {
+                Ok(t) => Some(t),
+                Err(e) => return failure(e),
+            },
+            None => None,
+        };
+        // An inverted window can never match, and answering it with a confident
+        // empty log would look like "this history has no such commits" rather
+        // than "you asked for an empty range".
+        if let (Some(s), Some(u)) = (since, until) {
+            if s > u {
+                return failure(GitError::Usage {
+                    operation: OP,
+                    message: format!(
+                        "--since '{}' is later than --until '{}', so no commit can \
+                         match. Did the two get swapped?",
+                        parsed.since.as_deref().unwrap_or_default(),
+                        parsed.until.as_deref().unwrap_or_default()
+                    ),
+                });
+            }
+        }
+
+        // The embedder's `max_rows` is a hard cap; `--limit` may only lower it.
+        let limit = parsed.limit.min(self.config.limits().max_rows);
+        // Not lowerable by an argument: this one caps a read, not an output.
+        // `--stat` reads blob pairs to count lines, so this is what stands
+        // between a repository and an allocation the repository picked.
+        let max_blob_bytes = self.config.limits().max_blob_bytes;
+        let max_diff_files = self.config.limits().max_diff_files;
+        let merges = match (parsed.merges, parsed.no_merges) {
+            (true, false) => verbs::log::MergeFilter::Only,
+            (false, true) => verbs::log::MergeFilter::Exclude,
+            // `(true, true)` is unreachable — clap's `conflicts_with` rejects
+            // it — and `(false, false)` is the documented default.
+            _ => verbs::log::MergeFilter::Both,
+        };
+        let rev = parsed.rev.clone();
+        let author = parsed.author.clone();
+        let first_parent = parsed.first_parent;
+        let body = parsed.body;
+        let stat = parsed.stat;
+        let path_args = parsed.path.clone();
+
+        let outcome = block_in_place_compat(move || {
+            let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
+            // `--path` values are relative to the caller's cwd within the repo,
+            // exactly as git's pathspecs are — the same prefixing `status` does.
+            let prefix = cwd_prefix(&resolved.real, repo.root());
+            let paths = path_args
+                .iter()
+                .map(|spec| {
+                    if prefix.is_empty() || spec.starts_with(':') {
+                        spec.clone()
+                    } else {
+                        format!("{prefix}/{spec}")
+                    }
+                })
+                .collect();
+            let opts = verbs::log::LogOptions {
+                rev,
+                limit,
+                paths,
+                since,
+                until,
+                author,
+                merges,
+                first_parent,
+                body,
+                stat,
+                max_blob_bytes,
+                max_diff_files,
+            };
+            let root = repo.root().display().to_string();
+            verbs::log::run(&repo, &opts).map(|model| (model, root))
+        });
+
+        let (model, repo_root) = match outcome {
+            Ok(pair) => pair,
+            Err(e) => return failure(e),
+        };
+
+        let mut result = ExecResult::with_output(crate::render::log(&model));
+        // Truncation is always reported — a stderr note beside the JSON's
+        // `truncated: true` (E.5). The exit code stays 0: a truncated log is a
+        // successful answer that ran up against `--limit`.
+        if model.truncated {
+            // Naming `--limit` unconditionally would be a small lie whenever
+            // the walk budget stopped us instead: an agent would lower a limit
+            // that was never the constraint. A report short of the limit can
+            // only have come from the budget.
+            result.err = if model.commits.len() >= limit {
+                format!(
+                    "git log: output truncated at {} commits (--limit); \
+                     'truncated' is true in --json",
+                    model.commits.len()
+                )
+            } else {
+                format!(
+                    "git log: stopped after examining the maximum number of \
+                     commits without filling --limit ({} matched); \
+                     'truncated' is true in --json. Narrow the search with \
+                     --rev or a date window",
+                    model.commits.len()
+                )
+            };
+        }
+        result.baggage.insert("git.repo".to_string(), repo_root);
+        if let Some(first) = model.commits.first() {
+            result
+                .baggage
+                .insert("git.log_tip_oid".to_string(), first.oid.clone());
+        }
+        result
+    }
 }
 
 /// The repo-relative, slash-separated directory of `real` within `root`, or
@@ -242,6 +400,9 @@ impl Tool for GitTool {
         if self.config.has(Verb::Status) {
             cmd = cmd.subcommand(verbs::status::StatusArgs::command().name("status"));
         }
+        if self.config.has(Verb::Log) {
+            cmd = cmd.subcommand(verbs::log::LogArgs::command().name("log"));
+        }
         schema_tree_from_clap(&cmd, self.config.tool_name(), DESCRIPTION, EXAMPLES)
     }
 
@@ -257,6 +418,7 @@ impl Tool for GitTool {
         match verb.as_str() {
             "info" => self.run_info(args, consumed, ctx).await,
             "status" => self.run_status(args, consumed, ctx).await,
+            "log" => self.run_log(args, consumed, ctx).await,
             // Unreachable: `route` only returns names it found in the schema,
             // and the schema is built from the verbs this file dispatches.
             // Reached anyway means a verb was added to `schema()` without a
@@ -498,7 +660,8 @@ mod tests {
         let err = tool(
             GitConfig::read_only()
                 .without_verb(Verb::Info)
-                .without_verb(Verb::Status),
+                .without_verb(Verb::Status)
+                .without_verb(Verb::Log),
         )
         .expect_err("a tool with no verbs cannot run anything");
         assert_eq!(err, ConfigError::NoVerbsEnabled);
@@ -508,15 +671,23 @@ mod tests {
     fn schema_carries_only_the_enabled_verbs() {
         let full = tool(GitConfig::read_only()).expect("read-only config").schema();
         let names: Vec<&str> = full.subcommands.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["info", "status"]);
+        assert_eq!(names, ["info", "status", "log"]);
 
-        // Subtract one, and only the other survives — the schema is built from
+        // Subtract one, and only the others survive — the schema is built from
         // the config, so a disabled verb is absent, not merely rejected.
         let narrowed = tool(GitConfig::read_only().without_verb(Verb::Status))
-            .expect("info alone is a valid config")
+            .expect("info and log are a valid config")
             .schema();
         let names: Vec<&str> = narrowed.subcommands.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["info"]);
+        assert_eq!(names, ["info", "log"]);
+
+        // Subtract a different one, to prove the removal tracks the config
+        // rather than the last verb in the list.
+        let narrowed = tool(GitConfig::read_only().without_verb(Verb::Log))
+            .expect("info and status are a valid config")
+            .schema();
+        let names: Vec<&str> = narrowed.subcommands.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["info", "status"]);
     }
 
     /// The disabled verb must vanish from the schema, because that is what
@@ -528,7 +699,8 @@ mod tests {
         let git = GitTool {
             config: GitConfig::read_only()
                 .without_verb(Verb::Info)
-                .without_verb(Verb::Status),
+                .without_verb(Verb::Status)
+                .without_verb(Verb::Log),
         };
         let schema = git.schema();
         assert!(
@@ -649,7 +821,7 @@ mod tests {
         let caps = git.capabilities();
         assert_eq!(caps.limits.max_rows, 7);
         assert_eq!(caps.profiles, ["read"]);
-        assert_eq!(caps.verbs, ["info", "status"]);
+        assert_eq!(caps.verbs, ["info", "status", "log"]);
     }
 
 }

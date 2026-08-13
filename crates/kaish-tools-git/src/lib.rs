@@ -30,7 +30,10 @@
 //! that fingerprint test. PR 2 adds `git status`, hand-composed on the index,
 //! a worktree walk, and a tree↔index comparison — `gix-status` is disqualified
 //! because it hard-requires `gix-filter` (→ `gix-command`), the spawn
-//! machinery the tripwires forbid.
+//! machinery the tripwires forbid. PR 3 adds `git log`: a `gix-traverse`
+//! commit walk, a small revision grammar, and `--stat` line counts from
+//! `gix-diff`'s tree walk plus `gix-imara-diff` — none of which links
+//! `gix-command` either.
 
 #[cfg(target_family = "wasm")]
 compile_error!(
@@ -51,6 +54,8 @@ mod error;
 #[cfg(not(target_family = "wasm"))]
 mod model;
 #[cfg(not(target_family = "wasm"))]
+mod pathfilter;
+#[cfg(not(target_family = "wasm"))]
 mod render;
 #[cfg(not(target_family = "wasm"))]
 mod repo;
@@ -65,8 +70,8 @@ pub use config::{ConfigError, GitConfig, Limits, Profile, Verb};
 pub use error::GitError;
 #[cfg(not(target_family = "wasm"))]
 pub use model::{
-    Capabilities, EntryKind, EntryStatus, Head, LimitsReport, RefBackend, RepoInfo, StatusEntry,
-    StatusReport, StatusTotals,
+    Capabilities, CommitInfo, EntryKind, EntryStatus, Head, LimitsReport, LogReport, RefBackend,
+    RepoInfo, Signature, StatSummary, StatusEntry, StatusReport, StatusTotals,
 };
 #[cfg(not(target_family = "wasm"))]
 pub use repo::ReadRepo;
@@ -82,12 +87,15 @@ pub use tool::{tool, GitTool};
 /// it parses `Cargo.toml`'s `=` pins and fails if the two drift.
 #[cfg(not(target_family = "wasm"))]
 const GIX_PINS: &[(&str, &str)] = &[
+    ("gix-actor", "0.41.2"),
     ("gix-commitgraph", "0.38.0"),
     ("gix-config", "0.59.0"),
+    ("gix-date", "0.15.6"),
     ("gix-diff", "0.66.0"),
     ("gix-discover", "0.54.0"),
     ("gix-glob", "0.27.0"),
     ("gix-ignore", "0.22.0"),
+    ("gix-imara-diff", "0.2.4"),
     ("gix-index", "0.54.0"),
     ("gix-object", "0.63.0"),
     ("gix-odb", "0.83.0"),

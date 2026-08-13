@@ -85,6 +85,39 @@ const VERB_MATRIX: &[(&str, &[&[&str]])] = &[
             &["--repo", "/mnt/wt-side", "--json"],
         ],
     ),
+    (
+        "log",
+        &[
+            // Bare: the commit walk and the object reads under it. The fixture
+            // is packed, so this exercises the pack path — a pack-index rebuild
+            // would be exactly the kind of `.git` write D.4 exists to catch.
+            &[],
+            // Structured output: a different renderer over the same model.
+            &["--json"],
+            // `--stat` reads blob pairs to count lines, the heaviest object
+            // traffic this verb generates.
+            &["--stat", "--json"],
+            // Message bodies, which read the same objects a different way.
+            &["--body", "--json"],
+            // A revision other than HEAD, resolved through the ref store —
+            // where a naive peel could rewrite `packed-refs`.
+            &["--rev", "feature/side"],
+            // Tag resolution, which peels an annotated object.
+            &["--rev", "v0.1.0", "--json"],
+            // Navigation suffixes, which read parents.
+            &["--rev", "HEAD~1"],
+            // The filters, each of which walks trees or signatures.
+            &["--path", "src", "--json"],
+            &["--author", "Fixture", "--json"],
+            &["--since", "2020-01-01", "--json"],
+            &["--no-merges", "--json"],
+            &["--first-parent", "--json"],
+            // Truncation, which stops the walk mid-flight.
+            &["--limit", "1"],
+            // A linked worktree resolves refs through the common dir.
+            &["--repo", "/mnt/wt-side", "--json"],
+        ],
+    ),
 ];
 
 /// Split an argv slice into the `ToolArgs` the kernel would have built.

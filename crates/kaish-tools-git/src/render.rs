@@ -8,7 +8,7 @@
 
 use kaish_types::{OutputData, OutputNode};
 
-use crate::model::{RepoInfo, StatusReport};
+use crate::model::{LogReport, RepoInfo, StatusReport};
 
 /// Render [`RepoInfo`] as a `FIELD`/`VALUE` table carrying the full object as
 /// `rich_json`.
@@ -103,6 +103,72 @@ pub fn status(report: &StatusReport) -> OutputData {
         // worse than saying so.
         Err(e) => {
             tracing::warn!(error = %e, "git status: could not build the --json payload");
+            table
+        }
+    }
+}
+
+/// Render a [`LogReport`] as a one-line-per-commit table (B.3), carrying the
+/// full model as `rich_json`.
+///
+/// The text surface is `git log --oneline` plus the date and author, which is
+/// the shape a reader scans; `--json` carries the parents, the full oid, the
+/// body and the stat counts. `--stat` adds a counts column rather than a second
+/// table, so one row stays one commit whatever flags are in play.
+pub fn log(report: &LogReport) -> OutputData {
+    let with_stat = report.commits.iter().any(|c| c.stat.is_some());
+    let with_body = report.commits.iter().any(|c| c.body.is_some());
+
+    let rows: Vec<OutputNode> = report
+        .commits
+        .iter()
+        .map(|commit| {
+            let mut cells = vec![
+                // The date alone; the time of day is in --json for anyone who
+                // needs it, and this keeps the column scannable.
+                commit.author.time.chars().take(10).collect::<String>(),
+                commit.author.name.clone(),
+                commit.summary.clone(),
+            ];
+            if with_stat {
+                cells.push(match &commit.stat {
+                    Some(s) => format!("{} files +{} -{}", s.files, s.additions, s.deletions),
+                    None => String::new(),
+                });
+            }
+            if with_body {
+                // A body is multi-line by nature; the table shows whether there
+                // is one, and --json carries the text.
+                cells.push(match &commit.body {
+                    Some(b) if !b.is_empty() => format!("{} lines", b.lines().count()),
+                    _ => String::new(),
+                });
+            }
+            OutputNode::new(commit.short_oid.clone()).with_cells(cells)
+        })
+        .collect();
+
+    let mut headers = vec![
+        "OID".to_string(),
+        "DATE".to_string(),
+        "AUTHOR".to_string(),
+        "SUMMARY".to_string(),
+    ];
+    if with_stat {
+        headers.push("STAT".to_string());
+    }
+    if with_body {
+        headers.push("BODY".to_string());
+    }
+
+    let table = OutputData::table(headers, rows);
+    match serde_json::to_value(report) {
+        Ok(json) => table.with_rich_json(json),
+        // A model of owned scalars cannot fail to serialize in practice; the
+        // table is still a correct answer, and losing --json silently would be
+        // worse than saying so.
+        Err(e) => {
+            tracing::warn!(error = %e, "git log: could not build the --json payload");
             table
         }
     }

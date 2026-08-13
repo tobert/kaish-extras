@@ -44,6 +44,87 @@ fixture asserted against real `git status --porcelain` before fixing.
   `gix_odb::alternate::resolve` (raised by gemini-pro in the PR #23 re-review;
   behavioral, do not reason it out — build the fixture).
 
+## git log — known limitations (accepted for the read profile)
+
+- **L1 — `--stat` does not detect renames.** A renamed file is counted as one
+  deletion plus one addition, so `files` is 2 and the line counts are the whole
+  file twice. `status` has exact-match rename pairing and `log` does not,
+  because the tree comparison here is per-commit and pairing would need the same
+  oid-reappearance pass run against every commit walked. Git's own default
+  (`git log --stat` without `-M`) also does not detect renames, so this matches
+  the tool an agent is comparing against — but it is a divergence from `status`
+  within our own surface, which is the part worth closing. Revisit when PR 5
+  (`diff`) factors the rename pairing out of `status`.
+
+- **L2 — a filtered `log` walks history rather than stopping at `--limit`.**
+  No filter (`--author`, `--path`, a date window) is sorted along ancestry, so
+  the walk cannot stop when it has enough matches — it stops when it has enough
+  matches *or* has examined `MAX_COMMITS_EXAMINED` (100k) commits. On a large
+  repository an unmatched filter therefore pays a full-history walk and reports
+  `truncated: true`. Correct and bounded, but a commit-graph-backed date cutoff
+  (`gix-traverse`'s `ByCommitTimeCutoff`) would make the date case much cheaper.
+  Not worth the complexity until a real repository makes it hurt.
+
+- **L4 — `@` is not accepted as a synonym for `HEAD`.** Git takes bare `@`
+  wherever it takes `HEAD`. `resolve_commit` does not: `@` is not a valid ref
+  name, is not hex, and so exits 1 "does not name a commit". That is a refusal,
+  not a wrong answer — a probe over the whole grammar (`@`, `HEAD@`, `^{}`,
+  `-`, `HEAD~0`, `HEAD^^^`, `HEAD~2~3`, `HEAD~-1`, `HEAD~1x`, oversized `~N`,
+  trailing whitespace, empty) found no input that resolves to a *surprising*
+  commit, which is the property that matters. But an agent that types `@` gets
+  a confusing error rather than the log it wanted. Either accept it as an alias
+  or name it in `unsupported_revspec` so the error says "use HEAD".
+
+- **L3 — `--stat` line counts read whole blobs.** Counting lines needs both
+  sides of every changed file in memory, bounded per blob by the embedder's
+  `max_blob_bytes` but not in aggregate across a commit. A commit touching very
+  many just-under-cap files is a large transient allocation. The row cap bounds
+  commits, not bytes per commit.
+
+## Crate-wide — confirmed by probe, own PR (Amy, 2026-08-13)
+
+Both found by the PR 3 cross-model review and then **probed**, not reasoned
+about. Neither is introduced by `log`; both predate it and affect every verb,
+so they get a focused PR of their own rather than riding along with a new verb.
+
+- **X1 — the `.git` file's `gitdir:` line is a 1-bit host-existence oracle.**
+  This is the G2 shape again, in the one place the earlier round did not reach.
+  A `.git` *file* inside the mount naming a git dir outside it splits by whether
+  the outside path exists on the host:
+
+  | `gitdir:` target | result |
+  |---|---|
+  | exists | exit 4, `EscapesMount` |
+  | absent | exit 1, `NotARepository` |
+
+  Probed both ways with a fixture mounting a worktree whose `.git` file points
+  outside. The cause is `repo.rs:184`: `canonicalize` failing on a
+  repository-controlled `git_dir` folds into `NotARepository`, while resolving
+  outside the ceiling falls through to the `EscapesMount` branch below. An
+  attacker who controls a repository reads one bit about arbitrary host paths,
+  one probe at a time.
+
+  Fix shape: the same treatment `contain` and `open_leaf` already have — fold
+  "does not resolve" and "resolves outside" into one non-echoing exit-4, so the
+  refusal depends only on what the attacker already knows. Needs a fail-first
+  probe for both cases, like the G2 fix.
+
+- **X2 — positional arguments are silently swallowed, so the tool answers a
+  different question.** `git log side` returns **exit 0** with `rev: "HEAD"`:
+  the branch name lands in the hidden `operands` sink that every verb carries
+  ("Validation-only sink… Read nothing off this field") and is discarded. An
+  agent asking for a branch's history gets the current branch's, confidently,
+  and concludes the branch is empty. `git status src/` has the same shape, and
+  `info` the same sink.
+
+  Probed directly: a two-branch fixture, `log side`, exit 0, one commit, HEAD's.
+
+  **Amy's call (2026-08-13): accept them as git does** — a positional binds
+  `--rev`, and positionals after `--` bind `--path`. That is real design across
+  `info`/`status`/`log` and the `to_argv` convention the sink exists to satisfy,
+  which is why it is its own PR. Until then every verb can silently answer the
+  wrong question, which makes this the more dangerous of the two in daily use.
+
 ## Upstream
 
 - **R4 — unbounded recursion decoding the index cache-tree (gix-index).**

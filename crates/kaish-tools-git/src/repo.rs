@@ -16,6 +16,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use gix_index::hash as gix_hash;
 use gix_object::FindExt;
 use gix_ref::file::ReferenceExt;
 
@@ -606,6 +607,185 @@ impl ReadRepo {
         Ok(Some(tree_id))
     }
 
+    /// Resolve a `--rev` argument to a commit oid, over the small revision
+    /// grammar (architecture.md B): `HEAD`, a branch, a tag, `refs/...`, a full
+    /// or ≥4-char unambiguous oid, and the `~N` / `^` / `^N` suffixes on any of
+    /// those. Everything else — `@{...}`, `A..B`, `:/text`, `^{...}`,
+    /// `<rev>:<path>` — is a loud usage error naming the form, never resolved
+    /// to a surprising commit.
+    ///
+    /// A ref is tried before an oid, matching git's preference, so a branch
+    /// named like a hex string still resolves as the branch. The result is
+    /// always peeled to a commit: a tag resolves to what it ultimately points
+    /// at, and a revision that names a tree or blob is refused.
+    pub(crate) fn resolve_commit(&self, spec: &str) -> Result<gix_hash::ObjectId, GitError> {
+        let op = self.operation;
+        if let Some(bad) = unsupported_revspec(spec) {
+            return Err(GitError::UnsupportedRevspec {
+                operation: op,
+                spec: spec.to_string(),
+                syntax: bad,
+            });
+        }
+
+        // The base ends at the first `~`/`^`; refs and oids contain neither.
+        let split = spec.find(['~', '^']).unwrap_or(spec.len());
+        let (base, nav) = spec.split_at(split);
+        if base.is_empty() {
+            return Err(GitError::UnsupportedRevspec {
+                operation: op,
+                spec: spec.to_string(),
+                syntax: "a leading ~ or ^ with no revision".to_string(),
+            });
+        }
+
+        let mut oid = self.resolve_base(base, spec)?;
+        oid = self.peel_to_commit(oid, spec)?;
+
+        for step in parse_nav(op, spec, nav)? {
+            oid = match step {
+                Nav::FirstParentAncestor(n) => {
+                    let mut cur = oid;
+                    for _ in 0..n {
+                        cur = self.nth_parent(cur, 1, spec)?;
+                    }
+                    cur
+                }
+                // `^0` dereferences to the commit itself; `^N` (N≥1) takes the
+                // Nth parent.
+                Nav::NthParent(0) => oid,
+                Nav::NthParent(n) => self.nth_parent(oid, n, spec)?,
+            };
+        }
+        Ok(oid)
+    }
+
+    /// Resolve the base of a revision — a ref if one matches, otherwise an oid.
+    fn resolve_base(&self, base: &str, spec: &str) -> Result<gix_hash::ObjectId, GitError> {
+        let op = self.operation;
+        // A ref first, matching git, so a branch named like a hex string still
+        // resolves as the branch. The name is converted here rather than inside
+        // `try_find` to keep two failure modes apart: a string that is not a
+        // valid ref name simply is not a ref, and falls through to the oid
+        // attempt; a refs backend that actually failed to read is loud. Letting
+        // one `if let Ok(..)` swallow both would turn an unreadable `.git/refs`
+        // into a confident "no such revision" (house rule: no silent
+        // fallbacks).
+        if let Ok(partial) = TryInto::<&gix_ref::PartialNameRef>::try_into(base) {
+            match self.refs.try_find(partial) {
+                Ok(Some(mut reference)) => {
+                    let id = reference.peel_to_id(&self.refs, &self.objects).map_err(|e| {
+                        GitError::repository(op, format!("resolving ref '{base}'"), &self.git_dir, e)
+                    })?;
+                    return Ok(id);
+                }
+                // A valid ref name that names nothing — fall through and try
+                // the same string as an oid.
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(GitError::repository(
+                        op,
+                        format!("looking up ref '{base}'"),
+                        &self.git_dir,
+                        e,
+                    ))
+                }
+            }
+        }
+
+        // An oid, full or a ≥4-char prefix. `lookup_prefix` handles both: a
+        // 40-char prefix is an exact match, a shorter one may be ambiguous.
+        let looks_hex = (4..=40).contains(&base.len()) && base.bytes().all(|b| b.is_ascii_hexdigit());
+        if looks_hex {
+            let prefix = gix_hash::Prefix::from_hex(base).map_err(|_| GitError::NoSuchRevision {
+                operation: op,
+                rev: spec.to_string(),
+                repo: self.git_dir.clone(),
+            })?;
+            return match self.objects.lookup_prefix(prefix, None).map_err(|e| {
+                GitError::repository(op, "looking up an oid prefix", &self.git_dir, e)
+            })? {
+                Some(Ok(oid)) => Ok(oid),
+                Some(Err(())) => Err(GitError::AmbiguousRevision {
+                    operation: op,
+                    rev: spec.to_string(),
+                    repo: self.git_dir.clone(),
+                }),
+                None => Err(GitError::NoSuchRevision {
+                    operation: op,
+                    rev: spec.to_string(),
+                    repo: self.git_dir.clone(),
+                }),
+            };
+        }
+
+        Err(GitError::NoSuchRevision {
+            operation: op,
+            rev: spec.to_string(),
+            repo: self.git_dir.clone(),
+        })
+    }
+
+    /// Peel an object to the commit it names, following annotated tags. A
+    /// revision that resolves to a tree or blob is refused, not silently
+    /// treated as a commit.
+    fn peel_to_commit(&self, start: gix_hash::ObjectId, spec: &str) -> Result<gix_hash::ObjectId, GitError> {
+        let op = self.operation;
+        let mut oid = start;
+        let mut buf = Vec::new();
+        // A tag chain is finite in any real repository; the bound stops a
+        // hand-built cycle from spinning rather than trusting it cannot happen.
+        for _ in 0..32 {
+            // The decoded object borrows `buf`, so the step is reduced to an
+            // owned decision inside this scope — the borrow ends before `oid`
+            // is reassigned for the next round.
+            let next: Option<gix_hash::ObjectId> = {
+                let data = self.objects.find(&oid, &mut buf).map_err(|e| {
+                    GitError::repository(op, "reading an object", &self.git_dir, e)
+                })?;
+                match data.decode().map_err(|e| {
+                    GitError::repository(op, "decoding an object", &self.git_dir, e)
+                })? {
+                    gix_object::ObjectRef::Commit(_) => None,
+                    gix_object::ObjectRef::Tag(tag) => Some(tag.target()),
+                    _ => {
+                        return Err(GitError::NoSuchRevision {
+                            operation: op,
+                            rev: spec.to_string(),
+                            repo: self.git_dir.clone(),
+                        })
+                    }
+                }
+            };
+            match next {
+                None => return Ok(oid),
+                Some(target) => oid = target,
+            }
+        }
+        Err(GitError::NoSuchRevision {
+            operation: op,
+            rev: spec.to_string(),
+            repo: self.git_dir.clone(),
+        })
+    }
+
+    /// The Nth parent (1-based) of a commit, for `^N` and `~N` navigation.
+    fn nth_parent(&self, oid: gix_hash::ObjectId, n: usize, spec: &str) -> Result<gix_hash::ObjectId, GitError> {
+        let op = self.operation;
+        let mut buf = Vec::new();
+        let parents: Vec<gix_hash::ObjectId> = self
+            .objects
+            .find_commit_iter(&oid, &mut buf)
+            .map_err(|e| GitError::repository(op, "reading a commit", &self.git_dir, e))?
+            .parent_ids()
+            .collect();
+        parents.get(n - 1).copied().ok_or_else(|| GitError::NoSuchRevision {
+            operation: op,
+            rev: spec.to_string(),
+            repo: self.git_dir.clone(),
+        })
+    }
+
     /// The parsed index, or `None` when the repository has never had one.
     ///
     /// Read as bytes through [`open_leaf`], so an `index` symlinked out of the
@@ -1078,6 +1258,84 @@ fn guard_alternates(
         contain(operation, what, objects_dir, &dir, ceiling)?;
     }
     Ok(())
+}
+
+/// One navigation step in a revision suffix (`~N`, `^`, `^N`).
+enum Nav {
+    /// `~N`: walk the first parent `N` times.
+    FirstParentAncestor(usize),
+    /// `^N`: the Nth parent. `^0` is the commit itself.
+    NthParent(usize),
+}
+
+/// Recognize revision syntax outside the small grammar, returning the offending
+/// form. The order matters: `...` is checked before `..`, and `^{` before a
+/// bare `^` is treated as navigation.
+fn unsupported_revspec(spec: &str) -> Option<String> {
+    if spec.contains("@{") {
+        return Some("@{...}".to_string());
+    }
+    if spec.contains("...") {
+        return Some("...".to_string());
+    }
+    if spec.contains("..") {
+        return Some("..".to_string());
+    }
+    if spec.contains("^{") {
+        return Some("^{...}".to_string());
+    }
+    if spec.contains(":/") {
+        return Some(":/...".to_string());
+    }
+    if spec.contains(':') {
+        return Some("<rev>:<path> (that is `git show`, not `git log`)".to_string());
+    }
+    None
+}
+
+/// Parse a `~`/`^` navigation suffix into a sequence of steps.
+fn parse_nav(operation: &'static str, spec: &str, nav: &str) -> Result<Vec<Nav>, GitError> {
+    let mut out = Vec::new();
+    let mut chars = nav.chars().peekable();
+    while let Some(c) = chars.next() {
+        let is_tilde = match c {
+            '~' => true,
+            '^' => false,
+            other => {
+                return Err(GitError::UnsupportedRevspec {
+                    operation,
+                    spec: spec.to_string(),
+                    syntax: other.to_string(),
+                })
+            }
+        };
+        let mut digits = String::new();
+        while let Some(d) = chars.peek() {
+            if d.is_ascii_digit() {
+                digits.push(*d);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        // `~`/`^` with no number both mean 1; `^0` (the commit itself) is the
+        // one place a zero is meaningful, so it is preserved.
+        let n: usize = if digits.is_empty() {
+            1
+        } else {
+            digits.parse().map_err(|_| GitError::UnsupportedRevspec {
+                operation,
+                spec: spec.to_string(),
+                syntax: format!("{c}{digits} (number too large)"),
+            })?
+        };
+        out.push(if is_tilde {
+            Nav::FirstParentAncestor(n)
+        } else {
+            Nav::NthParent(n)
+        });
+    }
+    Ok(out)
 }
 
 /// Lexically normalize a path: drop `.`, resolve `..` against the preceding
