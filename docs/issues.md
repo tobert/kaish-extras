@@ -81,6 +81,26 @@ fixture asserted against real `git status --porcelain` before fixing.
   many just-under-cap files is a large transient allocation. The row cap bounds
   commits, not bytes per commit.
 
+## kaish seams — for the write profiles
+
+- **S1 — an out-of-tree tool cannot name kaish's effect ids type-safely.**
+  `ToolSchema::operations` (kaish 0.14.0) carries the dotted effect ids a tool
+  declares, so an embedder learns `rm` removes a path without recognizing the
+  name. The ids themselves live in `KernelOperation` (`kaish-kernel/src/
+  operation.rs`), and `kaish-tools-git` deliberately does not depend on
+  `kaish-kernel` — that independence is the honest-embedder posture. So when
+  the write profiles land we would either hardcode strings that must match the
+  kernel's by convention, or ask kaish to move the id constants down into
+  `kaish-types` where the out-of-tree contract lives. The second is the kaish PR
+  to open, and it is the AGENTS.md pattern exactly: a seam that does not exist
+  yet, fixed upstream rather than worked around.
+
+  **Nothing to do for the read profile** — `operations` is documented as
+  "empty for a tool with no destructive effect", and every kaish builtin that
+  declares one is destructive (`write`, `mv`, `cp`, `dd`, `rm`, `patch`, `tee`,
+  `sed`). A read-only git tool correctly declares none, so today's empty vector
+  is the right answer rather than an omission.
+
 ## Upstream
 
 - **R4 — unbounded recursion decoding the index cache-tree (gix-index).**
