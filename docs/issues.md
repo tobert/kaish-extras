@@ -124,3 +124,41 @@ fixture asserted against real `git status --porcelain` before fixing.
 
   Next step is a gitoxide issue plus a depth limit in `one_recursive`. Until
   then a hostile index can crash any embedder of this crate.
+
+## curl — deferred (see docs/curl.md)
+
+`kaish-tools-curl` ships native first (kaijutsu); the rest is parked here.
+
+- **CU1 — wasm backend.** The sync-XHR design in `docs/curl.md` is reasoned,
+  not probed. Build the one-call wasm probe before the backend; if sync XHR
+  does not complete under `block_on`, the wasm path is an async-`execute`
+  architecture change, not this design.
+- **CU2 — COEP interaction.** `coi-sw.js` stamps `COEP: require-corp` for the
+  `SharedArrayBuffer` Ctrl-C path, which blocks cross-origin responses without
+  CORP. Probe a real fetch from the cross-origin-isolated worker against
+  CORS-only and CORS+CORP endpoints; this decides whether playground curl is
+  useful at all.
+- **CU3 — `--max-time` / `--connect-timeout` on wasm.** Sync XHR forbids a
+  timeout and `tokio::time` panics on `wasm32-unknown`, so neither flag can be
+  honored. Documented as a refusal; no fix without the async-`execute` path.
+- **CU4 — `-k` / `--insecure` on wasm.** The browser holds the TLS verifier;
+  there is no per-request override. Native keeps it via a rustls dangerous
+  config.
+- **CU5 — features not in the 80/20 cut.** Multiple URLs, `--next`,
+  `--parallel`, `--retry`/`--retry-*`, `--resolve`/`--connect-to`, proxies and
+  SOCKS, `--cookie`/`--cookie-jar` (a jar), `-F`/`--form` (multipart),
+  `-G`/`--get`, `-w`/`--write-out`, `-v`/`--verbose`, `-K`/`--config`,
+  `--netrc`, `--abstract-unix-socket`, `--cert`/`--key`/`--cacert`/`--capath`. Each is a
+  parse-time refusal with a literate error today (see `docs/curl.md`); graduate
+  one to support only when an agent need is real. `--unix-socket` (filesystem)
+  moved into the buildout; `--abstract-unix-socket` (Linux abstract namespace)
+  stays here as the same transport with abstract addressing.
+- **CU6 — curl's `--json` request-body shorthand.** Refused to keep kaish's
+  `--json` (structured output) convention universal. Revisit only if the
+  idiom `-H Content-Type:application/json --data <body>` proves too much
+  friction in practice.
+- **CU7 — unstable ureq transport API for `--unix-socket`.** ureq 3.x has no
+  first-class unix-socket connect; the build implements a `Transport` over
+  `std::os::unix::net::UnixStream` through ureq's `unversioned::transport`
+  module, which carries no semver guarantee. A ureq 4.x bump could break it;
+  pin ureq and revisit on minor bumps.
