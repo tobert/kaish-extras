@@ -12,9 +12,32 @@ cross-model review before it is built.
 
 ## Status
 
-Draft, pre-review. The native backend choice and the wasm feasibility argument
-are the parts a kaibo review should pressure-test (see "Wasm" and "Probes
-still owed").
+**Reviewed 2026-08-14, and blocked.** Two independent reviewers (deepseek
+agentic over the repo, gemini-pro on whole files, neither given a diff) both
+concluded: *do not build this as written*. Findings in
+`docs/design/reviews/curl-review-2026-08.md`, tracked as **CU8–CU20** in
+`docs/issues.md`.
+
+The three that gate any HTTP code, because each changes `CurlConfig` and so is
+a breaking change to every embedder once the crate ships:
+
+1. **No egress or containment policy.** This doc's largest omission. A network
+   tool next to a VFS needs the design budget `GitConfig` spent on containment,
+   and this spends none (CU8, CU9, CU10).
+2. **`operations`, the VFS byte budget, and the kernel output cap are not
+   reachable** from the out-of-tree surface this crate is restricted to. The
+   sections below that lean on them describe an API that is not there (CU12,
+   CU13).
+3. **Exit code 3 is kernel-reserved** for output spill; the table below hands
+   it to "URL malformed" (CU11).
+
+Built so far, deliberately scoped to what no review outcome could invalidate:
+the crate skeleton and the functional-test harness. No arg parsing, no backend,
+no render.
+
+The wasm section below is **corrected** by the review — see CU3. Sync XHR in a
+Web Worker permits both `timeout` and `responseType`, so the limits asserted
+there are overstated in this draft.
 
 ## Why
 

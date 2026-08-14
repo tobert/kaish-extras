@@ -1,0 +1,81 @@
+[package]
+name = "kaish-tools-curl"
+description = "An 80/20 curl-shaped HTTP tool for kaish: one URL, GET/POST, headers, a body, --unix-socket — an out-of-tree Tool against kaish-tool-api + kaish-types only, never kaish-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# `tests/support.rs` is a shared harness, not a test target: docs/curl.md's
+# "Functional tests" section names that path as the local-server harness
+# every `[[test]]` target below stands up, and cargo would otherwise
+# auto-discover it as its own (empty) integration test. Turning
+# autodiscovery off and naming the real targets keeps the documented layout
+# without a `support/mod.rs` detour — the same reasoning `kaish-tools-git`
+# carries for its own `tests/support.rs`.
+autotests = false
+
+[dependencies]
+# The kaish tool surface, and the crates a `Tool` impl needs to talk to it.
+# `kaish-tool-api` + `kaish-types` are the whole out-of-tree contract — this
+# crate deliberately does not depend on `kaish-kernel`. Depending on
+# `kaish-kernel` is the one thing that must never happen here: it is the
+# honest-embedder claim `kaish-tools-git` makes into a compiler check, and
+# curl makes the same claim the same way.
+#
+# Unlike `kaish-tools-git`'s gix pin set, these are plain (not
+# `target`-scoped) dependencies: curl is meant to be the first cross-target
+# tool in this workspace, so kaish-tool-api and kaish-types must resolve on
+# wasm32-unknown-unknown too. Only the native HTTP backend (ureq, below) is
+# target-scoped.
+kaish-tool-api = { workspace = true }
+kaish-types = { workspace = true }
+
+async-trait = "0.1"
+# `string` is not cosmetic here: the tool name is embedder-configurable
+# (`CurlConfig::with_tool_name`), so the clap root command is built from a
+# runtime `String`, which `clap::builder::Str` only accepts with that
+# feature — the same reason `kaish-tools-git` takes it.
+clap = { version = "4", features = ["derive", "string"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+tracing = "0.1"
+# `rt` for `Handle::try_current()` / `RuntimeFlavor`, `rt-multi-thread` for
+# `block_in_place` itself — both are what `util::block_in_place_compat`
+# needs to choose a scheduling path instead of panicking on a current-thread
+# runtime, the same seam `kaish-tools-git` proved for blocking gix work.
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+
+# The native HTTP backend. Target-scoped because it is the one dependency
+# edge that does not resolve on wasm: the wasm backend (docs/curl.md "Wasm")
+# is synchronous `XMLHttpRequest` over `web-sys`, not ureq.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+# Default features (`rustls` + `gzip`) are taken deliberately, not left to
+# drift: ureq's `rustls` feature resolves to `rustls-no-provider` + `_ring` +
+# `rustls-webpki-roots`, so the crypto provider is **ring** — it needs a C
+# compiler but not cmake. `native-tls` is never turned on, which is what
+# keeps `openssl-sys` and `aws-lc-sys` out of the dependency graph (the same
+# ring-vs-aws-lc tradeoff docs/curl.md's "Native backend: ureq" section
+# records; a CI `cargo tree -i` tripwire is meant to assert this stays true,
+# the same guard `kaish-tools-git` keeps for its own dependency edges).
+ureq = "3.4"
+
+# Dev-dependencies are not target-scoped: `cargo test` only ever runs on a
+# native target, where the crate compiles.
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tempfile = "3"
+
+[[test]]
+name = "surface"
+path = "tests/surface.rs"
+
+[[test]]
+name = "unix_socket"
+path = "tests/unix_socket.rs"
+
+[[test]]
+name = "errors"
+path = "tests/errors.rs"

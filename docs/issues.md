@@ -138,9 +138,17 @@ fixture asserted against real `git status --porcelain` before fixing.
   CORP. Probe a real fetch from the cross-origin-isolated worker against
   CORS-only and CORS+CORP endpoints; this decides whether playground curl is
   useful at all.
-- **CU3 — `--max-time` / `--connect-timeout` on wasm.** Sync XHR forbids a
-  timeout and `tokio::time` panics on `wasm32-unknown`, so neither flag can be
-  honored. Documented as a refusal; no fix without the async-`execute` path.
+- **CU3 — `--max-time` / `--connect-timeout` on wasm.** **Corrected 2026-08-14;
+  the original claim here was wrong.** It said sync XHR forbids a timeout. The
+  XHR spec throws `InvalidAccessError` from the `timeout` setter only "if the
+  current global object is a `Window` object and this's synchronous is true"
+  (xhr.spec.whatwg.org). The playground runs in a **Web Worker**, where the
+  global is not a `Window` — so `timeout` is settable and `--max-time` **can**
+  be honored on wasm. The same spec sentence governs `responseType`, so
+  `arraybuffer` (binary bodies) is available there too. `tokio::time` still
+  panics on `wasm32-unknown`, but XHR's own timeout does not need it.
+  Reading the spec is not running the code: confirm both in a live worker as
+  part of the CU1 probe before relying on either.
 - **CU4 — `-k` / `--insecure` on wasm.** The browser holds the TLS verifier;
   there is no per-request override. Native keeps it via a rustls dangerous
   config.
@@ -162,3 +170,70 @@ fixture asserted against real `git status --porcelain` before fixing.
   `std::os::unix::net::UnixStream` through ureq's `unversioned::transport`
   module, which carries no semver guarantee. A ureq 4.x bump could break it;
   pin ureq and revisit on minor bumps.
+
+### Blockers raised by the 2026-08-14 cross-model review
+
+Both reviewers independently said **do not build `docs/curl.md` as written**.
+Full findings in `docs/design/reviews/curl-review-2026-08.md`. These are not
+deferrals — they gate the HTTP surface and several change `CurlConfig`, which
+is a breaking change to every embedder once the crate ships.
+
+- **CU8 — no egress or containment policy.** `CurlConfig` has no host
+  allowlist, no loopback/link-local deny, no unix-socket gate, no redirect
+  policy. The tool as designed is always-on arbitrary egress next to a VFS:
+  `--unix-socket` to a docker socket, SSRF to `169.254.169.254` and loopback,
+  `-d @path` as an exfil primitive, `-L` laundering a permitted URL past the
+  policy check. **Design the subtractive policy surface before the crate is
+  laid out**, the way `GitConfig` was.
+- **CU9 — `--unix-socket` must cross the VFS bridge.** Route the path through
+  `ToolCtx::resolve_path` + `backend().resolve_real_path()` and refuse outside
+  the mount. Handing an agent-supplied string to a host OS API bypasses
+  containment entirely.
+- **CU10 — cross-host redirect must strip credentials.** curl drops
+  user/password on cross-host redirect unless `--location-trusted`. Decide and
+  state it; today a 302 to an attacker host exfiltrates `-u` at exit 0.
+- **CU11 — exit code 3 is kernel-reserved.** `kaish-tools-git/src/error.rs:5-6`
+  — 3 (output spill), 124 (timeout), 130 (cancel) belong to the kernel and are
+  never manufactured by a tool. `docs/curl.md` maps 3 to "URL malformed". Pick
+  a different code (2, usage, is the likely answer) and re-check the whole ureq
+  `ErrorKind` map, which is reasoned rather than probed and conflates generic
+  `Io` with connect failure, and rustls handshake (35) with cert-auth (60).
+- **CU12 — `operations` ids are not reachable.** `net.request` / `fs.overwrite`
+  exist nowhere; issue **S1** already records that the ids live in
+  `KernelOperation` in `kaish-kernel`, which this crate must not depend on.
+  `kaish-tools-git` declares the *empty* vector, so the doc's "the same call
+  git makes" is false. Declare empty, or land the kaish PR moving the constants
+  into `kaish-types` first.
+- **CU13 — kernel byte budget and output cap are invisible to a tool.** The
+  reachable `ToolCtx` surface has no accessor for either, so "lower ureq's
+  10 MB default to the kernel's output cap" cannot be implemented as written.
+  Also `KernelBackend::write` takes a whole `&[u8]`, so `-o` is buffered or
+  chunked-append, not streamed. Replace with `CurlConfig`-supplied limits.
+- **CU14 — accepted no-op flags violate the no-silent-fallback rule.** `-s`,
+  `-S`, `--compressed`. Sharpest case: curl's `-S` exists to re-enable errors
+  after `-s` suppressed them, so modelling it as a no-op makes `-sS` behave
+  opposite to curl, silently. Refuse them, or implement them.
+- **CU15 — `--max-time` should default, not be opt-in.** On a current-thread
+  runtime `block_in_place_compat` calls `f()` inline, so a blocking request
+  freezes the whole embedder, and no watchdog can run. curl's default of "no
+  overall timeout" is a hang in an agent shell. Give `CurlConfig` a default.
+- **CU16 — the `--json` collision cannot be refused, only guessed at.**
+  `--json` is one argv token; the tool cannot tell kaish's structured-output
+  meaning from curl's request-body meaning. `curl --json http://host` silently
+  becomes a structured-output GET. Document the false-negative shapes honestly
+  instead of promising a refusal that cannot fire.
+- **CU17 — `--data-urlencode` is a grammar.** curl accepts `name=content`,
+  `content`, `@filename`, `name@filename` and encodes only the *value*. The
+  doc's one-liner licenses encoding the whole string, silently sending
+  `a%3Db%26c%3Dd` where curl sends `a=b&c=d`.
+- **CU18 — `-d` newline stripping and `-i`+`-o` interaction.** Real curl strips
+  CR/LF from `-d`, and `-i` with `-o` writes the headers *into the file*. The
+  flag table claims "None" for both divergences.
+- **CU19 — delete the `xhr.rs` stub from cut 1.** A wasm build would otherwise
+  compile a tool whose only backend is a stub. Carry `kaish-tools-git`'s
+  `compile_error!` on wasm until the backend is real.
+- **CU20 — agent-ergonomics divergences, Amy's call.** gemini argues the 80/20
+  line is modelled on a human developer: follow redirects by default rather
+  than requiring `-L`; implement `--retry` natively rather than telling an
+  agent to write a shell loop; drop `-O` because agents cannot predict the
+  derived filename. Each trades curl parity for agent reliability.
