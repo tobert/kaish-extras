@@ -12,32 +12,26 @@ cross-model review before it is built.
 
 ## Status
 
-**Reviewed 2026-08-14, and blocked.** Two independent reviewers (deepseek
-agentic over the repo, gemini-pro on whole files, neither given a diff) both
-concluded: *do not build this as written*. Findings in
-`docs/design/reviews/curl-review-2026-08.md`, tracked as **CU8–CU20** in
-`docs/issues.md`.
+**Building MVP.** The cross-model review blockers have been resolved:
 
-The three that gate any HTTP code, because each changes `CurlConfig` and so is
-a breaking change to every embedder once the crate ships:
+1. **Egress policy — `AllowEgress` trait (CU8).** An embedder-supplied trait
+   the tool calls per-request-per-hop. Default: deny-by-empty allowlist with
+   opt-in loopback/link-local. No method widens the set past what the
+   constructor grants — subtractive like `GitConfig`.
+2. **Exit codes (CU11).** Malformed URL now maps to **exit 7** ("could not
+   connect") with a literate error naming the real cause. The kernel does not
+   own a fixed set of numeric codes; that's repl policy. See kaish note below.
+3. **Literate-refusal posture (CU14–CU18).** Unsupported flags are parsed
+   at construction and refused with clear messages — no silent no-ops.
+   This keeps the door open for later implementation when need arises.
 
-1. **No egress or containment policy.** This doc's largest omission. A network
-   tool next to a VFS needs the design budget `GitConfig` spent on containment,
-   and this spends none (CU8, CU9, CU10).
-2. **`operations`, the VFS byte budget, and the kernel output cap are not
-   reachable** from the out-of-tree surface this crate is restricted to. The
-   sections below that lean on them describe an API that is not there (CU12,
-   CU13).
-3. **Exit code 3 is kernel-reserved** for output spill; the table below hands
-   it to "URL malformed" (CU11).
+Built so far: the crate skeleton, test harness, and `CurlConfig` with egress
+and redirect controls. The HTTP surface (argument parsing, ureq backend, Tool
+impl, renderers) follows.
 
-Built so far, deliberately scoped to what no review outcome could invalidate:
-the crate skeleton and the functional-test harness. No arg parsing, no backend,
-no render.
-
-The wasm section below is **corrected** by the review — see CU3. Sync XHR in a
-Web Worker permits both `timeout` and `responseType`, so the limits asserted
-there are overstated in this draft.
+The wasm section is **corrected** — see CU3. Sync XHR in a Web Worker permits
+both `timeout` and `responseType`, so the limits asserted there are overstated
+in this draft.
 
 ## Why
 
@@ -78,33 +72,32 @@ the last positional unless `--url` is used.
 | `<url>` (positional) | The URL to fetch. Required. | One URL only (curl takes many). |
 | `--url <url>` | Same as the positional. | None. |
 | `-X, --request <method>` | HTTP method. | None. |
-| `-d, --data <data>` | Body, `Content-Type: application/x-www-form-urlencoded` unless overridden, implies POST. Repeatable, joined with `&`. `@path` reads the file through the VFS. | None. |
+| `-d, --data <data>` | Body, `Content-Type: application/x-www-form-urlencoded` unless overridden, implies POST. Repeatable, joined with `&`. `@path` reads the file through the VFS. | Real curl strips trailing CR/LF from `-d` bodies; this build does not. |
 | `--data-binary <data>` | Like `-d` but no newline stripping. `@path` reads raw. | None. |
 | `--data-raw <data>` | Like `-d` but `@` is literal, never a file read. | None. |
-| `--data-urlencode <data>` | URL-encode the body. | None. |
+| `--data-urlencode <data>` | Accepts `name=value`; encodes only `value`, not the name or `=` separator. | Real curl also supports `@filename` and `name@filename` forms (deferred). |
 | `-H, --header <h:v>` | Request header. Repeatable. | None. |
-| `-i, --include` | Print response headers above the body. | None. |
+| `-i, --include` | Print response headers above the body. With `-o <file>`, writes headers **into the file** alongside the body, matching curl's behavior. | None. |
 | `-I, --head` | HEAD; print headers only. | None. |
-| `-o, --output <file>` | Write the body to a VFS path instead of stdout. | None. |
-| `-O, --remote-name` | Write the body to a file named from the URL path. | None. |
-| `-L, --location` | Follow redirects, up to `--max-redirs` (default 50). | **Inverted default**: curl does not follow unless `-L`; this build does not follow unless `-L`. |
+| `-o, --output <file>` | Write body to a VFS path. Headers go into the same file if `-i` is also given. | None. |
+| `-L, --location` | Follow redirects, up to `--max-redirs` (default 50). Redirects strip user/password on cross-host transition unless `CurlConfig::follow_redirects` is true. | Opt-in (matches curl's `-L`). Embedder can set a config default for auto-follow. |
 | `--max-redirs <n>` | Redirect cap. | None. |
 | `-u, --user <user[:pass]>` | Basic auth, `Authorization: Basic`. | None. |
 | `-A, --user-agent <ua>` | `User-Agent`. | None. |
 | `-e, --referer <url>` | `Referer`. | None. |
-| `-k, --insecure` | Skip TLS certificate verification. | Native only; wasm has no per-request override (the browser controls validation). |
-| `-f, --fail` | Exit 22 on HTTP status >= 400 instead of printing the body. | None. |
-| `-s, --silent` | Accepted; there is no progress meter, so this only suppresses the error stream. | None meaningful. |
-| `-S, --show-error` | Accepted; errors are shown by default. | None meaningful. |
-| `--compressed` | Accepted; decompression is handled by the backend on both targets (ureq gzip, the browser for wasm). | Effectively a no-op. |
-| `--max-time <s>` | Whole-request timeout. | Native only; wasm sync XHR cannot time out. |
-| `--connect-timeout <s>` | Connect-phase timeout. | Native only. |
-| `--unix-socket <path>` | Connect to an AF_UNIX socket instead of the URL host; the host is a placeholder (e.g. `http://localhost/`). | Native, unix-family targets only; wasm refuses with a literate error. `--abstract-unix-socket` is deferred (CU5). |
-| `--json` | **Not curl's request-body shorthand.** It is kaish's global output flag for every tool (see next section). | curl 7.82 `--json` (request body) is refused with a literate error. |
+| `-k, --insecure` | Skip TLS certificate verification. Native only; wasm has no per-request override (the browser controls validation). | None. |
+| `-f, --fail` | Exit on HTTP status >= 400 instead of printing the body. Uses curl-compatible exit codes. | None. |
+| `--max-time <s>` | Whole-request timeout. Has a `CurlConfig` default (30s) so the agent cannot hang the runtime by omission. | WASM: refuses with literate error (no `tokio::time`). |
+| `--connect-timeout <s>` | Connect-phase timeout. | WASM: refuses with literate error. |
+| `--unix-socket <path>` | Connect to an AF_UNIX socket instead of the URL host; the host is a placeholder (e.g. `http://localhost/`). Routed through `ToolCtx::resolve_path` + `backend().resolve_real_path()` for containment. Path must resolve within the VFS mount. | Native, unix-family targets only; wasm refuses with a literate error. `--abstract-unix-socket` deferred (CU5). |
+| `--json` | **Not curl's request-body shorthand.** It is kaish's global output flag for every tool (see next section). | curl 7.82 `--json` (request body) refused with literate error. |
 
-The flags curl has that this build does not carry are listed in "Literate
-errors." Each is caught at parse time and refused with a message that names the
-unsupported flag and the supported way to do the same thing.
+This build refuses the following flags at parse time with literate errors:
+`-O` (use `-o <file>`), `-s`, `-S`, `--compressed`, `--proxy`/SOCKS, `--form`,
+`--cookie`, `--write-out`, `--verbose`, `--retry`, `--get`, `--cert`/`--key`,
+`--resolve`, `--config`, `--netrc`, `--parallel`, `--next`. Each carries a message
+that names the unsupported flag and the supported alternative. See "Literate errors" below.
+Flags not mentioned here are silently ignored by clap's unknown-flag warning.
 
 ## Output, and the `--json` collision
 
