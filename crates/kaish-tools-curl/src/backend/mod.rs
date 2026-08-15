@@ -1,15 +1,15 @@
-//! The backend seam: docs/curl.md's "Crate shape" names this
-//! `trait Backend { fn fetch(...) -> Response }`, implemented by
-//! `backend/ureq.rs` (native, `cfg(not(target_family = "wasm"))`) and
-//! `backend/xhr.rs` (wasm, `cfg(target_family = "wasm")`) — neither of
-//! which exists yet.
+//! The blocking HTTP backend: ureq on native, xhr stub on wasm (deferred).
 //!
-//! Empty stub. Even the trait's exact method signature is HTTP-surface work:
-//! whether `fetch` takes a `CurlError`-returning `Result`, how a request
-//! (method, headers, body, `-k`, `--unix-socket`) is represented, and
-//! whether it is sync or async are all open questions the review docs/
-//! curl.md's "Status" section calls for should settle, not this skeleton.
-//! Neither `ureq.rs` nor `xhr.rs` is created here — the task that added this
-//! stub was explicitly told not to, and whether a wasm stub ships in cut 1
-//! is itself an open review question (docs/curl.md "Wasm: designed in, not
-//! built").
+//! Native builds compile `ureq.rs` behind the `Backend` trait; wasm builds are
+//! gated by a `compile_error!` until the XHR path is implemented. Compare
+//! `kaish-tools-git` which ships the same pattern for gix.
+
+#[cfg(not(target_family = "wasm"))]
+mod ureq;
+
+#[cfg(not(target_family = "wasm"))]
+pub use ureq::*;
+
+/// A blocked build of curl cannot execute without a backend.
+#[cfg(target_family = "wasm")]
+compile_error!("curl requires a native build target; the wasm XHR backend is not yet implemented");
