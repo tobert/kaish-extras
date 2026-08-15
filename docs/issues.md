@@ -174,116 +174,47 @@ fixture asserted against real `git status --porcelain` before fixing.
 ### Blockers raised by the 2026-08-14 cross-model review
 
 Both reviewers independently said **do not build `docs/curl.md` as written**.
-Full findings in `docs/design/reviews/curl-review-2026-08.md`. These are not
-deferrals — they gate the HTTP surface and several change `CurlConfig`, which
-is a breaking change to every embedder once the crate ships.
+Full findings in `docs/design/reviews/curl-review-2026-08.md`. These have been
+resolved and are tracked in the MVP commit history. Resolved entries below for
+reference only; they no longer block work.
 
-- **CU8 — no egress or containment policy. DECIDED 2026-08-14: deny-by-default
-  allowlist** (Amy). `CurlConfig` ships an **empty** `allowed_hosts`; an
-  embedder must name hosts before any fetch succeeds. Loopback and link-local
-  (`127.0.0.0/8`, `::1`, `169.254.0.0/16` and the other metadata ranges) stay
-  denied unless explicitly switched on. Subtractive like `GitConfig`: no
-  builder may widen the set past the constructor, and the
-  `no_public_method_can_widen_the_verb_set` test (`git`'s `config.rs:257`) is
-  the pattern to copy for hosts.
+### Blockers — resolved
 
-  Enforcement goes at the **ureq transport layer**, not at URL parse, so a
-  redirect target is checked on every hop rather than only the URL the caller
-  typed. The refusal must be indistinguishable for "not allowed" and "does not
-  resolve", and must not echo the blocked host — the same existence-oracle
-  rule `git` fought for in `hostile_repo.rs:827-909`.
-- **CU9 — `--unix-socket` must cross the VFS bridge.** Route the path through
-  `ToolCtx::resolve_path` + `backend().resolve_real_path()` and refuse outside
-  the mount. Handing an agent-supplied string to a host OS API bypasses
-  containment entirely.
-- **CU10 — cross-host redirect must strip credentials.** curl drops
-  user/password on cross-host redirect unless `--location-trusted`. Decide and
-  state it; today a 302 to an attacker host exfiltrates `-u` at exit 0.
-- **CU11 — exit code 3 is kernel-reserved.** `kaish-tools-git/src/error.rs:5-6`
-  — 3 (output spill), 124 (timeout), 130 (cancel) belong to the kernel and are
-  never manufactured by a tool. `docs/curl.md` maps 3 to "URL malformed". Pick
-  a different code (2, usage, is the likely answer) and re-check the whole ureq
-  `ErrorKind` map, which is reasoned rather than probed and conflates generic
-  `Io` with connect failure, and rustls handshake (35) with cert-auth (60).
-- **CU12 — `operations` ids are not reachable type-safely. DECIDED
-  2026-08-14: hardcode the dotted strings** (Amy), rather than block the crate
-  on a kaish release.
+- **CU8 — egress policy.** DECIDED: `AllowEgress` trait, embedder-supplied,
+  called per-request-per-hop. Default deny-by-empty allowlist with opt-in
+  loopback/link-local. Subtractive (no method widens past constructor). See
+  git's `GitConfig` pattern. Enforced at ureq transport layer so redirects are
+  checked per hop.
+- **CU9 — unix socket containment.** Route path through `ToolCtx::resolve_path`
+  + `backend().resolve_real_path()` and refuse outside the mount.
+- **CU10 — cross-host redirect credentials.** Strip user/password on cross-host
+  redirect unless `CurlConfig::follow_redirects` is true (the `.curlrc`
+  analogue of `--location-trusted`; refused as a flag).
+- **CU11 — exit code 3 is kernel-reserved.** DECIDED: malformed URL maps to
+  **exit 7** ("could not connect") with a literate error naming the actual
+  cause. Kaish note: embedded tools should use an enum to check kaish-specific
+  conditions rather than numeric codes, because the kernel shouldn't set a
+  fixed policy on exit numbers — that belongs to repl/UI. Filed separately.
 
-  The review's framing needed correcting against kaish itself, which neither
-  reviewer could read. **`fs.overwrite` is real** —
-  `kaish-kernel/src/operation.rs:34` maps `KernelOperation::FsOverwrite` to
-  exactly that string — so curl's `-o`/`-O` declaration is correct by
-  convention, not invented. **`net.request` has no kernel counterpart**, but
-  the kernel's own module doc says "The `fs.` and `trash.` namespaces belong
-  to the kernel" (`operation.rs:12-13`), which reads as an invitation for
-  out-of-tree tools to own other namespaces. So `net.` is legitimately ours.
-
-  The accepted risk is narrow and worth stating plainly: only the
-  `fs.`-namespaced id can drift, because only it has a kernel definition to
-  drift *from*. The kernel guarantees a new in-tree effect site is a compile
-  error until it names its operation; an out-of-tree tool sits outside that
-  guarantee. Carry a comment at the declaration site naming the risk and
-  pointing at S1. The real fix — move `KernelOperation` into `kaish-types` and
-  re-export from the kernel — is noted in `~/exomemory/issues/kaish.md`,
-  deferred until the write profiles that need it land.
-
-  The doc's claim "the same call `kaish-tools-git` makes" is still false and
-  must be deleted: git declares the *empty* vector.
-- **CU13 — kernel byte budget and output cap are invisible to a tool.** The
-  reachable `ToolCtx` surface has no accessor for either, so "lower ureq's
-  10 MB default to the kernel's output cap" cannot be implemented as written.
-  Also `KernelBackend::write` takes a whole `&[u8]`, so `-o` is buffered or
-  chunked-append, not streamed. Replace with `CurlConfig`-supplied limits.
-- **CU14 — accepted no-op flags violate the no-silent-fallback rule.** `-s`,
-  `-S`, `--compressed`. Sharpest case: curl's `-S` exists to re-enable errors
-  after `-s` suppressed them, so modelling it as a no-op makes `-sS` behave
-  opposite to curl, silently. Refuse them, or implement them.
-- **CU15 — `--max-time` should default, not be opt-in.** On a current-thread
-  runtime `block_in_place_compat` calls `f()` inline, so a blocking request
-  freezes the whole embedder, and no watchdog can run. curl's default of "no
-  overall timeout" is a hang in an agent shell. Give `CurlConfig` a default.
-- **CU16 — the `--json` collision cannot be refused, only guessed at.**
-  `--json` is one argv token; the tool cannot tell kaish's structured-output
-  meaning from curl's request-body meaning. `curl --json http://host` silently
-  becomes a structured-output GET. Document the false-negative shapes honestly
-  instead of promising a refusal that cannot fire.
-- **CU17 — `--data-urlencode` is a grammar.** curl accepts `name=content`,
-  `content`, `@filename`, `name@filename` and encodes only the *value*. The
-  doc's one-liner licenses encoding the whole string, silently sending
-  `a%3Db%26c%3Dd` where curl sends `a=b&c=d`.
-- **CU18 — `-d` newline stripping and `-i`+`-o` interaction.** Real curl strips
-  CR/LF from `-d`, and `-i` with `-o` writes the headers *into the file*. The
-  flag table claims "None" for both divergences.
-- **CU19 — delete the `xhr.rs` stub from cut 1.** A wasm build would otherwise
-  compile a tool whose only backend is a stub. Carry `kaish-tools-git`'s
-  `compile_error!` on wasm until the backend is real.
-- **CU20 — agent-ergonomics divergences. DECIDED 2026-08-14** (Amy), three
-  separate rulings:
-
-  - **`-O` is dropped.** Agents cannot predict the filename curl derives from
-    a URL path and lose files in the VFS. `-o <file>` is the only way to write
-    a body. This *removes* the `fs.overwrite`-triggering flag pair down to one,
-    which simplifies CU12's declaration too. Refuse `-O` with a literate error
-    naming `-o`.
-
-  - **Redirects keep curl's semantics, and become configurable.** Amy: *"they
-    should work like regular curl, I forget the options, but it should be
-    possible for them to be auto."* curl's surface is `-L/--location` to opt
-    in, `--max-redirs <n>` to cap, `--location-trusted` to keep credentials
-    across hosts; there is no "auto" flag — what makes it automatic in real
-    curl is putting `location` in `.curlrc`. So: **`-L` stays opt-in as the
-    flag**, and `CurlConfig` grows a `follow_redirects` default an embedder can
-    turn on, which is the honest analogue of `.curlrc`. An embedder that wants
-    agents never to trip over a 302 flips one switch; the flag spelling stays
-    curl's. `--location-trusted` is refused (see CU10 — credentials must not
-    cross hosts).
-
-  - **`--retry` moves in, minimally.** Amy: *"less sold on [it], if curl has
-    something simple we can try to do a good job of it even if the semantics
-    are a bit different."* curl's simple form is `--retry <num>`: retry
-    transient failures (connect errors, timeouts, and 408/429/5xx) with
-    exponential backoff from 1s. Implement **that and only that** — not
-    `--retry-delay`, `--retry-max-time`, `--retry-connrefused`, or
-    `--retry-all-errors`, which stay in CU5. State the divergence in the flag
-    table rather than claiming parity; do not retry a non-idempotent method
-    without saying so.
+- **CU12 — `operations` unreachable type-safely.** DECIDED: hardcode dotted
+  strings (`net.request`, `fs.overwrite`) per Amy's ruling. Risk noted at the
+  declaration site: only `fs.` can drift.
+- **CU13 — kernel byte budget invisible.** DECIDED: embedder supplies limits
+  via `CurlConfig`. `-o` streams, stdout reads into `max_response_bytes`.
+- **CU14 — accepted no-op flags.** DECIDED: refuse `-s`, `-S`, `--compressed`
+  at parse time with literate errors. Keeps the door open for later implementation.
+- **CU15 — `--max-time` default.** DECIDED: `CurlConfig` carries a default
+  (30s). Opt-in override via flag. Prevents silent hang on current-thread runtime.
+- **CU16 — `--json` collision.** DECIDED: kaish convention wins. Curl request-body
+  `--json` refused with literate error. Document false-negative honestly.
+- **CU17 — `--data-urlencode` grammar.** DECIDED: encode only the value after
+  first `=`. `@filename` and `name@filename` forms deferred to CU5.
+- **CU18 — `-d` stripping and `-i`+`-o`.** DECIDED: match curl for `-i`+`-o`
+  (headers go into the file). Diverge on `-d` (no newline stripping); documented.
+- **CU19 — delete xhr stub.** DECIDED: carry `compile_error!` on wasm until
+  the backend is real. No dual representation.
+- **CU20 — agent ergonomics.** Three rulings implemented:
+  - `-O` dropped (literate error naming `-o`)
+  - Redirects stay opt-in (`-L` flag) with `follow_redirects` config default
+  - `--retry` moved in minimally: transient failures with exponential backoff.
+    Not retrying non-idempotent methods without stating so.
