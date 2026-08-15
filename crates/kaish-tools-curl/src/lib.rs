@@ -32,6 +32,6 @@ mod model;
 mod render;
 mod util;
 
-pub use config::{CurlConfig, Limits};
+pub use config::{AllowAll, AllowByList, AllowEgress, CurlConfig, EgressResult, Limits, RedirectPolicy};
 pub use error::CurlError;
 pub use model::Response;
