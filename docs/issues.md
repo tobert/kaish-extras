@@ -124,3 +124,97 @@ fixture asserted against real `git status --porcelain` before fixing.
 
   Next step is a gitoxide issue plus a depth limit in `one_recursive`. Until
   then a hostile index can crash any embedder of this crate.
+
+## curl — deferred (see docs/curl.md)
+
+`kaish-tools-curl` ships native first (kaijutsu); the rest is parked here.
+
+- **CU1 — wasm backend.** The sync-XHR design in `docs/curl.md` is reasoned,
+  not probed. Build the one-call wasm probe before the backend; if sync XHR
+  does not complete under `block_on`, the wasm path is an async-`execute`
+  architecture change, not this design.
+- **CU2 — COEP interaction.** `coi-sw.js` stamps `COEP: require-corp` for the
+  `SharedArrayBuffer` Ctrl-C path, which blocks cross-origin responses without
+  CORP. Probe a real fetch from the cross-origin-isolated worker against
+  CORS-only and CORS+CORP endpoints; this decides whether playground curl is
+  useful at all.
+- **CU3 — `--max-time` / `--connect-timeout` on wasm.** **Corrected 2026-08-14;
+  the original claim here was wrong.** It said sync XHR forbids a timeout. The
+  XHR spec throws `InvalidAccessError` from the `timeout` setter only "if the
+  current global object is a `Window` object and this's synchronous is true"
+  (xhr.spec.whatwg.org). The playground runs in a **Web Worker**, where the
+  global is not a `Window` — so `timeout` is settable and `--max-time` **can**
+  be honored on wasm. The same spec sentence governs `responseType`, so
+  `arraybuffer` (binary bodies) is available there too. `tokio::time` still
+  panics on `wasm32-unknown`, but XHR's own timeout does not need it.
+  Reading the spec is not running the code: confirm both in a live worker as
+  part of the CU1 probe before relying on either.
+- **CU4 — `-k` / `--insecure` on wasm.** The browser holds the TLS verifier;
+  there is no per-request override. Native keeps it via a rustls dangerous
+  config.
+- **CU5 — features not in the 80/20 cut.** Multiple URLs, `--next`,
+  `--parallel`, `--retry`/`--retry-*`, `--resolve`/`--connect-to`, proxies and
+  SOCKS, `--cookie`/`--cookie-jar` (a jar), `-F`/`--form` (multipart),
+  `-G`/`--get`, `-w`/`--write-out`, `-v`/`--verbose`, `-K`/`--config`,
+  `--netrc`, `--abstract-unix-socket`, `--cert`/`--key`/`--cacert`/`--capath`. Each is a
+  parse-time refusal with a literate error today (see `docs/curl.md`); graduate
+  one to support only when an agent need is real. `--unix-socket` (filesystem)
+  moved into the buildout; `--abstract-unix-socket` (Linux abstract namespace)
+  stays here as the same transport with abstract addressing.
+- **CU6 — curl's `--json` request-body shorthand.** Refused to keep kaish's
+  `--json` (structured output) convention universal. Revisit only if the
+  idiom `-H Content-Type:application/json --data <body>` proves too much
+  friction in practice.
+- **CU7 — unstable ureq transport API for `--unix-socket`.** ureq 3.x has no
+  first-class unix-socket connect; the build implements a `Transport` over
+  `std::os::unix::net::UnixStream` through ureq's `unversioned::transport`
+  module, which carries no semver guarantee. A ureq 4.x bump could break it;
+  pin ureq and revisit on minor bumps.
+
+### Blockers raised by the 2026-08-14 cross-model review
+
+Both reviewers independently said **do not build `docs/curl.md` as written**.
+Full findings in `docs/design/reviews/curl-review-2026-08.md`. These have been
+resolved and are tracked in the MVP commit history. Resolved entries below for
+reference only; they no longer block work.
+
+### Blockers — resolved
+
+- **CU8 — egress policy.** DECIDED: `AllowEgress` trait, embedder-supplied,
+  called before initial dispatch. Default deny-by-empty allowlist with opt-in
+  loopback/link-local. (Redirect chains bypass this check — ureq has no
+  hook for per-hop interception.) Subtractive (no method widens past constructor). See
+  git's `GitConfig` pattern.
+- **CU9 — unix socket containment.** Route path through `ToolCtx::resolve_path`
+  + `backend().resolve_real_path()` and refuse outside the mount.
+- **CU10 — cross-host redirect credentials.** Strip user/password on cross-host
+  redirect unless `CurlConfig::follow_redirects` is true (the `.curlrc`
+  analogue of `--location-trusted`; refused as a flag).
+- **CU11 — exit code 3 is kernel-reserved.** DECIDED: malformed URL maps to
+  **exit 7** ("could not connect") with a literate error naming the actual
+  cause. Kaish note: embedded tools should use an enum to check kaish-specific
+  conditions rather than numeric codes, because the kernel shouldn't set a
+  fixed policy on exit numbers — that belongs to repl/UI. Filed separately.
+
+- **CU12 — `operations` unreachable type-safely.** DECIDED: hardcode dotted
+  strings (`net.request`, `fs.overwrite`) per Amy's ruling. Risk noted at the
+  declaration site: only `fs.` can drift.
+- **CU13 — kernel byte budget invisible.** DECIDED: embedder supplies limits
+  via `CurlConfig`. `-o` streams, stdout reads into `max_response_bytes`.
+- **CU14 — accepted no-op flags.** DECIDED: refuse `-s`, `-S`, `--compressed`
+  at parse time with literate errors. Keeps the door open for later implementation.
+- **CU15 — `--max-time` default.** DECIDED: `CurlConfig` carries a default
+  (30s). Opt-in override via flag. Prevents silent hang on current-thread runtime.
+- **CU16 — `--json` collision.** DECIDED: kaish convention wins. Curl request-body
+  `--json` refused with literate error. Document false-negative honestly.
+- **CU17 — `--data-urlencode` grammar.** DECIDED: encode only the value after
+  first `=`. `@filename` and `name@filename` forms deferred to CU5.
+- **CU18 — `-d` stripping and `-i`+`-o`.** DECIDED: match curl for `-i`+`-o`
+  (headers go into the file). Diverge on `-d` (no newline stripping); documented.
+- **CU19 — delete xhr stub.** DECIDED: carry `compile_error!` on wasm until
+  the backend is real. No dual representation.
+- **CU20 — agent ergonomics.** Three rulings implemented:
+  - `-O` dropped (literate error naming `-o`)
+  - Redirects stay opt-in (`-L` flag) with `follow_redirects` config default
+  - `--retry` moved in minimally: transient failures with exponential backoff.
+    Not retrying non-idempotent methods without stating so.
