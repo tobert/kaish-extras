@@ -181,10 +181,10 @@ reference only; they no longer block work.
 ### Blockers — resolved
 
 - **CU8 — egress policy.** DECIDED: `AllowEgress` trait, embedder-supplied,
-  called per-request-per-hop. Default deny-by-empty allowlist with opt-in
-  loopback/link-local. Subtractive (no method widens past constructor). See
-  git's `GitConfig` pattern. Enforced at ureq transport layer so redirects are
-  checked per hop.
+  called before initial dispatch. Default deny-by-empty allowlist with opt-in
+  loopback/link-local. (Redirect chains bypass this check — ureq has no
+  hook for per-hop interception.) Subtractive (no method widens past constructor). See
+  git's `GitConfig` pattern.
 - **CU9 — unix socket containment.** Route path through `ToolCtx::resolve_path`
   + `backend().resolve_real_path()` and refuse outside the mount.
 - **CU10 — cross-host redirect credentials.** Strip user/password on cross-host
