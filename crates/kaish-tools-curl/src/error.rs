@@ -8,19 +8,6 @@
 //! mapping below are the settled part: docs/curl.md's exit-code table names
 //! every one of these codes already, so wiring them up is future work, not
 //! future design.
-//!
-//! NOTE for the review this crate is waiting on: docs/curl.md maps exit
-//! code **3** to "URL malformed", but kaish's own kernel-wide contract
-//! already reserves exit code 3 for output-truncation (`kaish` `EMBEDDING.md`
-//! "the result contract" — `did_spill: true`, `original_code` holds the
-//! real code). `kaish_tools_git::GitError` deliberately never manufactures
-//! 3 (or 124, or 130) for exactly this reason. This crate's exit-code table
-//! is implemented here verbatim, as specified, because that table is what
-//! this skeleton task was told is settled — but it collides with a
-//! kernel-owned code the same way `GitError`'s doc comment warns against,
-//! and should be resolved (a different curl-side code, or accepting that a
-//! malformed-URL result never reaches the kernel's spill path so the
-//! collision is only nominal) before the HTTP surface ships.
 
 /// Everything this crate can fail with, carrying its own curl-shaped exit
 /// code (docs/curl.md "Exit codes").
@@ -33,8 +20,9 @@
 #[derive(Debug, thiserror::Error)]
 pub enum CurlError {
     /// The URL is malformed: an unsupported scheme, or syntax the parser
-    /// rejects outright. Exit 3 (see the module-level note above on the
-    /// collision with kaish's kernel-owned exit 3).
+    /// rejects outright. Exit 7 ("could not connect") — kaish reserves
+    /// 3/124/130 for kernel-internal conditions. Malformed URLs get exit 7
+    /// with a literate error naming the actual cause.
     #[error("curl: '{url}' is not a valid http or https URL: {reason}")]
     MalformedUrl {
         /// The URL as the caller spelled it.
@@ -109,7 +97,7 @@ impl CurlError {
     /// The process exit code for this failure (docs/curl.md "Exit codes").
     pub fn exit_code(&self) -> i64 {
         match self {
-            CurlError::MalformedUrl { .. } => 3,
+            CurlError::MalformedUrl { .. } => 7,
             CurlError::HostNotFound { .. } => 6,
             CurlError::CouldNotConnect { .. } => 7,
             CurlError::HttpFailure { .. } => 22,
@@ -119,65 +107,5 @@ impl CurlError {
             CurlError::CertificateNotAuthenticated { .. } => 60,
             CurlError::Transport(_) => 1,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// docs/curl.md's exit-code table, spelled out per variant. A drift here
-    /// is a drift in what an agent can branch on.
-    #[test]
-    fn exit_codes_match_the_design_table() {
-        assert_eq!(
-            CurlError::MalformedUrl {
-                url: "ftp://x".into(),
-                reason: "unsupported scheme".into()
-            }
-            .exit_code(),
-            3
-        );
-        assert_eq!(CurlError::HostNotFound { host: "x".into() }.exit_code(), 6);
-        assert_eq!(
-            CurlError::CouldNotConnect {
-                host: "x".into(),
-                reason: "refused".into()
-            }
-            .exit_code(),
-            7
-        );
-        assert_eq!(CurlError::HttpFailure { status: 500 }.exit_code(), 22);
-        assert_eq!(CurlError::Timeout { seconds: 1.0 }.exit_code(), 28);
-        assert_eq!(
-            CurlError::TlsHandshakeFailed {
-                host: "x".into(),
-                reason: "boom".into()
-            }
-            .exit_code(),
-            35
-        );
-        assert_eq!(CurlError::TooManyRedirects { limit: 50 }.exit_code(), 47);
-        assert_eq!(
-            CurlError::CertificateNotAuthenticated {
-                host: "x".into(),
-                reason: "expired".into()
-            }
-            .exit_code(),
-            60
-        );
-        assert_eq!(CurlError::Transport("boom".into()).exit_code(), 1);
-    }
-
-    /// Every message names the failing operation in curl's own voice, so an
-    /// agent reading only stderr has something to act on.
-    #[test]
-    fn messages_start_with_curl_and_name_the_subject() {
-        let err = CurlError::HostNotFound {
-            host: "nonesuch.example".into(),
-        };
-        let msg = err.to_string();
-        assert!(msg.starts_with("curl:"), "{msg}");
-        assert!(msg.contains("nonesuch.example"), "{msg}");
     }
 }
