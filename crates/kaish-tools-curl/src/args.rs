@@ -4,9 +4,7 @@
 //! a [`Request`] that the ureq backend executes. Early-return refusals for
 //! every denied flag produce literate errors per docs/curl.md's "Literate errors" section.
 
-use clap::Parser;
 use kaish_types::ToolArgs;
-use kaish_tool_api::GlobalFlags;
 use kaish_types::Value;
 
 use crate::config::{CurlConfig};
@@ -37,7 +35,7 @@ pub struct Request {
     /// Body parts joined with `&` (from repeat `-d`). Each may be inline data or
     /// a VFS path prefixed with `@`.
     pub bodies: Vec<String>,
-    /// Header name:value pairs.
+    /// Header name:value pairs (may include a User-Agent if user set one via -H).
     pub headers: Vec<(String, String)>,
     /// Whether to include response headers in stdout. With `-o`, headers go into
     /// the output file alongside the body.
@@ -55,6 +53,9 @@ pub struct Request {
     pub fail_on_error: bool,
     /// Path to AF_UNIX socket.
     pub unix_socket: Option<String>,
+    /// Whether user explicitly set User-Agent via `-H User-Agent:...` or `-A`.
+    /// Used by tool.rs to avoid duplicating the UA header.
+    pub ua_explicit: bool,
 }
 
 /// Parse curl-style ToolArgs into a validated request.
@@ -108,7 +109,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(CurlError::MalformedUrl {
             url: url.clone(),
-            reason: format!("only http and https schemes are supported"),
+            reason: "only http and https schemes are supported".to_string(),
         });
     }
 
@@ -121,7 +122,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let mut max_redirs: Option<u32> = None;
     let mut unix_socket: Option<String> = None;
     let mut referer: Option<String> = None;
-    let mut user_agent: Option<String> = None;
+    let mut ua_explicit: bool = false;
 
     let mut i = 0;
     while i < trimmed.len() {
@@ -133,6 +134,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
                 }
             }
             "--data-urlencode" => {
+                // Deferred: accept name=value forms only; @filename deferred to CU5.
                 i += 1;
                 if let Some(val) = trimmed.get(i) {
                     bodies.push(format!("@{}", val));
@@ -142,6 +144,9 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
                 i += 1;
                 if let Some(hv) = trimmed.get(i) {
                     if let Some((name, value)) = hv.split_once(':') {
+                        if name.trim().eq_ignore_ascii_case("user-agent") {
+                            ua_explicit = true;
+                        }
                         headers.push((name.trim().to_string(), value.trim().to_string()));
                     }
                 }
@@ -165,8 +170,8 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             }
             "-A" | "--user-agent" => {
                 i += 1;
-                if let Some(ua) = trimmed.get(i) {
-                    user_agent = Some(ua.clone());
+                if trimmed.get(i).is_some() {
+                    ua_explicit = true;
                 }
             }
             "-e" | "--referer" => {
@@ -202,11 +207,6 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         headers.push(("Referer".to_string(), r));
     }
 
-    // Add user-agent header if specified.
-    if let Some(ua) = user_agent {
-        headers.push(("User-Agent".to_string(), ua));
-    }
-
     // Head + data is nonsensical.
     if head_only && !bodies.is_empty() {
         return Err(CurlError::MalformedUrl {
@@ -229,6 +229,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         follow_redirects: max_redirs,
         fail_on_error,
         unix_socket,
+        ua_explicit,
     })
 }
 
@@ -289,7 +290,8 @@ fn find_positional(args: &[String]) -> Option<String> {
     let mut i = 0;
     while i < args.len() {
         if args[i].starts_with("--") || (args[i].starts_with("-") && args[i].len() > 1) {
-            let needs_value = !KNOWN_FLAGS.contains(&args[i].as_str())
+            let takes_values = matches!(args[i].as_str(), "-d"|"-X"|"--data"|"--data-binary"|"--data-raw"|"--data-urlencode"|"-A"|"-e"|"-H"|"-o"|"--header"|"--output"|"--request"|"-u"|"-L"|"--location"|"--max-redirs"|"--max-time"|"--unix-socket");
+            let needs_value = !KNOWN_FLAGS.contains(&args[i].as_str()) || args[i].contains('=') || takes_values
                 || args[i].contains('=');
             if needs_value && i + 1 < args.len() && !args[i + 1].starts_with('-') {
                 i += 2;
@@ -316,4 +318,39 @@ fn find_single_arg(args: &[String], flag: &str) -> Option<String> {
 
 fn has_any_of(args: &[String], flags: &[String]) -> bool {
     args.iter().any(|a| flags.contains(a))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refused_flags_catches_properly() {
+        let args = vec!["-O".to_string(), "http://example.com".into()];
+        assert!(find_refused_flag(&args).is_some());
+
+        let args = vec!["--form".into(), "field=value".into()];
+        assert!(find_refused_flag(&args).is_some());
+
+        let args = vec!["http://example.com".into()];
+        assert!(find_refused_flag(&args).is_none());
+    }
+
+    #[test]
+
+    #[test]
+    fn find_positional_skips_flags_with_values() {
+        let args = vec![
+            "-i".into(), "-o".into(), "/tmp/out".into(),
+            "-H".into(), "X-Foo:bar".into(),
+            "http://x.com".into(),
+        ];
+        assert_eq!(find_positional(&args), Some("http://x.com".into()));
+    }
+
+    #[test]
+    fn find_positional_returns_first_non_flag() {
+        let args = vec!["http://x.com".into(), "-d".into()];
+        assert_eq!(find_positional(&args), Some("http://x.com".into()));
+    }
 }

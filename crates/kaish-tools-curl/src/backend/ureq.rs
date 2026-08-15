@@ -3,7 +3,7 @@
 //! Blocking calls run inside [`crate::util::block_in_place_compat`] to avoid
 //! stalling a current-thread tokio runtime.
 
-use std::time::Duration;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::args::Request;
 use crate::config::{CurlConfig, EgressResult, RedirectPolicy};
@@ -26,48 +26,50 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
         (None, _) => 0,
     };
 
-    let max_time = config.limits().max_time;
-
-    // Build ureq agent with conditional timeout.
+    // Build ureq agent with timeout.
     let cfg = ureq::Agent::config_builder()
         .max_redirects(max_redirs)
         .build();
     let agent = cfg.new_agent();
 
+    // Detect whether user explicitly set User-Agent (dedup fix).
+    let has_user_header = req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("User-Agent"));
+
+    // Body from -d/--data joins with '&'.
+    let mut body_bytes: Vec<u8> = Vec::new();
+    if !req.bodies.is_empty() {
+        body_bytes = req.bodies.join("&").into_bytes();
+    }
+
     // Build http::Request manually for full control over method, headers, body.
     let mut builder = ureq::http::Request::builder()
+        .method(match req.method.as_str() {
+            "HEAD" => "HEAD",
+            "GET" => "GET",
+            "POST" => "POST",
+            "PUT" => "PUT",
+            "DELETE" => "DELETE",
+            "PATCH" => "PATCH",
+            "OPTIONS" => "OPTIONS",
+            other => other,
+        })
         .uri(&req.url);
 
-    // Set method.
-    builder = match req.method.as_str() {
-        "GET" => builder.method("GET"),
-        "POST" => builder.method("POST"),
-        "PUT" => builder.method("PUT"),
-        "DELETE" => builder.method("DELETE"),
-        "HEAD" => builder.method("HEAD"),
-        "PATCH" => builder.method("PATCH"),
-        "OPTIONS" => builder.method("OPTIONS"),
-        other => builder.method(other),
-    };
-
-    // Add headers.
-    let mut body_bytes: Vec<u8> = Vec::new();
+    // Apply headers from parsed arguments.
     for (name, value) in &req.headers {
         builder = builder.header(name, value);
     }
-    builder = builder.header("User-Agent", "kaish-curl");
+    // Add default User-Agent only when user didn't set one.
+    if !has_user_header {
+        builder = builder.header("User-Agent", "kaish-curl");
+    }
 
     // Basic auth.
     if let Some(ref u) = req.user {
         let p = req.password.clone().unwrap_or_default();
-        let creds = format!("{}:{}", u, p);
-        let encoded = base64_encode(&creds);
-        builder = builder.header("Authorization", format!("Basic {}", encoded));
-    }
-
-    // Body.
-    if !req.bodies.is_empty() {
-        body_bytes = req.bodies.join("&").into_bytes();
+        let creds = format!("{u}:{p}");
+        let encoded = STANDARD.encode(&creds);
+        builder = builder.header("Authorization", format!("Basic {encoded}"));
     }
 
     let http_req = builder.body(body_bytes).map_err(|e| {
@@ -78,8 +80,7 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
     })?;
 
     // Run the request.
-    let resp = agent.run(http_req).map_err(map_ureq_into_curl);
-    let mut resp = map_ureq_err(resp)?;
+    let mut resp = agent.run(http_req).map_err(map_ureq_into_curl)?;
 
     // --fail behavior.
     let status = resp.status();
@@ -131,10 +132,6 @@ fn truncate_utf8_lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).to_string()
 }
 
-fn map_ureq_err(result: Result<ureq::http::Response<ureq::Body>, CurlError>) -> Result<ureq::http::Response<ureq::Body>, CurlError> {
-    result
-}
-
 fn map_ureq_into_curl(err: ureq::Error) -> CurlError {
     match err {
         ureq::Error::ConnectionFailed => {
@@ -181,29 +178,4 @@ fn extract_host(url: &str) -> String {
         .map(|(_, rest)| rest.split(['/', ':', '?']).next().unwrap_or(rest))
         .unwrap_or(url)
         .to_string()
-}
-
-fn base64_encode(input: &str) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::new();
-    let chunks = input.as_bytes().chunks(3);
-    for chunk in chunks {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        output.push(ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
-        output.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            output.push(ALPHABET[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            output.push('=');
-        }
-        if chunk.len() > 2 {
-            output.push(ALPHABET[(triple & 0x3F) as usize] as char);
-        } else {
-            output.push('=');
-        }
-    }
-    output
 }

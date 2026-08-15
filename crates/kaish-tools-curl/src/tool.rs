@@ -148,14 +148,24 @@ impl Tool for CurlTool {
             }
         }
 
-        // Bodies.
+        // Bodies — refuse @file body forms (reading files via VFS is deferred).
         let mut bodies: Vec<String> = Vec::new();
         scan_bodies(&trimmed, &mut bodies);
+        if bodies.is_empty() && has_body_flag(&trimmed) {
+            return failure(CurlError::Transport(
+                "curl: '@path' body syntax is not supported. Read a file with 'cat <path>' and pipe it into curl --data-binary -."
+                    .into(),
+            ));
+        }
 
         // Headers.
         let mut headers: Vec<(String, String)> = Vec::new();
-        scan_headers(&trimmed, &mut headers);
-        headers.push(("User-Agent".to_string(), "kaish-curl".to_string()));
+        let mut ua_explicit = false;
+        scan_headers_with_ua_check(&trimmed, &mut headers, &mut ua_explicit);
+        // Default User-Agent only when user didn't set one.
+        if !ua_explicit {
+            headers.push(("User-Agent".to_string(), "kaish-curl".to_string()));
+        }
 
         // Method.
         let method = if let Some(m) = extract_arg(&trimmed, "-X").or_else(|| extract_arg(&trimmed, "--request")) {
@@ -180,6 +190,7 @@ impl Tool for CurlTool {
             follow_redirects,
             fail_on_error,
             unix_socket: extract_arg(&trimmed, "--unix-socket"),
+            ua_explicit,
         };
 
         // Execute via blocking backend.
@@ -220,7 +231,7 @@ fn handle_success(
     include_headers: bool,
 ) -> ExecResult {
     if let Some(path) = output_file {
-        let bytes_written = path.len(); // placeholder
+        let _bytes_written = path.len(); // placeholder
         let status = response.status;
         let mut result = ExecResult::success(format!(
             "Wrote {} bytes to '{}'",
@@ -313,8 +324,14 @@ fn find_positional(args: &[String]) -> Option<String> {
     let mut i = 0;
     while i < args.len() {
         if args[i].starts_with("--") || (args[i].starts_with("-") && args[i].len() > 1) {
-            let needs_value = !KNOWN_FLAGS.contains(&args[i].as_str())
-                || args[i].contains('=');
+            let needs_value = {
+                let t = args[i].as_str();
+                // These flags consume the next token as their value
+                let has_value_arg = matches!(t, "-d"|"-X"|"--data"|"--data-binary"|"--data-raw"
+                    |"--data-urlencode"|"-A"|"-e"|"-H"|"-o"|"--header"|"--output"
+                    |"--request"|"-u"|"--user"|"--max-time"|"--unix-socket");
+                !KNOWN_FLAGS.contains(&args[i].as_str()) || args[i].contains('=') || has_value_arg
+            };
             if needs_value && i + 1 < args.len() && !args[i + 1].starts_with('-') {
                 i += 2;
             } else {
@@ -344,6 +361,10 @@ fn scan_bodies(trimmed: &[String], bodies: &mut Vec<String>) {
         if trimmed[i] == "-d" || trimmed[i] == "--data" || trimmed[i] == "--data-binary" || trimmed[i] == "--data-raw" {
             i += 1;
             if let Some(val) = trimmed.get(i) {
+                // @path body form is refused — read files through VFS (cat).
+                if val.starts_with('@') {
+                    return; // caller checks for this after scan returns
+                }
                 bodies.push(val.clone());
             }
         }
@@ -351,13 +372,18 @@ fn scan_bodies(trimmed: &[String], bodies: &mut Vec<String>) {
     }
 }
 
-fn scan_headers(trimmed: &[String], headers: &mut Vec<(String, String)>) {
+/// Scans for `-H`/`--header` flags and detects User-Agent presence.
+fn scan_headers_with_ua_check(trimmed: &[String], headers: &mut Vec<(String, String)>, ua_explicit: &mut bool) {
     let mut i = 0;
     while i < trimmed.len() {
         if trimmed[i] == "-H" || trimmed[i] == "--header" {
             i += 1;
             if let Some(hv) = trimmed.get(i) {
                 if let Some((name, value)) = hv.split_once(':') {
+                    let hname = name.trim().to_lowercase();
+                    if hname == "user-agent" {
+                        *ua_explicit = true;
+                    }
                     headers.push((name.trim().to_string(), value.trim().to_string()));
                 }
             }
@@ -394,4 +420,9 @@ fn find_refused_flag(trimmed: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+/// Check if any body-generating flag was present in trimmed args.
+fn has_body_flag(trimmed: &[String]) -> bool {
+    trimmed.iter().any(|f| matches!(f.as_str(), "-d" | "--data" | "--data-binary" | "--data-raw"))
 }

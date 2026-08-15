@@ -1,7 +1,5 @@
 //! Format a [`Response`] as text (stdout/stderr or into a file) or JSON.
 
-use std::collections::BTreeMap;
-use std::io::Write;
 
 use serde_json::{json, Value};
 
