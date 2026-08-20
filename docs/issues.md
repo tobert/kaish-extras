@@ -165,21 +165,16 @@ fixture asserted against real `git status --porcelain` before fixing.
   `--json` (structured output) convention universal. Revisit only if the
   idiom `-H Content-Type:application/json --data <body>` proves too much
   friction in practice.
-- **CU7 — `--unix-socket` has no transport.** **Corrected 2026-08-20.** This
-  entry used to say the build "implements a `Transport` over
-  `std::os::unix::net::UnixStream`". It does not — `backend/ureq.rs` never
-  read `Request::unix_socket`, so the flag was parsed and silently ignored,
-  and the request went to the URL's host over TCP. The flag is now refused at
-  parse time. The design still holds: ureq 3.x has no first-class unix-socket
-  connect, so the transport goes through `unversioned::transport`, which
-  carries no semver guarantee (pin ureq, revisit on minor bumps), and the path
-  routes through `ToolCtx::resolve_path` + `backend().resolve_real_path()` per
-  CU9. `tests/unix_socket.rs` and the harness's `UnixGuard` wait on it.
 - **CU22 — `-k`/`--insecure` on wasm.** Implemented natively on 2026-08-20
   (`TlsConfig::disable_verification`, gated behind
   `CurlConfig::with_insecure_permitted`). wasm cannot have it at all: the
   browser owns the verifier (CU4). The wasm backend must refuse `-k` even
   where the embedder permitted it.
+- **CU7b — `--unix-socket` rides an unstable ureq API.** The transport
+  (`src/backend/unix.rs`) is a `Connector`/`Transport` pair reached through
+  `ureq::unversioned::transport`, which carries no semver guarantee. ureq is
+  pinned for that reason; `tests/unix_socket.rs` is the tripwire. Revisit on
+  every ureq minor bump, and expect a 4.x bump to move it.
 ### Blockers raised by the 2026-08-14 cross-model review
 
 Both reviewers independently said **do not build `docs/curl.md` as written**.

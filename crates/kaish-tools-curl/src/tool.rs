@@ -115,6 +115,12 @@ impl CurlTool {
             #[arg(long)]
             max_time: Option<f64>,
 
+            /// Connect to this filesystem socket instead of the URL's host,
+            /// which becomes a placeholder the Host header still needs. The
+            /// path must resolve inside a mount this shell can reach.
+            #[arg(long)]
+            unix_socket: Option<String>,
+
             /// Skip TLS certificate verification. Present only when the
             /// embedder permits it; refused otherwise.
             #[arg(short = 'k', long)]
@@ -172,6 +178,18 @@ impl Tool for CurlTool {
             Err(err) => return failure(err),
         };
 
+        // `--unix-socket` names a path, and a path is the embedder's to
+        // decide. Resolve it through the VFS and require it to land inside a
+        // mount before the backend can open it — CU9's containment rule,
+        // applied to the one flag besides `-o` that produces a path. A
+        // symlink out of the mount is caught here, because
+        // `resolve_real_path` is what the embedder's own backend answers
+        // with, not a lexical prefix test.
+        let req = match resolve_unix_socket(req, ctx) {
+            Ok(req) => req,
+            Err(err) => return failure(err),
+        };
+
         let output_file = req.output_file.clone();
         let include_headers = req.include_headers;
         let head_only = req.head_only;
@@ -215,6 +233,71 @@ const EXAMPLES: [(&str, &str); 6] = [
         "curl --json https://api.example.com/status | jq -r .status",
     ),
 ];
+
+/// Map `--unix-socket`'s path through the VFS and refuse anything that leaves
+/// the mount it was reached by.
+fn resolve_unix_socket(
+    mut req: crate::args::Request,
+    ctx: &dyn ToolCtx,
+) -> Result<crate::args::Request, CurlError> {
+    let Some(path) = req.unix_socket.as_deref() else {
+        return Ok(req);
+    };
+
+    let vfs = ctx.resolve_path(path);
+    let backend = ctx.backend();
+    let real = backend.resolve_real_path(&vfs).ok_or_else(|| {
+        CurlError::Transport(format!(
+            "'--unix-socket {path}' does not name a path on a real filesystem. A socket has to exist \
+             somewhere the operating system can open it, and this path is virtual."
+        ))
+    })?;
+
+    let mount = backend
+        .mounts()
+        .into_iter()
+        .filter(|m| vfs.starts_with(&m.path))
+        .max_by_key(|m| m.path.components().count())
+        .ok_or_else(|| {
+            CurlError::Transport(format!(
+                "'--unix-socket {path}' is not inside any mounted filesystem, so this shell cannot reach it."
+            ))
+        })?;
+    let ceiling = backend.resolve_real_path(&mount.path).ok_or_else(|| {
+        CurlError::Transport(format!(
+            "'--unix-socket {path}' is under a mount with no real filesystem behind it."
+        ))
+    })?;
+
+    // Canonicalize before comparing. `Path::starts_with` is lexical: it
+    // cannot see a symlink, and the embedder's `resolve_real_path` is under no
+    // obligation to resolve one — a naive implementation joins the mount root
+    // to the rest of the path and returns it. Without this, a symlink inside
+    // the mount pointing anywhere on the host would pass a check that looks
+    // exactly like it is doing its job. Canonicalizing also requires the
+    // socket to exist, which it must anyway to be connected to.
+    let real = std::fs::canonicalize(&real).map_err(|e| {
+        CurlError::Transport(format!(
+            "'--unix-socket {path}' could not be resolved on the filesystem: {e}"
+        ))
+    })?;
+    let ceiling = std::fs::canonicalize(&ceiling).map_err(|e| {
+        CurlError::Transport(format!(
+            "the mount holding '--unix-socket {path}' could not be resolved: {e}"
+        ))
+    })?;
+
+    if !real.starts_with(&ceiling) {
+        return Err(CurlError::Transport(format!(
+            "'--unix-socket {path}' resolves outside the mount it was reached through, so it is refused. \
+             Name a socket inside {}.",
+            mount.path.display()
+        )));
+    }
+
+    req.unix_socket = Some(real.display().to_string());
+    Ok(req)
+}
 
 fn error_result(err: CurlError) -> ExecResult {
     let code = err.exit_code();

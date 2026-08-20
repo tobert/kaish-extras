@@ -58,6 +58,7 @@ pub(crate) const HONORED_FLAGS: &[&str] = &[
     "--fail",
     "--max-time",
     "--connect-timeout",
+    "--unix-socket",
 ];
 
 /// Flags refused at parse time, each with the message an agent reads.
@@ -87,7 +88,6 @@ pub(crate) const REFUSED_FLAGS: &[(&str, &str)] = &[
     ("-K", "'-K' is not supported. Pass flags on the command line."),
     ("--netrc", "'--netrc' is not supported. Use '--user <user[:pass]>' for credentials."),
     ("--resolve", "'--resolve' is not supported. To reach a specific address with a different Host, request the IP and set the header: curl -H 'Host: example.com' http://<ip>/."),
-    ("--unix-socket", "'--unix-socket' is not supported. This build has no AF_UNIX transport; reach the service over http:// instead."),
 ];
 
 /// The default `User-Agent`, sent when the caller names none.
@@ -132,6 +132,10 @@ pub struct Request {
     pub max_time: f64,
     /// Connect-phase deadline in seconds, when the caller asked for one.
     pub connect_timeout: Option<f64>,
+    /// `--unix-socket`: connect to this filesystem socket instead of the
+    /// URL's host. Still the path as the caller typed it — `tool.rs` resolves
+    /// it through the VFS and checks containment before the backend sees it.
+    pub unix_socket: Option<String>,
     /// `-k`: skip TLS certificate verification. Only reachable when the
     /// embedder set `CurlConfig::with_insecure_permitted`; refused otherwise.
     pub insecure: bool,
@@ -200,6 +204,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let mut fail_on_error = false;
     let mut follow_redirects = false;
     let mut insecure = false;
+    let mut unix_socket: Option<String> = None;
 
     // Only `-d`/`--data`/`--data-urlencode` imply a form Content-Type; real
     // curl sends none for `--data-binary`/`--data-raw`, so declaring
@@ -298,6 +303,15 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             "-I" | "--head" => head_only = true,
             "-f" | "--fail" => fail_on_error = true,
             "-L" | "--location" => follow_redirects = true,
+            "--unix-socket" => {
+                if cfg!(not(unix)) {
+                    return Err(CurlError::Transport(
+                        "'--unix-socket' needs a unix-family target, and this build is not one. Reach the service over http:// instead."
+                            .into(),
+                    ));
+                }
+                unix_socket = Some(value(&mut i)?);
+            }
             "-k" | "--insecure" => {
                 if !config.insecure_permitted() {
                     return Err(CurlError::Transport(format!(
@@ -420,6 +434,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         max_time: max_time.unwrap_or_else(|| config.limits().max_time),
         connect_timeout,
         insecure,
+        unix_socket,
     })
 }
 
@@ -758,12 +773,16 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_flags_refuse_rather_than_lie() {
-        // The backend honors neither, so accepting them would silently do
-        // the opposite of what the caller asked (verify TLS, use TCP).
-        for flag in ["-k", "--insecure", "--unix-socket"] {
+    fn a_refused_flag_names_itself_and_the_way_forward() {
+        // Both kinds of refusal: out of the 80/20 cut, and gated by config.
+        for flag in ["-O", "--form", "--proxy"] {
             let err = parse_args(&argv(&[flag, "http://x.com"]), &CurlConfig::default())
-                .expect_err("must refuse a flag the backend does not honor");
+                .expect_err("must refuse a flag outside the cut");
+            assert!(format!("{err}").contains(flag), "message should name {flag}: {err}");
+        }
+        for flag in ["-k", "--insecure"] {
+            let err = parse_args(&argv(&[flag, "http://x.com"]), &CurlConfig::default())
+                .expect_err("-k is refused until the embedder permits it");
             assert!(format!("{err}").contains(flag), "message should name {flag}: {err}");
         }
     }

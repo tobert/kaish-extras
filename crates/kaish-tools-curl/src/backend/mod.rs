@@ -7,6 +7,12 @@
 #[cfg(not(target_family = "wasm"))]
 mod ureq;
 
+// `--unix-socket`'s transport. Unix-family only: `UnixStream` does not exist
+// on every native target, and the flag is refused where the transport is
+// absent rather than silently connecting over TCP instead.
+#[cfg(all(not(target_family = "wasm"), unix))]
+mod unix;
+
 #[cfg(not(target_family = "wasm"))]
 pub use ureq::*;
 

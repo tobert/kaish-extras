@@ -722,6 +722,9 @@ impl Drop for UnixGuard {
 /// the same "never a silent success" reasoning `kaish-tools-git`'s
 /// `StrictBackend` states for itself (`crates/kaish-tools-git/tests/support.rs`).
 pub struct MemoryBackend {
+    /// An optional `(vfs, real)` mount pair, for the containment checks that
+    /// ask where a path actually lands.
+    mount: Option<(PathBuf, PathBuf)>,
     written: Mutex<HashMap<PathBuf, Vec<u8>>>,
 }
 
@@ -729,7 +732,15 @@ impl MemoryBackend {
     pub fn new() -> Self {
         Self {
             written: Mutex::new(HashMap::new()),
+            mount: None,
         }
+    }
+
+    /// Bind `vfs` to a real directory, so containment checks have something
+    /// to check against.
+    pub fn with_mount(mut self, vfs: impl Into<PathBuf>, real: impl Into<PathBuf>) -> Self {
+        self.mount = Some((vfs.into(), real.into()));
+        self
     }
 
     /// The bytes last written to `path`, if `-o` ever wrote there.
@@ -860,15 +871,29 @@ impl KernelBackend for MemoryBackend {
     }
 
     fn mounts(&self) -> Vec<MountInfo> {
-        Vec::new()
+        match &self.mount {
+            Some((vfs, _)) => vec![MountInfo {
+                path: vfs.clone(),
+                read_only: false,
+                resident_bytes: None,
+            }],
+            None => Vec::new(),
+        }
     }
 
-    /// An identity mapping. Never actually consulted — curl's `-o` writes
-    /// only through `backend().write()` (see the struct doc) — but it must
-    /// answer *something* sane rather than panic on a method that is a
-    /// legitimate, side-effect-free query.
+    /// Maps a VFS path under the configured mount onto a real directory, the
+    /// way a `LocalFs` mount does. `--unix-socket` is the flag that needs it:
+    /// its containment check asks this backend where a path really lands, and
+    /// an identity mapping would make the check meaningless.
+    ///
+    /// With no mount configured this is the identity, which is what every
+    /// other test wants — `-o` writes through `write()` and never consults
+    /// this.
     fn resolve_real_path(&self, path: &Path) -> Option<PathBuf> {
-        Some(path.to_path_buf())
+        match &self.mount {
+            Some((vfs, real)) => path.strip_prefix(vfs).ok().map(|rest| real.join(rest)),
+            None => Some(path.to_path_buf()),
+        }
     }
 }
 

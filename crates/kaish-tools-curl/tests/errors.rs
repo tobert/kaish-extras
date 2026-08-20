@@ -119,24 +119,18 @@ async fn refused_flags_name_themselves_and_never_run() {
 }
 
 #[tokio::test]
-async fn dash_k_and_unix_socket_are_refused_because_the_backend_cannot_honor_them() {
-    // Unlike the flags above, `-k` and `--unix-socket` are refused for a
-    // sharper reason: the backend has no code path that honors either one
-    // (no TLS-verification bypass, no AF_UNIX transport — see CU7/CU22 in
-    // docs/issues.md). Accepting either would silently do the opposite of
-    // what the caller asked — verify TLS anyway, or dial TCP instead of the
-    // socket. Refusing is deliberate, and this is the test that would catch
-    // a future change that "fixes" the refusal by quietly wiring the flag to
-    // nothing.
-    for flag in ["-k", "--unix-socket"] {
-        let result = curl(loopback_config(), argv(&[flag, "http://127.0.0.1:1/"])).await;
-        assert_ne!(result.code, 0, "{flag} should be refused, not silently accepted");
-        assert!(
-            result.err.contains(flag),
-            "refusal for {flag} should name it: {}",
-            result.err
-        );
-    }
+async fn dash_k_is_refused_until_the_embedder_permits_it() {
+    // `-k` is not out of the 80/20 cut — it works. It is off because an agent
+    // that can silence certificate verification can be talked into silencing
+    // it, so the decision belongs to the embedder (CU22).
+    let result = curl(loopback_config(), argv(&["-k", "http://127.0.0.1:1/"])).await;
+    assert_ne!(result.code, 0, "-k should be refused under the default config");
+    assert!(result.err.contains("-k"), "the refusal should name it: {}", result.err);
+    assert!(
+        result.err.contains("embedder"),
+        "say who can change it: {}",
+        result.err
+    );
 }
 
 #[tokio::test]

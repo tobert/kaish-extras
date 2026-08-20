@@ -19,6 +19,19 @@ use crate::model::Response as CurlResponse;
 use url::Url;
 
 
+/// The socket `--unix-socket` named, already resolved and containment-checked
+/// by `tool.rs`. `None` on a non-unix target, where the parser refuses the
+/// flag before this is reached.
+#[cfg(unix)]
+fn unix_socket_path(req: &Request) -> Option<std::path::PathBuf> {
+    req.unix_socket.as_ref().map(std::path::PathBuf::from)
+}
+
+#[cfg(not(unix))]
+fn unix_socket_path(_req: &Request) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Headers that carry a secret, and so stop at a change of host.
 const CREDENTIAL_HEADERS: &[&str] = &["authorization", "cookie", "proxy-authorization"];
 
@@ -128,14 +141,26 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
     }
     // `with_parts` rather than `new_agent`, so the resolver above sees every
     // address before a socket is opened.
-    let agent = ureq::Agent::with_parts(
-        builder_cfg.build(),
-        ureq::unversioned::transport::DefaultConnector::new(),
-        VettingResolver {
-            inner: DefaultResolver::default(),
-            policy: config.egress_policy(),
-        },
-    );
+    let resolver = VettingResolver {
+        inner: DefaultResolver::default(),
+        policy: config.egress_policy(),
+    };
+    let built = builder_cfg.build();
+    let agent = match unix_socket_path(req) {
+        // `--unix-socket` never touches the network, so the URL's host is a
+        // placeholder and address vetting has nothing to vet. Containment for
+        // this path was done in `tool.rs`, against the VFS.
+        Some(path) => ureq::Agent::with_parts(
+            built,
+            crate::backend::unix::UnixConnector::new(path),
+            resolver,
+        ),
+        None => ureq::Agent::with_parts(
+            built,
+            ureq::unversioned::transport::DefaultConnector::new(),
+            resolver,
+        ),
+    };
 
     // Credentials from `-u`, or from the URL's own userinfo when the caller
     // spelled them there instead (curl accepts both; `-u` wins).
