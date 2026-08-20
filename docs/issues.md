@@ -171,6 +171,14 @@ fixture asserted against real `git status --porcelain` before fixing.
   module, which carries no semver guarantee. A ureq 4.x bump could break it;
   pin ureq and revisit on minor bumps.
 
+- **CU21 — no CI job for `kaish-tools-curl`.** `.github/workflows/ci.yml`
+  builds, clippies and tests `kaish-tools-git`; the curl crate has only the
+  workspace-wide `curl-sys` tripwire covering it. That is how a `use base64::…`
+  with no `base64` dependency reached main (fixed 2026-08-20 in the 0.15 bump).
+  Give curl the same job shape once the crate's dead-code warnings are gone —
+  the job must run clippy with `-D warnings` like git's does, or it buys less
+  than it looks like it does.
+
 ### Blockers raised by the 2026-08-14 cross-model review
 
 Both reviewers independently said **do not build `docs/curl.md` as written**.

@@ -61,6 +61,10 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 # records; a CI `cargo tree -i` tripwire is meant to assert this stays true,
 # the same guard `kaish-tools-git` keeps for its own dependency edges).
 ureq = "3.4"
+# `--user` builds an `Authorization: Basic` header, which is base64. Pinned to
+# the major ureq itself already pulls in, so the native build gains no new
+# crate — the wasm backend has `btoa` and never needs this edge.
+base64 = "0.23"
 
 # Dev-dependencies are not target-scoped: `cargo test` only ever runs on a
 # native target, where the crate compiles.

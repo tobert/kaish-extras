@@ -34,10 +34,16 @@ has caught real broken deploys.
 ## kaish dependency pinning
 
 `[workspace.dependencies]` in the root `Cargo.toml` pins all four kaish crates
-to **published crates.io versions** (0.14.0 as of 2026-08-13). Rules:
+to **published crates.io versions** (`"0.15"` as of 2026-08-20). Rules:
 
 - **All four must pin the SAME version** — mixing them puts two copies of a
   kaish crate in the dependency graph.
+- **The pin is a caret range, and downstream depends on that.** `"0.15"` is
+  `^0.15`: any 0.15.x patch resolves, so an embedder that consumes both a tool
+  crate from here and kaish directly (kaijutsu) can move to 0.15.1 and still
+  unify on one copy of each kaish crate. 0.16 cannot ride along — pre-1.0 a
+  minor carries breaking changes — so a kaish minor is a bump here that has to
+  build and pass the checks. Do not widen the range to buy the illusion.
 - `kaish-kernel` is `default-features = false`. Keep it that way: a sibling
   crate enabling kernel default features tramples the no-default choice
   (`localfs` etc. must not leak into the browser build).
