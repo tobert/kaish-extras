@@ -99,7 +99,10 @@ This build refuses the following flags at parse time with literate errors:
 does not implement them rather than because they are out of scope — `-k`/`--insecure`
 and `--unix-socket`. Each carries a message
 that names the unsupported flag and the supported alternative. See "Literate errors" below.
-Flags not mentioned here are silently ignored by clap's unknown-flag warning.
+A flag this build does not recognize is **refused**, not ignored: an agent
+that typed something must never be left believing it took effect. So is a
+second URL — one per invocation, and curl says so rather than fetching the
+first and dropping the rest — and a flag whose value is missing.
 
 ## Output, and the `--json` collision
 

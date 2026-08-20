@@ -192,14 +192,14 @@ fn read_body_within(
         .map_err(|e| {
             // A partial read is data loss dressed up as a response.
             CurlError::Transport(format!(
-                "curl: failed reading the response body from {}: {e}",
+                "failed reading the response body from {}: {e}",
                 host_of(url)
             ))
         })?;
 
     if read as u64 > max_bytes {
         return Err(CurlError::Transport(format!(
-            "curl: response body from {} exceeds the {max_bytes}-byte limit this embedder allows. \
+            "response body from {} exceeds the {max_bytes}-byte limit this embedder allows. \
              Request a smaller range, or ask the embedder to raise `Limits::max_response_bytes`.",
             host_of(url)
         )));

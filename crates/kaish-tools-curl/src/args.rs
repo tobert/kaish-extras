@@ -1,13 +1,20 @@
 //! Argument parsing and refused-flag detection for kaish-curl.
 //!
-//! [`parse_args`] is the **only** parser in this crate: it takes raw argv
-//! tokens and produces a [`Request`] the backend executes. `tool.rs` used to
-//! carry an inline second copy, and the two drifted — the copy silently
-//! ignored `-I`, `-A`, `-e`, `--max-redirs` and `--data-urlencode`, all of
-//! which docs/curl.md's flag table promises. One parser, one place a flag can
-//! be honored or refused.
+//! [`parse_args`] is the only parser in this crate, and it makes **one pass**.
+//! That is load-bearing, not tidiness. The previous version swept the whole
+//! argv for boolean flags before scanning it, so `curl -d "-i" <url>` set
+//! `--include` from a token that was a *body*, and `curl -d "-O" <url>`
+//! refused a flag nobody typed. A single pass never sees a flag's value as a
+//! flag, because the arm that owns the flag consumes it.
 //!
-//! A flag the backend cannot honor is **refused here**, never accepted and
+//! The tool declares [`ToolSchema::with_raw_argv`], so kaish binds every
+//! argument to `positional` in source order rather than splitting it into an
+//! unordered flag set. curl is exactly the position-sensitive case that
+//! setting exists for: `-d -5` is a body, not a flag, and `-d a -d b` means
+//! nothing without its order. The one shape the raw-argv binder still
+//! composes is `--key=value`, which [`split_inline_value`] handles.
+//!
+//! A flag the backend cannot honor is refused here, never accepted and
 //! dropped: accepting `-k` and then verifying the certificate anyway does the
 //! opposite of what the caller asked, and says nothing about it.
 
@@ -17,31 +24,71 @@ use kaish_types::Value;
 use crate::config::CurlConfig;
 use crate::error::CurlError;
 
-/// Flags this tool understands, for positional detection and refusal.
-const KNOWN_FLAGS: &[&str] = &[
-    "--url", "-X", "--request",
-    "--data", "-d", "--data-binary", "--data-raw", "--data-urlencode",
-    "-H", "--header",
-    "-i", "--include", "-I", "--head",
-    "-o", "--output",
-    "-L", "--location", "--max-redirs",
-    "-u", "--user", "-A", "--user-agent", "-e", "--referer",
-    "-f", "--fail",
-    "--max-time", "--connect-timeout",
+/// Every flag the scan loop honors, in the long spelling the schema uses.
+///
+/// `tool.rs` builds the `ToolSchema` from a clap struct, and a test asserts
+/// the two agree in both directions. They drifted badly before that guard
+/// existed: the schema advertised `-k` and `--unix-socket`, which are
+/// refused, and omitted ten flags that work — and `help curl` is most of what
+/// an embedded agent ever learns about this tool.
+/// Test-only: the parser's own list lives in the `match` arms below, and Rust
+/// gives no way to reflect over them. This mirror covers the direction a
+/// behavioral test cannot — "the parser honors a flag the schema never
+/// mentions". The other direction is checked by actually running the parser.
+#[cfg(test)]
+pub(crate) const HONORED_FLAGS: &[&str] = &[
+    "--url",
+    "--request",
+    "--data",
+    "--data-binary",
+    "--data-raw",
+    "--data-urlencode",
+    "--header",
+    "--include",
+    "--head",
+    "--output",
+    "--location",
+    "--max-redirs",
+    "--user",
+    "--user-agent",
+    "--referer",
+    "--fail",
+    "--max-time",
+    "--connect-timeout",
 ];
 
-/// Flags that take the next token as their value. Positional detection has to
-/// know these or it mistakes a flag's value for the URL — and, just as badly,
-/// must *not* list valueless flags like `-L`, or `curl -L <url>` loses its URL.
-const VALUE_FLAGS: &[&str] = &[
-    "-X", "--request",
-    "-d", "--data", "--data-binary", "--data-raw", "--data-urlencode",
-    "-H", "--header",
-    "-o", "--output",
-    "--max-redirs",
-    "-u", "--user", "-A", "--user-agent", "-e", "--referer",
-    "--max-time", "--connect-timeout",
-    "--url",
+/// Flags refused at parse time, each with the message an agent reads.
+///
+/// Two kinds live here: out of the 80/20 cut (`-O`, `--form`, …), and not
+/// implemented by the backend (`-k`, `--unix-socket`). Both refuse, because
+/// the alternative is a flag that quietly does nothing.
+pub(crate) const REFUSED_FLAGS: &[(&str, &str)] = &[
+    ("-O", "'-O' is not supported. Use '-o <file>' for an explicit output path."),
+    ("-s", "'-s' is not supported. This build has no progress meter to suppress."),
+    ("-S", "'-S' is not supported. Error display is always enabled."),
+    ("--compressed", "'--compressed' is not supported. Decompression is automatic."),
+    ("--form", "'--form' (multipart) is not supported. Use '--data' for application/x-www-form-urlencoded."),
+    ("-F", "'-F' (multipart) is not supported. Use '--data' for application/x-www-form-urlencoded."),
+    ("--cookie", "'--cookie' is not supported. Send cookies with '-H Cookie:<value>'."),
+    ("-b", "'-b' is not supported. Send cookies with '-H Cookie:<value>'."),
+    ("--verbose", "'--verbose' is not supported. Use '-i' to see response headers; request tracing is not available in this build."),
+    ("-v", "'-v' is not supported. Use '-i' to see response headers; request tracing is not available in this build."),
+    ("--write-out", "'--write-out' is not supported. Use kaish '--json' for a structured response object."),
+    ("-w", "'-w' is not supported. Use kaish '--json' for a structured response object."),
+    ("--retry", "'--retry' is not supported. Retry from the shell: 'for i in 1 2 3; do curl ... && break; done'."),
+    ("--get", "'--get' is not supported. Put the query string in the URL."),
+    ("-G", "'-G' is not supported. Put the query string in the URL."),
+    ("--cert", "'--cert' is not supported. Client certificates are not available."),
+    ("--key", "'--key' is not supported. Client key files are not available."),
+    ("--proxy", "'--proxy' is not supported. Direct connections only."),
+    ("-x", "'-x' is not supported. Direct connections only."),
+    ("--config", "'--config' is not supported. Pass flags on the command line."),
+    ("-K", "'-K' is not supported. Pass flags on the command line."),
+    ("--netrc", "'--netrc' is not supported. Use '--user <user[:pass]>' for credentials."),
+    ("--resolve", "'--resolve' is not supported. To reach a specific address with a different Host, request the IP and set the header: curl -H 'Host: example.com' http://<ip>/."),
+    ("-k", "'-k' is not supported. This build always verifies TLS — use an https:// URL whose certificate validates, or an http:// URL."),
+    ("--insecure", "'--insecure' is not supported. This build always verifies TLS — use an https:// URL whose certificate validates, or an http:// URL."),
+    ("--unix-socket", "'--unix-socket' is not supported. This build has no AF_UNIX transport; reach the service over http:// instead."),
 ];
 
 /// The default `User-Agent`, sent when the caller names none.
@@ -81,26 +128,28 @@ pub struct Request {
     pub fail_on_error: bool,
     /// Whole-request deadline in seconds. Always set — the `CurlConfig`
     /// default applies when the caller omits `--max-time`, so an agent cannot
-    /// hang the embedder by leaving it off.
+    /// hang the embedder by leaving it off. The backend clamps it to the
+    /// embedder's ceiling.
     pub max_time: f64,
     /// Connect-phase deadline in seconds, when the caller asked for one.
     pub connect_timeout: Option<f64>,
 }
 
-/// Parse curl-style [`ToolArgs`] into a validated [`Request`].
+/// Split a `--flag=value` token, which is the one composed shape the kaish
+/// raw-argv binder still produces (`Arg::Named` renders as `--key=value`).
 ///
-/// Errors on a refused flag, a missing or non-http(s) URL, an `@path` body
-/// (deferred — CU5), and `-I` together with `--data`.
-pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlError> {
-    let trimmed = trim_argv(args);
-
-    if let Some(refused) = find_refused_flag(&trimmed) {
-        return Err(CurlError::Transport(refused));
+/// Short flags are left alone: `-H` never arrives glued to its value from the
+/// binder, and splitting `-d a=1` on `=` would tear a body in half.
+fn split_inline_value(token: &str) -> (&str, Option<&str>) {
+    match token.strip_prefix("--").and_then(|rest| rest.split_once('=')) {
+        Some((name, value)) => (&token[..name.len() + 2], Some(value)),
+        None => (token, None),
     }
+}
 
-    let include_headers = has_flag(&trimmed, &["-i", "--include"]);
-    let head_only = has_flag(&trimmed, &["-I", "--head"]);
-    let fail_on_error = has_flag(&trimmed, &["-f", "--fail"]);
+/// Parse curl-style [`ToolArgs`] into a validated [`Request`].
+pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlError> {
+    let argv = trim_argv(args)?;
 
     let mut bodies: Vec<String> = Vec::new();
     let mut headers: Vec<(String, String)> = Vec::new();
@@ -108,101 +157,127 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let mut user: Option<String> = None;
     let mut password: Option<String> = None;
     let mut method_override: Option<String> = None;
-    let mut url_flag: Option<String> = None;
-    let mut max_redirs: Option<u32> = None;
+    let mut url: Option<String> = None;
+    let mut max_redirects: Option<u32> = None;
     let mut referer: Option<String> = None;
     let mut user_agent: Option<String> = None;
     let mut max_time: Option<f64> = None;
     let mut connect_timeout: Option<f64> = None;
-    let mut follow = false;
+    let mut include_headers = false;
+    let mut head_only = false;
+    let mut fail_on_error = false;
+    let mut follow_redirects = false;
 
     let mut i = 0;
-    while i < trimmed.len() {
-        // Every value-taking arm below advances `i` past its value, so a
-        // value that looks like a flag (`-H` `-weird: v`) is never re-read as
-        // one.
-        let value = |i: &mut usize| -> Option<String> {
+    while i < argv.len() {
+        let (flag, inline) = split_inline_value(&argv[i]);
+        let flag = flag.to_string();
+        let inline = inline.map(str::to_string);
+
+        if let Some((_, message)) = REFUSED_FLAGS.iter().find(|(f, _)| *f == flag) {
+            return Err(CurlError::Transport((*message).to_string()));
+        }
+
+        // Consume this flag's value: the inline half of `--flag=value`, or the
+        // next token — whatever it looks like. A value that begins with `-`
+        // belongs to its flag (`-d -5` is a body), which is why this never
+        // inspects the next token before taking it.
+        let value = |i: &mut usize| -> Result<String, CurlError> {
+            if let Some(v) = inline.clone() {
+                return Ok(v);
+            }
             *i += 1;
-            trimmed.get(*i).cloned()
+            argv.get(*i).cloned().ok_or_else(|| {
+                CurlError::Transport(format!("'{flag}' requires a value, and none followed it."))
+            })
         };
-        match trimmed[i].as_str() {
+
+        match argv[i].as_str().split('=').next().unwrap_or(&argv[i]) {
             "-d" | "--data" | "--data-binary" | "--data-raw" => {
-                let raw = trimmed[i].as_str() == "--data-raw";
-                if let Some(val) = value(&mut i) {
-                    // `--data-raw` takes `@` literally; the others would read
-                    // a file, which is deferred (CU5).
-                    if !raw && val.starts_with('@') {
-                        return Err(CurlError::Transport(
-                            "curl: '@path' body syntax is not supported. Read a file with 'cat <path>' and pipe it into curl --data-binary -."
-                                .into(),
-                        ));
-                    }
-                    bodies.push(val);
+                let raw = argv[i].starts_with("--data-raw");
+                let val = value(&mut i)?;
+                // `--data-raw` takes `@` literally; the others would read a
+                // file, which is deferred (CU5).
+                if !raw && val.starts_with('@') {
+                    return Err(CurlError::Transport(
+                        "'@path' body syntax is not supported. Read a file with 'cat <path>' and pipe it into curl --data-binary -."
+                            .into(),
+                    ));
                 }
+                bodies.push(val);
             }
             "--data-urlencode" => {
-                if let Some(val) = value(&mut i) {
-                    if val.starts_with('@') || val.contains('@') && !val.contains('=') {
-                        return Err(CurlError::Transport(
-                            "curl: '--data-urlencode' file forms ('@file', 'name@file') are not supported. Pass 'name=value' instead."
-                                .into(),
-                        ));
-                    }
-                    bodies.push(urlencode_pair(&val));
+                let val = value(&mut i)?;
+                if val.starts_with('@') || (val.contains('@') && !val.contains('=')) {
+                    return Err(CurlError::Transport(
+                        "'--data-urlencode' file forms ('@file', 'name@file') are not supported. Pass 'name=value' instead."
+                            .into(),
+                    ));
                 }
+                bodies.push(urlencode_pair(&val));
             }
             "-H" | "--header" => {
-                if let Some(hv) = value(&mut i) {
-                    if let Some((name, v)) = hv.split_once(':') {
-                        let name = name.trim();
-                        if name.eq_ignore_ascii_case("user-agent") {
-                            user_agent = Some(v.trim().to_string());
-                        } else {
-                            headers.push((name.to_string(), v.trim().to_string()));
-                        }
-                    }
+                let hv = value(&mut i)?;
+                let Some((name, v)) = hv.split_once(':') else {
+                    return Err(CurlError::Transport(format!(
+                        "'-H {hv}' is not a header. Headers are 'Name: value'."
+                    )));
+                };
+                let name = name.trim();
+                if name.eq_ignore_ascii_case("user-agent") {
+                    user_agent = Some(v.trim().to_string());
+                } else {
+                    headers.push((name.to_string(), v.trim().to_string()));
                 }
             }
-            "-o" | "--output" => output_file = value(&mut i),
-            "-X" | "--request" => method_override = value(&mut i),
-            "--url" => url_flag = value(&mut i),
+            "-o" | "--output" => output_file = Some(value(&mut i)?),
+            "-X" | "--request" => method_override = Some(value(&mut i)?),
+            "--url" => url = Some(set_once(url, value(&mut i)?)?),
             "-u" | "--user" => {
-                if let Some(auth) = value(&mut i) {
-                    match auth.split_once(':') {
-                        Some((u, p)) => {
-                            user = Some(u.to_string());
-                            password = Some(p.to_string());
-                        }
-                        None => user = Some(auth),
+                let auth = value(&mut i)?;
+                match auth.split_once(':') {
+                    Some((u, p)) => {
+                        user = Some(u.to_string());
+                        password = Some(p.to_string());
                     }
+                    None => user = Some(auth),
                 }
             }
-            "-A" | "--user-agent" => user_agent = value(&mut i),
-            "-e" | "--referer" => referer = value(&mut i),
-            "-L" | "--location" => follow = true,
+            "-A" | "--user-agent" => user_agent = Some(value(&mut i)?),
+            "-e" | "--referer" => referer = Some(value(&mut i)?),
+            "-i" | "--include" => include_headers = true,
+            "-I" | "--head" => head_only = true,
+            "-f" | "--fail" => fail_on_error = true,
+            "-L" | "--location" => follow_redirects = true,
             "--max-redirs" => {
-                if let Some(n) = value(&mut i) {
-                    max_redirs = Some(n.parse::<u32>().map_err(|_| CurlError::Transport(
-                        format!("curl: '--max-redirs' wants a whole number of redirects, got '{n}'."),
-                    ))?);
-                }
+                let raw = value(&mut i)?;
+                max_redirects = Some(raw.parse::<u32>().map_err(|_| {
+                    CurlError::Transport(format!(
+                        "'--max-redirs' wants a whole number of redirects, got '{raw}'."
+                    ))
+                })?);
             }
-            "--max-time" => max_time = Some(seconds(&value(&mut i), "--max-time")?),
+            "--max-time" => max_time = Some(seconds(&value(&mut i)?, "--max-time")?),
             "--connect-timeout" => {
-                connect_timeout = Some(seconds(&value(&mut i), "--connect-timeout")?)
+                connect_timeout = Some(seconds(&value(&mut i)?, "--connect-timeout")?)
             }
-            _ => {}
+            other if other.starts_with('-') && other.len() > 1 => {
+                // Silently ignoring an unknown flag is the failure mode this
+                // whole surface exists to avoid: the agent believes it asked
+                // for something.
+                return Err(CurlError::Transport(format!(
+                    "'{other}' is not a flag this build understands. Run 'help curl' for the supported set."
+                )));
+            }
+            _ => url = Some(set_once(url, argv[i].clone())?),
         }
         i += 1;
     }
 
-    let url = url_flag
-        .or_else(|| find_positional(&trimmed))
-        .ok_or_else(|| CurlError::MalformedUrl {
-            url: "<missing>".into(),
-            reason: "URL is required — one positional argument or --url must specify the target"
-                .into(),
-        })?;
+    let url = url.ok_or_else(|| CurlError::MalformedUrl {
+        url: "<missing>".into(),
+        reason: "URL is required — one positional argument or --url must specify the target".into(),
+    })?;
 
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(CurlError::MalformedUrl {
@@ -253,27 +328,33 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         output_file,
         user,
         password,
-        follow_redirects: follow,
-        max_redirects: max_redirs,
+        follow_redirects,
+        max_redirects,
         fail_on_error,
         max_time: max_time.unwrap_or_else(|| config.limits().max_time),
         connect_timeout,
     })
 }
 
+/// One URL per invocation, and say so rather than fetching the first and
+/// ignoring the rest.
+fn set_once(existing: Option<String>, candidate: String) -> Result<String, CurlError> {
+    match existing {
+        Some(first) => Err(CurlError::Transport(format!(
+            "only one URL per invocation is supported, and both '{first}' and '{candidate}' were given. Run curl once per URL."
+        ))),
+        None => Ok(candidate),
+    }
+}
+
 /// Parse a seconds value, naming the flag when it isn't a number.
-fn seconds(raw: &Option<String>, flag: &str) -> Result<f64, CurlError> {
-    let Some(raw) = raw else {
-        return Err(CurlError::Transport(format!(
-            "curl: '{flag}' wants a number of seconds, but none followed it."
-        )));
-    };
+fn seconds(raw: &str, flag: &str) -> Result<f64, CurlError> {
     raw.parse::<f64>()
         .ok()
         .filter(|s| *s > 0.0 && s.is_finite())
         .ok_or_else(|| {
             CurlError::Transport(format!(
-                "curl: '{flag}' wants a positive number of seconds, got '{raw}'."
+                "'{flag}' wants a positive number of seconds, got '{raw}'."
             ))
         })
 }
@@ -302,119 +383,33 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
-fn has_flag(trimmed: &[String], names: &[&str]) -> bool {
-    trimmed.iter().any(|t| names.contains(&t.as_str()))
-}
-
-fn find_refused_flag(trimmed: &[String]) -> Option<String> {
-    const REFUSED: &[(&str, &str)] = &[
-        ("-O", "curl: '-O' is not supported. Use '-o <file>' for explicit output path."),
-        ("-s", "curl: '-s' is not supported. This build has no progress meter to suppress."),
-        ("-S", "curl: '-S' is not supported. Error display is always enabled."),
-        ("--compressed", "curl: '--compressed' is not supported. Decompression is automatic."),
-        ("--form", "curl: '--form' (multipart) is not supported. Use '--data' for application/x-www-form-urlencoded."),
-        ("--cookie", "curl: '--cookie' is not supported. Send cookies with '-H Cookie:<value>'."),
-        ("--verbose", "curl: '--verbose'/'-v' is not supported. Use kaish '--json' for structured output."),
-        ("-v", "curl: '--verbose'/'-v' is not supported. Use kaish '--json' for structured output."),
-        ("--write-out", "curl: '--write-out' is not supported. Use kaish '--json' for structured response objects."),
-        ("--retry", "curl: '--retry' is not supported. Retry transient failures from the shell loop."),
-        ("--get", "curl: '--get'/'-G' is not supported. Put query strings in the URL."),
-        ("-G", "curl: '--get'/'-G' is not supported. Put query strings in the URL."),
-        ("--cert", "curl: '--cert' is not supported. Client certificates are not available."),
-        ("--key", "curl: '--key' is not supported. Client key files are not available."),
-        ("--proxy", "curl: '--proxy' is not supported. Direct connections only."),
-        ("--config", "curl: '--config'/'-K' is not supported. Pass flags on the command line."),
-        ("-K", "curl: '--config'/'-K' is not supported. Pass flags on the command line."),
-        ("--netrc", "curl: '--netrc' is not supported. Use '--user <user[:pass]>' for credentials."),
-        ("--resolve", "curl: '--resolve' is not supported. DNS resolution uses the system resolver."),
-        // Refused because the backend does not implement them, not because
-        // they are out of scope. Accepting either would do the opposite of
-        // what the caller asked, quietly. Both are tracked in docs/issues.md.
-        ("-k", "curl: '-k' is not supported yet — this build always verifies TLS. It refuses rather than accept the flag and verify anyway."),
-        ("--insecure", "curl: '--insecure' is not supported yet — this build always verifies TLS. It refuses rather than accept the flag and verify anyway."),
-        ("--unix-socket", "curl: '--unix-socket' is not supported yet — this build has no AF_UNIX transport. It refuses rather than silently connect over TCP instead."),
-    ];
-    for (flag, msg) in REFUSED {
-        if trimmed.iter().any(|t| t == *flag) {
-            return Some(msg.to_string());
-        }
-    }
-    None
-}
-
-fn trim_argv(args: &ToolArgs) -> Vec<String> {
-    let mut result = Vec::new();
-    for v in &args.positional {
-        if let Value::String(s) = v {
-            result.push(s.clone());
-        }
-    }
-    for flag in &args.flags {
-        result.push(flag.clone());
-    }
-    for (name, val) in &args.named {
-        if let Value::String(v) = val {
-            result.push(format!("--{}={}", name, v));
-        } else {
-            result.push(format!("--{}", name));
-        }
-    }
-    result
-}
-
-/// The first token that is not a flag and not a flag's value — the URL.
-fn find_positional(args: &[String]) -> Option<String> {
-    let mut i = 0;
-    while i < args.len() {
-        if args[i].starts_with("--") || (args[i].starts_with('-') && args[i].len() > 1) {
-            // An unknown flag might take a value; a known valueless one never
-            // does. Getting this wrong in the other direction is what made
-            // `curl -L <url>` report a missing URL.
-            let takes_value = VALUE_FLAGS.contains(&args[i].as_str())
-                || (!KNOWN_FLAGS.contains(&args[i].as_str()) && !args[i].contains('='));
-            if takes_value && i + 1 < args.len() && !args[i + 1].starts_with('-') {
-                i += 2;
-            } else {
-                i += 1;
-            }
-        } else {
-            return Some(args[i].clone());
-        }
-    }
-    None
+/// The argv, in source order.
+///
+/// The tool sets [`ToolSchema::with_raw_argv`], so kaish binds every argument
+/// to `positional` in the order it was typed and leaves `flags`/`named`
+/// empty. Reading only `positional` is therefore reading the true argv — and
+/// the earlier version, which concatenated the three buckets, put a flag's
+/// value before its flag whenever the binder split them.
+fn trim_argv(args: &ToolArgs) -> Result<Vec<String>, CurlError> {
+    args.positional
+        .iter()
+        .map(|v| match v {
+            Value::String(s) => Ok(s.clone()),
+            Value::Int(n) => Ok(n.to_string()),
+            Value::Float(f) => Ok(f.to_string()),
+            Value::Bool(b) => Ok(b.to_string()),
+            // A structured or binary value has no argv spelling. Refusing
+            // beats picking one and pretending the caller meant it.
+            other => Err(CurlError::Transport(format!(
+                "an argument of this kind cannot be part of a command line: {other:?}. Pass a string."
+            ))),
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn refused_flags_catches_properly() {
-        let args = vec!["-O".to_string(), "http://example.com".into()];
-        assert!(find_refused_flag(&args).is_some());
-
-        let args = vec!["--form".into(), "field=value".into()];
-        assert!(find_refused_flag(&args).is_some());
-
-        let args = vec!["http://example.com".into()];
-        assert!(find_refused_flag(&args).is_none());
-    }
-
-    #[test]
-    fn find_positional_skips_flags_with_values() {
-        let args = vec![
-            "-i".into(), "-o".into(), "/tmp/out".into(),
-            "-H".into(), "X-Foo:bar".into(),
-            "http://x.com".into(),
-        ];
-        assert_eq!(find_positional(&args), Some("http://x.com".into()));
-    }
-
-    #[test]
-    fn find_positional_returns_first_non_flag() {
-        let args = vec!["http://x.com".into(), "-d".into()];
-        assert_eq!(find_positional(&args), Some("http://x.com".into()));
-    }
 
     // ── One parser, and it has to actually honor the documented surface ──
     //
@@ -531,6 +526,22 @@ mod tests {
     fn max_time_defaults_from_config_and_the_flag_overrides_it() {
         assert_eq!(parse(&["http://x.com"]).max_time, CurlConfig::default().limits().max_time);
         assert_eq!(parse(&["--max-time", "2.5", "http://x.com"]).max_time, 2.5);
+    }
+
+    #[test]
+    fn a_refusal_names_the_tool_exactly_once() {
+        // `CurlError::Transport`'s Display already prefixes "curl: ", and
+        // every message here used to carry its own — so every refusal an
+        // agent read began "curl: curl:".
+        for (flag, message) in REFUSED_FLAGS {
+            let rendered = CurlError::Transport((*message).to_string()).to_string();
+            assert!(rendered.starts_with("curl: "), "{flag}: {rendered}");
+            assert!(!rendered.contains("curl: curl:"), "{flag}: {rendered}");
+            assert!(
+                rendered.contains(flag),
+                "a refusal must name the flag it refused: {rendered}"
+            );
+        }
     }
 
     #[test]

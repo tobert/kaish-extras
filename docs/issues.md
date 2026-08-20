@@ -206,8 +206,9 @@ reference only; they no longer block work.
   fixed policy on exit numbers — that belongs to repl/UI. Filed separately.
 
 - **CU12 — `operations` unreachable type-safely.** DECIDED: hardcode dotted
-  strings (`net.request`, `fs.overwrite`) per Amy's ruling. Risk noted at the
-  declaration site: only `fs.` can drift.
+  strings per Amy's ruling. Declared as of 2026-08-20 —
+  `with_operations(["net.request", "fs.overwrite"])`, asserted by
+  `schema_declares_what_the_tool_actually_does`. Only `fs.` can drift.
 - **CU13 — kernel byte budget invisible.** DECIDED: embedder supplies limits
   via `CurlConfig`. `-o` streams, stdout reads into `max_response_bytes`.
 - **CU14 — accepted no-op flags.** DECIDED: refuse `-s`, `-S`, `--compressed`
@@ -244,41 +245,7 @@ standalone before being written down.
 
 ### Honesty of the declared surface
 
-- **CU29 — `Tool::schema` does not describe the real parser. (both)** It
-  advertises `-k` and `--unix-socket`, which the parser refuses, and omits
-  `-I`, `-H`, `-A`, `-e`, `--max-time`, `--connect-timeout`, `--data-binary`,
-  `--data-raw`, `--data-urlencode`, `--url`, which it honors. `help curl`,
-  completion, and `tools --json` all lie about the surface. It also declares
-  no `operations`, so an embedder gating on declared effects sees a tool that
-  makes network requests and writes files as side-effect-free (CU12 chose the
-  dotted strings; nothing ever passed them).
-
 ### Argument binding — the parser is built on the wrong contract
-
-- **CU30 — curl needs `ToolSchema::with_raw_argv()` and does not set it.
-  (both, from different directions)** kaish's binder splits argv into
-  `positional` / `flags` (an unordered `HashSet`) / `named`, and renders named
-  values as `--key=value`. curl is exactly the position-sensitive case
-  `raw_argv` exists for (its own kernel doc names POSIX `test`: "an operand
-  that looks like a flag must not be hoisted into the unordered flag set").
-  Without it: `--flag=value` forms fall through `args.rs`'s exact-match arms
-  and are silently dropped; `curl -d "-i" <url>` hoists `-i` out of the body
-  and sets `--include`; `curl -d "-O" <url>` refuses a flag the caller never
-  typed; and `trim_argv` re-concatenating buckets puts a flag's value before
-  its flag. The unit and functional tests all put every token in `positional`
-  in order — which is precisely what `raw_argv` would deliver, so the suite
-  passes while the real binding path is broken.
-- **CU31 — a missing flag value silently no-ops.** `-o` with nothing after it
-  leaves `output_file = None` and the request proceeds. Same for `-X`,
-  `--url`, `-u`, `-A`, `-e`, `-H`, `-d`, `--max-redirs`. Only `--max-time` and
-  `--connect-timeout` fail. curl says "option requires parameter".
-- **CU32 — a second URL and unknown flags are silently ignored.**
-  `curl http://a http://b` fetches only the first; docs/curl.md says a second
-  URL is refused. `curl --frobnicate <url>` runs a normal GET.
-- **CU33 — `find_positional` desyncs on a value beginning with `-`.**
-  `curl -d -5 <url>` parses the body, then the second scan treats `-5` as a
-  flag, skips the URL with it, and reports "URL is required". Two scan loops
-  disagree; `raw_argv` plus one pass removes the second.
 
 ### Limits that are not limits
 
@@ -309,11 +276,6 @@ standalone before being written down.
   rather than silently substituting for it, which is not the silent-fallback
   the house rule is about. Refusing costs a failed turn on nearly every first
   attempt. Amy's call; CU14 decided the other way.
-- **CU44 — three refusal messages dead-end the agent.** `--resolve` says "DNS
-  resolution uses the system resolver" — an agent in a VFS cannot edit
-  `/etc/hosts`; point it at `-H 'Host: …'` against the IP instead. `-v` points
-  at `--json`, which carries no request-side detail; point it at `-i`. `-k`
-  explains the tool's philosophy instead of the way forward.
 - **CU45 — `--json` shape.** The body is a double-encoded string, so an agent
   must parse JSON inside JSON; emit a real object for `application/json` and
   base64 for binary. Missing: the redirect chain, timing, and a
