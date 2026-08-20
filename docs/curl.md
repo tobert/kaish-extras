@@ -132,9 +132,8 @@ the rest to 1. State the number so an agent can branch on it.
 | Code | Cause |
 |---|---|
 | 0 | Success (any HTTP status unless `--fail`). |
-| 3 | URL malformed (bad scheme, bad syntax). |
 | 6 | Host not found. |
-| 7 | Could not connect. |
+| 7 | Could not connect — **and** URL malformed (bad scheme, bad syntax). curl uses 3 for a malformed URL; kaish's kernel reserves 3, so this build maps malformed URLs here with an error naming the real cause (CU11). |
 | 22 | `--fail` and HTTP status >= 400. |
 | 28 | `--max-time` or `--connect-timeout` exceeded. |
 | 35 | TLS handshake failed. |

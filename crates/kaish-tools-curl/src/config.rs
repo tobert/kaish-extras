@@ -270,7 +270,8 @@ impl CurlConfig {
 
     /// Set the egress allowlist policy.
     ///
-    /// The default is [`AllowAll`] (permit everything); call this with
+    /// The default is [`AllowByList::new`] — an empty allowlist, so nothing
+    /// passes until the embedder names hosts. Call this with
     /// [`AllowByList`] for deny-by-default operation.
     pub fn with_allow_egress(mut self, policy: impl AllowEgress + 'static) -> Self {
         self.allow_egress = Self::make_allow_egress(policy);
@@ -307,7 +308,15 @@ impl Default for CurlConfig {
             tool_name: "curl".to_string(),
             limits: Limits::default(),
             follow_redirects: RedirectPolicy::default(),
-            allow_egress: Self::make_allow_egress(AllowAll),
+            // Deny-by-empty-allowlist, which is what `CurlConfig::new`'s own
+            // doc, this module's header, and docs/curl.md have always said
+            // this was. It used to be `AllowAll`: an embedder that took the
+            // default got unrestricted egress from a tool whose entire
+            // safety story is the allowlist, and the unit test asserting it
+            // was named for the deny-by-default behavior it was not testing.
+            // A security default that fails open is worth nobody's
+            // convenience.
+            allow_egress: Self::make_allow_egress(AllowByList::new()),
         }
     }
 }
@@ -320,9 +329,9 @@ mod tests {
     fn default_config_is_named_curl_with_deny_by_default_egress() {
         let cfg = CurlConfig::default();
         assert_eq!(cfg.tool_name(), "curl");
-        // Default egress is AllowAll (permissive) — the embedder must switch
-        // to AllowByList for deny-by-default operation.
-        assert_eq!(cfg.permit_egress("https://example.com"), EgressResult::Allowed);
+        // An embedder that registers curl and sets nothing else reaches
+        // nothing. This test carried this name while asserting the opposite.
+        assert_ne!(cfg.permit_egress("https://example.com"), EgressResult::Allowed);
     }
 
     #[test]

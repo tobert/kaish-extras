@@ -42,8 +42,18 @@ use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
-#[cfg(unix)]
+
 use std::path::{Path, PathBuf};
+
+use async_trait::async_trait;
+
+use kaish_tool_api::{KernelBackend, Tool, ToolCtx};
+use kaish_types::backend::{
+    BackendResult, MountInfo, PatchOp, ReadRange, ToolInfo, ToolResult, WriteMode,
+};
+use kaish_types::{DirEntry, ExecResult, OutputFormat, ToolArgs, Value};
+
+use kaish_tools_curl::{AllowByList, CurlConfig};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Captured requests
@@ -694,4 +704,289 @@ impl Drop for UnixGuard {
             }
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A test `ToolCtx` — curl's only I/O touches `write()`, for `-o`
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A [`KernelBackend`] double that records every write into memory instead of
+/// touching a real filesystem, so an `-o` test can assert on exactly the
+/// bytes the tool wrote without standing up a VFS mount.
+///
+/// `write()` is the only backend method `tool.rs`'s `handle_success` ever
+/// calls — `ctx.resolve_path` is a `ToolCtx` method, not a `KernelBackend`
+/// one, and curl does no other file I/O. Every other method panics via
+/// [`curl_never_calls`]: a silent stub here would hide a future regression
+/// where curl reaches for a backend method it has no business calling —
+/// the same "never a silent success" reasoning `kaish-tools-git`'s
+/// `StrictBackend` states for itself (`crates/kaish-tools-git/tests/support.rs`).
+pub struct MemoryBackend {
+    written: Mutex<HashMap<PathBuf, Vec<u8>>>,
+}
+
+impl MemoryBackend {
+    pub fn new() -> Self {
+        Self {
+            written: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The bytes last written to `path`, if `-o` ever wrote there.
+    pub fn written(&self, path: &Path) -> Option<Vec<u8>> {
+        self.written
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(path)
+            .cloned()
+    }
+
+    /// Every path written so far — a test asserting "`-o` never ran" checks
+    /// this is empty rather than guessing a path nothing wrote to.
+    pub fn written_paths(&self) -> Vec<PathBuf> {
+        self.written
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+}
+
+impl Default for MemoryBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Panic naming the `KernelBackend` method `kaish-tools-curl` must never
+/// call — see [`MemoryBackend`]'s doc comment.
+macro_rules! curl_never_calls {
+    ($what:literal) => {
+        unimplemented!(
+            "MemoryBackend::{} — kaish-tools-curl's Tool::execute never calls this; \
+             only write() backs '-o'. A test that reached this found a real \
+             behavior change, not a harness gap.",
+            $what
+        )
+    };
+}
+
+#[async_trait]
+impl KernelBackend for MemoryBackend {
+    async fn read(&self, _path: &Path, _range: Option<ReadRange>) -> BackendResult<Vec<u8>> {
+        curl_never_calls!("read")
+    }
+
+    async fn write(&self, path: &Path, content: &[u8], _mode: WriteMode) -> BackendResult<()> {
+        self.written
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(path.to_path_buf(), content.to_vec());
+        Ok(())
+    }
+
+    async fn append(&self, _path: &Path, _content: &[u8]) -> BackendResult<()> {
+        curl_never_calls!("append")
+    }
+
+    async fn patch(&self, _path: &Path, _ops: &[PatchOp]) -> BackendResult<()> {
+        curl_never_calls!("patch")
+    }
+
+    async fn list(&self, _path: &Path) -> BackendResult<Vec<DirEntry>> {
+        curl_never_calls!("list")
+    }
+
+    async fn stat(&self, _path: &Path) -> BackendResult<DirEntry> {
+        curl_never_calls!("stat")
+    }
+
+    async fn mkdir(&self, _path: &Path) -> BackendResult<()> {
+        curl_never_calls!("mkdir")
+    }
+
+    async fn set_mtime(&self, _path: &Path, _mtime: std::time::SystemTime) -> BackendResult<()> {
+        curl_never_calls!("set_mtime")
+    }
+
+    async fn remove(&self, _path: &Path, _recursive: bool) -> BackendResult<()> {
+        curl_never_calls!("remove")
+    }
+
+    async fn rename(&self, _from: &Path, _to: &Path) -> BackendResult<()> {
+        curl_never_calls!("rename")
+    }
+
+    async fn exists(&self, _path: &Path) -> bool {
+        curl_never_calls!("exists")
+    }
+
+    async fn lstat(&self, _path: &Path) -> BackendResult<DirEntry> {
+        curl_never_calls!("lstat")
+    }
+
+    async fn read_link(&self, _path: &Path) -> BackendResult<PathBuf> {
+        curl_never_calls!("read_link")
+    }
+
+    async fn symlink(&self, _target: &Path, _link: &Path) -> BackendResult<()> {
+        curl_never_calls!("symlink")
+    }
+
+    async fn call_tool(
+        &self,
+        _name: &str,
+        _args: ToolArgs,
+        _ctx: &mut dyn ToolCtx,
+    ) -> BackendResult<ToolResult> {
+        curl_never_calls!("call_tool")
+    }
+
+    async fn list_tools(&self) -> BackendResult<Vec<ToolInfo>> {
+        curl_never_calls!("list_tools")
+    }
+
+    async fn get_tool(&self, _name: &str) -> BackendResult<Option<ToolInfo>> {
+        curl_never_calls!("get_tool")
+    }
+
+    fn read_only(&self) -> bool {
+        false
+    }
+
+    fn backend_type(&self) -> &str {
+        "memory-test"
+    }
+
+    fn mounts(&self) -> Vec<MountInfo> {
+        Vec::new()
+    }
+
+    /// An identity mapping. Never actually consulted — curl's `-o` writes
+    /// only through `backend().write()` (see the struct doc) — but it must
+    /// answer *something* sane rather than panic on a method that is a
+    /// legitimate, side-effect-free query.
+    fn resolve_real_path(&self, path: &Path) -> Option<PathBuf> {
+        Some(path.to_path_buf())
+    }
+}
+
+/// A minimal `ToolCtx` over a [`KernelBackend`] and a cwd — the whole
+/// surface curl's `Tool::execute` needs from the kernel.
+pub struct TestCtx {
+    backend: Arc<dyn KernelBackend>,
+    cwd: PathBuf,
+    vars: HashMap<String, Value>,
+    /// The output format the tool asked for, if any — how a test would
+    /// observe `--json` having been honored, if a test needs to.
+    pub output_format: Option<OutputFormat>,
+}
+
+impl TestCtx {
+    pub fn new(backend: Arc<dyn KernelBackend>, cwd: impl Into<PathBuf>) -> Self {
+        Self {
+            backend,
+            cwd: cwd.into(),
+            vars: HashMap::new(),
+            output_format: None,
+        }
+    }
+}
+
+impl ToolCtx for TestCtx {
+    fn backend(&self) -> &Arc<dyn KernelBackend> {
+        &self.backend
+    }
+
+    fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    fn resolve_path(&self, path: &str) -> PathBuf {
+        // Lexical only, like the kernel's: never touches the real filesystem.
+        let joined = if path.starts_with('/') {
+            PathBuf::from(path)
+        } else {
+            self.cwd.join(path)
+        };
+        let mut out = PathBuf::new();
+        for component in joined.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
+    fn var(&self, name: &str) -> Option<Value> {
+        self.vars.get(name).cloned()
+    }
+
+    fn set_var(&mut self, name: &str, value: Value) {
+        self.vars.insert(name.to_string(), value);
+    }
+
+    fn set_output_format(&mut self, format: OutputFormat) {
+        self.output_format = Some(format);
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Driving the tool
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Build the `ToolArgs` `crate::args::parse_args` expects from raw argv
+/// tokens — the same shape `args.rs`'s own unit tests use (`fn argv` at the
+/// bottom of that module): every token lands in `positional`, flags and
+/// their values interleaved exactly as typed. `parse_args` walks a
+/// flattened `positional` + `flags` + `named` token stream (`trim_argv`)
+/// regardless of which bucket a token came from, so handing it everything
+/// as ordered positionals is the direct, order-preserving way to express a
+/// command line without this harness re-deriving `trim_argv`'s own
+/// reassembly rules.
+pub fn argv(tokens: &[&str]) -> ToolArgs {
+    let mut args = ToolArgs::new();
+    args.positional = tokens.iter().map(|t| Value::String((*t).to_string())).collect();
+    args
+}
+
+/// A `CurlConfig` that permits loopback egress. Every functional test's
+/// server lives on `127.0.0.1`, and `CurlConfig::default`'s egress policy is
+/// deny-by-empty-allowlist (`docs/curl.md` CU8) — without this, a request
+/// never leaves the tool at all, and every surface test would silently be
+/// testing the egress refusal instead of the behavior it names.
+pub fn loopback_config() -> CurlConfig {
+    CurlConfig::default().with_allow_egress(AllowByList::new().with_allow_loopback(true))
+}
+
+/// Run curl end-to-end: parse `args` against `config`, dispatch through the
+/// real `Tool` impl, against a fresh [`MemoryBackend`] a caller can't see.
+/// Use [`curl_with_backend`] when a test needs to assert on what `-o` wrote.
+pub async fn curl(config: CurlConfig, args: ToolArgs) -> ExecResult {
+    curl_with_backend(config, args, Arc::new(MemoryBackend::new())).await
+}
+
+/// Run curl end-to-end against a caller-supplied backend, so the caller can
+/// inspect `backend.written(...)` after the call returns.
+pub async fn curl_with_backend(
+    config: CurlConfig,
+    args: ToolArgs,
+    backend: Arc<MemoryBackend>,
+) -> ExecResult {
+    let mut ctx = TestCtx::new(backend, "/");
+    let tool = kaish_tools_curl::tool(config);
+    tool.execute(args, &mut ctx).await
 }

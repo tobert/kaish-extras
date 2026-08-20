@@ -33,6 +33,14 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
     // inside a bounded hook (kaijutsu) relies on this — an omitted flag must
     // not mean "wait forever".
     let mut builder_cfg = ureq::Agent::config_builder()
+        // ureq's `http_status_as_error` defaults to **true**
+        // (ureq-3.4.0/src/config.rs:867), which turns every 4xx/5xx into
+        // `Err(Error::StatusCode)` before `fetch` can look at it. That is the
+        // opposite of curl: a plain `curl <url>` against a 404 prints the
+        // error page and exits 0, and only `-f` turns a status into a
+        // failure. Turning it off leaves that decision where it belongs —
+        // the `fail_on_error` check below.
+        .http_status_as_error(false)
         .max_redirects(max_redirs)
         .timeout_global(Some(Duration::from_secs_f64(req.max_time)));
     if let Some(connect) = req.connect_timeout {
