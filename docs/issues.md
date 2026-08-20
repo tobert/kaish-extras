@@ -233,3 +233,140 @@ reference only; they no longer block work.
   - Redirects stay opt-in (`-L` flag) with `follow_redirects` config default
   - `--retry` moved in minimally: transient failures with exponential backoff.
     Not retrying non-idempotent methods without stating so.
+
+## curl — from the 2026-08-20 cross-model review (gemini-pro + deepseek)
+
+Both reviewers ran without a diff, on whole files. Findings they reached
+independently are marked **(both)**. Every containment claim below was
+re-verified against the code, and the two egress bypasses were probed
+standalone before being written down.
+
+### Containment — must fix before any embedder registers curl
+
+- **CU24 — the egress allowlist is bypassable with URL userinfo. (both)**
+  `AllowByList::permit` (config.rs) takes the host by splitting on the first
+  `/`, `:` or `?` after `://`; `@` is not a delimiter. So
+  `https://allowed.example:443@169.254.169.254/latest/meta-data/` presents
+  `allowed.example` to the check and connects to the metadata service. Any
+  allowlisted host is a key to anywhere. Probed, confirmed. The fix is to stop
+  matching lexically on the URL string and compare against the authority a
+  real parser (`http::Uri`, or the `url` crate) resolves — the same one ureq
+  will dial.
+- **CU25 — `is_in_cidr` is a string prefix test.** `is_in_cidr(host, "127.")`
+  means the hostname `127.evil.com` is "loopback" and `169.254.evil.com` is
+  "link-local", so either opt-in permits attacker-chosen public hosts. Parse
+  as an IP; a name is not an address.
+- **CU26 — IPv6 literals cannot be expressed.** `[::1]:8080` splits to `[` on
+  the first colon, so the `::1`, `fe80:` and `fd00:` branches are unreachable
+  and no IPv6 host can be allowlisted. Fails closed, but silently.
+- **CU27 — Basic-auth credentials are not stripped on cross-host redirect.
+  (both)** docs/curl.md and CU10 both promise the stripping. There is no
+  stripping code in the crate. `-u` plus a redirect is an exfiltration path.
+- **CU8 (restated, still live) — the allowlist is checked once. (both)** ureq
+  follows redirect hops itself with no per-hop hook, so an allowed host that
+  302s anywhere is followed. The `AllowEgress` trait doc claims per-hop
+  enforcement it does not get. Options: drive redirects manually (fetch with
+  `max_redirects(0)` and loop, checking egress each hop), or a ureq middleware.
+  This is the one that makes CU24 catastrophic rather than merely bad.
+- **CU28 — the allowlist matches names, the connection resolves DNS.** An
+  allowlisted name that resolves to loopback or a metadata address gets
+  through, and nothing re-checks after resolution. Classic SSRF; needs a
+  resolver-side check, not a parser-side one.
+
+### Honesty of the declared surface
+
+- **CU29 — `Tool::schema` does not describe the real parser. (both)** It
+  advertises `-k` and `--unix-socket`, which the parser refuses, and omits
+  `-I`, `-H`, `-A`, `-e`, `--max-time`, `--connect-timeout`, `--data-binary`,
+  `--data-raw`, `--data-urlencode`, `--url`, which it honors. `help curl`,
+  completion, and `tools --json` all lie about the surface. It also declares
+  no `operations`, so an embedder gating on declared effects sees a tool that
+  makes network requests and writes files as side-effect-free (CU12 chose the
+  dotted strings; nothing ever passed them).
+
+### Argument binding — the parser is built on the wrong contract
+
+- **CU30 — curl needs `ToolSchema::with_raw_argv()` and does not set it.
+  (both, from different directions)** kaish's binder splits argv into
+  `positional` / `flags` (an unordered `HashSet`) / `named`, and renders named
+  values as `--key=value`. curl is exactly the position-sensitive case
+  `raw_argv` exists for (its own kernel doc names POSIX `test`: "an operand
+  that looks like a flag must not be hoisted into the unordered flag set").
+  Without it: `--flag=value` forms fall through `args.rs`'s exact-match arms
+  and are silently dropped; `curl -d "-i" <url>` hoists `-i` out of the body
+  and sets `--include`; `curl -d "-O" <url>` refuses a flag the caller never
+  typed; and `trim_argv` re-concatenating buckets puts a flag's value before
+  its flag. The unit and functional tests all put every token in `positional`
+  in order — which is precisely what `raw_argv` would deliver, so the suite
+  passes while the real binding path is broken.
+- **CU31 — a missing flag value silently no-ops.** `-o` with nothing after it
+  leaves `output_file = None` and the request proceeds. Same for `-X`,
+  `--url`, `-u`, `-A`, `-e`, `-H`, `-d`, `--max-redirs`. Only `--max-time` and
+  `--connect-timeout` fail. curl says "option requires parameter".
+- **CU32 — a second URL and unknown flags are silently ignored.**
+  `curl http://a http://b` fetches only the first; docs/curl.md says a second
+  URL is refused. `curl --frobnicate <url>` runs a normal GET.
+- **CU33 — `find_positional` desyncs on a value beginning with `-`.**
+  `curl -d -5 <url>` parses the body, then the second scan treats `-5` as a
+  flag, skips the URL with it, and reports "URL is required". Two scan loops
+  disagree; `raw_argv` plus one pass removes the second.
+
+### Limits that are not limits
+
+- **CU34 — a flag can raise a ceiling the embedder set. (both)**
+  `max_time.unwrap_or(config.limits().max_time)` lets `--max-time 3600`
+  override the embedder outright, and `--max-redirs` the same. The `Limits`
+  doc says a flag "may only lower it, never raise it". Clamp with `min`.
+- **CU35 — truncation is reported as success.** A body over
+  `max_response_bytes` is cut and returned `Ok`, and with `-o` that
+  already-truncated body is written and reported as "Wrote N bytes" with exit
+  0 — a silently corrupt file. Both `config.rs` and docs/curl.md claim `-o`
+  streams and is governed by the VFS budget rather than this cap; it does
+  neither. Supersedes and widens CU23: bound the read with `.take()`, fail
+  loudly at the boundary, and make `-o` actually stream.
+- **CU36 — `--max-redirs` is discarded under `RedirectPolicy::Auto`.** Without
+  `-L`, `follow` is false, so the caller's cap never reaches the backend and
+  the config cap is used instead.
+
+### Response fidelity
+
+- **CU37 — duplicate response headers collapse. (both)** `BTreeMap<String,
+  String>` keeps the last of three `Set-Cookie`s, and a non-UTF-8 header value
+  becomes an empty string. `-i` is documented to print what the server sent.
+- **CU38 — the reported URL is the request URL, not the final one.**
+  `model.rs` documents `url` as post-redirect; the backend fills it from
+  `req.url`, so `--json` and the `curl.url` baggage name the pre-redirect URL.
+- **CU39 — exit 6 is unreachable and exit 60 nearly so. (both)** Nothing ever
+  constructs `HostNotFound`; DNS failures land in `Io` → `CouldNotConnect` (7)
+  or the catch-all (1). Only `ureq::Error::Pem` maps to 60, so an ordinary
+  self-signed-cert failure exits 1, not 60. An agent branching on these codes
+  branches wrong.
+- **CU40 — `--data-binary` and `--data-raw` get a form-urlencoded
+  Content-Type.** Real curl sets it for `-d`/`--data`/`--data-urlencode` only,
+  so `--data-binary '{"a":1}'` posts JSON declared as a form.
+- **CU41 — stdout mangles binary bodies.** `render_text` runs the body through
+  `from_utf8_lossy`, so binary to stdout comes back with U+FFFD; only `-o`
+  preserves bytes.
+- **CU42 — `Timeout` reports the configured budget as elapsed time**, not the
+  time actually spent.
+
+### Agent ergonomics (design lane, gemini)
+
+- **CU43 — reconsider refusing `-s`/`-S`.** Models emit `curl -sSL` reflexively
+  from training. The semantic content of `-s` is "no progress meter", and this
+  build has none — so accepting it and doing nothing *fulfills* the request
+  rather than silently substituting for it, which is not the silent-fallback
+  the house rule is about. Refusing costs a failed turn on nearly every first
+  attempt. Amy's call; CU14 decided the other way.
+- **CU44 — three refusal messages dead-end the agent.** `--resolve` says "DNS
+  resolution uses the system resolver" — an agent in a VFS cannot edit
+  `/etc/hosts`; point it at `-H 'Host: …'` against the IP instead. `-v` points
+  at `--json`, which carries no request-side detail; point it at `-i`. `-k`
+  explains the tool's philosophy instead of the way forward.
+- **CU45 — `--json` shape.** The body is a double-encoded string, so an agent
+  must parse JSON inside JSON; emit a real object for `application/json` and
+  base64 for binary. Missing: the redirect chain, timing, and a
+  `curl.content_type` baggage entry to branch on before parsing.
+- **CU46 — `CurlConfig` cannot inject headers, set a proxy, or add TLS
+  roots.** An embedder that wants to supply credentials the agent never sees,
+  route through an egress proxy, or trust a MITM inspection CA has no seam.
