@@ -1,8 +1,14 @@
-# PR gates, cribbed from kaish's ci.yml: clippy on the wasm target (the only
-# target kaish-web builds for) and the full site build + real-time e2e — the
-# same checks pages.yml runs before deploying, so a green PR means a
-# deployable main. Runs on pull_request only: pushes to main get the identical
-# build + e2e inside pages.yml, and running both there would double the work.
+# The gates, cribbed from kaish's ci.yml: clippy on the wasm target (the only
+# target kaish-web builds for), the full site build + real-time e2e, and the
+# Rust tool crates (build, clippy, test, dependency tripwires, wasm guard).
+#
+# Runs on pull_request **and** on push to main. Main matters because we work
+# on main directly while kaish-extras hardens. This was `pull_request` only,
+# on the reasoning that pages.yml re-runs the site build and e2e on push —
+# true, but pages.yml runs *nothing else*, so a direct push to main had no
+# clippy and no tool-crate gate at all. That is how a `kaish-tools-curl` that
+# did not compile reached main. Only `site-e2e` is skipped on push, because
+# that one really is pages.yml's job.
 #
 # Actions are pinned by commit SHA, not tag — a tag can be moved, a digest
 # can't (supply-chain). Each pin carries a `# vX.Y.Z` comment naming the
@@ -11,6 +17,8 @@ name: ci
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -42,6 +50,8 @@ jobs:
 
   site-e2e:
     name: site build + e2e
+    # pages.yml runs exactly this on push to main, in front of the deploy.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
