@@ -80,6 +80,7 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
         req.bodies.join("&").into_bytes()
     };
 
+    let started = std::time::Instant::now();
     let mut hops: u32 = 0;
     loop {
         if config.permit_egress(current.as_str()) != EgressResult::Allowed {
@@ -112,7 +113,7 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
 
         let mut resp = agent
             .run(http_req)
-            .map_err(|e| map_ureq_into_curl(e, &current, max_time, max_redirs))?;
+            .map_err(|e| map_ureq_into_curl(e, &current, started.elapsed(), max_redirs))?;
         let status = resp.status().as_u16();
 
         if let Some(location) = redirect_target(status, resp.headers()).filter(|_| following) {
@@ -240,11 +241,20 @@ fn host_of(url: &Url) -> String {
     url.host_str().unwrap_or("[unknown]").to_string()
 }
 
-fn resp_headers(headers: &ureq::http::HeaderMap) -> std::collections::BTreeMap<String, String> {
+fn resp_headers(headers: &ureq::http::HeaderMap) -> std::collections::BTreeMap<String, Vec<String>> {
     use std::collections::BTreeMap;
-    let mut map = BTreeMap::new();
+    let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (name, value) in headers.iter() {
-        map.insert(name.to_string(), value.to_str().unwrap_or("").to_string());
+        // A header value that is not UTF-8 became an empty string, which
+        // reads as "the server sent nothing" rather than "we could not render
+        // this". Say which.
+        let rendered = match value.to_str() {
+            Ok(v) => v.to_string(),
+            Err(_) => format!("<{} bytes, not valid UTF-8>", value.as_bytes().len()),
+        };
+        // Every value under the name, not the last one: three `Set-Cookie`s
+        // used to collapse into one (CU37).
+        map.entry(name.to_string()).or_default().push(rendered);
     }
     map
 }
@@ -255,11 +265,16 @@ fn resp_headers(headers: &ureq::http::HeaderMap) -> std::collections::BTreeMap<S
 fn map_ureq_into_curl(
     err: ureq::Error,
     url: &Url,
-    max_time: f64,
+    elapsed: std::time::Duration,
     max_redirs: u32,
 ) -> CurlError {
     let host = host_of(url);
     match err {
+        // Exit 6. ureq names this case exactly and nothing matched it, so a
+        // DNS failure arrived as "could not connect" (7) or as a generic
+        // transport error (1) — and an agent that branches on 6 to try a
+        // different name never saw one (CU39).
+        ureq::Error::HostNotFound => CurlError::HostNotFound { host },
         ureq::Error::ConnectionFailed => CurlError::CouldNotConnect {
             host,
             reason: "connection failed".into(),
@@ -267,16 +282,37 @@ fn map_ureq_into_curl(
         // Exit 28, not 7: a deadline that fired is not a connection that
         // never opened, and an agent retrying on 7 would retry the wrong
         // thing.
-        ureq::Error::Timeout(_) => CurlError::Timeout { seconds: max_time },
-        ureq::Error::Tls(msg) => CurlError::TlsHandshakeFailed {
-            host,
-            reason: msg.into(),
-        },
+        // The time actually spent, not the budget that was configured — an
+        // agent reading "timed out after 30s" when it waited 0.2s learns the
+        // wrong thing about the endpoint (CU42).
+        ureq::Error::Timeout(_) => CurlError::Timeout { seconds: elapsed.as_secs_f64() },
+        // ureq collapses every TLS failure into one &'static str, so telling
+        // "the certificate did not verify" (60) from "the handshake broke"
+        // (35) means reading that string. The split is a heuristic on ureq's
+        // wording, stated here rather than hidden: if it stops matching, both
+        // land on 35, which is the safer of the two to over-report.
+        ureq::Error::Tls(msg) => {
+            let lowered = msg.to_ascii_lowercase();
+            if lowered.contains("cert") || lowered.contains("verif") {
+                CurlError::CertificateNotAuthenticated { host, reason: msg.into() }
+            } else {
+                CurlError::TlsHandshakeFailed { host, reason: msg.into() }
+            }
+        }
         ureq::Error::Pem(e) => CurlError::CertificateNotAuthenticated {
             host,
             reason: format!("{e}"),
         },
         ureq::Error::TooManyRedirects => CurlError::TooManyRedirects { limit: max_redirs },
+        // ureq will not replay a request body across a 307/308. Say so,
+        // rather than letting it fall through as a bare "redirect failed".
+        ureq::Error::RedirectFailed => CurlError::Transport(format!(
+            "{host} answered with a redirect that would require sending the request body again, which this build will not do. Reissue the request against the redirect target."
+        )),
+        ureq::Error::BadUri(reason) => CurlError::MalformedUrl {
+            url: url.to_string(),
+            reason,
+        },
         ureq::Error::Io(e) => CurlError::CouldNotConnect {
             host,
             reason: format!("IO error: {e}"),

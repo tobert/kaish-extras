@@ -227,6 +227,18 @@ async fn handle_success(
     let url = response.url.clone();
 
     let Some(path) = output_file else {
+        // stdout is a text channel (`OutputData` carries no bytes), so a
+        // binary body would arrive peppered with U+FFFD and be called the
+        // response. Say what it is and where it can go intact instead
+        // (CU41) — `-o` writes the bytes through the VFS unchanged, and
+        // `--json` base64s them.
+        if !head_only && std::str::from_utf8(&response.body).is_err() {
+            return error_result(CurlError::Transport(format!(
+                "the response from {url} is {} bytes of binary, which cannot be printed. \
+                 Save it with '-o <path>', or use '--json' to receive it base64-encoded.",
+                response.body.len()
+            )));
+        }
         // curl prints headers for `-I` whether or not `-i` was given.
         let text = crate::render::render_text(&response, include_headers || head_only, head_only);
         let json_obj = crate::render::render_json(&response);

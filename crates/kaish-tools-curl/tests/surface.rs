@@ -300,3 +300,78 @@ async fn max_redirs_caps_a_two_hop_chain() {
         result.err
     );
 }
+
+#[tokio::test]
+async fn duplicate_response_headers_all_survive() {
+    // CU37: a BTreeMap<String, String> kept the last of three Set-Cookies.
+    let server = Server::builder()
+        .route(
+            "/cookies",
+            Response::new(200)
+                .header("Set-Cookie", "a=1")
+                .header("Set-Cookie", "b=2")
+                .header("Set-Cookie", "c=3")
+                .body("ok"),
+        )
+        .start_tcp();
+
+    let result = curl(loopback_config(), argv(&["-i", &server.url("/cookies")])).await;
+    assert_eq!(result.code, 0, "{}", result.err);
+    let out = result.text_out();
+    for cookie in ["a=1", "b=2", "c=3"] {
+        assert!(out.contains(cookie), "every Set-Cookie must print: {out}");
+    }
+}
+
+#[tokio::test]
+async fn a_json_body_arrives_as_an_object_not_a_string() {
+    // CU45: `body` used to be JSON encoded inside a JSON string, so an agent
+    // had to parse it twice before it could branch on anything.
+    let server = Server::builder()
+        .route("/api", Response::json(200, r#"{"status":"ok","count":3}"#))
+        .start_tcp();
+
+    let result = curl(loopback_config(), argv(&[&server.url("/api")])).await;
+    assert_eq!(result.code, 0, "{}", result.err);
+
+    let Some(kaish_types::Value::Json(obj)) = result.data else {
+        panic!("--json payload should be structured");
+    };
+    assert_eq!(obj["body_format"], "json");
+    assert_eq!(obj["body"]["status"], "ok");
+    assert_eq!(obj["body"]["count"], 3);
+}
+
+#[tokio::test]
+async fn a_text_body_stays_text_even_when_it_parses_as_json() {
+    // Content-Type is the authority: a text/plain `42` is text.
+    let server = Server::builder()
+        .route("/plain", Response::text(200, "42"))
+        .start_tcp();
+
+    let result = curl(loopback_config(), argv(&[&server.url("/plain")])).await;
+    let Some(kaish_types::Value::Json(obj)) = result.data else {
+        panic!("--json payload should be structured");
+    };
+    assert_eq!(obj["body_format"], "text");
+    assert_eq!(obj["body"], "42");
+}
+
+#[tokio::test]
+async fn a_binary_body_is_refused_on_stdout_and_base64_in_json() {
+    // CU41: stdout is a text channel, so printing binary meant handing back a
+    // body full of U+FFFD and calling it the response.
+    let bytes: Vec<u8> = vec![0x00, 0xff, 0xfe, 0x01, 0x80];
+    let server = Server::builder()
+        .route(
+            "/blob",
+            Response::new(200)
+                .header("Content-Type", "application/octet-stream")
+                .body(bytes.clone()),
+        )
+        .start_tcp();
+
+    let result = curl(loopback_config(), argv(&[&server.url("/blob")])).await;
+    assert_ne!(result.code, 0, "binary must not be printed as mangled text");
+    assert!(result.err.contains("-o"), "say where it can go intact: {}", result.err);
+}

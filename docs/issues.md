@@ -251,23 +251,6 @@ standalone before being written down.
 
 ### Response fidelity
 
-- **CU37 — duplicate response headers collapse. (both)** `BTreeMap<String,
-  String>` keeps the last of three `Set-Cookie`s, and a non-UTF-8 header value
-  becomes an empty string. `-i` is documented to print what the server sent.
-- **CU39 — exit 6 is unreachable and exit 60 nearly so. (both)** Nothing ever
-  constructs `HostNotFound`; DNS failures land in `Io` → `CouldNotConnect` (7)
-  or the catch-all (1). Only `ureq::Error::Pem` maps to 60, so an ordinary
-  self-signed-cert failure exits 1, not 60. An agent branching on these codes
-  branches wrong.
-- **CU40 — `--data-binary` and `--data-raw` get a form-urlencoded
-  Content-Type.** Real curl sets it for `-d`/`--data`/`--data-urlencode` only,
-  so `--data-binary '{"a":1}'` posts JSON declared as a form.
-- **CU41 — stdout mangles binary bodies.** `render_text` runs the body through
-  `from_utf8_lossy`, so binary to stdout comes back with U+FFFD; only `-o`
-  preserves bytes.
-- **CU42 — `Timeout` reports the configured budget as elapsed time**, not the
-  time actually spent.
-
 ### Agent ergonomics (design lane, gemini)
 
 - **CU43 — reconsider refusing `-s`/`-S`.** Models emit `curl -sSL` reflexively
@@ -276,10 +259,6 @@ standalone before being written down.
   rather than silently substituting for it, which is not the silent-fallback
   the house rule is about. Refusing costs a failed turn on nearly every first
   attempt. Amy's call; CU14 decided the other way.
-- **CU45 — `--json` shape.** The body is a double-encoded string, so an agent
-  must parse JSON inside JSON; emit a real object for `application/json` and
-  base64 for binary. Missing: the redirect chain, timing, and a
-  `curl.content_type` baggage entry to branch on before parsing.
 - **CU46 — `CurlConfig` cannot inject headers, set a proxy, or add TLS
   roots.** An embedder that wants to supply credentials the agent never sees,
   route through an egress proxy, or trust a MITM inspection CA has no seam.

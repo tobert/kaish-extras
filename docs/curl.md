@@ -73,8 +73,8 @@ the last positional unless `--url` is used.
 | `--url <url>` | Same as the positional. | None. |
 | `-X, --request <method>` | HTTP method. | None. |
 | `-d, --data <data>` | Body, `Content-Type: application/x-www-form-urlencoded` unless overridden, implies POST. Repeatable, joined with `&`. `@path` reads the file through the VFS. | Real curl strips trailing CR/LF from `-d` bodies; this build does not. |
-| `--data-binary <data>` | Like `-d` but no newline stripping. `@path` reads raw. | None. |
-| `--data-raw <data>` | Like `-d` but `@` is literal, never a file read. | None. |
+| `--data-binary <data>` | Like `-d`, and no Content-Type is implied — real curl sends none for this form either. | `@path` file reads are deferred (CU5). |
+| `--data-raw <data>` | Like `-d`, `@` is literal, and no Content-Type is implied. | None. |
 | `--data-urlencode <data>` | Accepts `name=value`; encodes only `value`, not the name or `=` separator. | Real curl also supports `@filename` and `name@filename` forms (deferred). |
 | `-H, --header <h:v>` | Request header. Repeatable. | None. |
 | `-i, --include` | Print response headers above the body. With `-o <file>`, writes headers **into the file** alongside the body, matching curl's behavior. | None. |

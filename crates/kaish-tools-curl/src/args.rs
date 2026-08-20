@@ -168,10 +168,17 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let mut fail_on_error = false;
     let mut follow_redirects = false;
 
+    // Only `-d`/`--data`/`--data-urlencode` imply a form Content-Type; real
+    // curl sends none for `--data-binary`/`--data-raw`, so declaring
+    // `--data-binary '{"a":1}'` as form-urlencoded was a lie about the bytes
+    // on the wire (CU40).
+    let mut body_implies_form = false;
+
     let mut i = 0;
     while i < argv.len() {
         let (flag, inline) = split_inline_value(&argv[i]);
-        let flag = flag.to_string();
+        let argv_flag = flag.to_string();
+        let flag = argv_flag.clone();
         let inline = inline.map(str::to_string);
 
         if let Some((_, message)) = REFUSED_FLAGS.iter().find(|(f, _)| *f == flag) {
@@ -194,7 +201,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
 
         match argv[i].as_str().split('=').next().unwrap_or(&argv[i]) {
             "-d" | "--data" | "--data-binary" | "--data-raw" => {
-                let raw = argv[i].starts_with("--data-raw");
+                let raw = argv_flag == "--data-raw";
                 let val = value(&mut i)?;
                 // `--data-raw` takes `@` literally; the others would read a
                 // file, which is deferred (CU5).
@@ -203,6 +210,9 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
                         "'@path' body syntax is not supported. Read a file with 'cat <path>' and pipe it into curl --data-binary -."
                             .into(),
                     ));
+                }
+                if matches!(argv_flag.as_str(), "-d" | "--data") {
+                    body_implies_form = true;
                 }
                 bodies.push(val);
             }
@@ -214,6 +224,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
                             .into(),
                     ));
                 }
+                body_implies_form = true;
                 bodies.push(urlencode_pair(&val));
             }
             "-H" | "--header" => {
@@ -261,6 +272,20 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             "--connect-timeout" => {
                 connect_timeout = Some(seconds(&value(&mut i)?, "--connect-timeout")?)
             }
+            // kaish's global output flag, not curl's request-body `--json`
+            // (CU16). The kernel has already applied it via
+            // `GlobalFlags::apply_from_args`, which handles exactly this
+            // raw-argv case — it reaches us only because a raw_argv binder
+            // lifts nothing out of source order. Consume and move on;
+            // refusing it as unknown would break `curl --json <url> | jq`.
+            "--json" => {}
+            // End of options: everything after is an operand.
+            "--" => {
+                for token in &argv[i + 1..] {
+                    url = Some(set_once(url, token.clone())?);
+                }
+                break;
+            }
             other if other.starts_with('-') && other.len() > 1 => {
                 // Silently ignoring an unknown flag is the failure mode this
                 // whole surface exists to avoid: the agent believes it asked
@@ -298,7 +323,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     }
     // docs/curl.md's `-d` row: a body implies form encoding unless the caller
     // named a Content-Type themselves.
-    if !bodies.is_empty()
+    if body_implies_form
         && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
     {
         headers.push((
@@ -526,6 +551,86 @@ mod tests {
     fn max_time_defaults_from_config_and_the_flag_overrides_it() {
         assert_eq!(parse(&["http://x.com"]).max_time, CurlConfig::default().limits().max_time);
         assert_eq!(parse(&["--max-time", "2.5", "http://x.com"]).max_time, 2.5);
+    }
+
+    #[test]
+    fn kaish_global_json_is_not_mistaken_for_an_unknown_flag() {
+        // The kernel applies `--json` before execute (GlobalFlags::
+        // apply_from_args), but a raw_argv binder leaves it in argv — so the
+        // parser sees it and must not refuse it. `curl --json <url> | jq` is
+        // the shape this whole surface is for.
+        let req = parse(&["--json", "http://x.com"]);
+        assert_eq!(req.url, "http://x.com");
+    }
+
+    #[test]
+    fn a_double_dash_ends_the_flags() {
+        let req = parse(&["--", "http://x.com"]);
+        assert_eq!(req.url, "http://x.com");
+    }
+
+    #[test]
+    fn an_unknown_flag_is_refused_rather_than_ignored() {
+        let err = parse_args(&argv(&["--frobnicate", "http://x.com"]), &CurlConfig::default())
+            .expect_err("an unknown flag must not be silently dropped");
+        assert!(format!("{err}").contains("--frobnicate"), "{err}");
+    }
+
+    #[test]
+    fn a_second_url_is_refused_rather_than_dropped() {
+        let err = parse_args(&argv(&["http://a.com", "http://b.com"]), &CurlConfig::default())
+            .expect_err("one URL per invocation");
+        assert!(format!("{err}").contains("http://b.com"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_flag_value_fails_rather_than_no_op() {
+        let err = parse_args(&argv(&["http://x.com", "-o"]), &CurlConfig::default())
+            .expect_err("-o with nothing after it must not behave as though absent");
+        assert!(format!("{err}").contains("-o"), "{err}");
+    }
+
+    #[test]
+    fn a_body_that_looks_like_a_flag_stays_a_body() {
+        // The old pre-scan swept all of argv for booleans, so `-d "-i"` set
+        // --include and `-d "-O"` refused a flag nobody typed.
+        let req = parse(&["-d", "-i", "http://x.com"]);
+        assert_eq!(req.bodies, vec!["-i".to_string()]);
+        assert!(!req.include_headers, "a body must not set a flag");
+
+        let req = parse(&["-d", "-O", "http://x.com"]);
+        assert_eq!(req.bodies, vec!["-O".to_string()]);
+
+        // and a value beginning with `-` no longer desyncs the URL search
+        let req = parse(&["-d", "-5", "http://x.com"]);
+        assert_eq!(req.url, "http://x.com");
+    }
+
+    #[test]
+    fn inline_flag_values_are_understood() {
+        // kaish's raw-argv binder renders a `Arg::Named` as `--key=value`,
+        // which the exact-match arms used to drop on the floor.
+        let req = parse(&["--header=X-Foo: bar", "--max-redirs=2", "--url=http://x.com"]);
+        assert_eq!(header(&req, "x-foo"), Some("bar"));
+        assert_eq!(req.max_redirects, Some(2));
+        assert_eq!(req.url, "http://x.com");
+    }
+
+    #[test]
+    fn only_the_form_body_flags_imply_a_form_content_type() {
+        // Real curl sends no Content-Type for --data-binary/--data-raw.
+        assert_eq!(
+            header(&parse(&["--data-binary", "{\"a\":1}", "http://x.com"]), "content-type"),
+            None
+        );
+        assert_eq!(
+            header(&parse(&["--data-raw", "x", "http://x.com"]), "content-type"),
+            None
+        );
+        assert_eq!(
+            header(&parse(&["-d", "a=1", "http://x.com"]), "content-type"),
+            Some("application/x-www-form-urlencoded")
+        );
     }
 
     #[test]
