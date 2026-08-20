@@ -136,7 +136,7 @@ function onWorkerMessage(ev) {
   const m = ev.data;
   if (m.type === 'ready') {
     workerReady = true;
-    put(`kernel up in ${m.ms.toFixed(0)}ms — seeding /src …\n`, 'dim');
+    put(`${m.version} — kernel up in ${m.ms.toFixed(0)}ms — seeding /src …\n`, 'dim');
     maybeSeed();
   } else if (m.type === 'seeded') {
     put(`seeded ${m.count} files (${(m.bytes / 1e6).toFixed(1)} MB) in ` +

@@ -146,6 +146,17 @@ await waitFor("seeded banner", async () => (await screenText()).includes("seeded
 }
 console.log("boot+seed (recovers from injected transient wasm-fetch failure): OK");
 
+// 1b. The MOTD names the kaish version, and the kernel is the one that
+//     answered — worker.js runs `kaish-version` on the booted shell rather
+//     than stamping a build-time constant. Stage 2 below cross-checks the
+//     claim against a live `kaish-version` typed at the prompt, so a banner
+//     that drifts from the running kernel fails there rather than here.
+const bannerVersion = (await screenText()).match(/kaish \d+\.\d+\.\d+/)?.[0];
+if (!bannerVersion) {
+  fail("boot banner carries no 'kaish X.Y.Z' version — MOTD version regression");
+}
+console.log(`motd names the running kernel (${bannerVersion}): OK`);
+
 // 2. Commands run through the worker, FIFO. Assert on output the kernel
 //    actually produced, not text already on screen — the boot banner already
 //    contains "kaish" and the echoed command line itself contains
@@ -158,6 +169,11 @@ await waitFor("uname output (machine field is wasm32 on this build)",
   async () => (await screenText()).slice(beforeExec).includes("wasm32"));
 await waitFor("grep output (a bare match count on its own line)",
   async () => /\n\d+\n/.test((await screenText()).slice(beforeExec)));
+// The MOTD's version claim, checked against the kernel answering right now.
+// A banner built from a stale constant would pass stage 1b and fail here.
+await type("kaish-version");
+await waitFor(`kaish-version agrees with the boot banner (${bannerVersion})`,
+  async () => (await screenText()).slice(beforeExec).includes(bannerVersion!));
 console.log("exec via worker: OK");
 
 // 3. Tab completion: unique command completes with a trailing space; a

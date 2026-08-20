@@ -17,7 +17,17 @@ self.onmessage = async (ev) => {
       await init();
       shell = new KaishShell();
       console.log('[kaish-worker] booted' + (flagView ? ' (interruptible)' : ''));
-      postMessage({ type: 'ready', ms: performance.now() - t0 });
+      // Ask the kernel we just booted what version it is, rather than
+      // stamping a constant at build time: the MOTD can only claim what the
+      // page is actually running if the running kernel answers. A non-zero
+      // exit is reported, not swallowed — a `kaish-version` that fails is a
+      // real signal about this build.
+      const v = JSON.parse(shell.execute('kaish-version'));
+      postMessage({
+        type: 'ready',
+        ms: performance.now() - t0,
+        version: v.code === 0 ? v.out.trim() : `kaish-version exited ${v.code}`,
+      });
     } else if (msg.type === 'seed') {
       const t0 = performance.now();
       let bytes = 0;
