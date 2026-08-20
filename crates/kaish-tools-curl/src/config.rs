@@ -31,6 +31,26 @@ pub trait AllowEgress: Send + Sync {
     /// Whether `url` is permitted. The URL is absolute and fully resolved
     /// (scheme + authority); it is NOT a VFS path.
     fn permit(&self, url: &str) -> bool;
+
+    /// Whether `host` may be reached at `address`, asked once per address DNS
+    /// returned and before any connection is opened.
+    ///
+    /// [`permit`](AllowEgress::permit) sees a **name**; the connection is made
+    /// to an **address**, and the two need not agree — `internal.example` can
+    /// resolve to `127.0.0.1` or to a metadata endpoint, whether by accident,
+    /// by a hostile zone, or by DNS rebinding. This is the hook that closes
+    /// that gap, and it closes it without a window: curl hands ureq the exact
+    /// addresses this method approved, so nothing is resolved a second time
+    /// between the check and the connect.
+    ///
+    /// The default permits every address, because a custom policy already
+    /// decided what it wanted in `permit` and this trait cannot guess.
+    /// [`AllowByList`] overrides it to apply the same loopback and link-local
+    /// opt-ins it applies to names.
+    fn permit_address(&self, host: &str, address: IpAddr) -> bool {
+        let _ = (host, address);
+        true
+    }
 }
 
 /// Default allow-everything implementation. Not recommended for production
@@ -163,6 +183,34 @@ fn is_link_local(host: &str) -> bool {
     }
 }
 
+impl AllowByList {
+    /// Whether an address may be connected to.
+    ///
+    /// An address the embedder wrote into the allowlist itself is permitted:
+    /// there is no name-to-address gap to close when the allowlist entry *is*
+    /// the address. Everything else is judged by range, so an allowlisted
+    /// *name* that resolves into loopback or link-local still needs the
+    /// matching opt-in — which is the DNS-rebinding case this exists for.
+    fn address_permitted(&self, address: IpAddr) -> bool {
+        let rendered = address.to_string();
+        // `Url::host_str` brackets an IPv6 literal, so allowlist entries are
+        // normalized that way; a bare `IpAddr` is not.
+        let bracketed = format!("[{rendered}]");
+        if is_host_allowed(&rendered, &self.allowed_hosts)
+            || is_host_allowed(&bracketed, &self.allowed_hosts)
+        {
+            return true;
+        }
+        if is_loopback(&rendered) {
+            return self.allow_loopback;
+        }
+        if is_link_local(&rendered) {
+            return self.allow_link_local;
+        }
+        true
+    }
+}
+
 impl AllowEgress for AllowByList {
     fn permit(&self, url: &str) -> bool {
         let Some(host) = reachable_host(url) else {
@@ -179,6 +227,10 @@ impl AllowEgress for AllowByList {
             return true;
         }
         false
+    }
+
+    fn permit_address(&self, _host: &str, address: IpAddr) -> bool {
+        self.address_permitted(address)
     }
 }
 
@@ -252,6 +304,11 @@ pub struct CurlConfig {
     limits: Limits,
     follow_redirects: RedirectPolicy,
     allow_egress: Arc<dyn AllowEgress>,
+    /// Whether `-k` may be used at all. Off by default.
+    insecure_permitted: bool,
+    /// Headers the embedder adds to every request; the agent cannot see or
+    /// override them.
+    injected_headers: Vec<(String, String)>,
 }
 
 impl std::fmt::Debug for CurlConfig {
@@ -261,6 +318,9 @@ impl std::fmt::Debug for CurlConfig {
             .field("limits", &self.limits)
             .field("follow_redirects", &self.follow_redirects)
             .field("allow_egress", &"[AllowEgress]")
+            .field("insecure_permitted", &self.insecure_permitted)
+            // Never the values: an injected header is usually a credential.
+            .field("injected_headers", &self.injected_headers.len())
             .finish()
     }
 }
@@ -304,6 +364,51 @@ impl CurlConfig {
         self.follow_redirects
     }
 
+    /// Permit `-k`/`--insecure`, which turns off TLS certificate
+    /// verification for the whole request.
+    ///
+    /// Off by default, and refused at parse time while it is off: an agent
+    /// that can silence certificate verification can be talked into it. Turn
+    /// it on only where a self-signed certificate is a known part of the
+    /// environment — a development service, an internal CA the build does not
+    /// carry. `-k` still has to be typed; this only decides whether typing it
+    /// is allowed.
+    pub fn with_insecure_permitted(mut self, permitted: bool) -> Self {
+        self.insecure_permitted = permitted;
+        self
+    }
+
+    /// Whether `-k`/`--insecure` may be used.
+    pub fn insecure_permitted(&self) -> bool {
+        self.insecure_permitted
+    }
+
+    /// Headers added to every request, which the agent never sees and cannot
+    /// remove.
+    ///
+    /// For credentials an embedder holds on the agent's behalf — an
+    /// `Authorization` for an internal API, a tenant header an audit trail
+    /// needs. They are applied after the caller's own headers and win any
+    /// collision, so `-H 'Authorization: ...'` cannot displace one. They are
+    /// dropped on a redirect to a different host, exactly as `-u` credentials
+    /// are: an injected secret must not follow a `Location` off the host it
+    /// was meant for.
+    pub fn with_injected_headers(
+        mut self,
+        headers: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        self.injected_headers = headers
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
+        self
+    }
+
+    /// The embedder's injected headers.
+    pub fn injected_headers(&self) -> &[(String, String)] {
+        &self.injected_headers
+    }
+
     /// Set the egress allowlist policy.
     ///
     /// The default is [`AllowByList::new`] — an empty allowlist, so nothing
@@ -319,6 +424,11 @@ impl CurlConfig {
     /// Returns [`EgressResult::Allowed`] if the policy permits the URL,
     /// [`EgressResult::Denied`] otherwise. The embedder's allowlist gates
     /// every outbound request and every redirect hop.
+    /// The egress policy itself, for the resolver that vets addresses.
+    pub(crate) fn egress_policy(&self) -> Arc<dyn AllowEgress> {
+        Arc::clone(&self.allow_egress)
+    }
+
     pub fn permit_egress(&self, url: &str) -> EgressResult {
         if self.allow_egress.permit(url) {
             EgressResult::Allowed
@@ -353,6 +463,8 @@ impl Default for CurlConfig {
             // A security default that fails open is worth nobody's
             // convenience.
             allow_egress: Self::make_allow_egress(AllowByList::new()),
+            insecure_permitted: false,
+            injected_headers: Vec::new(),
         }
     }
 }
@@ -415,6 +527,39 @@ mod tests {
         assert!(policy.permit("http://allowed.example./x"));
         // and an allowlist entry spelled either way still matches
         assert!(allowing(&["Allowed.Example."]).permit("http://allowed.example/x"));
+    }
+
+    #[test]
+    fn a_name_that_resolves_into_a_restricted_range_is_refused_at_the_address() {
+        // The allowlist matches a name; the connection goes to an address.
+        // `internal.example` pointing at the metadata endpoint — by a hostile
+        // zone, by rebinding, or by mistake — passes `permit` and must not
+        // pass here (CU28).
+        let policy = allowing(&["internal.example"]);
+        assert!(policy.permit("http://internal.example/x"));
+        assert!(!policy.permit_address("internal.example", "169.254.169.254".parse().unwrap()));
+        assert!(!policy.permit_address("internal.example", "127.0.0.1".parse().unwrap()));
+        // An ordinary public address is fine.
+        assert!(policy.permit_address("internal.example", "93.184.216.34".parse().unwrap()));
+    }
+
+    #[test]
+    fn an_address_the_embedder_allowlisted_itself_is_permitted() {
+        // Writing `127.0.0.1` into the allowlist is an explicit choice; it
+        // must not also require the loopback opt-in.
+        let policy = allowing(&["127.0.0.1"]);
+        assert!(policy.permit_address("127.0.0.1", "127.0.0.1".parse().unwrap()));
+        assert!(policy.permit_address("127.0.0.1", "127.0.0.1".parse().unwrap()));
+
+        let policy = allowing(&["[::1]"]);
+        assert!(policy.permit_address("[::1]", "::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn the_loopback_opt_in_covers_addresses_too() {
+        let policy = AllowByList::new().with_allow_loopback(true);
+        assert!(policy.permit_address("localhost", "127.0.0.1".parse().unwrap()));
+        assert!(policy.permit_address("localhost", "::1".parse().unwrap()));
     }
 
     #[test]

@@ -175,11 +175,11 @@ fixture asserted against real `git status --porcelain` before fixing.
   carries no semver guarantee (pin ureq, revisit on minor bumps), and the path
   routes through `ToolCtx::resolve_path` + `backend().resolve_real_path()` per
   CU9. `tests/unix_socket.rs` and the harness's `UnixGuard` wait on it.
-- **CU22 — `-k`/`--insecure` has no implementation.** Same shape as CU7: the
-  flag was parsed into `Request::insecure` and never read, so a caller asking
-  to skip verification got full verification and no notice. Refused at parse
-  time now. Native needs a rustls dangerous-verifier config on the ureq agent;
-  wasm cannot have it at all (CU4 — the browser owns the verifier).
+- **CU22 — `-k`/`--insecure` on wasm.** Implemented natively on 2026-08-20
+  (`TlsConfig::disable_verification`, gated behind
+  `CurlConfig::with_insecure_permitted`). wasm cannot have it at all: the
+  browser owns the verifier (CU4). The wasm backend must refuse `-k` even
+  where the embedder permitted it.
 ### Blockers raised by the 2026-08-14 cross-model review
 
 Both reviewers independently said **do not build `docs/curl.md` as written**.
@@ -238,11 +238,6 @@ standalone before being written down.
 
 ### Containment — must fix before any embedder registers curl
 
-- **CU28 — the allowlist matches names, the connection resolves DNS.** An
-  allowlisted name that resolves to loopback or a metadata address gets
-  through, and nothing re-checks after resolution. Classic SSRF; needs a
-  resolver-side check, not a parser-side one.
-
 ### Honesty of the declared surface
 
 ### Argument binding — the parser is built on the wrong contract
@@ -253,17 +248,6 @@ standalone before being written down.
 
 ### Agent ergonomics (design lane, gemini)
 
-- **CU43 — reconsider refusing `-s`/`-S`.** Models emit `curl -sSL` reflexively
-  from training. The semantic content of `-s` is "no progress meter", and this
-  build has none — so accepting it and doing nothing *fulfills* the request
-  rather than silently substituting for it, which is not the silent-fallback
-  the house rule is about. Refusing costs a failed turn on nearly every first
-  attempt. Amy's call; CU14 decided the other way.
-- **CU46 — `CurlConfig` cannot inject headers, set a proxy, or add TLS
-  roots.** An embedder that wants to supply credentials the agent never sees,
-  route through an egress proxy, or trust a MITM inspection CA has no boundary
-  to reach for.
-
 ## Writing style — deferred
 
 - **W1 — `seam` survives in `docs/git.md` and in code comments.** The term rule
@@ -272,3 +256,13 @@ standalone before being written down.
   that pass was touching. `docs/git.md` has two, and the `kaish-tools-git` and
   `kaish-tools-curl` sources have several in `//` comments. Groom at the point
   of touch; there is no bulk pass.
+
+## curl — the embedder boundary, still open
+
+- **CU46b — proxy and custom TLS roots.** `CurlConfig` gained injected headers
+  on 2026-08-20; the other two the review asked for did not land. An embedder
+  behind an egress proxy, or one terminating TLS at an inspection CA, has no
+  way to say so, and `--proxy` stays a parse-time refusal. Both are one-line
+  passes to ureq (`Config::proxy`, `TlsConfig::root_certs`) — deliberately not
+  built until an embedder asks, because the shape of the ask decides whether
+  it belongs on `CurlConfig` or on a transport the embedder supplies whole.

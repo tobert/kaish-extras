@@ -85,15 +85,52 @@ the last positional unless `--url` is used.
 | `-u, --user <user[:pass]>` | Basic auth, `Authorization: Basic`. | None. |
 | `-A, --user-agent <ua>` | `User-Agent`. | None. |
 | `-e, --referer <url>` | `Referer`. | None. |
-| `-k, --insecure` | **Refused at parse time.** This build always verifies TLS; the flag is refused rather than accepted and ignored. Tracked as CU22. | curl skips verification; this build tells you it won't. |
+| `-k, --insecure` | Skip TLS certificate verification. **Off unless the embedder sets `CurlConfig::with_insecure_permitted(true)`**, and refused with a literate error while it is off — an agent that can silence verification can be talked into it. `help curl` lists the flag only where it is permitted. | Gated by the embedder rather than always available. |
 | `-f, --fail` | Exit on HTTP status >= 400 instead of printing the body. Uses curl-compatible exit codes. | None. |
 | `--max-time <s>` | Whole-request timeout, applied to the ureq agent. Always set: the `CurlConfig` default (30s) applies when the flag is omitted, and the flag is **clamped to the embedder's ceiling** — it can lower the budget, never raise it. A deadline that fires is exit **28**, not exit 7. | WASM: refuses with literate error (no `tokio::time`). |
 | `--connect-timeout <s>` | Connect-phase timeout. | WASM: refuses with literate error. |
 | `--unix-socket <path>` | **Refused at parse time.** There is no AF_UNIX transport in this build, and refusing beats silently connecting over TCP to the URL's host instead. The containment design (`ToolCtx::resolve_path` + `backend().resolve_real_path()`, path must resolve within the VFS mount) stands and is what the transport will use. Tracked as CU7. | curl connects; this build tells you it can't yet. `--abstract-unix-socket` deferred (CU5). |
 | `--json` | **Not curl's request-body shorthand.** It is kaish's global output flag for every tool (see next section). | curl 7.82 `--json` (request body) refused with literate error. |
 
+
+### Egress: names and addresses
+
+`AllowEgress::permit` sees the URL, and `AllowEgress::permit_address` sees each
+address DNS returned, before any socket opens. Both matter, because a name and
+an address need not agree: `internal.example` can resolve to `127.0.0.1` or to
+a metadata endpoint, by a hostile zone, by rebinding, or by mistake. curl
+supplies ureq with exactly the addresses the policy approved, so nothing is
+resolved a second time between the check and the connect.
+
+`AllowByList` applies the same loopback and link-local opt-ins to addresses
+that it applies to names, with one exception: an address written into the
+allowlist itself is permitted, because the embedder named that address on
+purpose and there is no name-to-address gap left to close.
+
+### Headers the embedder supplies
+
+`CurlConfig::with_injected_headers` adds headers to every request that the
+agent can neither read nor remove — a credential for an internal API, a tenant
+header an audit trail needs. A caller `-H` naming the same header is dropped
+rather than sent beside it, so the far end never has to choose. Like `-u`
+credentials, injected headers stop at a change of host; so do
+`Authorization`, `Cookie`, and `Proxy-Authorization` set by the caller, because
+stripping only the `-u` form would leave `-H` as the way around the rule.
+
+`-s`/`--silent` and `-S`/`--show-error` are **accepted**. There is no progress
+meter here, so the request has nothing to do — that is a request satisfied, not
+a flag ignored. One divergence, deliberate: real curl's `-s` also silences
+*error* messages, and this build always reports errors, because an agent that
+cannot see a failure cannot act on it. `curl -sSL <url>` therefore behaves
+exactly as an agent expects, and `curl -s <url>` still prints the error when
+one happens.
+
+Short flags combine: `-sSL`, `-iL`, `-fL` are read as the flags they spell.
+A cluster containing a value-taking flag (`-so out.txt`) is refused, naming
+the flag that broke it.
+
 This build refuses the following flags at parse time with literate errors:
-`-O` (use `-o <file>`), `-s`, `-S`, `--compressed`, `--proxy`/SOCKS, `--form`,
+`-O` (use `-o <file>`), `--compressed`, `--proxy`/SOCKS, `--form`,
 `--cookie`, `--write-out`, `--verbose`, `--retry`, `--get`, `--cert`/`--key`,
 `--resolve`, `--config`, `--netrc`, `--parallel`, `--next`, and — because the backend
 does not implement them rather than because they are out of scope — `-k`/`--insecure`

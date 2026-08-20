@@ -24,7 +24,10 @@ use kaish_types::Value;
 use crate::config::CurlConfig;
 use crate::error::CurlError;
 
-/// Every flag the scan loop honors, in the long spelling the schema uses.
+/// Every flag the scan loop honors unconditionally, in the long spelling the
+/// schema uses. `--insecure` is deliberately absent: it is honored only when
+/// the embedder permits it, and `schema_matches_the_parser` checks both
+/// states rather than pretending it is always one or the other.
 ///
 /// `tool.rs` builds the `ToolSchema` from a clap struct, and a test asserts
 /// the two agree in both directions. They drifted badly before that guard
@@ -64,8 +67,6 @@ pub(crate) const HONORED_FLAGS: &[&str] = &[
 /// the alternative is a flag that quietly does nothing.
 pub(crate) const REFUSED_FLAGS: &[(&str, &str)] = &[
     ("-O", "'-O' is not supported. Use '-o <file>' for an explicit output path."),
-    ("-s", "'-s' is not supported. curl prints no progress meter here, so there is nothing to silence — drop the flag."),
-    ("-S", "'-S' is not supported. Errors always print here — drop the flag."),
     ("--compressed", "'--compressed' is not supported. Responses are decompressed already — drop the flag."),
     ("--form", "'--form' (multipart) is not supported. Use '--data' for application/x-www-form-urlencoded."),
     ("-F", "'-F' (multipart) is not supported. Use '--data' for application/x-www-form-urlencoded."),
@@ -86,8 +87,6 @@ pub(crate) const REFUSED_FLAGS: &[(&str, &str)] = &[
     ("-K", "'-K' is not supported. Pass flags on the command line."),
     ("--netrc", "'--netrc' is not supported. Use '--user <user[:pass]>' for credentials."),
     ("--resolve", "'--resolve' is not supported. To reach a specific address with a different Host, request the IP and set the header: curl -H 'Host: example.com' http://<ip>/."),
-    ("-k", "'-k' is not supported. This build always verifies TLS — use an https:// URL whose certificate validates, or an http:// URL."),
-    ("--insecure", "'--insecure' is not supported. This build always verifies TLS — use an https:// URL whose certificate validates, or an http:// URL."),
     ("--unix-socket", "'--unix-socket' is not supported. This build has no AF_UNIX transport; reach the service over http:// instead."),
 ];
 
@@ -133,6 +132,39 @@ pub struct Request {
     pub max_time: f64,
     /// Connect-phase deadline in seconds, when the caller asked for one.
     pub connect_timeout: Option<f64>,
+    /// `-k`: skip TLS certificate verification. Only reachable when the
+    /// embedder set `CurlConfig::with_insecure_permitted`; refused otherwise.
+    pub insecure: bool,
+}
+
+/// Short flags that carry no value, and can therefore be written together.
+///
+/// Refused shorts are here too, so `-kL` refuses `-k` rather than reporting
+/// the whole cluster as unknown.
+const BOOLEAN_SHORTS: &[char] = &['i', 'I', 'f', 'L', 's', 'S', 'k', 'O', 'v', 'G'];
+
+/// Short flags that take a value, and so cannot appear inside a cluster.
+const VALUE_SHORTS: &[char] = &['X', 'd', 'H', 'o', 'u', 'A', 'e', 'w', 'b', 'x', 'K', 'F'];
+
+/// Expand `-sSL` into `-s -S -L`.
+///
+/// Agents type `curl -sSL <url>` from muscle memory — it is one of the most
+/// common shapes in the training corpus — and it used to be refused whole as
+/// an unknown flag. Only called at flag position, never on a value: `-d -iL`
+/// is a body, and a preprocessing pass over all of argv could not tell the
+/// difference.
+///
+/// `None` means this is not a cluster of value-free shorts, and the caller
+/// reports it rather than guessing.
+fn expand_short_cluster(token: &str) -> Option<Vec<String>> {
+    let body = token.strip_prefix('-')?;
+    if body.starts_with('-') || body.chars().count() < 2 {
+        return None;
+    }
+    if !body.chars().all(|c| BOOLEAN_SHORTS.contains(&c)) {
+        return None;
+    }
+    Some(body.chars().map(|c| format!("-{c}")).collect())
 }
 
 /// Split a `--flag=value` token, which is the one composed shape the kaish
@@ -149,7 +181,7 @@ fn split_inline_value(token: &str) -> (&str, Option<&str>) {
 
 /// Parse curl-style [`ToolArgs`] into a validated [`Request`].
 pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlError> {
-    let argv = trim_argv(args)?;
+    let mut argv = trim_argv(args)?;
 
     let mut bodies: Vec<String> = Vec::new();
     let mut headers: Vec<(String, String)> = Vec::new();
@@ -167,6 +199,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let mut head_only = false;
     let mut fail_on_error = false;
     let mut follow_redirects = false;
+    let mut insecure = false;
 
     // Only `-d`/`--data`/`--data-urlencode` imply a form Content-Type; real
     // curl sends none for `--data-binary`/`--data-raw`, so declaring
@@ -257,9 +290,22 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             "-A" | "--user-agent" => user_agent = Some(value(&mut i)?),
             "-e" | "--referer" => referer = Some(value(&mut i)?),
             "-i" | "--include" => include_headers = true,
+            // curl's `-s` also silences *error* messages; this build always
+            // reports errors, because an agent that cannot see a failure
+            // cannot act on it. The progress meter half is honored exactly:
+            // there is none to print. docs/curl.md records the divergence.
+            "-s" | "--silent" | "-S" | "--show-error" => {}
             "-I" | "--head" => head_only = true,
             "-f" | "--fail" => fail_on_error = true,
             "-L" | "--location" => follow_redirects = true,
+            "-k" | "--insecure" => {
+                if !config.insecure_permitted() {
+                    return Err(CurlError::Transport(format!(
+                        "'{argv_flag}' is not permitted here. This embedder requires TLS certificates to verify; reach the service over http:// instead, or ask the embedder to allow it."
+                    )));
+                }
+                insecure = true;
+            }
             "--max-redirs" => {
                 let raw = value(&mut i)?;
                 max_redirects = Some(raw.parse::<u32>().map_err(|_| {
@@ -287,6 +333,21 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
                 break;
             }
             other if other.starts_with('-') && other.len() > 1 => {
+                if let Some(expanded) = expand_short_cluster(other) {
+                    // Splice the cluster in where it stood, so each flag is
+                    // read in the position it was written.
+                    argv.splice(i..=i, expanded);
+                    continue;
+                }
+                if let Some(bad) = other
+                    .strip_prefix('-')
+                    .filter(|b| !b.starts_with('-'))
+                    .and_then(|b| b.chars().find(|c| VALUE_SHORTS.contains(c)))
+                {
+                    return Err(CurlError::Transport(format!(
+                        "'{other}' cannot be written as one word, because '-{bad}' takes a value. Write the flags separately, as in '-s -{bad} <value>'."
+                    )));
+                }
                 // Silently ignoring an unknown flag is the failure mode this
                 // whole surface exists to avoid: the agent believes it asked
                 // for something.
@@ -358,6 +419,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         fail_on_error,
         max_time: max_time.unwrap_or_else(|| config.limits().max_time),
         connect_timeout,
+        insecure,
     })
 }
 
@@ -631,6 +693,52 @@ mod tests {
             header(&parse(&["-d", "a=1", "http://x.com"]), "content-type"),
             Some("application/x-www-form-urlencoded")
         );
+    }
+
+    #[test]
+    fn clustered_short_flags_are_understood() {
+        // `curl -sSL <url>` is muscle memory from the training corpus, and it
+        // used to be refused whole as an unknown flag (CU43).
+        let req = parse(&["-sSL", "http://x.com"]);
+        assert_eq!(req.url, "http://x.com");
+        assert!(req.follow_redirects);
+
+        let req = parse(&["-iL", "http://x.com"]);
+        assert!(req.include_headers);
+        assert!(req.follow_redirects);
+
+        // A cluster carrying a refused flag refuses that flag, not the word.
+        let err = parse_args(&argv(&["-kL", "http://x.com"]), &CurlConfig::default())
+            .expect_err("-k is refused");
+        assert!(format!("{err}").contains("-k"), "{err}");
+    }
+
+    #[test]
+    fn a_cluster_containing_a_value_flag_says_so() {
+        let err = parse_args(&argv(&["-so", "/tmp/out", "http://x.com"]), &CurlConfig::default())
+            .expect_err("-o takes a value and cannot be clustered");
+        let msg = format!("{err}");
+        assert!(msg.contains("-o"), "name the flag that broke it: {msg}");
+        assert!(msg.contains("separately"), "say what to do instead: {msg}");
+    }
+
+    #[test]
+    fn a_cluster_is_only_expanded_in_flag_position() {
+        // `-iL` here is a body. Expanding argv up front could not tell the
+        // difference; expanding at flag position can.
+        let req = parse(&["-d", "-iL", "http://x.com"]);
+        assert_eq!(req.bodies, vec!["-iL".to_string()]);
+        assert!(!req.include_headers);
+        assert!(!req.follow_redirects);
+    }
+
+    #[test]
+    fn silent_flags_are_accepted_because_there_is_nothing_to_silence() {
+        // CU43: the request is satisfied, not ignored — this build prints no
+        // progress meter. It does still print errors, which curl's `-s`
+        // would suppress; docs/curl.md records that divergence.
+        let req = parse(&["-s", "-S", "http://x.com"]);
+        assert_eq!(req.url, "http://x.com");
     }
 
     #[test]

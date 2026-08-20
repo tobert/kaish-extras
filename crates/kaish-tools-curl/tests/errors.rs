@@ -364,3 +364,53 @@ async fn url_userinfo_cannot_impersonate_an_allowlisted_host() {
     assert!(result.err.contains("egress allowlist"), "{}", result.err);
     assert!(server.requests().is_empty(), "the request must never leave");
 }
+
+#[tokio::test]
+async fn injected_headers_win_and_stop_at_a_host_boundary() {
+    // CU46: an embedder holding a credential on the agent's behalf. The agent
+    // must not be able to displace it with its own -H, and it must not follow
+    // a Location off the host it was meant for.
+    let (server, _elsewhere) = redirect_to_other_name_for_self("/start", "/end");
+
+    let config = CurlConfig::default()
+        .with_allow_egress(AllowByList::new().with_allow_loopback(true))
+        .with_injected_headers([("Authorization", "Bearer embedder-token")]);
+
+    let result = curl(
+        config,
+        argv(&["-L", "-H", "Authorization: Bearer agent-guess", &server.url("/start")]),
+    )
+    .await;
+    assert_eq!(result.code, 0, "{}", result.err);
+
+    let reqs = server.requests();
+    assert_eq!(reqs.len(), 2, "should have made both hops");
+    assert_eq!(
+        reqs[0].header("authorization"),
+        Some("Bearer embedder-token"),
+        "the embedder's header must win over the agent's -H"
+    );
+    assert!(
+        reqs[1].header("authorization").is_none(),
+        "neither the injected credential nor the agent's own -H may cross to \
+         another host — stripping only the -u form would leave -H as the way around it"
+    );
+}
+
+#[tokio::test]
+async fn dash_k_is_refused_unless_the_embedder_permits_it() {
+    let server = Server::builder()
+        .route("/x", Response::text(200, "ok"))
+        .start_tcp();
+
+    let result = curl(loopback_config(), argv(&["-k", &server.url("/x")])).await;
+    assert_ne!(result.code, 0, "-k is refused by default");
+    assert!(result.err.contains("-k"), "{}", result.err);
+    assert!(server.requests().is_empty(), "refused before the request left");
+
+    // Permitted, it parses and the request goes out (this server is plaintext,
+    // so nothing is verified either way — what is under test is the gate).
+    let permitted = loopback_config().with_insecure_permitted(true);
+    let result = curl(permitted, argv(&["-k", &server.url("/x")])).await;
+    assert_eq!(result.code, 0, "{}", result.err);
+}

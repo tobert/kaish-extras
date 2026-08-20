@@ -8,11 +8,68 @@ use std::time::Duration;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::args::Request;
-use crate::config::{CurlConfig, EgressResult, RedirectPolicy};
+use std::sync::Arc;
+
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
+
+use crate::config::{AllowEgress, CurlConfig, EgressResult, RedirectPolicy};
 use crate::error::CurlError;
 use crate::model::Response as CurlResponse;
 
 use url::Url;
+
+
+/// Headers that carry a secret, and so stop at a change of host.
+const CREDENTIAL_HEADERS: &[&str] = &["authorization", "cookie", "proxy-authorization"];
+
+/// A DNS resolver that asks the embedder's egress policy about every address
+/// before any connection is opened.
+///
+/// The allowlist matches a **name**; the connection goes to an **address**.
+/// `internal.example` resolving to `127.0.0.1`, or to a metadata endpoint, is
+/// the classic way past a name-based allowlist — by accident, by a hostile
+/// zone, or by DNS rebinding (CU28). Vetting here rather than resolving
+/// separately and hoping is what removes the window: ureq connects to exactly
+/// the addresses this returns, so there is no second lookup between the check
+/// and the connect.
+struct VettingResolver {
+    inner: DefaultResolver,
+    policy: Arc<dyn AllowEgress>,
+}
+
+impl std::fmt::Debug for VettingResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VettingResolver")
+    }
+}
+
+impl Resolver for VettingResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let resolved = self.inner.resolve(uri, config, timeout)?;
+        let host = uri.host().unwrap_or_default();
+        for address in &resolved {
+            if !self.policy.permit_address(host, address.ip()) {
+                // `PermissionDenied` is the discriminator `map_ureq_into_curl`
+                // reads to report this as a policy refusal rather than as an
+                // IO failure the agent might retry.
+                return Err(ureq::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "{host} resolves to {}, which this embedder's egress policy does not permit. \
+                         A permitted name pointing at a restricted address is refused at the address, not the name",
+                        address.ip()
+                    ),
+                )));
+            }
+        }
+        Ok(resolved)
+    }
+}
 
 /// Execute the HTTP request, following redirects **ourselves**.
 ///
@@ -57,11 +114,28 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
         // The whole-request deadline is always set, clamped to the embedder's
         // ceiling above. An omitted `--max-time` must not mean "wait forever".
         .timeout_global(Some(Duration::from_secs_f64(max_time)));
+    if req.insecure {
+        // The parser only sets this when the embedder permitted it.
+        builder_cfg = builder_cfg.tls_config(
+            ureq::tls::TlsConfig::builder()
+                .disable_verification(true)
+                .build(),
+        );
+    }
     if let Some(connect) = req.connect_timeout {
         builder_cfg =
             builder_cfg.timeout_connect(Some(Duration::from_secs_f64(connect.min(max_time))));
     }
-    let agent = builder_cfg.build().new_agent();
+    // `with_parts` rather than `new_agent`, so the resolver above sees every
+    // address before a socket is opened.
+    let agent = ureq::Agent::with_parts(
+        builder_cfg.build(),
+        ureq::unversioned::transport::DefaultConnector::new(),
+        VettingResolver {
+            inner: DefaultResolver::default(),
+            policy: config.egress_policy(),
+        },
+    );
 
     // Credentials from `-u`, or from the URL's own userinfo when the caller
     // spelled them there instead (curl accepts both; `-u` wins).
@@ -81,6 +155,8 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
     };
 
     let started = std::time::Instant::now();
+    let start_host = current.host_str().map(str::to_string);
+    let mut same_host_as_start = true;
     let mut hops: u32 = 0;
     loop {
         if config.permit_egress(current.as_str()) != EgressResult::Allowed {
@@ -98,9 +174,37 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
             .method(req.method.as_str())
             .uri(current.as_str());
 
+        // The embedder's headers, applied to every request the agent cannot
+        // see or remove. Like `-u` credentials, they stop at a change of
+        // host: an injected secret must not follow a `Location` off the host
+        // it was meant for.
+        let injected_here: &[(String, String)] = if same_host_as_start {
+            config.injected_headers()
+        } else {
+            &[]
+        };
+
         // Headers arrive complete from the parser — User-Agent and
-        // Content-Type included, exactly once each.
+        // Content-Type included, exactly once each. A caller header colliding
+        // with an injected one is dropped rather than sent beside it:
+        // `http::request::Builder::header` *appends*, so both would go out and
+        // the far end would choose — which is not a choice to hand over when
+        // one of the two is the embedder's credential.
         for (name, value) in &req.headers {
+            if injected_here.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)) {
+                continue;
+            }
+            // A secret the caller set by hand does not cross a host boundary
+            // either. curl strips `Authorization` on a cross-host redirect
+            // whatever set it, and stripping only the `-u` form would leave
+            // `-H 'Authorization: …'` as the way around the rule.
+            if !same_host_as_start && CREDENTIAL_HEADERS.iter().any(|h| name.eq_ignore_ascii_case(h))
+            {
+                continue;
+            }
+            builder = builder.header(name, value);
+        }
+        for (name, value) in injected_here {
             builder = builder.header(name, value);
         }
         if let Some((user, pass)) = &credentials {
@@ -135,6 +239,9 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
             // redirect was an exfiltration path.
             if next.host_str() != current.host_str() {
                 credentials = None;
+            }
+            if next.host_str() != start_host.as_deref() {
+                same_host_as_start = false;
             }
             current = next;
             strip_userinfo(&mut current);
@@ -317,6 +424,15 @@ fn map_ureq_into_curl(
             url: url.to_string(),
             reason,
         },
+        // The vetting resolver's refusal, which is a policy answer rather
+        // than a transport failure — say so, and do not dress it as IO the
+        // agent might retry.
+        ureq::Error::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            CurlError::CouldNotConnect {
+                host,
+                reason: e.to_string(),
+            }
+        }
         ureq::Error::Io(e) => CurlError::CouldNotConnect {
             host,
             reason: format!("IO error: {e}"),

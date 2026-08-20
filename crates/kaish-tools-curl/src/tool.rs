@@ -115,6 +115,11 @@ impl CurlTool {
             #[arg(long)]
             max_time: Option<f64>,
 
+            /// Skip TLS certificate verification. Present only when the
+            /// embedder permits it; refused otherwise.
+            #[arg(short = 'k', long)]
+            insecure: bool,
+
             /// Give up on connecting after this many seconds. No connect-phase
             /// limit of its own by default; --max-time still bounds the whole
             /// request. Exceeding it exits 28.
@@ -123,7 +128,7 @@ impl CurlTool {
         }
 
         let cmd = <CurlCli as clap::CommandFactory>::command();
-        schema_tree_from_clap(&cmd, self.config.tool_name(), DESCRIPTION, EXAMPLES)
+        let mut schema = schema_tree_from_clap(&cmd, self.config.tool_name(), DESCRIPTION, EXAMPLES)
             // curl is position-sensitive: `-d -5` is a body and `-d a -d b`
             // means nothing without its order, so it needs the true argv
             // rather than kaish's unordered flag/named split. See args.rs.
@@ -131,7 +136,15 @@ impl CurlTool {
             // What this tool does, for an embedder gating on declared effects.
             // It used to declare nothing, so curl looked side-effect-free
             // while making network requests and writing files (CU12, CU29).
-            .with_operations(["net.request", "fs.overwrite"])
+            .with_operations(["net.request", "fs.overwrite"]);
+
+        // `help curl` should describe the curl this embedder actually
+        // registered. Advertising `-k` where it is refused is the same
+        // failure the drift guard exists to catch, one config away.
+        if !self.config.insecure_permitted() {
+            schema.params.retain(|p| p.name != "insecure");
+        }
+        schema
     }
 }
 
@@ -311,6 +324,21 @@ mod tests {
     /// have already drifted once — the schema advertised `-k` and
     /// `--unix-socket`, which are refused, while omitting ten flags that
     /// work. This fails the moment they disagree again, in either direction.
+    #[test]
+    fn insecure_appears_in_help_only_where_it_is_permitted() {
+        let default = tool(CurlConfig::default()).schema();
+        assert!(
+            !default.params.iter().any(|p| p.name == "insecure"),
+            "`-k` is refused under the default config, so help must not offer it"
+        );
+
+        let permitted = tool(CurlConfig::default().with_insecure_permitted(true)).schema();
+        assert!(
+            permitted.params.iter().any(|p| p.name == "insecure"),
+            "an embedder that permits `-k` should see it in help"
+        );
+    }
+
     #[test]
     fn schema_matches_the_parser() {
         let schema = tool(CurlConfig::default()).schema();
