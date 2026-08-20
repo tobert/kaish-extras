@@ -13,7 +13,10 @@
 //! enforces it. Compare git's `no_public_method_can_widen_the_verb_set` for
 //! the same invariant.
 
+use std::net::IpAddr;
 use std::sync::Arc;
+
+use url::Url;
 
 /// Decide whether a resolved URL is permitted by the embedder.
 ///
@@ -75,7 +78,12 @@ impl AllowByList {
     /// so the caller builds the full list before passing it to `CurlConfig`.
     /// There is no individual removal method.
     pub fn with_allowed_hosts(mut self, hosts: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.allowed_hosts = hosts.into_iter().map(Into::into).collect();
+        // Normalized on the way in, so a list written `Allowed.Example.` still
+        // matches the host a URL resolves to.
+        self.allowed_hosts = hosts
+            .into_iter()
+            .map(|h| normalize_host(&h.into()))
+            .collect();
         self
     }
 
@@ -94,54 +102,82 @@ impl AllowByList {
     }
 }
 
-fn is_in_cidr(ip: &str, cidr: &str) -> bool {
-    // Simple prefix containment check; sufficient for common CIDRs like
-    // "127." for 127.0.0.0/8 or "169.254." for 169.254.0.0/16.
-    ip.starts_with(cidr)
+/// The host a URL actually reaches, normalized for comparison.
+///
+/// Parsed, never split. The userinfo in
+/// `https://allowed.example:443@169.254.169.254/` belongs to the authority,
+/// and a lexical split on the first `:` cannot tell it from the host — which
+/// is exactly how that URL used to satisfy an allowlist naming
+/// `allowed.example` while ureq dialed the metadata service. `None` means we
+/// could not determine the host, and an undeterminable host is denied.
+fn reachable_host(url: &str) -> Option<String> {
+    Url::parse(url).ok()?.host_str().map(normalize_host)
+}
+
+/// Lower-case, and drop the root label's trailing dot: `Allowed.Example.` and
+/// `allowed.example` name the same host, and an allowlist that says otherwise
+/// denies for a reason nobody can see.
+fn normalize_host(host: &str) -> String {
+    host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase()
+}
+
+/// The host as an IP address, if it is one. Brackets come off first —
+/// `Url::host_str` renders an IPv6 literal as `[::1]`.
+fn parse_ip(host: &str) -> Option<IpAddr> {
+    host.strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host)
+        .parse()
+        .ok()
 }
 
 fn is_host_allowed(host: &str, allowed: &[String]) -> bool {
     allowed.iter().any(|h| h == host)
 }
 
-/// Check whether a host falls within the standard loopback range.
+/// Whether the host is a loopback address.
+///
+/// Address, not spelling: this used to be `host.starts_with("127.")`, under
+/// which the ordinary DNS name `127.evil.com` was loopback and an embedder
+/// that opted into loopback opted into whatever that name resolved to.
 fn is_loopback(host: &str) -> bool {
-    host == "localhost" || host == "127.0.0.1" || host == "::1" || is_in_cidr(host, "127.")
+    host == "localhost" || parse_ip(host).is_some_and(|ip| ip.is_loopback())
 }
 
-/// Check whether a host falls within link-local / metadata ranges.
+/// Whether the host is link-local, or one of the cloud metadata endpoints
+/// that share the same "reachable from inside, trusted by accident" shape.
 fn is_link_local(host: &str) -> bool {
-    is_in_cidr(host, "169.254.")
-        || is_in_cidr(host, "fe80:")
-        || is_in_cidr(host, "fd00:")
-        || host == "metadata.google.internal"
-        || host == "169.254.169.254"
-        || host == "100.100.100.200"
+    if host == "metadata.google.internal" {
+        return true;
+    }
+    match parse_ip(host) {
+        // 169.254.0.0/16, plus Alibaba's metadata address, which is not
+        // link-local but belongs to the same opt-in.
+        Some(IpAddr::V4(v4)) => v4.is_link_local() || v4.octets() == [100, 100, 100, 200],
+        // fe80::/10 (link-local) and fc00::/7 (unique local).
+        Some(IpAddr::V6(v6)) => {
+            let first = v6.segments()[0];
+            (first & 0xffc0) == 0xfe80 || (first & 0xfe00) == 0xfc00
+        }
+        None => false,
+    }
 }
 
 impl AllowEgress for AllowByList {
     fn permit(&self, url: &str) -> bool {
-        // Extract host from URL (everything after scheme:// up to :port or /).
-        let host = match url.split_once("://") {
-            Some((_, rest)) => rest.split(['/', ':', '?']).next().unwrap_or(rest),
-            None => url.split(['/', ':', '?']).next().unwrap_or(url),
+        let Some(host) = reachable_host(url) else {
+            return false;
         };
 
-        // Exact allowlist match (takes priority).
-        if is_host_allowed(host, &self.allowed_hosts) {
+        if is_host_allowed(&host, &self.allowed_hosts) {
             return true;
         }
-
-        // Loopback check.
-        if self.allow_loopback && is_loopback(host) {
+        if self.allow_loopback && is_loopback(&host) {
             return true;
         }
-
-        // Link-local/metadata check.
-        if self.allow_link_local && is_link_local(host) {
+        if self.allow_link_local && is_link_local(&host) {
             return true;
         }
-
         false
     }
 }
@@ -324,6 +360,81 @@ impl Default for CurlConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Egress containment ──────────────────────────────────────────────
+    //
+    // The 2026-08-20 cross-model review found the allowlist walkable. Each
+    // case below is a bypass that worked, or a legitimate URL that used to be
+    // denied for the same parsing reason (docs/issues.md CU24-CU26).
+
+    fn allowing(hosts: &[&str]) -> AllowByList {
+        AllowByList::new().with_allowed_hosts(hosts.iter().copied())
+    }
+
+    #[test]
+    fn userinfo_cannot_impersonate_an_allowlisted_host() {
+        let policy = allowing(&["allowed.example"]);
+        // The host here is 169.254.169.254. Splitting the string on the first
+        // ':' saw `allowed.example` and said yes, while ureq dialed the
+        // metadata service.
+        assert!(!policy.permit("https://allowed.example:443@169.254.169.254/latest/meta-data/"));
+        assert!(!policy.permit("http://allowed.example:80@127.0.0.1:9999/x"));
+        assert!(!policy.permit("http://allowed.example@evil.example/x"));
+        // The real host, reached with credentials in the URL, is still fine.
+        assert!(policy.permit("https://user:pass@allowed.example/x"));
+    }
+
+    #[test]
+    fn a_hostname_that_starts_like_an_ip_is_not_an_ip() {
+        // `is_in_cidr` was `starts_with`, so `127.evil.com` was "loopback".
+        let policy = AllowByList::new().with_allow_loopback(true);
+        assert!(!policy.permit("http://127.evil.com/x"));
+        assert!(policy.permit("http://127.0.0.1:8080/x"));
+        assert!(policy.permit("http://localhost:8080/x"));
+
+        let policy = AllowByList::new().with_allow_link_local(true);
+        assert!(!policy.permit("http://169.254.evil.com/x"));
+        assert!(policy.permit("http://169.254.169.254/latest/meta-data/"));
+    }
+
+    #[test]
+    fn ipv6_literals_are_expressible() {
+        // `[::1]:8080` split to `[` on the first colon, so no IPv6 host could
+        // ever match — the `::1` branch was unreachable.
+        let policy = AllowByList::new().with_allow_loopback(true);
+        assert!(policy.permit("http://[::1]:8080/x"));
+        assert!(!policy.permit("http://[2606:4700::1111]/x"));
+
+        assert!(allowing(&["[2606:4700::1111]"]).permit("http://[2606:4700::1111]/x"));
+    }
+
+    #[test]
+    fn host_matching_ignores_case_and_a_trailing_dot() {
+        let policy = allowing(&["allowed.example"]);
+        assert!(policy.permit("HTTP://Allowed.Example/x"));
+        assert!(policy.permit("http://allowed.example./x"));
+        // and an allowlist entry spelled either way still matches
+        assert!(allowing(&["Allowed.Example."]).permit("http://allowed.example/x"));
+    }
+
+    #[test]
+    fn an_unparseable_url_is_denied() {
+        // Fail closed: if we cannot say what host this reaches, it does not go.
+        let policy = allowing(&["allowed.example"]);
+        assert!(!policy.permit("not a url"));
+        assert!(!policy.permit("http://"));
+        assert!(!policy.permit(""));
+    }
+
+    #[test]
+    fn link_local_and_loopback_stay_denied_unless_opted_into() {
+        let policy = allowing(&["allowed.example"]);
+        assert!(!policy.permit("http://127.0.0.1/x"));
+        assert!(!policy.permit("http://[::1]/x"));
+        assert!(!policy.permit("http://169.254.169.254/x"));
+        assert!(!policy.permit("http://metadata.google.internal/x"));
+        assert!(!policy.permit("http://100.100.100.200/x"));
+    }
 
     #[test]
     fn default_config_is_named_curl_with_deny_by_default_egress() {

@@ -80,14 +80,14 @@ the last positional unless `--url` is used.
 | `-i, --include` | Print response headers above the body. With `-o <file>`, writes headers **into the file** alongside the body, matching curl's behavior. | None. |
 | `-I, --head` | HEAD; print headers only. | None. |
 | `-o, --output <file>` | Write body to a VFS path, through `ToolCtx::resolve_path` + `backend().write()` — never the host filesystem. Headers go into the same file if `-i` is also given. | None. |
-| `-L, --location` | Follow redirects, up to `--max-redirs` (default 50). Redirects strip user/password on cross-host transition unless `CurlConfig::follow_redirects` is true. | Opt-in (matches curl's `-L`). Embedder can set a config default for auto-follow. |
+| `-L, --location` | Follow redirects, up to `--max-redirs` (default 50). Hops are driven by this build, not by ureq, so **the egress allowlist is evaluated on every one** — a redirect cannot leave the embedder's policy. User/password are dropped on a cross-host hop. | Opt-in (matches curl's `-L`). Embedder can set a config default for auto-follow. |
 | `--max-redirs <n>` | Redirect cap. | None. |
 | `-u, --user <user[:pass]>` | Basic auth, `Authorization: Basic`. | None. |
 | `-A, --user-agent <ua>` | `User-Agent`. | None. |
 | `-e, --referer <url>` | `Referer`. | None. |
 | `-k, --insecure` | **Refused at parse time.** This build always verifies TLS; the flag is refused rather than accepted and ignored. Tracked as CU22. | curl skips verification; this build tells you it won't. |
 | `-f, --fail` | Exit on HTTP status >= 400 instead of printing the body. Uses curl-compatible exit codes. | None. |
-| `--max-time <s>` | Whole-request timeout, applied to the ureq agent. Always set: the `CurlConfig` default (30s) applies when the flag is omitted, so an agent cannot hang the embedder by leaving it off. A deadline that fires is exit **28**, not exit 7. | WASM: refuses with literate error (no `tokio::time`). |
+| `--max-time <s>` | Whole-request timeout, applied to the ureq agent. Always set: the `CurlConfig` default (30s) applies when the flag is omitted, and the flag is **clamped to the embedder's ceiling** — it can lower the budget, never raise it. A deadline that fires is exit **28**, not exit 7. | WASM: refuses with literate error (no `tokio::time`). |
 | `--connect-timeout <s>` | Connect-phase timeout. | WASM: refuses with literate error. |
 | `--unix-socket <path>` | **Refused at parse time.** There is no AF_UNIX transport in this build, and refusing beats silently connecting over TCP to the URL's host instead. The containment design (`ToolCtx::resolve_path` + `backend().resolve_real_path()`, path must resolve within the VFS mount) stands and is what the transport will use. Tracked as CU7. | curl connects; this build tells you it can't yet. `--abstract-unix-socket` deferred (CU5). |
 | `--json` | **Not curl's request-body shorthand.** It is kaish's global output flag for every tool (see next section). | curl 7.82 `--json` (request body) refused with literate error. |

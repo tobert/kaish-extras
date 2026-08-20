@@ -33,6 +33,15 @@ kaish-tool-api = { workspace = true }
 kaish-types = { workspace = true }
 
 async-trait = "0.1"
+# The egress allowlist is a security control, so it does not get a hand-rolled
+# URL parser. `url` is the WHATWG parser: it separates userinfo from host
+# (splitting the string on ':' did not, which is how
+# `https://allowed:443@169.254.169.254/` walked past the allowlist), handles
+# IPv6 literals and relative `Location` joins, and re-serializes to the
+# absolute, userinfo-free URL the backend then hands to ureq — so the string
+# we checked is the string that gets dialed, with no parser differential in
+# between. Pure Rust, resolves on wasm.
+url = "2"
 # `string` is not cosmetic here: the tool name is embedder-configurable
 # (`CurlConfig::with_tool_name`), so the clap root command is built from a
 # runtime `String`, which `clap::builder::Str` only accepts with that

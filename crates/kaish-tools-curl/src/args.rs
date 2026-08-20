@@ -69,8 +69,14 @@ pub struct Request {
     /// Basic auth user; `password` is `None` when the caller gave no `:pass`.
     pub user: Option<String>,
     pub password: Option<String>,
-    /// `Some(n)` follows up to n redirects; `None` does not follow.
-    pub follow_redirects: Option<u32>,
+    /// `-L`: follow redirects. Separate from the cap, because "not
+    /// following" and "following, cap 0" are different answers (CU36) —
+    /// conflating them into one `Option<u32>` silently discarded a
+    /// `--max-redirs` given without `-L` under `RedirectPolicy::Auto`.
+    pub follow_redirects: bool,
+    /// `--max-redirs`, when the caller named one. The embedder's ceiling
+    /// applies regardless.
+    pub max_redirects: Option<u32>,
     /// `-f`: fail with exit 22 on status >= 400 instead of printing the body.
     pub fail_on_error: bool,
     /// Whole-request deadline in seconds. Always set — the `CurlConfig`
@@ -237,14 +243,6 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         None => "GET".to_string(),
     };
 
-    // `-L` without `--max-redirs` takes the config cap; `--max-redirs`
-    // without `-L` is inert, matching curl.
-    let follow_redirects = if follow {
-        Some(max_redirs.unwrap_or_else(|| config.limits().max_redirects))
-    } else {
-        None
-    };
-
     Ok(Request {
         url,
         method,
@@ -255,7 +253,8 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         output_file,
         user,
         password,
-        follow_redirects,
+        follow_redirects: follow,
+        max_redirects: max_redirs,
         fail_on_error,
         max_time: max_time.unwrap_or_else(|| config.limits().max_time),
         connect_timeout,
@@ -462,9 +461,17 @@ mod tests {
     }
 
     #[test]
-    fn max_redirs_overrides_the_config_cap() {
+    fn max_redirs_is_carried_whether_or_not_dash_l_is_given() {
         let req = parse(&["-L", "--max-redirs", "3", "http://x.com"]);
-        assert_eq!(req.follow_redirects, Some(3));
+        assert!(req.follow_redirects);
+        assert_eq!(req.max_redirects, Some(3));
+
+        // Without `-L` the cap is inert under the default policy, but it must
+        // still reach the backend: under `RedirectPolicy::Auto` the embedder
+        // follows, and the caller's cap is the one that should apply.
+        let req = parse(&["--max-redirs", "3", "http://x.com"]);
+        assert!(!req.follow_redirects);
+        assert_eq!(req.max_redirects, Some(3));
     }
 
     #[test]
@@ -473,7 +480,7 @@ mod tests {
         // the URL and reports "URL is required".
         let req = parse(&["-L", "http://x.com"]);
         assert_eq!(req.url, "http://x.com");
-        assert_eq!(req.follow_redirects, Some(CurlConfig::default().limits().max_redirects));
+        assert!(req.follow_redirects);
     }
 
     #[test]

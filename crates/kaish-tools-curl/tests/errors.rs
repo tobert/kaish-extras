@@ -10,9 +10,11 @@
 #[path = "support.rs"]
 mod support;
 
-use support::{argv, curl, loopback_config, Response, Server};
+use std::sync::{Arc, OnceLock};
 
-use kaish_tools_curl::{AllowByList, CurlConfig};
+use support::{argv, curl, loopback_config, Response, Server, TcpGuard};
+
+use kaish_tools_curl::{AllowByList, CurlConfig, Limits};
 
 #[tokio::test]
 async fn missing_url_fails_with_exit_7() {
@@ -202,4 +204,163 @@ async fn plain_get_against_a_4xx_returns_the_body_with_exit_0() {
     let result = curl(loopback_config(), argv(&[&url])).await;
     assert_eq!(result.code, 0, "a bare 404 without --fail is not a curl failure: {}", result.err);
     assert_eq!(result.text_out(), "not found body");
+}
+
+// ── Containment: the 2026-08-20 review findings, as tests ────────────────
+//
+// None of these existed, which is how each bug shipped. They use `localhost`
+// and `127.0.0.1` as two *different hosts* that both reach the harness: the
+// egress policy and the credential rule both key on the host, and loopback is
+// the only place a test can stand up a second one.
+
+/// One listener, reachable under two host names. `127.0.0.1` and `localhost`
+/// are different hosts to the egress policy and to the credential rule, and
+/// both land on the same server — which is the only way a loopback-only test
+/// can exercise a cross-host redirect at all. The target is filled in after
+/// `start_tcp` assigns a port, and read when the request arrives.
+fn redirect_to_other_name_for_self(from: &str, to_path: &'static str) -> (TcpGuard, String) {
+    let target: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+    let for_route = Arc::clone(&target);
+    let server = Server::builder()
+        .route_fn(from, move |_req| {
+            Response::redirect(302, for_route.get().expect("port set before first request"))
+        })
+        .route(to_path, Response::text(200, "arrived"))
+        .start_tcp();
+    let port = server.url("/x").rsplit(':').next().unwrap().trim_end_matches("/x").to_string();
+    let elsewhere = format!("http://localhost:{port}{to_path}");
+    target.set(elsewhere.clone()).expect("set once");
+    (server, elsewhere)
+}
+
+#[tokio::test]
+async fn a_redirect_to_a_denied_host_is_not_followed() {
+    // CU8: the allowlist used to be consulted once, on the URL the caller
+    // typed, and ureq followed every hop after that unchecked. An allowed
+    // host answering `302 Location: <anywhere>` was a hole straight through
+    // the embedder's policy.
+    let (server, _elsewhere) = redirect_to_other_name_for_self("/start", "/secret");
+
+    // Only the literal `127.0.0.1` is permitted — `localhost` is not, even
+    // though it reaches the very same listener.
+    let config = CurlConfig::default()
+        .with_allow_egress(AllowByList::new().with_allowed_hosts(["127.0.0.1"]));
+    let result = curl(config, argv(&["-L", &server.url("/start")])).await;
+
+    assert_eq!(result.code, 7, "a denied hop must fail, not be followed: {}", result.err);
+    assert!(
+        result.err.contains("egress policy"),
+        "the error should name the policy that refused it: {}",
+        result.err
+    );
+    let paths: Vec<String> =
+        server.requests().iter().map(|r| r.path_no_query().to_string()).collect();
+    assert_eq!(paths, vec!["/start"], "the redirect target must never be requested");
+}
+
+#[tokio::test]
+async fn credentials_do_not_cross_a_host_boundary_on_redirect() {
+    // CU27: docs/curl.md and CU10 both promised this stripping. Nothing
+    // implemented it, so `-u` plus a redirect leaked the credential to
+    // whatever the first host pointed at.
+    let (server, _elsewhere) = redirect_to_other_name_for_self("/start", "/end");
+
+    let config = CurlConfig::default()
+        .with_allow_egress(AllowByList::new().with_allow_loopback(true));
+    let result = curl(config, argv(&["-L", "-u", "user:pass", &server.url("/start")])).await;
+    assert_eq!(result.code, 0, "{}", result.err);
+
+    let reqs = server.requests();
+    assert_eq!(reqs.len(), 2, "should have made both hops");
+    assert!(
+        reqs[0].header("authorization").is_some(),
+        "the first hop is the one the caller authenticated"
+    );
+    assert!(
+        reqs[1].header("authorization").is_none(),
+        "credentials must not follow a redirect to a different host"
+    );
+}
+
+#[tokio::test]
+async fn credentials_survive_a_redirect_that_stays_on_the_same_host() {
+    let server = Server::builder()
+        .route("/start", Response::redirect(302, "/end"))
+        .route("/end", Response::text(200, "arrived"))
+        .start_tcp();
+
+    let config = CurlConfig::default()
+        .with_allow_egress(AllowByList::new().with_allow_loopback(true));
+    let result = curl(config, argv(&["-L", "-u", "user:pass", &server.url("/start")])).await;
+    assert_eq!(result.code, 0, "{}", result.err);
+
+    let reqs = server.requests();
+    assert_eq!(reqs.len(), 2);
+    assert!(
+        reqs[1].header("authorization").is_some(),
+        "a same-host redirect keeps the credential, as curl does"
+    );
+}
+
+#[tokio::test]
+async fn a_flag_cannot_raise_the_embedders_time_ceiling() {
+    // CU34: `max_time.unwrap_or(config)` let an agent override the embedder
+    // outright, while `Limits`'s own doc said a flag may only lower it.
+    let server = Server::builder()
+        .route_fn("/slow", |_req| {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            Response::text(200, "eventually")
+        })
+        .start_tcp();
+
+    let limits = Limits { max_time: 0.2, ..Limits::default() };
+    let config = CurlConfig::default()
+        .with_limits(limits)
+        .with_allow_egress(AllowByList::new().with_allow_loopback(true));
+
+    // The agent asks for an hour; the embedder said 0.2s, and the embedder wins.
+    let result = curl(config, argv(&["--max-time", "3600", &server.url("/slow")])).await;
+    assert_eq!(result.code, 28, "should time out at the embedder's ceiling: {}", result.err);
+}
+
+#[tokio::test]
+async fn a_body_over_the_cap_fails_instead_of_being_quietly_truncated() {
+    // CU35: the body was read whole, trimmed to the cap, and returned Ok — so
+    // `-o` wrote a silently corrupt file and reported success.
+    let server = Server::builder()
+        .route("/big", Response::text(200, "x".repeat(4096)))
+        .start_tcp();
+
+    let limits = Limits { max_response_bytes: 64, ..Limits::default() };
+    let config = CurlConfig::default()
+        .with_limits(limits)
+        .with_allow_egress(AllowByList::new().with_allow_loopback(true));
+
+    let result = curl(config, argv(&[&server.url("/big")])).await;
+    assert_ne!(result.code, 0, "over the cap must not be a success");
+    assert!(
+        result.err.contains("64") && result.err.contains("limit"),
+        "the error should name the limit that was hit: {}",
+        result.err
+    );
+}
+
+#[tokio::test]
+async fn url_userinfo_cannot_impersonate_an_allowlisted_host() {
+    // CU24, end to end: the allowlist names the harness's host, and the URL
+    // spells that host into the userinfo of a different one. The old lexical
+    // split saw the allowlisted name and let the request out.
+    let server = Server::builder()
+        .route("/x", Response::text(200, "reached"))
+        .start_tcp();
+    let port = server.url("/").rsplit(':').next().unwrap().trim_end_matches('/').to_string();
+
+    let config = CurlConfig::default()
+        .with_allow_egress(AllowByList::new().with_allowed_hosts(["allowed.example"]));
+    let sneaky = format!("http://allowed.example:{port}@127.0.0.1:{port}/x");
+    let result = curl(config, argv(&[&sneaky])).await;
+
+    assert_eq!(result.code, 7, "userinfo must not satisfy the allowlist: {}", result.err);
+    assert!(result.err.contains("egress policy"), "{}", result.err);
+    assert!(server.requests().is_empty(), "the request must never leave");
 }

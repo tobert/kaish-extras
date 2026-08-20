@@ -180,12 +180,6 @@ fixture asserted against real `git status --porcelain` before fixing.
   to skip verification got full verification and no notice. Refused at parse
   time now. Native needs a rustls dangerous-verifier config on the ureq agent;
   wasm cannot have it at all (CU4 — the browser owns the verifier).
-- **CU23 — `--max-response-bytes` truncation reads the whole body first.**
-  `backend/ureq.rs` reads the full body into memory and *then* compares against
-  `Limits::max_response_bytes`, so the cap bounds what is returned, not what is
-  allocated. A hostile or mistaken endpoint can still make the embedder buffer
-  far more than the limit. Wants a limited reader on the ureq body instead.
-
 ### Blockers raised by the 2026-08-14 cross-model review
 
 Both reviewers independently said **do not build `docs/curl.md` as written**.
@@ -243,31 +237,6 @@ standalone before being written down.
 
 ### Containment — must fix before any embedder registers curl
 
-- **CU24 — the egress allowlist is bypassable with URL userinfo. (both)**
-  `AllowByList::permit` (config.rs) takes the host by splitting on the first
-  `/`, `:` or `?` after `://`; `@` is not a delimiter. So
-  `https://allowed.example:443@169.254.169.254/latest/meta-data/` presents
-  `allowed.example` to the check and connects to the metadata service. Any
-  allowlisted host is a key to anywhere. Probed, confirmed. The fix is to stop
-  matching lexically on the URL string and compare against the authority a
-  real parser (`http::Uri`, or the `url` crate) resolves — the same one ureq
-  will dial.
-- **CU25 — `is_in_cidr` is a string prefix test.** `is_in_cidr(host, "127.")`
-  means the hostname `127.evil.com` is "loopback" and `169.254.evil.com` is
-  "link-local", so either opt-in permits attacker-chosen public hosts. Parse
-  as an IP; a name is not an address.
-- **CU26 — IPv6 literals cannot be expressed.** `[::1]:8080` splits to `[` on
-  the first colon, so the `::1`, `fe80:` and `fd00:` branches are unreachable
-  and no IPv6 host can be allowlisted. Fails closed, but silently.
-- **CU27 — Basic-auth credentials are not stripped on cross-host redirect.
-  (both)** docs/curl.md and CU10 both promise the stripping. There is no
-  stripping code in the crate. `-u` plus a redirect is an exfiltration path.
-- **CU8 (restated, still live) — the allowlist is checked once. (both)** ureq
-  follows redirect hops itself with no per-hop hook, so an allowed host that
-  302s anywhere is followed. The `AllowEgress` trait doc claims per-hop
-  enforcement it does not get. Options: drive redirects manually (fetch with
-  `max_redirects(0)` and loop, checking egress each hop), or a ureq middleware.
-  This is the one that makes CU24 catastrophic rather than merely bad.
 - **CU28 — the allowlist matches names, the connection resolves DNS.** An
   allowlisted name that resolves to loopback or a metadata address gets
   through, and nothing re-checks after resolution. Classic SSRF; needs a
@@ -313,29 +282,11 @@ standalone before being written down.
 
 ### Limits that are not limits
 
-- **CU34 — a flag can raise a ceiling the embedder set. (both)**
-  `max_time.unwrap_or(config.limits().max_time)` lets `--max-time 3600`
-  override the embedder outright, and `--max-redirs` the same. The `Limits`
-  doc says a flag "may only lower it, never raise it". Clamp with `min`.
-- **CU35 — truncation is reported as success.** A body over
-  `max_response_bytes` is cut and returned `Ok`, and with `-o` that
-  already-truncated body is written and reported as "Wrote N bytes" with exit
-  0 — a silently corrupt file. Both `config.rs` and docs/curl.md claim `-o`
-  streams and is governed by the VFS budget rather than this cap; it does
-  neither. Supersedes and widens CU23: bound the read with `.take()`, fail
-  loudly at the boundary, and make `-o` actually stream.
-- **CU36 — `--max-redirs` is discarded under `RedirectPolicy::Auto`.** Without
-  `-L`, `follow` is false, so the caller's cap never reaches the backend and
-  the config cap is used instead.
-
 ### Response fidelity
 
 - **CU37 — duplicate response headers collapse. (both)** `BTreeMap<String,
   String>` keeps the last of three `Set-Cookie`s, and a non-UTF-8 header value
   becomes an empty string. `-i` is documented to print what the server sent.
-- **CU38 — the reported URL is the request URL, not the final one.**
-  `model.rs` documents `url` as post-redirect; the backend fills it from
-  `req.url`, so `--json` and the `curl.url` baggage name the pre-redirect URL.
 - **CU39 — exit 6 is unreachable and exit 60 nearly so. (both)** Nothing ever
   constructs `HostNotFound`; DNS failures land in `Io` → `CouldNotConnect` (7)
   or the catch-all (1). Only `ureq::Error::Pem` maps to 60, so an ordinary
