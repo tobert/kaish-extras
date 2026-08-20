@@ -39,7 +39,7 @@ impl CurlTool {
             #[arg(required = true)]
             url: String,
 
-            /// HTTP method. Defaults to GET, or POST when a body is given.
+            /// Send this HTTP method. Default GET, or POST when a body is given.
             #[arg(short = 'X', long)]
             request: Option<String>,
 
@@ -48,48 +48,56 @@ impl CurlTool {
             #[arg(short = 'd', long, action = clap::ArgAction::Append)]
             data: Vec<String>,
 
-            /// Like --data, and never strips anything from the value.
+            /// Like --data, and sends no Content-Type of its own.
             #[arg(long, action = clap::ArgAction::Append)]
             data_binary: Vec<String>,
 
-            /// Like --data, and '@' is literal rather than a file read.
+            /// Like --data, with '@' literal rather than a file read, and no
+            /// Content-Type of its own.
             #[arg(long, action = clap::ArgAction::Append)]
             data_raw: Vec<String>,
 
-            /// Body part 'name=value' with only the value percent-encoded.
+            /// Send 'name=value' as a body part, percent-encoding only the value.
+            /// Repeatable.
             #[arg(long, action = clap::ArgAction::Append)]
             data_urlencode: Vec<String>,
 
-            /// Request header, 'Name: value'. Repeatable.
+            /// Send a request header, 'Name: value'. Repeatable.
             #[arg(short = 'H', long, action = clap::ArgAction::Append)]
             header: Vec<String>,
 
-            /// Print response headers above the body; with -o they go into the file.
+            /// Print the response headers above the body; with -o they go into
+            /// the file instead.
             #[arg(short = 'i', long)]
             include: bool,
 
-            /// HEAD request: print the response headers and no body.
+            /// Send HEAD and print the response headers only. Cannot be combined
+            /// with a request body.
             #[arg(short = 'I', long)]
             head: bool,
 
-            /// Write the body to this path in the shell's filesystem instead of stdout.
+            /// Write the body to this path in the shell's filesystem instead of
+            /// stdout. Required for a binary response, which stdout cannot carry.
             #[arg(short = 'o', long)]
             output: Option<String>,
 
-            /// Follow redirects. Every hop is re-checked against the embedder's
-            /// egress policy, and credentials are dropped on a change of host.
+            /// Follow redirects; off by default. Every hop is checked against
+            /// the embedder's egress policy, and user/password are dropped when
+            /// the host changes.
             #[arg(short = 'L', long)]
             location: bool,
 
-            /// Cap on redirects followed. The embedder's ceiling still applies.
+            /// Stop after this many redirects. Default 50, and the embedder's
+            /// own ceiling still applies. Exceeding it exits 47.
             #[arg(long)]
             max_redirs: Option<u32>,
 
-            /// Basic auth, 'user' or 'user:password'.
+            /// Basic auth, 'user' or 'user:password'. Dropped on a redirect to a
+            /// different host.
             #[arg(short = 'u', long)]
             user: Option<String>,
 
-            /// Set the User-Agent. Defaults to kaish-curl.
+            /// Set the User-Agent. Default kaish-curl.
             #[arg(short = 'A', long)]
             user_agent: Option<String>,
 
@@ -97,16 +105,19 @@ impl CurlTool {
             #[arg(short = 'e', long)]
             referer: Option<String>,
 
-            /// Exit 22 on an HTTP status of 400 or more instead of printing the body.
+            /// Exit 22 on an HTTP status of 400 or more instead of printing the
+            /// body. Without it, any status is exit 0 and the body prints.
             #[arg(short = 'f', long)]
             fail: bool,
 
-            /// Whole-request timeout in seconds. May lower the embedder's
-            /// ceiling, never raise it.
+            /// Give up after this many seconds. Default 30; may lower the
+            /// embedder's ceiling, never raise it. Exceeding it exits 28.
             #[arg(long)]
             max_time: Option<f64>,
 
-            /// Connect-phase timeout in seconds.
+            /// Give up on connecting after this many seconds. No connect-phase
+            /// limit of its own by default; --max-time still bounds the whole
+            /// request. Exceeding it exits 28.
             #[arg(long)]
             connect_timeout: Option<f64>,
         }

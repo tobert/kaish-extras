@@ -257,7 +257,7 @@ Probed against the published crate and the source at `~/src/research/ureq`
 
 - **Sync, no async runtime, no subprocess.** ureq is a blocking client. It
   runs inside `block_in_place_compat` on the kernel's tokio runtime, exactly
-  the seam `kaish-tools-git` uses for blocking gix. No embedder IO-driver or
+  the boundary `kaish-tools-git` uses for blocking gix. No embedder IO-driver or
   multi-thread requirement: `block_in_place_compat` picks the right path for a
   current-thread or multi-thread runtime. This is the reason ureq beats an
   async client here: it adds no runtime constraint on the embedder.
@@ -433,7 +433,7 @@ URL), gated on the two probes in "Probes still owed."
 
 The native backend is small: a clap struct, a config, a ureq-backed
 `execute`, the render, and the error catalog. ureq is probed, the exit-code
-map is settled, and the `block_in_place_compat` seam is already proven by the
+map is settled, and the `block_in_place_compat` boundary is already proven by the
 git crate. The added work over a bare 80/20 is `--unix-socket` (a custom
 transport on ureq's unstable API) and the functional-test harness. Two or
 three focused days for the native tool plus the three functional tests. The

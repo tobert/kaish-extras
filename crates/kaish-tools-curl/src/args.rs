@@ -64,9 +64,9 @@ pub(crate) const HONORED_FLAGS: &[&str] = &[
 /// the alternative is a flag that quietly does nothing.
 pub(crate) const REFUSED_FLAGS: &[(&str, &str)] = &[
     ("-O", "'-O' is not supported. Use '-o <file>' for an explicit output path."),
-    ("-s", "'-s' is not supported. This build has no progress meter to suppress."),
-    ("-S", "'-S' is not supported. Error display is always enabled."),
-    ("--compressed", "'--compressed' is not supported. Decompression is automatic."),
+    ("-s", "'-s' is not supported. curl prints no progress meter here, so there is nothing to silence — drop the flag."),
+    ("-S", "'-S' is not supported. Errors always print here — drop the flag."),
+    ("--compressed", "'--compressed' is not supported. Responses are decompressed already — drop the flag."),
     ("--form", "'--form' (multipart) is not supported. Use '--data' for application/x-www-form-urlencoded."),
     ("-F", "'-F' (multipart) is not supported. Use '--data' for application/x-www-form-urlencoded."),
     ("--cookie", "'--cookie' is not supported. Send cookies with '-H Cookie:<value>'."),
@@ -291,7 +291,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
                 // whole surface exists to avoid: the agent believes it asked
                 // for something.
                 return Err(CurlError::Transport(format!(
-                    "'{other}' is not a flag this build understands. Run 'help curl' for the supported set."
+                    "'{other}' is not a flag curl accepts here; see `help curl` for the ones it does."
                 )));
             }
             _ => url = Some(set_once(url, argv[i].clone())?),

@@ -81,7 +81,7 @@ fixture asserted against real `git status --porcelain` before fixing.
   many just-under-cap files is a large transient allocation. The row cap bounds
   commits, not bytes per commit.
 
-## kaish seams — for the write profiles
+## kaish boundaries — for the write profiles
 
 - **S1 — an out-of-tree tool cannot name kaish's effect ids type-safely.**
   `ToolSchema::operations` (kaish 0.14.0) carries the dotted effect ids a tool
@@ -92,7 +92,7 @@ fixture asserted against real `git status --porcelain` before fixing.
   the write profiles land we would either hardcode strings that must match the
   kernel's by convention, or ask kaish to move the id constants down into
   `kaish-types` where the out-of-tree contract lives. The second is the kaish PR
-  to open, and it is the AGENTS.md pattern exactly: a seam that does not exist
+  to open, and it is the AGENTS.md pattern exactly: a boundary that does not exist
   yet, fixed upstream rather than worked around.
 
   **Nothing to do for the read profile** — `operations` is documented as
@@ -261,4 +261,14 @@ standalone before being written down.
   attempt. Amy's call; CU14 decided the other way.
 - **CU46 — `CurlConfig` cannot inject headers, set a proxy, or add TLS
   roots.** An embedder that wants to supply credentials the agent never sees,
-  route through an egress proxy, or trust a MITM inspection CA has no seam.
+  route through an egress proxy, or trust a MITM inspection CA has no boundary
+  to reach for.
+
+## Writing style — deferred
+
+- **W1 — `seam` survives in `docs/git.md` and in code comments.** The term rule
+  is `boundary`, not `seam` (AGENTS.md, "Writing style"). AGENTS.md,
+  `docs/curl.md` and `docs/issues.md` were corrected on 2026-08-20 as the files
+  that pass was touching. `docs/git.md` has two, and the `kaish-tools-git` and
+  `kaish-tools-curl` sources have several in `//` comments. Groom at the point
+  of touch; there is no bulk pass.

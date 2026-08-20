@@ -86,7 +86,11 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
         if config.permit_egress(current.as_str()) != EgressResult::Allowed {
             return Err(CurlError::CouldNotConnect {
                 host: host_of(&current),
-                reason: "request denied by embedder egress policy".into(),
+                // Name the host and the rule that stopped it. "denied by
+                // policy" alone leaves an agent to guess whether the address
+                // is wrong, the network is down, or it asked for something it
+                // may not have.
+                reason: "denied by this embedder's egress allowlist, so no connection was attempted. Only allowlisted hosts are reachable from this shell".into(),
             });
         }
 

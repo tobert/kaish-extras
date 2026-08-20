@@ -6,7 +6,7 @@ this file is only what you need beyond it to work effectively.
 
 The one principle that shapes everything: this repo is an **honest external
 embedder** of kaish. `kaish-web` consumes the same public API any embedder gets.
-When it needs a seam that doesn't exist, the fix is a kaish PR (same
+When it needs a boundary that doesn't exist, the fix is a kaish PR (same
 maintainer), never a fork or a workaround here.
 
 ## Commands
@@ -51,8 +51,8 @@ to **published crates.io versions** (`"0.15"` as of 2026-08-20). Rules:
   rev while claiming to be an ordinary consumer is the one place the
   honest-embedder posture is weaker than it looks: a rev is an affordance no
   real embedder has. Go back to one only while developing against an unreleased
-  kaish seam, and come back off it.
-- Workflow for changes that need a kaish-side seam: open a kaish PR, pin all
+  kaish boundary, and come back off it.
+- Workflow for changes that need a kaish-side boundary: open a kaish PR, pin all
   four here to the PR branch head to develop against it, then move back to the
   published version once the release carrying it lands — not to the merged main
   sha, unless the wait is genuinely blocking.
@@ -73,19 +73,67 @@ WebKit focus-during-keydown dropping the first char).
 
 ## Writing style
 
-kaish's [docs/style.md](https://github.com/tobert/kaish/blob/main/docs/style.md)
-applies here by reference — that guide names kaish-extras as an adopter, and it
-carries the weights, the term rules, and the reasoning. The weight map for this
-repo's files:
+kaish's guidance lives in [its `AGENTS.md`, "Writing style"](https://github.com/tobert/kaish/blob/main/AGENTS.md#writing-style),
+and that file is the source when the two disagree. It used to live in
+`docs/style.md`, which this section pointed at until 2026-08-20 — the file was
+gone and the pointer was still here, so the rules below are carried in this
+repo rather than referenced out of it. An agent working in kaish-extras may
+have no kaish checkout at all.
+
+The weight map for this repo's files:
 
 - **Full weight**: every tool `description`, argument doc, and error or
-  diagnostic string a crate in this workspace returns — the future kaish-git
-  verb surface included. An agent reads an error more often than it reads any
-  help topic.
+  diagnostic string a crate in this workspace returns. An agent reads an error
+  more often than it reads any help topic, and for an embedded tool the schema
+  is most of what it will ever read.
 - **Terms only**: `README.md` and the docs under `docs/`.
 - **Exempt**: `signoff.md` — it tells a story from a point of view.
 
 Groom at the point of touch; there is no bulk pass.
+
+### The rules
+
+**Keep the vocabulary small.** This limits the number of distinct words, not
+the length of the text. Plain words instead of figures of speech, so the
+meaning is available from the words themselves. American spelling.
+
+**One term, one meaning.** Pick one word per concept and keep it; do not vary
+for style. Write `boundary`, not `seam`. `surface` can hide the thing it names
+— in published text, name the tool schema, the error message, the help topic,
+or the API.
+
+**Provide specific values.** Give the exit code, size, flag, default, and
+condition wherever it is practical. This saves an agent a round trip and gives
+it something to update its model of the world with.
+
+> Before: Oversize output fails.
+>
+> After: Oversize output spills to a file and exits 3.
+
+**Fast and informative failures.** Lead with the consequence, name the
+condition, and suggest the next step when it is known. User- and agent-facing
+errors must not leak internals — an internal name is unresolvable to the
+reader, and belongs only in an assertion about a real bug.
+
+**Published text is published.** A `///` on a clap argument is copied into
+`ParamSchema.description` and reaches agents through the tool schema.
+Behavior goes there; mechanism goes in a `//` comment. A `///` on the clap
+*struct* is not published — `schema_from_clap` reads `cmd.get_about()`
+instead. Do not infer the published text by grepping: read the schema.
+
+**Example labels are imperative.** They sit next to a command, so they should
+read like one: "Save the body to a file", not "File output".
+
+**The example is the rule.** Show the correct form first and let it carry the
+rule by itself. Avoid incorrect examples; when one is necessary, put the
+correct form first and mark the error clearly.
+
+**Cross-references take one form per target**: ``see `help <topic>` `` for a
+help topic, and `docs/curl.md`, "Section name" for a document.
+
+**Write for model context.** Use the same prose for humans and models, assume
+the context may be truncated, teach syntax with examples, and repeat a rule in
+the error that enforces it.
 
 ## Conventions
 

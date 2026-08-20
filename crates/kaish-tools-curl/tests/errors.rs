@@ -92,7 +92,7 @@ async fn egress_denial_never_reaches_the_server_and_names_the_policy() {
     let result = curl(config, argv(&[&url])).await;
     assert_eq!(result.code, 7, "{}", result.err);
     assert!(
-        result.err.contains("denied") && result.err.contains("policy"),
+        result.err.contains("denied") && result.err.contains("egress allowlist"),
         "message should say the embedder policy denied it: {}",
         result.err
     );
@@ -249,7 +249,7 @@ async fn a_redirect_to_a_denied_host_is_not_followed() {
 
     assert_eq!(result.code, 7, "a denied hop must fail, not be followed: {}", result.err);
     assert!(
-        result.err.contains("egress policy"),
+        result.err.contains("egress allowlist"),
         "the error should name the policy that refused it: {}",
         result.err
     );
@@ -361,6 +361,6 @@ async fn url_userinfo_cannot_impersonate_an_allowlisted_host() {
     let result = curl(config, argv(&[&sneaky])).await;
 
     assert_eq!(result.code, 7, "userinfo must not satisfy the allowlist: {}", result.err);
-    assert!(result.err.contains("egress policy"), "{}", result.err);
+    assert!(result.err.contains("egress allowlist"), "{}", result.err);
     assert!(server.requests().is_empty(), "the request must never leave");
 }
