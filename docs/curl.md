@@ -79,23 +79,25 @@ the last positional unless `--url` is used.
 | `-H, --header <h:v>` | Request header. Repeatable. | None. |
 | `-i, --include` | Print response headers above the body. With `-o <file>`, writes headers **into the file** alongside the body, matching curl's behavior. | None. |
 | `-I, --head` | HEAD; print headers only. | None. |
-| `-o, --output <file>` | Write body to a VFS path. Headers go into the same file if `-i` is also given. | None. |
+| `-o, --output <file>` | Write body to a VFS path, through `ToolCtx::resolve_path` + `backend().write()` — never the host filesystem. Headers go into the same file if `-i` is also given. | None. |
 | `-L, --location` | Follow redirects, up to `--max-redirs` (default 50). Redirects strip user/password on cross-host transition unless `CurlConfig::follow_redirects` is true. | Opt-in (matches curl's `-L`). Embedder can set a config default for auto-follow. |
 | `--max-redirs <n>` | Redirect cap. | None. |
 | `-u, --user <user[:pass]>` | Basic auth, `Authorization: Basic`. | None. |
 | `-A, --user-agent <ua>` | `User-Agent`. | None. |
 | `-e, --referer <url>` | `Referer`. | None. |
-| `-k, --insecure` | Skip TLS certificate verification. Native only; wasm has no per-request override (the browser controls validation). | None. |
+| `-k, --insecure` | **Refused at parse time.** This build always verifies TLS; the flag is refused rather than accepted and ignored. Tracked as CU22. | curl skips verification; this build tells you it won't. |
 | `-f, --fail` | Exit on HTTP status >= 400 instead of printing the body. Uses curl-compatible exit codes. | None. |
-| `--max-time <s>` | Whole-request timeout. Has a `CurlConfig` default (30s) so the agent cannot hang the runtime by omission. | WASM: refuses with literate error (no `tokio::time`). |
+| `--max-time <s>` | Whole-request timeout, applied to the ureq agent. Always set: the `CurlConfig` default (30s) applies when the flag is omitted, so an agent cannot hang the embedder by leaving it off. A deadline that fires is exit **28**, not exit 7. | WASM: refuses with literate error (no `tokio::time`). |
 | `--connect-timeout <s>` | Connect-phase timeout. | WASM: refuses with literate error. |
-| `--unix-socket <path>` | Connect to an AF_UNIX socket instead of the URL host; the host is a placeholder (e.g. `http://localhost/`). Routed through `ToolCtx::resolve_path` + `backend().resolve_real_path()` for containment. Path must resolve within the VFS mount. | Native, unix-family targets only; wasm refuses with a literate error. `--abstract-unix-socket` deferred (CU5). |
+| `--unix-socket <path>` | **Refused at parse time.** There is no AF_UNIX transport in this build, and refusing beats silently connecting over TCP to the URL's host instead. The containment design (`ToolCtx::resolve_path` + `backend().resolve_real_path()`, path must resolve within the VFS mount) stands and is what the transport will use. Tracked as CU7. | curl connects; this build tells you it can't yet. `--abstract-unix-socket` deferred (CU5). |
 | `--json` | **Not curl's request-body shorthand.** It is kaish's global output flag for every tool (see next section). | curl 7.82 `--json` (request body) refused with literate error. |
 
 This build refuses the following flags at parse time with literate errors:
 `-O` (use `-o <file>`), `-s`, `-S`, `--compressed`, `--proxy`/SOCKS, `--form`,
 `--cookie`, `--write-out`, `--verbose`, `--retry`, `--get`, `--cert`/`--key`,
-`--resolve`, `--config`, `--netrc`, `--parallel`, `--next`. Each carries a message
+`--resolve`, `--config`, `--netrc`, `--parallel`, `--next`, and — because the backend
+does not implement them rather than because they are out of scope — `-k`/`--insecure`
+and `--unix-socket`. Each carries a message
 that names the unsupported flag and the supported alternative. See "Literate errors" below.
 Flags not mentioned here are silently ignored by clap's unknown-flag warning.
 

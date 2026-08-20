@@ -165,19 +165,26 @@ fixture asserted against real `git status --porcelain` before fixing.
   `--json` (structured output) convention universal. Revisit only if the
   idiom `-H Content-Type:application/json --data <body>` proves too much
   friction in practice.
-- **CU7 — unstable ureq transport API for `--unix-socket`.** ureq 3.x has no
-  first-class unix-socket connect; the build implements a `Transport` over
-  `std::os::unix::net::UnixStream` through ureq's `unversioned::transport`
-  module, which carries no semver guarantee. A ureq 4.x bump could break it;
-  pin ureq and revisit on minor bumps.
-
-- **CU21 — no CI job for `kaish-tools-curl`.** `.github/workflows/ci.yml`
-  builds, clippies and tests `kaish-tools-git`; the curl crate has only the
-  workspace-wide `curl-sys` tripwire covering it. That is how a `use base64::…`
-  with no `base64` dependency reached main (fixed 2026-08-20 in the 0.15 bump).
-  Give curl the same job shape once the crate's dead-code warnings are gone —
-  the job must run clippy with `-D warnings` like git's does, or it buys less
-  than it looks like it does.
+- **CU7 — `--unix-socket` has no transport.** **Corrected 2026-08-20.** This
+  entry used to say the build "implements a `Transport` over
+  `std::os::unix::net::UnixStream`". It does not — `backend/ureq.rs` never
+  read `Request::unix_socket`, so the flag was parsed and silently ignored,
+  and the request went to the URL's host over TCP. The flag is now refused at
+  parse time. The design still holds: ureq 3.x has no first-class unix-socket
+  connect, so the transport goes through `unversioned::transport`, which
+  carries no semver guarantee (pin ureq, revisit on minor bumps), and the path
+  routes through `ToolCtx::resolve_path` + `backend().resolve_real_path()` per
+  CU9. `tests/unix_socket.rs` and the harness's `UnixGuard` wait on it.
+- **CU22 — `-k`/`--insecure` has no implementation.** Same shape as CU7: the
+  flag was parsed into `Request::insecure` and never read, so a caller asking
+  to skip verification got full verification and no notice. Refused at parse
+  time now. Native needs a rustls dangerous-verifier config on the ureq agent;
+  wasm cannot have it at all (CU4 — the browser owns the verifier).
+- **CU23 — `--max-response-bytes` truncation reads the whole body first.**
+  `backend/ureq.rs` reads the full body into memory and *then* compares against
+  `Limits::max_response_bytes`, so the cap bounds what is returned, not what is
+  allocated. A hostile or mistaken endpoint can still make the embedder buffer
+  far more than the limit. Wants a limited reader on the ureq body instead.
 
 ### Blockers raised by the 2026-08-14 cross-model review
 

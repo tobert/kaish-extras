@@ -47,7 +47,10 @@ impl AllowEgress for AllowAll {
 /// names a host first. Loopback and link-local ranges are denied unless the
 /// caller enables them via constructors. Subtractive: once constructed, no
 /// method adds hosts or changes the scopes.
-#[derive(Debug, Clone)]
+/// `Default` is deliberately the same deny-everything starting point as
+/// [`AllowByList::new`] — an allowlist whose default let anything through
+/// would be the wrong shape of mistake to make convenient.
+#[derive(Debug, Clone, Default)]
 pub struct AllowByList {
     /// Allowed hostnames / IPs. Empty = nothing passes.
     allowed_hosts: Vec<String>,

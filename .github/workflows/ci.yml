@@ -120,6 +120,37 @@ jobs:
           git --version
           cargo test -p kaish-tools-git --locked
 
+  curl-tool:
+    name: kaish-tools-curl (native)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable branch, pinned 2026-07-05
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: curl-tool-native
+
+      # This job exists because its absence shipped a crate that did not
+      # compile: `src/backend/ureq.rs` used `base64` with no `base64`
+      # dependency and reached main, because CI built kaish-tools-git and
+      # nothing else. Clippy denies warnings for the same reason git's does.
+      - name: Clippy (deny warnings)
+        run: cargo clippy -p kaish-tools-curl --all-targets --locked -- -D warnings
+
+      - name: Build
+        run: cargo build -p kaish-tools-curl --locked
+
+      # The functional tests stand up a real local HTTP server on loopback
+      # (tests/support.rs) — no network egress, no fixtures to install.
+      - name: Test (against the local HTTP harness)
+        run: cargo test -p kaish-tools-curl --locked
+
   git-tool-dependency-tripwires:
     name: kaish-tools-git dependency tripwire (${{ matrix.pkg }})
     runs-on: ubuntu-latest
