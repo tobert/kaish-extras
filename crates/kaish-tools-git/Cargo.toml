@@ -1,6 +1,8 @@
 [package]
 name = "kaish-tools-git"
 description = "A shallow, safety-first git read surface for kaish, built on gitoxide plumbing (not the gix facade) to keep spawn-capable machinery out of the dependency graph"
+keywords = ["git", "gitoxide", "kaish", "read-only"]
+categories = ["development-tools", "filesystem"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true

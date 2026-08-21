@@ -198,27 +198,118 @@ fixture asserted against real `git status --porcelain` before fixing.
 
 ## Upstream
 
-- **R4 — unbounded recursion decoding the index cache-tree (gix-index).**
+- **R4 — unbounded recursion decoding the index cache-tree (gix-index),
+  guarded locally; upstream-only from here.**
   `gix_index::extension::tree::decode::one_recursive` (gix-index 0.54.0,
-  `src/extension/tree/decode.rs:36`) recurses once per subtree of the `TREE`
-  extension with no depth bound, so a `.git/index` carrying a deep enough
-  cache-tree aborts the process with a stack overflow. Confirmed by probe
-  while capping our own tree walk: a 1200-level chain, which `git write-tree`
-  produces on request, overflows a 2 MiB thread inside `ReadRepo::open_index`
-  — before any kaish-git code sees a tree. Backtrace is ~1200 frames of
-  `one_recursive`.
+  `src/extension/tree/decode.rs:36`) still recurses once per subtree of the
+  `TREE` extension with no depth bound of its own — a `.git/index` carrying a
+  deep enough cache-tree would abort the process with a stack overflow inside
+  that call, before any kaish-git code runs. Confirmed by probe: a 1200-level
+  chain, which `git write-tree` produces on request, overflows a 2 MiB thread
+  in a debug build (a release build's smaller frames do not overflow at that
+  depth — the guard below does not rely on that, but it is why the regression
+  test is debug-build-only). Backtrace is ~1200 frames of `one_recursive`.
 
-  We cannot close this from here. `gix_index::decode::Options` carries no way
-  to skip or bound the extension (`thread_limit`,
-  `min_extension_block_in_bytes_for_threading`, `expected_checksum`,
-  `alloc_limit_bytes`), and `alloc_limit_bytes` does not help: it bounds the
-  per-node subtree allocation, while the hostile shape is one subtree per
-  level. Our own `MAX_TREE_DEPTH` bounds `flatten_subtree` and nothing else,
-  so `a_tree_deeper_than_the_cap_is_refused` deletes the index to keep its
-  assertion pointed at our recursion.
+  `gix_index::decode::Options` still carries no way to skip or bound the
+  extension (`thread_limit`, `min_extension_block_in_bytes_for_threading`,
+  `expected_checksum`, `alloc_limit_bytes`), and `alloc_limit_bytes` does not
+  help: it bounds the per-node subtree allocation, while the hostile shape is
+  one subtree per level. That part of the analysis stands — this crate still
+  cannot make gitoxide itself bound the recursion.
 
-  Next step is a gitoxide issue plus a depth limit in `one_recursive`. Until
-  then a hostile index can crash any embedder of this crate.
+  **Closed for this crate** (not just raised): `ReadRepo::open_index`
+  (`crates/kaish-tools-git/src/repo.rs`) now calls
+  `index_depth_guard::refuse_if_cache_tree_too_deep` on the raw index bytes
+  *before* `gix_index::State::from_bytes` ever sees them. The guard
+  (`crates/kaish-tools-git/src/index_depth_guard.rs`) re-derives just enough
+  of the on-disk index format — the fixed header, the variable-length entry
+  records, and the `TREE` extension's own node encoding — to walk the
+  cache-tree's nesting with an explicit heap stack (a `Vec`) instead of
+  recursion, and refuses past `verbs::status::MAX_STATUS_TREE_DEPTH` (256,
+  the same bound `flatten_subtree` uses) with `GitError::IndexTreeTooDeep`
+  (exit 1) before any recursive decode runs. Because the walk is iterative,
+  no input can make it recurse — this is a real bound, not a bigger stack
+  raising the threshold.
+
+  **Fails closed, not open.** The first version of this guard treated an
+  index shape it could not parse (an unrecognized version, a truncated
+  record) as "nothing to refuse" and waved it through to
+  `gix_index::State::from_bytes` unchecked, reasoning that gix would reject a
+  malformed index on its own. That reasoning had a hole a review caught
+  before merge: "gix will reject a malformed index" is not the same claim as
+  "gix will refuse to recurse" — this guard and gix's real decode are two
+  independently written readings of the same bytes, so a parse failure on
+  this guard's side is not proof gix's decode would also stop, and a
+  mid-chain bail was reporting "safe" having only counted the levels it
+  managed to read. Fixed to fail closed: every parse failure that could
+  plausibly hide a deeper structure — a truncated cache-tree node, an entry
+  this guard's own (re-derived) skip logic cannot account for, a dangling
+  extension header — refuses with the new `GitError::IndexTreeUnreadable`
+  (exit 1), not "not too deep". The only passthroughs left are the three
+  checks that are provably identical to `gix_index`'s own header gate (bad
+  signature, unrecognized version, too few bytes even for the header) —
+  documented at `index_depth_guard::ExtensionsRegion::NothingToCheck` as the
+  narrow exception it is, not implied.
+
+  `a_tree_deeper_than_the_cap_is_refused` (`tests/status.rs`) still deletes
+  the index to keep its assertion pointed at our own `flatten_subtree`
+  recursion rather than the index path. The index path has its own coverage
+  now: `a_hostile_cache_tree_in_the_index_is_refused_not_crashed` builds a
+  1200-level cache-tree *without* deleting the index, and — because a stack
+  overflow aborts the whole test process, not just one test — runs the
+  guarded decode in a child process (this same test binary, re-invoked to run
+  only that one test on a thread with the 2 MiB stack the probe measured) and
+  asserts on the child's exit status: termination by signal is treated as R4
+  regressing, a clean exit 1 naming the depth limit is the guard working.
+  `a_truncated_cache_tree_node_is_refused_not_silently_passed` covers the
+  fail-closed fix itself: a 50-level (well under the cap) cache-tree whose
+  payload is truncated mid-node must refuse as unreadable, not pass as clean
+  — confirmed to fail against the pre-fix code (it returned exit 0 with an
+  ordinary, if incomplete, status report) before the fix landed.
+
+  What is left is upstream-only: gitoxide's own `one_recursive` still has no
+  depth bound, so anything that calls `gix_index::State::from_bytes` directly
+  — outside this crate's guard — remains exposed. A gitoxide issue (a depth
+  limit in `one_recursive`, or a way to skip the `TREE` extension via
+  `decode::Options`) is still worth filing upstream; this repo's contribution
+  guidance reserves filing to repos we don't own for Amy personally, so that
+  step is hers, not an agent's.
+
+## git — two tree-depth bounds, not one (not planned to converge)
+
+`verbs::log::MAX_STAT_TREE_DEPTH` (64) and `verbs::status::MAX_STATUS_TREE_DEPTH`
+(256, also reused by `index_depth_guard` for the index's cache-tree) used to
+share the bare name `MAX_TREE_DEPTH` — harmless while each was private to its
+own module, noticed and renamed when the R4 fix made `status`'s constant
+`pub(crate)` and imported by name from a third module, which turned a
+same-name collision cross-module.
+
+Not unified into one constant, and not expected to be: `status`'s
+`flatten_subtree` is genuinely self-recursive (calls itself once per subtree
+on the real call stack), which is what makes 256 a hard stack-safety bound,
+empirically anchored to the depth a debug build measurably overflows at
+(700–800 levels on a 2 MiB thread). `log`'s `flatten_tree` walks with an
+explicit `Vec`-based stack instead — no call-stack recursion at all — so its
+64 is a generous sanity cap on a mechanism that does not carry the same
+overflow risk in the first place, not a value measured against the same
+failure mode. Two different mechanisms with two different appropriate
+values; changing either is a behavior change, which is out of scope for a
+naming cleanup.
+
+## kaish-tools-git — publishing
+
+- **The crates.io version timeline.** `kaish-tools-git` is at workspace
+  version `0.1.0` and has never been published in this form, but the name is
+  not free: crates.io already holds five libgit2-era versions (`0.8.0`
+  through `0.8.4`, none yanked), owned by the same account, from the
+  pre-rewrite `tobert/kaish` monorepo — a different codebase under the same
+  name. Publishing `0.1.0` under a `max_version` of `0.8.4` is legal but
+  confusing (cargo's resolver goes by version number, not publish date, so a
+  fresh `cargo add` would keep landing on the old libgit2 code). Options and a
+  recommendation (publish forward as `0.9.0` rather than yanking the old
+  line or resetting the number) are laid out in full in
+  [`docs/design/publishing.md`](design/publishing.md) — Amy's call, not made
+  here.
 
 ## curl — deferred (see docs/curl.md)
 

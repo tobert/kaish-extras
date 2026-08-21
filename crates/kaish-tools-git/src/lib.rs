@@ -52,6 +52,8 @@ mod config;
 #[cfg(not(target_family = "wasm"))]
 mod error;
 #[cfg(not(target_family = "wasm"))]
+mod index_depth_guard;
+#[cfg(not(target_family = "wasm"))]
 mod model;
 #[cfg(not(target_family = "wasm"))]
 mod pathfilter;

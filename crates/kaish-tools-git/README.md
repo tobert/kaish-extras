@@ -6,14 +6,14 @@ autopsy, and design intent live in [`../../docs/git.md`](../../docs/git.md);
 the crate layout, verb surface, and read-only enforcement argument are in
 [`../../docs/design/architecture.md`](../../docs/design/architecture.md).
 
-This is PR 1 of that plan: `git info`, the repository open path (ceilinged
-discovery, isolated config parsing, the refusals), the fixture harness, and
-the `.git` fingerprint test. One verb so far; the rest arrive one PR at a
-time.
+Three verbs so far — `info`, `status`, `log` — all read-only; the write
+profiles above are not built yet.
 
 ```sh
 kaish> git info
 kaish> git info --repo /mnt/repos/kaish --json
+kaish> git status --json
+kaish> git log --since 2026-08-01 --stat
 ```
 
 Register it in an embedder's `configure_tools` closure:

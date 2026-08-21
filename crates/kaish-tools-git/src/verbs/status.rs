@@ -1083,7 +1083,24 @@ enum FlattenError {
 /// outside — the linux kernel's is about a dozen — so nothing that is actually
 /// a checkout comes near this. Git's own `core.maxTreeDepth` defaults far
 /// higher, which it can afford because its frames are a fraction of ours.
-const MAX_TREE_DEPTH: usize = 256;
+///
+/// `pub(crate)` rather than private: [`crate::index_depth_guard`] reuses this
+/// exact bound for the index's cache-tree extension (docs/issues.md, R4) — a
+/// cache-tree node mirrors the same working-tree directory nesting this walk
+/// bounds, so the same "generous but finite" reasoning applies to both, and
+/// one measured number is easier to keep honest than two that are supposed to
+/// agree.
+///
+/// Named `_STATUS_` rather than a bare `MAX_TREE_DEPTH`: `verbs::log` has its
+/// own tree-depth bound (`MAX_STAT_TREE_DEPTH`, 64) for a different call site
+/// with different frame sizes, and the two used to share this exact name —
+/// harmless while each stayed private to its own module, but this constant
+/// is now `pub(crate)` and imported by name from a third module, which makes
+/// a same-named, different-valued sibling much easier to misread as "the"
+/// bound. Not unified with log's: changing either value is a behavior change
+/// outside what a naming cleanup should do (docs/issues.md tracks whether
+/// they should ever converge).
+pub(crate) const MAX_STATUS_TREE_DEPTH: usize = 256;
 
 fn flatten_subtree(
     repo: &ReadRepo,
@@ -1093,10 +1110,10 @@ fn flatten_subtree(
     out: &mut BTreeMap<String, (ObjectId, Class)>,
 ) -> Result<(), FlattenError> {
     const OP: &str = "status";
-    if depth > MAX_TREE_DEPTH {
+    if depth > MAX_STATUS_TREE_DEPTH {
         return Err(FlattenError::Git(GitError::TreeTooDeep {
             operation: OP,
-            limit: MAX_TREE_DEPTH,
+            limit: MAX_STATUS_TREE_DEPTH,
         }));
     }
     // Own the tree bytes and its entries before recursing, so the borrow of the
