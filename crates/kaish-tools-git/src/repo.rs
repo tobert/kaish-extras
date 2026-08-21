@@ -829,6 +829,13 @@ impl ReadRepo {
     /// the main one. Decoding never writes: a refreshed stat-cache is not
     /// persisted, which is what keeps the fingerprint test (D.4) green over
     /// status.
+    ///
+    /// The depth guard below runs *before* `gix_index::State::from_bytes`,
+    /// deliberately: gitoxide's own cache-tree decode recurses once per level
+    /// with no bound of its own, and a check placed after `from_bytes`
+    /// returns would already be too late — a deep enough index blows the
+    /// stack inside that call. See [`crate::index_depth_guard`] and
+    /// docs/issues.md, R4.
     pub(crate) fn open_index(&self) -> Result<Option<gix_index::State>, GitError> {
         let Some(path) = open_leaf(self.operation, "index (.git/index)", &self.git_dir, "index", &self.ceiling)?
             .path()
@@ -838,6 +845,7 @@ impl ReadRepo {
         };
         let bytes = std::fs::read(&path)
             .map_err(|e| GitError::repository(self.operation, "reading the index", &path, e))?;
+        crate::index_depth_guard::refuse_if_cache_tree_too_deep(self.operation, &bytes)?;
         let (state, _checksum) = gix_index::State::from_bytes(
             &bytes,
             // Zero, deliberately: we never write the index back and detect

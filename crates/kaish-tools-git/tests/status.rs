@@ -1125,6 +1125,140 @@ async fn a_tree_under_the_cap_is_read() {
     assert_eq!(row["worktree"], "deleted", "{row}");
 }
 
+/// Set by the parent invocation of this test to mark this process as the
+/// child: instead of spawning another child, decode the index at the given
+/// mount directly. Value is the fixture mount root ([`Repo::mount`]).
+const R4_CHILD_MOUNT_ENV: &str = "KAISH_GIT_R4_CHILD_MOUNT";
+
+/// R4 (docs/issues.md): a `.git/index` whose cache-tree (the `TREE`
+/// extension) nests deep enough overflows the stack *inside*
+/// `gix_index::State::from_bytes`, before any code in this crate runs. That
+/// is not something a plain `#[tokio::test]` can observe — the overflow
+/// aborts the whole process, taking the rest of this test binary down with
+/// it, silently "passing" every other test by never letting them run.
+///
+/// So the dangerous decode runs in a *child* process instead: this same test
+/// binary, re-invoked (`--exact`, so only this one test runs) with an env var
+/// that tells it to decode directly rather than spawn its own child. The
+/// parent asserts on the child's exit status: a crash shows up as
+/// termination by signal, which fails this test cleanly, in the parent,
+/// without the parent's own stack ever being at risk. Before the guard
+/// existed, the child aborted (confirmed below); with it, `status` refuses
+/// cleanly with exit 1 and names the depth limit, never a gitoxide-internal
+/// name.
+///
+/// The child decodes on a thread with a deliberately small (2 MiB) stack,
+/// matching the depth this crate's own probe measured (docs/issues.md, R4) —
+/// this platform's much larger default thread stack does not reliably
+/// overflow at only 1200 levels, so relying on it would make this test flaky
+/// rather than a repeatable trigger. Debug-build-only, like the sibling
+/// `MAX_TREE_DEPTH` measurement above: the frames a release build emits for
+/// `one_recursive` are small enough that 1200 levels does not overflow even a
+/// 2 MiB stack in release, so this test is only meaningful under `cargo test`
+/// (debug), not `cargo test --release`.
+#[tokio::test]
+async fn a_hostile_cache_tree_in_the_index_is_refused_not_crashed() {
+    if let Ok(mount) = std::env::var(R4_CHILD_MOUNT_ENV) {
+        // We are the child. Decode on a 2 MiB thread, exactly as the R4 probe
+        // did — if the guard is missing or broken, this is where the process
+        // dies, and it is a throwaway child, not the real test harness.
+        let mount = PathBuf::from(mount);
+        let handle = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("build a current-thread runtime on the probe thread");
+                rt.block_on(status(&mount, "/mnt/repo", &["--json"]))
+            })
+            .expect("spawn the bounded-stack probe thread");
+        let result = handle
+            .join()
+            .expect("the probe thread panicked instead of returning (that is not R4 -- investigate separately)");
+        // Markers, not a shared assertion: the parent reads these back out of
+        // the child's captured stdout (hence `--nocapture` below) rather than
+        // asserting here, because an assertion failure here is indistinguishable,
+        // from the parent's point of view, from a clean exit -- both just exit
+        // non-crashed. Only the parent can tell a crash from a clean run.
+        println!("R4_CHILD_EXIT_CODE={}", result.code);
+        println!("R4_CHILD_STDERR={}", result.err);
+        return;
+    }
+
+    let repo = Repo::init("repo");
+    commit_a_deep_tree(&repo, 1200);
+    // Unlike `a_tree_deeper_than_the_cap_is_refused`, the index is *not*
+    // deleted here -- keeping it is the whole point: `write-tree` leaves a
+    // matching cache-tree in `.git/index`, and that is what this test is
+    // about.
+
+    let exe = std::env::current_exe().expect("the current test binary");
+    let output = Command::new(&exe)
+        .args([
+            "--exact",
+            "a_hostile_cache_tree_in_the_index_is_refused_not_crashed",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(R4_CHILD_MOUNT_ENV, repo.mount())
+        .output()
+        .expect("spawn the child process");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = output.status.signal() {
+            panic!(
+                "the child process was killed by signal {signal} decoding a 1200-level \
+                 cache-tree -- R4 is unguarded: gix_index::State::from_bytes overflowed the \
+                 stack instead of a guard refusing first.\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+    }
+    assert!(
+        output.status.success(),
+        "the child test process failed on its own terms (not a crash) -- see its output.\n\
+         stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // A substring search, not a per-line one: libtest's own `test NAME ... `
+    // progress text has no trailing newline before the test body runs, so
+    // this test's first `println!` marker lands *after* that prefix on the
+    // very same line rather than starting one of its own.
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let marker = |name: &str| -> &str {
+        stdout
+            .split(name)
+            .nth(1)
+            .and_then(|after| after.lines().next())
+            .unwrap_or_else(|| panic!("child produced no {name} marker: {stdout}"))
+    };
+
+    assert_eq!(
+        marker("R4_CHILD_EXIT_CODE="),
+        "1",
+        "an over-deep cache-tree is a git-level no: {stdout}"
+    );
+
+    let stderr_line = marker("R4_CHILD_STDERR=");
+    assert!(
+        stderr_line.contains("256"),
+        "must name the depth limit this build enforces: {stderr_line}"
+    );
+    assert!(
+        stderr_line.contains("nested") || stderr_line.contains("deep"),
+        "must say what it refused: {stderr_line}"
+    );
+    assert!(
+        !stderr_line.to_lowercase().contains("gix") && !stderr_line.contains("one_recursive"),
+        "must not leak the gitoxide-internal name of what overflowed: {stderr_line}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // The blob cap (Limits::max_blob_bytes)
 // ═══════════════════════════════════════════════════════════════════════════

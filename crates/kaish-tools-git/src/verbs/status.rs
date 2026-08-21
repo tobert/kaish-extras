@@ -1083,7 +1083,14 @@ enum FlattenError {
 /// outside — the linux kernel's is about a dozen — so nothing that is actually
 /// a checkout comes near this. Git's own `core.maxTreeDepth` defaults far
 /// higher, which it can afford because its frames are a fraction of ours.
-const MAX_TREE_DEPTH: usize = 256;
+///
+/// `pub(crate)` rather than private: [`crate::index_depth_guard`] reuses this
+/// exact bound for the index's cache-tree extension (docs/issues.md, R4) — a
+/// cache-tree node mirrors the same working-tree directory nesting this walk
+/// bounds, so the same "generous but finite" reasoning applies to both, and
+/// one measured number is easier to keep honest than two that are supposed to
+/// agree.
+pub(crate) const MAX_TREE_DEPTH: usize = 256;
 
 fn flatten_subtree(
     repo: &ReadRepo,
