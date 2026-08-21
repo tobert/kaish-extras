@@ -13,18 +13,23 @@ use crate::error::GitError;
 use crate::model::{EntryKind, TreeRow};
 use crate::repo::ReadRepo;
 
-/// How deep a tree walk may recurse before it is refused.
+/// How deep the `ls`/`show` listing walk may recurse before it is refused.
 ///
 /// The same value `git log`'s `--stat` tree comparison bounds itself to
-/// (`verbs/log.rs`'s own `MAX_TREE_DEPTH`) — a second constant with the same
-/// number rather than a shared one, because the two walks read different
-/// data (this one builds rows with mode/oid/size; log's flattens to a
-/// path→oid map for a diff) and sharing a number is not the same as sharing a
-/// walk. A loud refusal here, not a silent truncation: a walk that stopped
-/// quietly at the limit would make everything below it look absent from the
-/// revision, and a repository can nest single-entry trees as deep as it
-/// likes to force unbounded recursion.
-const MAX_TREE_DEPTH: usize = 64;
+/// ([`crate::verbs::log`]'s `MAX_STAT_TREE_DEPTH`) — a second constant with
+/// the same number rather than a shared one, because the two walks read
+/// different data (this one builds rows with mode/oid/size; log's flattens to
+/// a path→oid map for a diff) and sharing a number is not the same as sharing
+/// a walk. `verbs::status`'s `MAX_STATUS_TREE_DEPTH` is a third, at 256; each
+/// bound names the walk it governs so the bare name cannot be read as one
+/// shared limit.
+///
+/// This walk recurses on the real call stack, so the bound is stack safety,
+/// not a sanity cap. A loud refusal, not a silent truncation: a walk that
+/// stopped quietly at the limit would make everything below it look absent
+/// from the revision, and a repository can nest single-entry trees as deep as
+/// it likes to force unbounded recursion.
+const MAX_LISTING_TREE_DEPTH: usize = 64;
 
 /// What a repo-relative path names inside a tree — the shared navigation
 /// behind `ls`'s `<PATH>` and `show`'s `<rev>:<path>`.
@@ -215,10 +220,10 @@ fn list_tree_at_depth(
     if *collector.truncated {
         return Ok(());
     }
-    if depth > MAX_TREE_DEPTH {
+    if depth > MAX_LISTING_TREE_DEPTH {
         return Err(GitError::TreeTooDeep {
             operation: op,
-            limit: MAX_TREE_DEPTH,
+            limit: MAX_LISTING_TREE_DEPTH,
         });
     }
 
