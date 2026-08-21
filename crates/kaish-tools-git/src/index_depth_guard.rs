@@ -97,14 +97,19 @@ fn unreadable(operation: &'static str) -> GitError {
 enum ExtensionsRegion<'d> {
     /// The header alone already rules out any recursion risk: a bad
     /// signature, an unrecognized version, or too few bytes even for the
-    /// header. Safe to wave through — and not merely "likely" safe, unlike
-    /// everything else in this module: `gix_index`'s own header check
-    /// (`decode::header::decode`) makes the identical, trivial comparisons
-    /// (`data.len() < 3*4 + hash_len`, `signature != b"DIRC"`, `version not in
-    /// {2,3,4}`) as its very first step, before entries or extensions are
-    /// touched at all, so there is no room for these two readings to
-    /// diverge — a plain equality/range check on fixed bytes has no
-    /// interesting edge cases the way variable-length entry parsing does.
+    /// header. Safe to wave through — on an assumption this crate has no way
+    /// to check for itself, unlike everything else in this module: reading
+    /// `gix_index` 0.54.0's own header check (`decode::header::decode`), it
+    /// makes the identical, trivial comparisons (`data.len() < 3*4 +
+    /// hash_len`, `signature != b"DIRC"`, `version not in {2,3,4}`) as its
+    /// very first step, before entries or extensions are touched at all.
+    /// `gix_index` is a crates.io dependency here, not vendored, so nothing
+    /// in this repo can run its decoder to confirm that stays true, or fail
+    /// a test the day it stops being true — the exact-version pin
+    /// (`=0.54.0` in `Cargo.toml`) is what the assumption actually rides on.
+    /// A fixed-length equality/range check has few edge cases the way
+    /// variable-length entry parsing does, which is why the assumption is
+    /// reasonable to carry — not why it is demonstrated.
     NothingToCheck,
     /// This module's own entries walk could not account for all `num_entries`
     /// records. Unlike the header gate above, this *is* real parsing logic —
@@ -179,18 +184,25 @@ fn skip_one_entry(data: &[u8], version: u32) -> Option<&[u8]> {
         const PATH_LEN_MASK: u16 = 0x0fff;
         let path_len = (flags & PATH_LEN_MASK) as usize;
         let data = if path_len == PATH_LEN_MASK as usize {
-            // Name is NUL-terminated instead of length-prefixed (>= 4095 bytes).
+            // Name is NUL-terminated instead of length-prefixed (>= 4095
+            // bytes). `nul_at + 1` already consumes the terminating NUL.
             let nul_at = data.iter().position(|&b| b == 0)?;
             &data[nul_at + 1..]
         } else {
-            data.get(path_len..)?
+            // `+ 1` for the terminating NUL git always writes after a
+            // length-prefixed name too (gix's `skip_padding`), so `consumed`
+            // below means the same thing in both branches: bytes through and
+            // including that NUL, never excluding it in one and including it
+            // in the other.
+            data.get(path_len + 1..)?
         };
         // V2/V3 entries are padded, from the entry's own start, to a multiple
-        // of 8 bytes — and always by *at least* one byte, even when the
-        // unpadded length already lands on a boundary, because git always
-        // writes a terminating NUL after the name (gix's `skip_padding`).
+        // of 8 bytes. `consumed` already counts the terminating NUL (both
+        // branches above consumed it), so the round-up below accounts only
+        // for the padding bytes that may follow that NUL — zero when the NUL
+        // itself already lands on the boundary.
         let consumed = start_len - data.len();
-        let padded = (consumed + 8) & !7;
+        let padded = (consumed + 7) & !7;
         data.get(padded - consumed..)?
     };
     Some(data)
@@ -442,5 +454,184 @@ mod tests {
         bytes.extend_from_slice(&[0u8; HASH_LEN]);
         let err = refuse_if_cache_tree_too_deep("status", &bytes).expect_err("must refuse");
         assert!(matches!(err, GitError::IndexTreeUnreadable { .. }));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Real-git-oracle fixtures for `skip_one_entry`'s padding formula.
+    //
+    // Hand-assembled bytes (like every fixture above) prove the code does
+    // what we think the format says; they cannot prove the format itself.
+    // The two branches of `skip_one_entry` disagree with each other on what
+    // `consumed` means unless both are read against the same oracle, so
+    // these fixtures are built by shelling out to real git — the same
+    // reason `tests/support.rs` (this crate's integration-test harness)
+    // does the same thing rather than hand-assembling a `.git/index`.
+    // ═══════════════════════════════════════════════════════════════════
+
+    fn run_git(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("spawn git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// Build a real `.git/index` with one blob entry named `name`, via `git
+    /// update-index --add --cacheinfo` — which never touches the working
+    /// tree, so `name` need not exist as a file.
+    fn index_bytes_for_one_cacheinfo_entry(name: &str) -> Vec<u8> {
+        use std::io::Write;
+
+        let dir = tempfile::Builder::new()
+            .prefix("kaish-index-guard-")
+            .tempdir()
+            .expect("tempdir");
+        run_git(dir.path(), &["init", "-q", "."]);
+
+        let mut hash_object = std::process::Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn git hash-object");
+        hash_object
+            .stdin
+            .take()
+            .expect("hash-object stdin")
+            .write_all(b"z")
+            .expect("write blob content");
+        let hash_out = hash_object.wait_with_output().expect("git hash-object");
+        assert!(hash_out.status.success(), "git hash-object failed");
+        let sha = String::from_utf8(hash_out.stdout).expect("sha is utf8");
+        let sha = sha.trim();
+
+        run_git(
+            dir.path(),
+            &["update-index", "--add", "--cacheinfo", &format!("100644,{sha},{name}")],
+        );
+        std::fs::read(dir.path().join(".git/index")).expect("read .git/index")
+    }
+
+    /// Build a real version-4 `.git/index` (`git update-index
+    /// --index-version 4`) with three files, whose real entry lengths (71,
+    /// 70, 69 bytes — none a multiple of 8) are exactly what pins v4's "no
+    /// padding" encoding.
+    fn index_bytes_for_v4_three_files() -> Vec<u8> {
+        let dir = tempfile::Builder::new()
+            .prefix("kaish-index-guard-v4-")
+            .tempdir()
+            .expect("tempdir");
+        run_git(dir.path(), &["init", "-q", "."]);
+        std::fs::write(dir.path().join("aaa.txt"), "a").expect("write aaa.txt");
+        std::fs::write(dir.path().join("bb.txt"), "b").expect("write bb.txt");
+        std::fs::write(dir.path().join("c.txt"), "c").expect("write c.txt");
+        run_git(dir.path(), &["add", "aaa.txt", "bb.txt", "c.txt"]);
+        run_git(dir.path(), &["update-index", "--index-version", "4"]);
+        std::fs::read(dir.path().join(".git/index")).expect("read .git/index")
+    }
+
+    /// The fix for the NUL-terminated (name 4095 bytes or more) padding bug.
+    /// Before the fix, that branch's `consumed` already counted the
+    /// terminating NUL, but reused the length-prefixed branch's
+    /// `(consumed + 8) & !7` formula — which assumes `consumed` has *not*
+    /// yet counted that NUL. Whenever `consumed` (including the NUL) landed
+    /// exactly on an 8-byte boundary, that formula added a full spurious 8
+    /// bytes instead of the correct zero, walking 8 bytes past the entry's
+    /// true end.
+    ///
+    /// A 4097-byte name hits exactly that edge: 4095 bytes or more selects
+    /// the NUL-terminated encoding, and the fixed 62-byte header plus the
+    /// 4097-byte name plus 1 byte for the NUL is 4160, a multiple of 8. Real
+    /// git — the oracle here, not a hand-rolled assumption about the format —
+    /// writes no padding at all past that NUL. Before the fix, this test
+    /// fails: the entries walk overshoots by 8 bytes, comes up short of the
+    /// trailing checksum, and `refuse_if_cache_tree_too_deep` wrongly refuses
+    /// a legitimate index.
+    #[test]
+    fn a_legitimate_index_with_a_nul_terminated_name_on_an_eight_byte_boundary_is_not_refused() {
+        let name = "y".repeat(4097);
+        let index_bytes = index_bytes_for_one_cacheinfo_entry(&name);
+
+        match extensions_region(&index_bytes) {
+            ExtensionsRegion::Extensions(bytes) => assert!(
+                bytes.is_empty(),
+                "this fixture writes no TREE extension; landing anywhere but \
+                 exactly on the trailing checksum means the entries walk did \
+                 not consume this entry's true on-disk length"
+            ),
+            ExtensionsRegion::Unreadable => {
+                panic!("a real index written by real git must parse to completion — see error.rs")
+            }
+            ExtensionsRegion::NothingToCheck => {
+                panic!("a real v2 index with one entry must reach the entries walk")
+            }
+        }
+        assert!(
+            refuse_if_cache_tree_too_deep("status", &index_bytes).is_ok(),
+            "a legitimate index must never be refused"
+        );
+    }
+
+    /// The same invariant as above, pinned for the length-prefixed branch
+    /// (name `< 4095` bytes) too, so the padding-formula rewrite is checked
+    /// against real git on both branches, not just the one that was broken.
+    /// An 18-byte name: fixed 62 + name 18 = 80, already a multiple of 8, so
+    /// real git still writes a full 8 bytes of NUL + padding past it — the
+    /// case the length-prefixed branch already got right.
+    #[test]
+    fn a_legitimate_index_with_a_length_prefixed_name_on_an_eight_byte_boundary_is_not_refused() {
+        let name = "y".repeat(18);
+        let index_bytes = index_bytes_for_one_cacheinfo_entry(&name);
+
+        match extensions_region(&index_bytes) {
+            ExtensionsRegion::Extensions(bytes) => assert!(
+                bytes.is_empty(),
+                "this fixture writes no TREE extension; landing anywhere but \
+                 exactly on the trailing checksum means the entries walk did \
+                 not consume this entry's true on-disk length"
+            ),
+            ExtensionsRegion::Unreadable => {
+                panic!("a real index written by real git must parse to completion — see error.rs")
+            }
+            ExtensionsRegion::NothingToCheck => {
+                panic!("a real v2 index with one entry must reach the entries walk")
+            }
+        }
+        assert!(refuse_if_cache_tree_too_deep("status", &index_bytes).is_ok());
+    }
+
+    /// A cross-model reviewer read `skip_one_entry`'s "No padding in this
+    /// version." comment (the version-4 branch) as wrong, and claimed v4
+    /// entries are padded like v2/v3. A probe against real git refuted that:
+    /// `git update-index --index-version 4` writes consecutive entries of
+    /// 71, 70, and 69 bytes for three one-byte files — none a multiple of
+    /// 8 — with the 20-byte trailing checksum starting immediately after the
+    /// last one. There is no padding to find.
+    ///
+    /// This test pins that behavior so a future edit cannot "fix" a correct
+    /// comment into a broken parser on the strength of a plausible-sounding
+    /// but false claim: it fails if v4 entries ever need padding skipped
+    /// that this parser does not skip.
+    #[test]
+    fn a_real_git_version_four_index_has_no_padding_between_entries() {
+        let index_bytes = index_bytes_for_v4_three_files();
+
+        match extensions_region(&index_bytes) {
+            ExtensionsRegion::Extensions(bytes) => assert!(
+                bytes.is_empty(),
+                "no TREE extension was written; the entries walk must land \
+                 exactly on the trailing checksum with zero padding assumed \
+                 between v4 entries"
+            ),
+            ExtensionsRegion::Unreadable => {
+                panic!("a real v4 index written by real git must parse to completion")
+            }
+            ExtensionsRegion::NothingToCheck => {
+                panic!("a real v4 index with entries must reach the entries walk")
+            }
+        }
+        assert!(refuse_if_cache_tree_too_deep("status", &index_bytes).is_ok());
     }
 }
