@@ -261,3 +261,65 @@ standalone before being written down.
   passes to ureq (`Config::proxy`, `TlsConfig::root_certs`) — deliberately not
   built until an embedder asks, because the shape of the ask decides whether
   it belongs on `CurlConfig` or on a transport the embedder supplies whole.
+
+## kaish-tools-image — a proposed third tool crate
+
+Proposed 2026-08-21 by the kaibo session, on Amy's instruction to record it
+rather than build it. Not scheduled; recorded so the driver is not lost.
+
+**The driver is real.** kaibo is widening its Stability AI coverage from 3
+routes to about 25. `edit/inpaint` and `edit/erase` each require a **mask
+image**, `control/style-transfer` takes two input images, and every route
+carries its own pixel-dimension constraints. An agent driving that API has to
+make and measure images between calls. Today it cannot: kaibo compiles
+`subprocess` out, so shelling out to ImageMagick is not available, and a cmake
+or C dependency would end kaibo's musl static single binary. A kaish tool
+bundle is the composable answer — `img` in a pipeline costs one call where a
+bespoke host-side tool costs several.
+
+**Pure Rust is the whole constraint, not a preference.** The bundle must link
+under musl with a Rust toolchain and nothing else. Gate it the way
+`kaish-tools-git` gates spawn machinery: a CI tripwire over `cargo tree`
+asserting no `cc` or cmake build script entered the graph, matching kaibo's
+own aws-lc/openssl exclusion.
+
+Operations, in the order they pay rent:
+
+1. **probe** — dimensions, mime, byte size. The cheapest, and every other
+   decision depends on it: an agent cannot do arithmetic on bytes it cannot
+   measure.
+2. **rasterize SVG to PNG** — the high-value one. Models write SVG well, so
+   "draw the mask as SVG, rasterize, send" is a good loop for inpaint and
+   erase.
+3. **resize / crop / pad** — preflight against a route's dimension limits.
+   Turns a 400 into a result.
+4. **composite and alpha operations** — an alpha channel is how a mask travels.
+5. **format convert** — png, jpeg, webp.
+
+Crate picks, all pure Rust:
+
+- `image` — decode and encode png/jpeg/webp/gif, resize, crop, composite.
+  Default features are already C-free (zune-jpeg, `png`, `image-webp`). WebP
+  **encode** is lossless-only in pure Rust, and AVIF encode pulls `ravif` —
+  leave that feature off.
+- `tiny-skia` — a pure-Rust 2D rasterizer, the Skia subset: paths, fills,
+  strokes, gradients.
+- `resvg` — SVG to PNG, on tiny-skia.
+- `cosmic-text` or `ab_glyph` — only if text rendering lands in scope.
+
+**An audio sibling has the same shape**, if it is ever wanted: `symphonia` to
+decode, `hound` for wav, `rubato` to resample. mp3 **encode** is LAME and
+therefore C, so wav output only. Stability's audio-inpaint route takes
+`mask_start` and `mask_end` in **seconds**, so a duration probe is the minimum
+useful audio tool and it is nearly free.
+
+**Out of scope, and a separate decision: whether kaibo ever mounts the
+bundle.** kaibo's kaish VFS is deliberately blind to its media CAS, so a
+builtin registered there could reach only project files and ephemeral
+`MemoryFs` scratch. Bridging that to a media call is a new write surface and
+needs its own gate. Amy's near-term plan on the kaibo side is to expose the
+routes to the client model directly and learn the real usage patterns before
+deciding what to bring in-house. The bundle can exist without that decision.
+
+The kaibo session has an endpoint-by-endpoint input-shape table pulled from
+the live OpenAPI spec; ask for it when this starts.
