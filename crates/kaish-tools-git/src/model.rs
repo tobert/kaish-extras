@@ -150,12 +150,16 @@ pub enum EntryStatus {
     Ignored,
 }
 
-/// What kind of thing a status entry describes.
+/// What kind of thing a status entry or tree row describes.
 ///
-/// `commit` is how a submodule gitlink appears (B.6 names it plainly); `dir` is
-/// how an untracked directory appears in `--untracked normal`, where git
-/// collapses a wholly-untracked directory to a single `path/` row rather than
-/// listing its contents.
+/// Shared by `git status`'s entries and `git ls`/`git show`'s tree rows
+/// (B.2, B.6) rather than each verb naming its own words for the same four
+/// ideas — one vocabulary, read once (AGENTS.md, "one term, one meaning").
+/// §B.6 spells a tree row's kind in git's own object vocabulary,
+/// `blob`/`tree`/`commit`/`symlink`; this reuses `file`/`dir` instead of
+/// introducing `blob`/`tree` as second names for them (see the PR 4 entry in
+/// architecture.md's Changelog/provenance). `commit` is how a submodule
+/// gitlink appears in either verb.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -166,7 +170,11 @@ pub enum EntryKind {
     Symlink,
     /// A submodule gitlink.
     Commit,
-    /// A directory — only produced for a collapsed untracked directory.
+    /// A directory. `git status` produces this only for a collapsed
+    /// untracked directory (`--untracked normal`, where git reports a
+    /// wholly-untracked directory as a single `path/` row rather than
+    /// listing its contents); `git ls` and `git show`'s tree form produce it
+    /// for an ordinary subtree row in a non-recursive listing.
     Dir,
 }
 
@@ -327,6 +335,114 @@ pub struct LogReport {
     /// With a filter (`--path`, `--author`, a date window) in effect this means
     /// the walk had more commits to examine, not that more would have matched.
     pub truncated: bool,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// git ls and git show's tree/blob forms (architecture.md B.5, B.6)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// One row of a tree listing — `git ls` and `git show`'s tree form share this
+/// exact shape (architecture.md B.6; "same row shape as `ls`" in B.5), so an
+/// agent that has read one has read both.
+///
+/// §B.6 spells the row `{path, kind: blob|tree|commit(submodule)|symlink, ...}`
+/// in git's own object vocabulary. This build reuses [`EntryKind`] instead —
+/// `file`/`dir`/`symlink`/`commit` — the vocabulary `git status` already
+/// established, rather than introduce `blob`/`tree` as second names for
+/// "file" and "dir" (AGENTS.md, "one term, one meaning"; see the Changelog /
+/// provenance entry in architecture.md for this PR).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TreeRow {
+    /// Repo-relative path, slash-separated.
+    pub path: String,
+    /// What kind of thing this is. [`EntryKind::Commit`] is a submodule
+    /// gitlink; [`EntryKind::Dir`] is a subtree, reported as a row only in a
+    /// non-recursive listing (a recursive one reports the leaves under it
+    /// instead, exactly as `git ls-tree -r` omits the directories it walks
+    /// through).
+    pub kind: EntryKind,
+    /// The git tree mode, six-digit octal (`100644`, `100755`, `120000`,
+    /// `160000`, `040000`) — the same string `git ls-tree` prints. A tree's
+    /// raw on-disk mode is five digits (`40000`); this pads it to six so the
+    /// two agree byte for byte.
+    pub mode: String,
+    /// The object id this entry names.
+    pub oid: String,
+    /// The blob's size in bytes, or `null` for a tree or a submodule gitlink
+    /// — a made-up zero would claim a size nobody measured.
+    pub size: Option<u64>,
+}
+
+/// `git ls`'s result (architecture.md B.6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LsReport {
+    /// The revision, verbatim as the caller spelled it.
+    pub rev: String,
+    /// The repo-relative path listed, `""` for the repository root.
+    pub path: String,
+    /// Whether subtrees were expanded (`--recursive`).
+    pub recursive: bool,
+    /// The rows, capped at the effective `--limit`.
+    pub entries: Vec<TreeRow>,
+    /// Whether the listing was truncated by `--limit`. Always reported, never
+    /// silent (E.5); a stderr note fires alongside it.
+    pub truncated: bool,
+}
+
+/// An annotated tag's own metadata, plus the object it points at
+/// (architecture.md B.5) — "tag metadata, then the tagged object" as a real
+/// field rather than a sentence in prose. `target` is tagged with its own
+/// `kind` exactly as [`crate::ShowOutcome`] is at the top level, so a caller
+/// reading a nested tag never has to guess what it is looking at either.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ShowTag {
+    /// The tag object's own oid — distinct from `target_oid`, which is what
+    /// it points at. An agent that reads a tag and wants to name it again
+    /// (`show <oid>`) needs this; every other model in this crate reports
+    /// its own oid, and a tag should not be the exception.
+    pub oid: String,
+    /// The tag's own name (`v0.1.0`), independent of the ref that may point
+    /// at it.
+    pub name: String,
+    /// Who created the tag. Absent for a tag object with no tagger line — a
+    /// state the git format allows and this reports rather than fabricates.
+    pub tagger: Option<Signature>,
+    /// The tag's own message, in full.
+    pub message: String,
+    /// The oid of the object this tag points at, before it is resolved.
+    pub target_oid: String,
+    /// The tagged object, described the same way `show` would describe it
+    /// directly — recursing through a tag-of-a-tag, bounded the same way
+    /// [`ReadRepo::tree_of_object`](crate::ReadRepo) bounds its own tag chain.
+    pub target: Box<ShowTarget>,
+}
+
+/// What a [`ShowTag`] points at, or what a `<rev>:<path>` navigation found
+/// under a tree — every case `git show` can resolve to, except the top-level
+/// blob case, which carries its bytes outside this model (see
+/// [`crate::ShowOutcome`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ShowTarget {
+    /// A commit — the same shape `git log` reports per commit ([`CommitInfo`]
+    /// with `body` always populated, `stat` always `None`: this build has no
+    /// `--patch`/`--stat` for `show` yet — those are a later phase).
+    Commit(CommitInfo),
+    /// An annotated tag pointing at another tag.
+    Tag(ShowTag),
+    /// A tree — the same row shape [`LsReport`] uses for `git ls`.
+    Tree(LsReport),
+    /// A blob, described but not read: embedding its bytes here would either
+    /// blow past `max_blob_bytes` unexamined or require non-UTF-8 content
+    /// inside a JSON string. `show <oid>` (or `show <rev>:<path>` naming the
+    /// same blob) is the honest way to read it, checked against the cap like
+    /// any other blob read.
+    Blob {
+        /// The blob's oid.
+        oid: String,
+        /// The blob's real size in bytes.
+        size: u64,
+    },
 }
 
 #[cfg(test)]
