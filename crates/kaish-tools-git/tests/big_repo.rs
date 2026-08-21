@@ -251,7 +251,8 @@ async fn log_oid_sequence_matches_git_at_several_limits() {
         let theirs = git_oids(&root, &["-n", &limit.to_string()]);
         assert_eq!(
             ours, theirs,
-            "log --limit {limit} vs `git log --format=%H -n {limit}` on {}",
+            "log --limit {limit} vs `git log --format=%H -n {limit}` on {} \
+             (docs/issues.md L5, if this is the same-second-commit tiebreak)",
             root.display()
         );
     }
@@ -416,9 +417,21 @@ async fn stat_matches_git_numstat_on_a_sample_of_commits() {
             deleted += d.parse::<u64>().unwrap_or(0);
         }
 
-        assert_eq!(stat["files"], files, "file count for {oid}: {numstat:?}");
-        assert_eq!(stat["additions"], added, "additions for {oid}: {numstat:?}");
-        assert_eq!(stat["deletions"], deleted, "deletions for {oid}: {numstat:?}");
+        assert_eq!(
+            stat["files"], files,
+            "file count for {oid}: {numstat:?} (docs/issues.md L6, if this is \
+             the Myers split divergence)"
+        );
+        assert_eq!(
+            stat["additions"], added,
+            "additions for {oid}: {numstat:?} (docs/issues.md L6, if this is \
+             the Myers split divergence)"
+        );
+        assert_eq!(
+            stat["deletions"], deleted,
+            "deletions for {oid}: {numstat:?} (docs/issues.md L6, if this is \
+             the Myers split divergence)"
+        );
     }
 
     eprintln!(
@@ -521,7 +534,9 @@ async fn status_matches_git_porcelain_on_a_real_checkout() {
     let theirs = porcelain_set(&root);
     assert_eq!(
         ours, theirs,
-        "our porcelain disagrees with `git status --porcelain=v1` on {}",
+        "our porcelain disagrees with `git status --porcelain=v1` on {} \
+         (docs/issues.md C7, C8, if this is an empty untracked directory or \
+         one wholly ignored by its own nested .gitignore)",
         root.display()
     );
 

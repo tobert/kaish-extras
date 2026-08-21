@@ -25,37 +25,48 @@ fixture asserted against real `git status --porcelain` before fixing.
   reports `A` — agreeing with us. No fixture produced a `T` from real git.
   Recommend closing this entry rather than carrying it as still open; the
   worktree half (C2) is the real divergence in this area.
-- **C2 — unstaged half, file→dir reports `Typechange`, confirmed.** Under
-  `--untracked all`, git reports ` D` for the file plus `??` for the
-  directory's contents; we report only `Typechange` on the file's path and
-  never descend into the new directory at all (`walk_untracked_and_ignored`
-  skips it because the path is already tracked). Default (`normal`) mode does
-  not show the divergence — git's own normal mode is equally silent about the
-  new directory's content there. Fixture:
-  `status.rs::c2_a_file_replaced_by_a_directory_diverges_from_git_in_all_mode`.
-- **C3 — ignored directory containing tracked files, confirmed.** Emitted as
-  `!!` and not descended; git descends (tracked wins over ignore), reports the
-  tracked files' states, and never emits the directory itself. Fixture:
-  `status.rs::c3_an_ignored_directory_holding_a_tracked_file_diverges_from_git`.
-- **C7 — an empty untracked directory is reported as `??`, confirmed.** Git
-  has no concept of a directory as a trackable thing — only blobs are
-  entries — so a directory with nothing inside it produces no output at all.
-  We report it as `??`. Found against a real repository
-  (`crates/kaish-vfs/tests` in a real `kaish` checkout, via `big_repo.rs`),
-  minimized to `status.rs::c7_an_empty_untracked_directory_is_reported_where_git_reports_nothing`.
+- **C2 — unstaged half, file→dir reports `Typechange`, confirmed, and now
+  characterized by a named test.** Under `--untracked all`, git reports ` D`
+  for the file plus `??` for the directory's contents; we report only
+  `Typechange` on the file's path and never descend into the new directory at
+  all (`walk_untracked_and_ignored` skips it because the path is already
+  tracked). Default (`normal`) mode does not show the divergence — git's own
+  normal mode is equally silent about the new directory's content there.
+  Pinned by
+  `status.rs::c2_a_file_replaced_by_a_directory_diverges_from_git_in_all_mode`,
+  which asserts our exact output against a live git oracle; it goes red the
+  moment either side's behavior changes.
+- **C3 — ignored directory containing tracked files, confirmed, and now
+  characterized by a named test.** Emitted as `!!` and not descended; git
+  descends (tracked wins over ignore), reports the tracked files' states, and
+  never emits the directory itself. Pinned by
+  `status.rs::c3_an_ignored_directory_holding_a_tracked_file_diverges_from_git`,
+  which asserts our exact output against a live git oracle; it goes red the
+  moment either side's behavior changes.
+- **C7 — an empty untracked directory is reported as `??`, confirmed, and now
+  characterized by a named test.** Git has no concept of a directory as a
+  trackable thing — only blobs are entries — so a directory with nothing
+  inside it produces no output at all. We report it as `??`. Found against a
+  real repository (`crates/kaish-vfs/tests` in a real `kaish` checkout, via
+  `big_repo.rs`), minimized and pinned by
+  `status.rs::c7_an_empty_untracked_directory_is_reported_where_git_reports_nothing`,
+  which asserts our exact output against a live git oracle; it goes red the
+  moment either side's behavior changes.
 - **C8 — a directory wholly ignored by its own nested `.gitignore` is reported
-  as `??`, confirmed.** A never-tracked directory whose own `.gitignore`
-  ignores everything under it (that `.gitignore` file included) has nothing
-  left inside that qualifies as untracked-and-not-ignored, so git reports
-  nothing under the default view (and `!!` only for its contents, never the
-  directory, under `--ignored`). We report the directory itself as `??`.
-  Distinct from C3: C3 is a *tracked* file inside an ignored directory; this
-  is a wholly-untracked directory whose *contents*, not the directory itself,
-  are what an ignore rule names. Found against `.crush/` — a tool cache dir
-  with `.gitignore` containing `*` — and reproduced identically in all three
-  real repositories tried (`kaish`, `kaibo`, `kaish-extras`, via `big_repo.rs`),
-  minimized to
-  `status.rs::c8_a_directory_wholly_ignored_by_its_own_nested_gitignore_is_reported_untracked`.
+  as `??`, confirmed, and now characterized by a named test.** A never-tracked
+  directory whose own `.gitignore` ignores everything under it (that
+  `.gitignore` file included) has nothing left inside that qualifies as
+  untracked-and-not-ignored, so git reports nothing under the default view
+  (and `!!` only for its contents, never the directory, under `--ignored`). We
+  report the directory itself as `??`. Distinct from C3: C3 is a *tracked*
+  file inside an ignored directory; this is a wholly-untracked directory whose
+  *contents*, not the directory itself, are what an ignore rule names. Found
+  against `.crush/` — a tool cache dir with `.gitignore` containing `*` — and
+  reproduced identically in all three real repositories tried (`kaish`,
+  `kaibo`, `kaish-extras`, via `big_repo.rs`), minimized and pinned by
+  `status.rs::c8_a_directory_wholly_ignored_by_its_own_nested_gitignore_is_reported_untracked`,
+  which asserts our exact output against a live git oracle; it goes red the
+  moment either side's behavior changes.
 
 ## git status — known limitations (accepted for the read profile)
 

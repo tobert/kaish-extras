@@ -1412,6 +1412,13 @@ async fn c1_a_staged_sibling_index_does_not_make_git_report_typechange() {
 /// untracked walk (`walk_untracked_and_ignored`) never descends into `foo`
 /// because `foo` is already a tracked path — so `foo/bar.txt` is never
 /// reported at all.
+///
+/// Characterized, not fixed: this pins our exact output today (` T foo`, and
+/// nothing else) alongside real git's live oracle (` D foo` plus
+/// `?? foo/bar.txt`), so the divergence cannot drift unnoticed. When this
+/// test fails, the behavior changed — re-check against real git, then update
+/// or close C2 in docs/issues.md. See `docs/issues.md`, "git status —
+/// divergences from git".
 #[tokio::test]
 async fn c2_a_file_replaced_by_a_directory_diverges_from_git_in_all_mode() {
     let repo = Repo::init("repo");
@@ -1442,13 +1449,14 @@ async fn c2_a_file_replaced_by_a_directory_diverges_from_git_in_all_mode() {
     .await;
     let ours = our_oracle(&result);
 
-    // docs/issues.md C2, confirmed: we report only the typechange on `foo`
-    // and never `foo/bar.txt` at all, where git reports both. Left failing —
-    // this is the fix's target, not a test-side mistake.
+    // Characterized (C2), not fixed: we report only the typechange on `foo`
+    // and never `foo/bar.txt` at all, where git (asserted above) reports
+    // both. Pinned to our own output, not to git's, so a change either way
+    // turns this red.
     assert_eq!(
-        ours, theirs,
-        "C2: our report ({ours:?}) diverges from git's ({theirs:?}) for a \
-         file replaced by a directory"
+        ours,
+        BTreeSet::from([(" T".to_string(), "foo".to_string())]),
+        "our behavior today (C2)"
     );
 }
 
@@ -1456,6 +1464,13 @@ async fn c2_a_file_replaced_by_a_directory_diverges_from_git_in_all_mode() {
 /// the directory and never descend it; git descends (tracked wins over
 /// ignore), reports the tracked file's real state, and never emits the
 /// directory itself.
+///
+/// Characterized, not fixed: this pins our exact output today (`!! sub` plus
+/// `?? .gitignore`) alongside real git's live oracle (`!! sub/untracked.txt`
+/// plus `?? .gitignore`), so the divergence cannot drift unnoticed. When this
+/// test fails, the behavior changed — re-check against real git, then update
+/// or close C3 in docs/issues.md. See `docs/issues.md`, "git status —
+/// divergences from git".
 #[tokio::test]
 async fn c3_an_ignored_directory_holding_a_tracked_file_diverges_from_git() {
     let repo = Repo::init("repo");
@@ -1486,15 +1501,18 @@ async fn c3_an_ignored_directory_holding_a_tracked_file_diverges_from_git() {
     .await;
     let ours = our_oracle(&result);
 
-    // docs/issues.md C3, confirmed: we emit `!! sub` for the whole directory
+    // Characterized (C3), not fixed: we emit `!! sub` for the whole directory
     // and never descend into it, so `sub/tracked.txt` (unmodified, correctly
     // silent) and `sub/untracked.txt` (wrongly folded into the directory row)
-    // never get git's per-path answer. Left failing — this pins the fix's
-    // target, not a test-side mistake.
+    // never get git's (asserted above) per-path answer. Pinned to our own
+    // output, not to git's, so a change either way turns this red.
     assert_eq!(
-        ours, theirs,
-        "C3: our report ({ours:?}) diverges from git's ({theirs:?}) for an \
-         ignored directory holding a tracked file"
+        ours,
+        BTreeSet::from([
+            ("!!".to_string(), "sub".to_string()),
+            ("??".to_string(), ".gitignore".to_string()),
+        ]),
+        "our behavior today (C3)"
     );
 }
 
@@ -1509,7 +1527,13 @@ async fn c3_an_ignored_directory_holding_a_tracked_file_diverges_from_git() {
 ///
 /// Found against a real repository (`crates/kaish-vfs/tests`, genuinely
 /// empty, in `KAISH_GIT_BIG_REPO=$HOME/src/kaish`), then minimized to this
-/// fixture. Left failing — this pins the fix's target.
+/// fixture.
+///
+/// Characterized, not fixed: this pins our exact output today (`?? empty_dir`)
+/// alongside real git's live oracle (nothing at all), so the divergence
+/// cannot drift unnoticed. When this test fails, the behavior changed —
+/// re-check against real git, then update or close C7 in docs/issues.md. See
+/// `docs/issues.md`, "git status — divergences from git".
 #[tokio::test]
 async fn c7_an_empty_untracked_directory_is_reported_where_git_reports_nothing() {
     let repo = Repo::init("repo");
@@ -1528,10 +1552,12 @@ async fn c7_an_empty_untracked_directory_is_reported_where_git_reports_nothing()
 
     let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
     let ours = our_oracle(&result);
+    // Characterized (C7), not fixed: pinned to our own output, not to git's
+    // (asserted above), so a change either way turns this red.
     assert_eq!(
-        ours, theirs,
-        "C7: our report ({ours:?}) diverges from git's ({theirs:?}) for an \
-         empty untracked directory"
+        ours,
+        BTreeSet::from([("??".to_string(), "empty_dir".to_string())]),
+        "our behavior today (C7)"
     );
 }
 
@@ -1546,8 +1572,13 @@ async fn c7_an_empty_untracked_directory_is_reported_where_git_reports_nothing()
 /// own `.gitignore` reads `*`, in `KAISH_GIT_BIG_REPO=$HOME/src/kaish`), then
 /// minimized to this fixture. Distinct from C3: C3 is a tracked file *inside*
 /// an ignored directory; this is a wholly-untracked directory that is not
-/// itself named by any ignore rule but whose entire contents are. Left
-/// failing — this pins the fix's target.
+/// itself named by any ignore rule but whose entire contents are.
+///
+/// Characterized, not fixed: this pins our exact output today (`?? sub`)
+/// alongside real git's live oracle (nothing at all), so the divergence
+/// cannot drift unnoticed. When this test fails, the behavior changed —
+/// re-check against real git, then update or close C8 in docs/issues.md. See
+/// `docs/issues.md`, "git status — divergences from git".
 #[tokio::test]
 async fn c8_a_directory_wholly_ignored_by_its_own_nested_gitignore_is_reported_untracked() {
     let repo = Repo::init("repo");
@@ -1568,9 +1599,11 @@ async fn c8_a_directory_wholly_ignored_by_its_own_nested_gitignore_is_reported_u
 
     let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
     let ours = our_oracle(&result);
+    // Characterized (C8), not fixed: pinned to our own output, not to git's
+    // (asserted above), so a change either way turns this red.
     assert_eq!(
-        ours, theirs,
-        "C8: our report ({ours:?}) diverges from git's ({theirs:?}) for a \
-         directory wholly ignored by its own nested .gitignore"
+        ours,
+        BTreeSet::from([("??".to_string(), "sub".to_string())]),
+        "our behavior today (C8)"
     );
 }
