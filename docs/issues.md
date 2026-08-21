@@ -334,5 +334,16 @@ needs its own gate. Amy's near-term plan on the kaibo side is to expose the
 routes to the client model directly and learn the real usage patterns before
 deciding what to bring in-house. The bundle can exist without that decision.
 
+**That decision has a second precondition, and it is a hard one: version
+unification.** This workspace pins the kaish crates to one minor, and pre-1.0
+a kaish minor is a breaking release, so a caret range cannot span two of them.
+Any bundle built here is therefore mountable by an embedder only while both
+sit on the **same kaish minor** — otherwise the graph carries two copies of
+every kaish crate and the `Tool` trait does not match. kaibo is on
+`kaish-kernel` 0.14.1 heading for 0.16 while this workspace is on 0.15, so
+today the answer is no on arithmetic alone, before any VFS question is
+reached. Whoever picks this up should check the minor first and discover it
+here rather than at link time.
+
 The kaibo session has an endpoint-by-endpoint input-shape table pulled from
 the live OpenAPI spec; ask for it when this starts.
