@@ -171,11 +171,15 @@ pub(crate) fn resolve_path_in_tree(
 /// repo-relative path, and a directory is a step to more leaves rather than a
 /// row of its own — the same shape `git ls-tree -r` reports (without `-t`).
 ///
-/// Entries are read into an owned `Vec` before any recursion, so each tree's
-/// scratch buffer is dropped before the next `find_tree_iter` call reuses it,
-/// and so the row order matches a natural depth-first walk (a directory's
-/// children appear where it sits in its parent's listing, not batched to the
-/// end) — the same order `git ls-tree -r` reports in.
+/// Entries are read one at a time straight off `find_tree_iter`, in the order
+/// git wrote them, expanding each directory before moving to the next
+/// sibling — the same natural depth-first order `git ls-tree -r` reports in
+/// (a directory's children appear where it sits in its parent's listing, not
+/// batched to the end). Deliberately not collected into an owned `Vec`
+/// first: a tree object's own entry count is bounded only by its raw byte
+/// size, so a hostile tree with millions of entries must not be materialized
+/// before `WalkParams::limit` or the truncation check ever gets a chance to
+/// apply.
 ///
 /// The two knobs a tree walk needs, bundled so the walk functions stay under
 /// clippy's argument-count lint rather than reaching for
@@ -227,28 +231,33 @@ fn list_tree_at_depth(
         });
     }
 
-    let entries: Vec<(ObjectId, String, EntryKind, gix_object::tree::EntryMode)> = {
-        let mut buf = Vec::new();
-        let iter = repo
-            .objects()
-            .find_tree_iter(&tree, &mut buf)
-            .map_err(|e| GitError::repository(op, "reading a tree", repo.git_dir(), e))?;
-        let mut collected = Vec::new();
-        for entry in iter {
-            let entry = entry.map_err(|e| GitError::repository(op, "decoding a tree", repo.git_dir(), e))?;
-            let name = entry.filename.to_str_lossy().into_owned();
-            let path = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
-            collected.push((entry.oid.to_owned(), path, kind_of(entry.mode.kind()), entry.mode));
-        }
-        collected
-        // `buf` (and the borrow it backs `iter` with) is dropped here, before
-        // any recursive call below reuses the object store.
-    };
-
-    for (oid, path, kind, mode) in entries {
+    // Read one entry at a time straight off the iterator rather than
+    // collecting the whole tree into an owned `Vec` first: a tree object's
+    // width (its own entry count) is bounded only by its raw byte size, so a
+    // hostile tree with millions of entries must not be materialized before
+    // `params.limit` or `*collector.truncated` ever gets a chance to apply.
+    // `buf` is this call's own scratch buffer — a recursive call three lines
+    // down owns a separate one, so nothing here holds `buf` borrowed across
+    // that recursion — and stepping the iterator in place still visits
+    // siblings in the order git wrote them, expanding each directory before
+    // moving to the next (the same depth-first order the old collect-first
+    // version produced).
+    let mut buf = Vec::new();
+    let iter = repo
+        .objects()
+        .find_tree_iter(&tree, &mut buf)
+        .map_err(|e| GitError::repository(op, "reading a tree", repo.git_dir(), e))?;
+    for entry in iter {
         if *collector.truncated {
             return Ok(());
         }
+        let entry = entry.map_err(|e| GitError::repository(op, "decoding a tree", repo.git_dir(), e))?;
+        let name = entry.filename.to_str_lossy().into_owned();
+        let path = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+        let kind = kind_of(entry.mode.kind());
+        let mode = entry.mode;
+        let oid = entry.oid.to_owned();
+
         if kind == EntryKind::Dir && params.recursive {
             // Omitted from the rows in recursive mode — the row's job is to
             // name a leaf, and a directory is only ever a step to more of

@@ -166,6 +166,31 @@ fixture asserted against real `git status --porcelain` before fixing.
   found only because real, organically-grown diffs exercised it — no
   synthetic fixture in this suite has hit it.
 
+- **L7 — a commit's message body is an unbounded allocation on the `show`
+  path, always; on the `log` path, only under `--body`.** Found by the
+  2026-08-21 cross-model review. `verbs::show.rs`'s `build_commit_info`
+  always calls `log::split_message` on the full decoded message and sets
+  `body: Some(body)` — reasoned (in its own doc comment) as free because
+  `show` is one commit, not a bulk listing, but nothing bounds how large one
+  commit's message can be: git enforces no limit, so a hostile commit with a
+  gigabyte-sized message costs a gigabyte-sized `String` copy (on top of
+  `find_commit`'s own full-object read) to serve a single `git show`.
+  `verbs::log.rs`'s per-commit body is gated behind `--body` (`if opts.body {
+  split_message(...) }`), which avoids the *per-listing* multiplication but
+  not this same per-commit cost once that flag is set. `show`'s blob form
+  already has the right shape to copy: `read_capped_blob(repo, op, oid,
+  opts.max_blob_bytes)` returns `(bytes, size, truncated)` and reports
+  truncation honestly rather than reading unbounded content. Applying the
+  same cap to a commit message would mean adding a truncation signal to
+  `CommitInfo` (`model.rs`), which is shared by both `log` and `show` and is
+  part of the published tool output schema — a real schema change, not a
+  same-PR fix alongside an unrelated index-guard bug. Needs its own PR:
+  bound the message read (probably behind the embedder's existing
+  `max_blob_bytes` or a sibling constant), add a `body_truncated: bool` (or
+  equivalent) field to `CommitInfo`, and update both call sites and their
+  tests together so `log --body` and `show` cannot silently disagree on the
+  cap.
+
 ## kaish boundaries — for the write profiles
 
 - **S1 — an out-of-tree tool cannot name kaish's effect ids type-safely.**
@@ -236,10 +261,13 @@ fixture asserted against real `git status --porcelain` before fixing.
   this guard's own (re-derived) skip logic cannot account for, a dangling
   extension header — refuses with the new `GitError::IndexTreeUnreadable`
   (exit 1), not "not too deep". The only passthroughs left are the three
-  checks that are provably identical to `gix_index`'s own header gate (bad
-  signature, unrecognized version, too few bytes even for the header) —
-  documented at `index_depth_guard::ExtensionsRegion::NothingToCheck` as the
-  narrow exception it is, not implied.
+  checks that read, against `gix_index` 0.54.0's own source, as identical to
+  its header gate (bad signature, unrecognized version, too few bytes even
+  for the header) — an assumption this repo cannot itself test (`gix_index`
+  is a crates.io dependency, not vendored) and that rides on the exact
+  `=0.54.0` pin staying in effect, documented as exactly that at
+  `index_depth_guard::ExtensionsRegion::NothingToCheck`, not overclaimed as
+  proven.
 
   `a_tree_deeper_than_the_cap_is_refused` (`tests/status.rs`) still deletes
   the index to keep its assertion pointed at our own `flatten_subtree`
@@ -256,6 +284,41 @@ fixture asserted against real `git status --porcelain` before fixing.
   payload is truncated mid-node must refuse as unreadable, not pass as clean
   — confirmed to fail against the pre-fix code (it returned exit 0 with an
   ordinary, if incomplete, status report) before the fix landed.
+
+  **A second, narrower fail-open closed later (2026-08-21):** `skip_one_entry`'s
+  two name-skip branches disagreed on what `consumed` meant. The
+  length-prefixed branch (`data.get(path_len..)?`) excluded the terminating
+  NUL git always writes after a name; the NUL-terminated branch (name `>=
+  4095` bytes, `&data[nul_at + 1..]`) included it. Both then reused the same
+  `(consumed + 8) & !7` padding formula, which is only correct for the
+  excludes-the-NUL meaning — on the includes-the-NUL branch it overshot the
+  entry's true end by a full 8 bytes whenever `consumed` (with the NUL)
+  landed exactly on an 8-byte boundary. That overshoot could walk the guard
+  to a wrong offset in the entries region and still return `Some`, missing a
+  `TREE` extension entirely, or (as the fixture below hits) come up short of
+  the trailing checksum and wrongly refuse a legitimate index — either way
+  contradicting `error.rs`'s "a real index written by real git always parses
+  to completion" doc. Found by a cross-model review and confirmed against
+  real git (`git update-index --add --cacheinfo` with a 4097-byte name: `>=
+  4095` selects the NUL-terminated encoding, and 62 (fixed header) + 4097
+  (name) + 1 (NUL) = 4160, a multiple of 8 — exactly the overshooting case).
+  Fixed by making both branches consume through the NUL (the length-prefixed
+  branch now does `data.get(path_len + 1..)?`) so `consumed` means the same
+  thing everywhere, then rounding up with `(consumed + 7) & !7`. Pinned by
+  `index_depth_guard.rs`'s
+  `a_legitimate_index_with_a_nul_terminated_name_on_an_eight_byte_boundary_is_not_refused`
+  (fails against the pre-fix formula) and
+  `a_legitimate_index_with_a_length_prefixed_name_on_an_eight_byte_boundary_is_not_refused`
+  (the branch that was already correct, now re-proven against the rewritten
+  formula), both built from real git rather than hand-assembled bytes. The
+  same review also claimed version-4 entries are padded like v2/v3 and that
+  the `// No padding in this version.` comment on that branch is wrong — a
+  probe against real git (`git update-index --index-version 4` on three
+  one-byte files) refuted it: entries of 71, 70, and 69 bytes, none a
+  multiple of 8, with the 20-byte checksum starting immediately after the
+  last one. Left alone, and now pinned against regressing on that false
+  reading by
+  `a_real_git_version_four_index_has_no_padding_between_entries`.
 
   What is left is upstream-only: gitoxide's own `one_recursive` still has no
   depth bound, so anything that calls `gix_index::State::from_bytes` directly
@@ -285,6 +348,42 @@ overflow risk in the first place, not a value measured against the same
 failure mode. Two different mechanisms with two different appropriate
 values; changing either is a behavior change, which is out of scope for a
 naming cleanup.
+
+## git tree walks — bounded depth but not width (found by the 2026-08-21 cross-model review, out of scope for the padding-guard PR)
+
+Depth is bounded everywhere in this crate (`MAX_LISTING_TREE_DEPTH`,
+`MAX_STAT_TREE_DEPTH`, `MAX_STATUS_TREE_DEPTH`, all above). A single tree
+object's own *width* — its entry count — is bounded only by its raw byte
+size, and a review flagged that `treewalk.rs::list_tree_at_depth` read every
+entry of a visited directory into an owned `Vec` before its `--limit` check
+in the output loop ever ran, so a hostile tree with millions of entries paid
+that materialization cost regardless of the cap. Fixed in this PR: the
+function now steps `find_tree_iter` directly and checks `*collector.truncated`
+per entry, so a small `--limit` bounds the read itself, not just what gets
+reported.
+
+The same review flagged the identical shape in two more places, left
+untouched here (out of scope for a padding-guard PR, and neither has a
+`--limit` concept to bound against — see below):
+
+- `verbs::status.rs`'s `flatten_subtree` (the recursive step
+  `flatten_head_tree` calls) collects a tree's entries into two owned `Vec`s
+  (`children`, `subtrees`) before doing anything with them — the exact
+  materialize-then-process shape `list_tree_at_depth` had. `status` computes
+  a complete HEAD-vs-index-vs-worktree comparison, though, so there is no
+  `--limit` to bound reads against the way `ls`/`show` have one: a partial
+  status would be a worse bug than the memory cost. Fixable the same way
+  `list_tree_at_depth` was (stream entries instead of collecting), but that is
+  a real change to a load-bearing function with its own extensive test
+  coverage — worth its own PR, not a drive-by alongside an unrelated index
+  fix.
+- `verbs::log.rs`'s `flatten_tree` does *not* share the pre-collect-`Vec` step
+  — it already processes each `find_tree_iter` entry directly in its `for`
+  loop, pushing to its explicit stack or its output map as it goes, with no
+  intermediate buffer to remove. Its width is still unbounded in total (no
+  `--limit` concept, same reasoning as `status` above), but there is no
+  redundant-materialization bug to fix here, just the inherent cost of a full
+  tree-vs-tree diff.
 
 ## kaish-tools-git — publishing
 
