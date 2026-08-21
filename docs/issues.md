@@ -159,6 +159,21 @@ fixture asserted against real `git status --porcelain` before fixing.
   guidance reserves filing to repos we don't own for Amy personally, so that
   step is hers, not an agent's.
 
+## kaish-tools-git — publishing
+
+- **The crates.io version timeline.** `kaish-tools-git` is at workspace
+  version `0.1.0` and has never been published in this form, but the name is
+  not free: crates.io already holds five libgit2-era versions (`0.8.0`
+  through `0.8.4`, none yanked), owned by the same account, from the
+  pre-rewrite `tobert/kaish` monorepo — a different codebase under the same
+  name. Publishing `0.1.0` under a `max_version` of `0.8.4` is legal but
+  confusing (cargo's resolver goes by version number, not publish date, so a
+  fresh `cargo add` would keep landing on the old libgit2 code). Options and a
+  recommendation (publish forward as `0.9.0` rather than yanking the old
+  line or resetting the number) are laid out in full in
+  [`docs/design/publishing.md`](design/publishing.md) — Amy's call, not made
+  here.
+
 ## curl — deferred (see docs/curl.md)
 
 `kaish-tools-curl` ships native first (kaijutsu); the rest is parked here.
