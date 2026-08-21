@@ -412,6 +412,198 @@ impl GitTool {
         }
         result
     }
+
+    #[tracing::instrument(
+        level = "info",
+        name = "git.verb",
+        skip_all,
+        fields(verb = "ls", repo)
+    )]
+    async fn run_ls(&self, args: ToolArgs, consumed: usize, ctx: &mut dyn ToolCtx) -> ExecResult {
+        const OP: &str = "ls";
+        if let Err(e) = verb_enabled(&self.config, Verb::Ls, OP) {
+            return failure(e);
+        }
+
+        let parsed = match parse_leaf::<verbs::ls::LsArgs>(&args, consumed, OP) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+
+        let resolved = match resolve_repo_paths(OP, ctx, parsed.repo.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return failure(e),
+        };
+        tracing::Span::current().record("repo", tracing::field::display(resolved.real.display()));
+
+        // Position, not content, decides the two operands: the first is
+        // always the revision, the second the path — `git ls-tree <rev>
+        // [<path>]`'s own grammar, which needs no `--` to tell them apart.
+        let ops = operands(&args, consumed).all();
+        if ops.len() > 2 {
+            return failure(GitError::Usage {
+                operation: OP,
+                message: format!(
+                    "takes at most a revision and a path, but got {} operands: \
+                     '{}'",
+                    ops.len(),
+                    ops.join("' '")
+                ),
+            });
+        }
+        let rev = ops
+            .first()
+            .cloned()
+            .unwrap_or_else(|| verbs::ls::DEFAULT_REV.to_string());
+        let path = ops.get(1).cloned().unwrap_or_default();
+
+        // The embedder's `max_rows` is a hard cap; `--limit` may only lower it.
+        let limit = parsed.limit.min(self.config.limits().max_rows);
+        let recursive = parsed.recursive;
+
+        let outcome = block_in_place_compat(move || {
+            let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
+            let opts = verbs::ls::LsOptions {
+                rev,
+                path,
+                recursive,
+                limit,
+            };
+            let root = repo.root().display().to_string();
+            verbs::ls::run(&repo, &opts).map(|model| (model, root))
+        });
+
+        let (model, repo_root) = match outcome {
+            Ok(pair) => pair,
+            Err(e) => return failure(e),
+        };
+
+        let mut result = ExecResult::with_output(crate::render::ls(&model));
+        if model.truncated {
+            result.err = format!(
+                "git ls: output truncated at {} entries (--limit); 'truncated' \
+                 is true in --json",
+                model.entries.len()
+            );
+        }
+        result.baggage.insert("git.repo".to_string(), repo_root);
+        result
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        name = "git.verb",
+        skip_all,
+        fields(verb = "show", repo)
+    )]
+    async fn run_show(&self, args: ToolArgs, consumed: usize, ctx: &mut dyn ToolCtx) -> ExecResult {
+        const OP: &str = "show";
+        if let Err(e) = verb_enabled(&self.config, Verb::Show, OP) {
+            return failure(e);
+        }
+
+        let parsed = match parse_leaf::<verbs::show::ShowArgs>(&args, consumed, OP) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+
+        let resolved = match resolve_repo_paths(OP, ctx, parsed.repo.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return failure(e),
+        };
+        tracing::Span::current().record("repo", tracing::field::display(resolved.real.display()));
+
+        // A single operand: the whole flagship spelling, colon path
+        // included (`show HEAD:src/lib.rs` is one operand, not two).
+        let ops = operands(&args, consumed).all();
+        if ops.len() > 1 {
+            return failure(GitError::Usage {
+                operation: OP,
+                message: format!(
+                    "takes exactly one revision, but got {} operands: '{}'. A \
+                     path is part of the revision operand ('show \
+                     HEAD:src/lib.rs'), not a second one",
+                    ops.len(),
+                    ops.join("' '")
+                ),
+            });
+        }
+        let rev = ops
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| verbs::show::DEFAULT_REV.to_string());
+
+        let limit = parsed.limit.min(self.config.limits().max_rows);
+        let max_blob_bytes = self.config.limits().max_blob_bytes;
+
+        let outcome = block_in_place_compat(move || {
+            let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
+            let opts = verbs::show::ShowOptions {
+                rev,
+                limit,
+                max_blob_bytes,
+            };
+            let root = repo.root().display().to_string();
+            verbs::show::run(&repo, &opts).map(|outcome| (outcome, root))
+        });
+
+        let (outcome, repo_root) = match outcome {
+            Ok(pair) => pair,
+            Err(e) => return failure(e),
+        };
+
+        // D5: the type is always stated in the output — `git.show_kind`
+        // baggage names it regardless of which arm below produced it, on top
+        // of each structured shape's own `kind` field (render.rs's
+        // `tag_kind`) or, for the blob form, the fact that there is no
+        // structure to tag at all.
+        let (mut result, kind) = match outcome {
+            verbs::show::ShowOutcome::Commit(commit) => {
+                (ExecResult::with_output(crate::render::show_commit(&commit)), "commit")
+            }
+            verbs::show::ShowOutcome::Tag(tag) => {
+                (ExecResult::with_output(crate::render::show_tag(&tag)), "tag")
+            }
+            verbs::show::ShowOutcome::Tree(report) => {
+                let mut r = ExecResult::with_output(crate::render::show_tree(&report));
+                if report.truncated {
+                    r.err = format!(
+                        "git show: output truncated at {} entries (--limit); \
+                         'truncated' is true in --json",
+                        report.entries.len()
+                    );
+                }
+                (r, "tree")
+            }
+            verbs::show::ShowOutcome::Gitlink(row) => {
+                (ExecResult::with_output(crate::render::show_gitlink(&row)), "commit")
+            }
+            verbs::show::ShowOutcome::Blob {
+                oid,
+                size,
+                truncated,
+                bytes,
+            } => {
+                let mut r = ExecResult::success_text_or_bytes(bytes);
+                if truncated {
+                    r.err = format!(
+                        "git show: blob '{oid}' is {size} bytes, over this \
+                         build's {max_blob_bytes}-byte cap (GitConfig limits, \
+                         max_blob_bytes) — content was not read. Raise the cap \
+                         to read it"
+                    );
+                }
+                r.baggage.insert("git.oid".to_string(), oid);
+                r.baggage.insert("git.size".to_string(), size.to_string());
+                (r, "blob")
+            }
+        };
+        result.baggage.insert("git.repo".to_string(), repo_root);
+        result.baggage.insert("git.show_kind".to_string(), kind.to_string());
+        result
+    }
 }
 
 /// The repo-relative, slash-separated directory of `real` within `root`, or
@@ -448,6 +640,12 @@ impl Tool for GitTool {
         if self.config.has(Verb::Log) {
             cmd = cmd.subcommand(verbs::log::LogArgs::command().name("log"));
         }
+        if self.config.has(Verb::Ls) {
+            cmd = cmd.subcommand(verbs::ls::LsArgs::command().name("ls"));
+        }
+        if self.config.has(Verb::Show) {
+            cmd = cmd.subcommand(verbs::show::ShowArgs::command().name("show"));
+        }
         schema_tree_from_clap(&cmd, self.config.tool_name(), DESCRIPTION, EXAMPLES)
     }
 
@@ -464,6 +662,8 @@ impl Tool for GitTool {
             "info" => self.run_info(args, consumed, ctx).await,
             "status" => self.run_status(args, consumed, ctx).await,
             "log" => self.run_log(args, consumed, ctx).await,
+            "ls" => self.run_ls(args, consumed, ctx).await,
+            "show" => self.run_show(args, consumed, ctx).await,
             // Unreachable: `route` only returns names it found in the schema,
             // and the schema is built from the verbs this file dispatches.
             // Reached anyway means a verb was added to `schema()` without a
@@ -484,10 +684,12 @@ const DESCRIPTION: &str =
     "Read a git repository — shallow, safety-first, and read-only by construction";
 
 /// Examples the schema carries into `help git` and completion.
-const EXAMPLES: [(&str, &str); 3] = [
+const EXAMPLES: [(&str, &str); 5] = [
     ("What repository is this", "git info"),
     ("Inspect a specific repository", "git info --repo /mnt/repos/kaish"),
     ("Structured, for a script", "git info --json"),
+    ("Read a file as of the last release", "git show v0.1.0:src/lib.rs"),
+    ("List a directory as of HEAD", "git ls HEAD src"),
 ];
 
 /// Wrap a [`GitError`] as an [`ExecResult`] carrying its taxonomy code.
@@ -780,7 +982,9 @@ mod tests {
             GitConfig::read_only()
                 .without_verb(Verb::Info)
                 .without_verb(Verb::Status)
-                .without_verb(Verb::Log),
+                .without_verb(Verb::Log)
+                .without_verb(Verb::Ls)
+                .without_verb(Verb::Show),
         )
         .expect_err("a tool with no verbs cannot run anything");
         assert_eq!(err, ConfigError::NoVerbsEnabled);
@@ -790,23 +994,23 @@ mod tests {
     fn schema_carries_only_the_enabled_verbs() {
         let full = tool(GitConfig::read_only()).expect("read-only config").schema();
         let names: Vec<&str> = full.subcommands.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["info", "status", "log"]);
+        assert_eq!(names, ["info", "status", "log", "ls", "show"]);
 
         // Subtract one, and only the others survive — the schema is built from
         // the config, so a disabled verb is absent, not merely rejected.
         let narrowed = tool(GitConfig::read_only().without_verb(Verb::Status))
-            .expect("info and log are a valid config")
+            .expect("the rest is a valid config")
             .schema();
         let names: Vec<&str> = narrowed.subcommands.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["info", "log"]);
+        assert_eq!(names, ["info", "log", "ls", "show"]);
 
         // Subtract a different one, to prove the removal tracks the config
         // rather than the last verb in the list.
-        let narrowed = tool(GitConfig::read_only().without_verb(Verb::Log))
-            .expect("info and status are a valid config")
+        let narrowed = tool(GitConfig::read_only().without_verb(Verb::Show))
+            .expect("the rest is a valid config")
             .schema();
         let names: Vec<&str> = narrowed.subcommands.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["info", "status"]);
+        assert_eq!(names, ["info", "status", "log", "ls"]);
     }
 
     /// The disabled verb must vanish from the schema, because that is what
@@ -819,7 +1023,9 @@ mod tests {
             config: GitConfig::read_only()
                 .without_verb(Verb::Info)
                 .without_verb(Verb::Status)
-                .without_verb(Verb::Log),
+                .without_verb(Verb::Log)
+                .without_verb(Verb::Ls)
+                .without_verb(Verb::Show),
         };
         let schema = git.schema();
         assert!(
@@ -940,7 +1146,7 @@ mod tests {
         let caps = git.capabilities();
         assert_eq!(caps.limits.max_rows, 7);
         assert_eq!(caps.profiles, ["read"]);
-        assert_eq!(caps.verbs, ["info", "status", "log"]);
+        assert_eq!(caps.verbs, ["info", "status", "log", "ls", "show"]);
     }
 
 }

@@ -8,7 +8,7 @@
 
 use kaish_types::{OutputData, OutputNode};
 
-use crate::model::{LogReport, RepoInfo, StatusReport};
+use crate::model::{CommitInfo, LogReport, LsReport, RepoInfo, ShowTag, StatusReport, TreeRow};
 
 /// Render [`RepoInfo`] as a `FIELD`/`VALUE` table carrying the full object as
 /// `rich_json`.
@@ -169,6 +169,141 @@ pub fn log(report: &LogReport) -> OutputData {
         // worse than saying so.
         Err(e) => {
             tracing::warn!(error = %e, "git log: could not build the --json payload");
+            table
+        }
+    }
+}
+
+/// Insert `"kind": <kind>` into an already-serialized object.
+///
+/// `git show`'s "the type is always stated in the output" (B.5) applies to
+/// `--json` too — every nested [`crate::model::ShowTarget`] already carries
+/// its own `kind` via `#[serde(tag = "kind")]`, and this is what makes the
+/// *top-level* result agree with that same convention rather than only
+/// stating its kind in `git.show_kind` baggage.
+fn tag_kind(mut json: serde_json::Value, kind: &str) -> serde_json::Value {
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert("kind".to_string(), serde_json::Value::String(kind.to_string()));
+    }
+    json
+}
+
+/// One row of a tree listing, in `git ls-tree`'s own column order: mode,
+/// kind, oid, path — shared by [`ls`] and `show`'s tree form so the two
+/// tables read identically.
+fn tree_row(entry: &TreeRow) -> OutputNode {
+    let kind = serde_json::to_value(entry.kind)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "?".to_string());
+    OutputNode::new(entry.mode.clone()).with_cells(vec![kind, entry.oid.clone(), entry.path.clone()])
+}
+
+const TREE_HEADERS: [&str; 4] = ["MODE", "KIND", "OID", "PATH"];
+
+/// Render an [`LsReport`] as a `git ls-tree`-shaped table (B.6), carrying the
+/// full model as `rich_json`.
+pub fn ls(report: &LsReport) -> OutputData {
+    let rows: Vec<OutputNode> = report.entries.iter().map(tree_row).collect();
+    let table = OutputData::table(TREE_HEADERS.map(String::from).to_vec(), rows);
+    match serde_json::to_value(report) {
+        Ok(json) => table.with_rich_json(json),
+        Err(e) => {
+            tracing::warn!(error = %e, "git ls: could not build the --json payload");
+            table
+        }
+    }
+}
+
+/// Render a tree form reached through `git show <rev>:<path>` — the same
+/// table [`ls`] renders, with `"kind": "tree"` added to `--json` so the
+/// result states its type the same way every other `show` case does.
+pub fn show_tree(report: &LsReport) -> OutputData {
+    let rows: Vec<OutputNode> = report.entries.iter().map(tree_row).collect();
+    let table = OutputData::table(TREE_HEADERS.map(String::from).to_vec(), rows);
+    match serde_json::to_value(report) {
+        Ok(json) => table.with_rich_json(tag_kind(json, "tree")),
+        Err(e) => {
+            tracing::warn!(error = %e, "git show: could not build the --json payload");
+            table
+        }
+    }
+}
+
+/// Render a submodule gitlink named directly by `git show <rev>:<path>` — the
+/// one row `ls` would show for the same path (see
+/// [`crate::verbs::show::ShowOutcome::Gitlink`]'s doc comment for why this
+/// has no dedicated fifth shape).
+pub fn show_gitlink(entry: &TreeRow) -> OutputData {
+    let table = OutputData::table(TREE_HEADERS.map(String::from).to_vec(), vec![tree_row(entry)]);
+    match serde_json::to_value(entry) {
+        Ok(json) => table.with_rich_json(tag_kind(json, "commit")),
+        Err(e) => {
+            tracing::warn!(error = %e, "git show: could not build the --json payload");
+            table
+        }
+    }
+}
+
+/// Render a commit reached through `git show` — the same `FIELD`/`VALUE`
+/// shape [`repo_info`] uses, tagged `"kind": "commit"`.
+pub fn show_commit(commit: &CommitInfo) -> OutputData {
+    let row = |field: &str, value: String| OutputNode::new(field).with_cells(vec![value]);
+    let rows = vec![
+        row("oid", commit.oid.clone()),
+        row("parents", commit.parents.join(", ")),
+        row(
+            "author",
+            format!("{} <{}> {}", commit.author.name, commit.author.email, commit.author.time),
+        ),
+        row(
+            "committer",
+            format!(
+                "{} <{}> {}",
+                commit.committer.name, commit.committer.email, commit.committer.time
+            ),
+        ),
+        row("summary", commit.summary.clone()),
+        row("body", commit.body.clone().unwrap_or_default()),
+    ];
+    let table = OutputData::table(vec!["FIELD".to_string(), "VALUE".to_string()], rows);
+    match serde_json::to_value(commit) {
+        Ok(json) => table.with_rich_json(tag_kind(json, "commit")),
+        Err(e) => {
+            tracing::warn!(error = %e, "git show: could not build the --json payload");
+            table
+        }
+    }
+}
+
+/// Render an annotated tag reached through `git show` — its own metadata,
+/// then the tagged object's oid and kind (the full nested description is in
+/// `--json`; the text table stays a summary, matching every other verb's
+/// text/JSON split in this crate).
+pub fn show_tag(tag: &ShowTag) -> OutputData {
+    let row = |field: &str, value: String| OutputNode::new(field).with_cells(vec![value]);
+    let target_kind = serde_json::to_value(tag.target.as_ref())
+        .ok()
+        .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "?".to_string());
+    let rows = vec![
+        row("oid", tag.oid.clone()),
+        row("name", tag.name.clone()),
+        row(
+            "tagger",
+            tag.tagger
+                .as_ref()
+                .map(|s| format!("{} <{}> {}", s.name, s.email, s.time))
+                .unwrap_or_else(|| "(none)".to_string()),
+        ),
+        row("message", tag.message.clone()),
+        row("target", format!("{} ({}, see --json)", tag.target_oid, target_kind)),
+    ];
+    let table = OutputData::table(vec!["FIELD".to_string(), "VALUE".to_string()], rows);
+    match serde_json::to_value(tag) {
+        Ok(json) => table.with_rich_json(tag_kind(json, "tag")),
+        Err(e) => {
+            tracing::warn!(error = %e, "git show: could not build the --json payload");
             table
         }
     }

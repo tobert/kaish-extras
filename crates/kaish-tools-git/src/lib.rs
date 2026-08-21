@@ -33,7 +33,10 @@
 //! machinery the tripwires forbid. PR 3 adds `git log`: a `gix-traverse`
 //! commit walk, a small revision grammar, and `--stat` line counts from
 //! `gix-diff`'s tree walk plus `gix-imara-diff` — none of which links
-//! `gix-command` either.
+//! `gix-command` either. PR 4 adds `git ls` and `git show` (commit, tag,
+//! tree and blob forms — no `--patch` yet, that is a later phase): a shared
+//! tree walk in `treewalk.rs`, the `<rev>:<path>` colon grammar `show` and
+//! `ls` accept and `log` still refuses, and `@` as an alias for `HEAD`.
 
 #[cfg(target_family = "wasm")]
 compile_error!(
@@ -62,6 +65,8 @@ mod repo;
 #[cfg(not(target_family = "wasm"))]
 mod tool;
 #[cfg(not(target_family = "wasm"))]
+mod treewalk;
+#[cfg(not(target_family = "wasm"))]
 mod verbs;
 
 #[cfg(not(target_family = "wasm"))]
@@ -70,8 +75,9 @@ pub use config::{ConfigError, GitConfig, Limits, Profile, Verb};
 pub use error::GitError;
 #[cfg(not(target_family = "wasm"))]
 pub use model::{
-    Capabilities, CommitInfo, EntryKind, EntryStatus, Head, LimitsReport, LogReport, RefBackend,
-    RepoInfo, Signature, StatSummary, StatusEntry, StatusReport, StatusTotals,
+    Capabilities, CommitInfo, EntryKind, EntryStatus, Head, LimitsReport, LogReport, LsReport,
+    RefBackend, RepoInfo, ShowTag, ShowTarget, Signature, StatSummary, StatusEntry, StatusReport,
+    StatusTotals, TreeRow,
 };
 #[cfg(not(target_family = "wasm"))]
 pub use repo::ReadRepo;
