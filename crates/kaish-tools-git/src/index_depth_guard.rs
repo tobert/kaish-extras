@@ -17,75 +17,134 @@
 //! variable-length entry records, and the `TREE` extension's own node
 //! encoding — just precisely enough to walk past all of it once with an
 //! explicit heap stack (a `Vec`) standing in for the call stack, so no input
-//! can make *this* walk recurse. It is deliberately not a validator: this
-//! module's only job is bounding depth, not correctness, and it gives up
-//! quietly — deferring to `gix_index::State::from_bytes`, which is the real
-//! decoder — the moment it meets an index shape it cannot account for. A
-//! structurally malformed index that is *not* a deep cache-tree fails there
-//! safely, without recursing, exactly as it does today; this module changes
-//! nothing about that path.
+//! can make *this* walk recurse.
+//!
+//! **Fail closed, not open.** This module and `gix_index::State::from_bytes`
+//! are two independently written readings of the same bytes, and where they
+//! disagree is exactly the case that matters: an input this module cannot
+//! walk to completion is refused, not waved through on the theory that gix
+//! would "probably" reject it too. "gix will reject a malformed index" is not
+//! the same claim as "gix will refuse to recurse" — an attacker gets to hunt
+//! for the one input where this module's parser gives up early while gix's
+//! real decoder reads on and recurses arbitrarily deep on the very same
+//! bytes. A check that cannot tell "found nothing dangerous" apart from "the
+//! check itself broke" is a check that fails open, so every parse failure
+//! below that could plausibly hide a deeper structure is a refusal, not a
+//! pass-through. The three exceptions, and why they really are exceptions,
+//! are called out at their own definitions below (`extensions_region`'s
+//! `NothingToCheck`).
 //!
 //! Only versions 2, 3 and 4 are understood (the only ones `gix_index` accepts
-//! at all); any other version is left for `from_bytes`'s own header check to
-//! reject, which happens before any extension is ever touched.
+//! at all).
 
 use crate::error::GitError;
-use crate::verbs::status::MAX_TREE_DEPTH;
+use crate::verbs::status::MAX_STATUS_TREE_DEPTH;
 
 /// This crate reads SHA-1 indexes only — [`crate::repo::ReadRepo::open_index`]
 /// hardcodes `gix_index::hash::Kind::Sha1` at its one `from_bytes` call site,
 /// so a cache-tree object id is always 20 raw bytes here.
 const HASH_LEN: usize = 20;
 
-/// Refuse before `gix_index::State::from_bytes` would recurse too deep
-/// decoding `index_bytes`'s `TREE` extension.
+/// Refuse before `gix_index::State::from_bytes` would recurse too deep — or
+/// read something this module could not itself account for — decoding
+/// `index_bytes`'s `TREE` extension.
 ///
 /// `index_bytes` must be exactly the bytes about to be handed to
-/// `from_bytes`. Returns `Ok(())` when there is nothing to refuse: no `TREE`
-/// extension is present, the index's shape is not one this module accounts
-/// for (left for `from_bytes` itself to accept or reject), or the `TREE`
-/// extension nests no deeper than [`MAX_TREE_DEPTH`] levels — the same bound
-/// `verbs::status` uses for its own tree walk, reused rather than duplicated.
+/// `from_bytes`. Returns `Ok(())` only when this module positively confirms
+/// there is nothing to refuse: no `TREE` extension is present, or the `TREE`
+/// extension it found nests no deeper than [`MAX_STATUS_TREE_DEPTH`] levels —
+/// the same bound `verbs::status` uses for its own tree walk, reused rather
+/// than duplicated. Everything this module cannot positively confirm is
+/// refused with [`GitError::IndexTreeUnreadable`], not passed through.
 pub(crate) fn refuse_if_cache_tree_too_deep(operation: &'static str, index_bytes: &[u8]) -> Result<(), GitError> {
-    let Some(extensions) = extensions_region(index_bytes) else {
-        return Ok(());
+    let extensions = match extensions_region(index_bytes) {
+        ExtensionsRegion::NothingToCheck => return Ok(()),
+        ExtensionsRegion::Unreadable => return Err(unreadable(operation)),
+        ExtensionsRegion::Extensions(bytes) => bytes,
     };
     let mut rest = extensions;
-    while let Some((signature, payload, after)) = next_extension(rest) {
-        if &signature == b"TREE" && cache_tree_exceeds_depth(payload, MAX_TREE_DEPTH) {
-            return Err(GitError::IndexTreeTooDeep {
-                operation,
-                limit: MAX_TREE_DEPTH,
-            });
+    while !rest.is_empty() {
+        let Some((signature, payload, after)) = next_extension(rest) else {
+            // Not the clean "no more extensions" case (that is `rest.is_empty()`,
+            // handled by the loop condition) — fewer than 8 bytes remain, or a
+            // declared size overruns what is left. A dangling extension header
+            // is not proof there is nothing past it; refuse rather than assume so.
+            return Err(unreadable(operation));
+        };
+        if &signature == b"TREE" {
+            match cache_tree_depth(payload, MAX_STATUS_TREE_DEPTH) {
+                CacheTreeDepth::Fine => {}
+                CacheTreeDepth::TooDeep => {
+                    return Err(GitError::IndexTreeTooDeep {
+                        operation,
+                        limit: MAX_STATUS_TREE_DEPTH,
+                    });
+                }
+                CacheTreeDepth::Unreadable => return Err(unreadable(operation)),
+            }
         }
         rest = after;
     }
     Ok(())
 }
 
-/// The header + entries walk, landing on the bytes between the last entry and
-/// the trailing checksum — extensions, if any. `None` for a version this
-/// module does not understand, a declared entry count that runs past what the
-/// bytes can hold, or a file too short to carry even the header and checksum;
-/// all three are for `gix_index::State::from_bytes` itself to reject.
-fn extensions_region(bytes: &[u8]) -> Option<&[u8]> {
+fn unreadable(operation: &'static str) -> GitError {
+    GitError::IndexTreeUnreadable { operation }
+}
+
+/// Where the header + entries walk landed, between the last entry and the
+/// trailing checksum.
+enum ExtensionsRegion<'d> {
+    /// The header alone already rules out any recursion risk: a bad
+    /// signature, an unrecognized version, or too few bytes even for the
+    /// header. Safe to wave through — and not merely "likely" safe, unlike
+    /// everything else in this module: `gix_index`'s own header check
+    /// (`decode::header::decode`) makes the identical, trivial comparisons
+    /// (`data.len() < 3*4 + hash_len`, `signature != b"DIRC"`, `version not in
+    /// {2,3,4}`) as its very first step, before entries or extensions are
+    /// touched at all, so there is no room for these two readings to
+    /// diverge — a plain equality/range check on fixed bytes has no
+    /// interesting edge cases the way variable-length entry parsing does.
+    NothingToCheck,
+    /// This module's own entries walk could not account for all `num_entries`
+    /// records. Unlike the header gate above, this *is* real parsing logic —
+    /// flags, extended flags, per-version path encoding, padding — with room
+    /// to diverge from gix's own reading of the same bytes. Refused, not
+    /// waved through; see the module doc.
+    Unreadable,
+    /// Landed cleanly on the bytes between the last entry and the trailing
+    /// checksum — zero or more extensions, or none at all.
+    Extensions(&'d [u8]),
+}
+
+/// The header + entries walk. See [`ExtensionsRegion`] for what each outcome
+/// means and why `NothingToCheck` is the one case here that is safe to leave
+/// to `gix_index::State::from_bytes` rather than refuse.
+fn extensions_region(bytes: &[u8]) -> ExtensionsRegion<'_> {
     if bytes.len() < 12 + HASH_LEN || &bytes[0..4] != b"DIRC" {
-        return None;
+        return ExtensionsRegion::NothingToCheck;
     }
-    let version = u32::from_be_bytes(bytes[4..8].try_into().ok()?);
+    let version = u32::from_be_bytes(bytes[4..8].try_into().expect("checked above"));
     if !(2..=4).contains(&version) {
-        return None;
+        return ExtensionsRegion::NothingToCheck;
     }
-    let num_entries = u32::from_be_bytes(bytes[8..12].try_into().ok()?);
+    let num_entries = u32::from_be_bytes(bytes[8..12].try_into().expect("checked above"));
     let mut data = &bytes[12..];
     for _ in 0..num_entries {
-        data = skip_one_entry(data, version)?;
+        data = match skip_one_entry(data, version) {
+            Some(rest) => rest,
+            None => return ExtensionsRegion::Unreadable,
+        };
     }
     // The last HASH_LEN bytes are always the trailing index checksum, never
-    // part of an extension.
-    let extensions_and_checksum = data;
-    let split = extensions_and_checksum.len().checked_sub(HASH_LEN)?;
-    Some(&extensions_and_checksum[..split])
+    // part of an extension. Too little left even for that is vanishingly
+    // unlikely for a real index (it would mean `num_entries` consumed nearly
+    // the whole file) and is not a shape worth reasoning about further:
+    // refuse rather than guess.
+    let Some(split) = data.len().checked_sub(HASH_LEN) else {
+        return ExtensionsRegion::Unreadable;
+    };
+    ExtensionsRegion::Extensions(&data[..split])
 }
 
 /// Skip exactly one on-disk index entry, returning what follows it.
@@ -153,9 +212,11 @@ fn skip_varint(data: &[u8]) -> Option<&[u8]> {
 }
 
 /// One `(signature, payload, rest)` step over the extensions block, or `None`
-/// once fewer than 8 bytes remain (no room for another signature + size) or a
-/// declared size does not fit in what is left — both read as "no more
-/// extensions", the same as reaching the end of the block cleanly.
+/// when fewer than 8 bytes remain (no room for another signature + size) or a
+/// declared size does not fit in what is left. Both are treated by the caller
+/// as "cannot confirm there is nothing dangerous past this point" — see the
+/// module doc — never as "no more extensions" (that is the caller's own
+/// `rest.is_empty()` check, made before ever calling this function).
 fn next_extension(data: &[u8]) -> Option<([u8; 4], &[u8], &[u8])> {
     if data.len() < 8 {
         return None;
@@ -167,20 +228,34 @@ fn next_extension(data: &[u8]) -> Option<([u8; 4], &[u8], &[u8])> {
     Some((signature, payload, after))
 }
 
-/// Does `payload` — a `TREE` extension's raw bytes — nest more than `limit`
-/// levels deep?
+/// The outcome of walking a `TREE` extension's payload.
+enum CacheTreeDepth {
+    /// Walked to completion; nesting never exceeded the limit.
+    Fine,
+    /// Nesting exceeded the limit before the walk needed to look any
+    /// further — the walk stops the instant this is known, so a
+    /// well-formed-until-there prefix is all it ever reads.
+    TooDeep,
+    /// The walk could not reach a confirmed end of the payload. This is
+    /// *not* "fine" — see the module doc: a parse failure here does not mean
+    /// `gix_index`'s own decode would also stop, so it cannot be treated as
+    /// evidence of safety.
+    Unreadable,
+}
+
+/// Walk a `TREE` extension's payload with an explicit heap stack instead of
+/// recursion (gix-index 0.54.0's own decode does this with the call stack —
+/// `extension::tree::decode::one_recursive`, one frame per subtree, with no
+/// depth bound; see docs/issues.md R4).
 ///
 /// `pending[i]` is how many more direct children the node open at depth `i`
 /// still owes; the stack's length *is* the current nesting depth once the
 /// root is pushed, mirroring `one_recursive`'s call depth frame for frame
 /// (each node it visits is one more open ancestor, exactly one more `Vec`
-/// entry here). Returns `true` the instant depth would exceed `limit` —
-/// before parsing anything past that point, so a well-formed-until-there
-/// prefix is all this function ever needs to see. A parse failure short of
-/// the limit is not a "deep" answer: it means the extension is malformed in
-/// some other way, which `gix_index::State::from_bytes` rejects on its own,
-/// safely, at whatever shallow depth the failure occurred.
-fn cache_tree_exceeds_depth(payload: &[u8], limit: usize) -> bool {
+/// entry here). Returns [`CacheTreeDepth::TooDeep`] the instant depth would
+/// exceed `limit` — before parsing anything past that point, so a
+/// well-formed-until-there prefix is all this function ever needs to see.
+fn cache_tree_depth(payload: &[u8], limit: usize) -> CacheTreeDepth {
     let mut pending: Vec<usize> = Vec::new();
     let mut data = payload;
     loop {
@@ -188,10 +263,10 @@ fn cache_tree_exceeds_depth(payload: &[u8], limit: usize) -> bool {
             pending.pop();
         }
         if pending.is_empty() && data.is_empty() {
-            return false;
+            return CacheTreeDepth::Fine;
         }
         let Some((subtree_count, rest)) = parse_cache_tree_node(data) else {
-            return false;
+            return CacheTreeDepth::Unreadable;
         };
         data = rest;
         if let Some(top) = pending.last_mut() {
@@ -199,7 +274,7 @@ fn cache_tree_exceeds_depth(payload: &[u8], limit: usize) -> bool {
         }
         pending.push(subtree_count);
         if pending.len() > limit {
-            return true;
+            return CacheTreeDepth::TooDeep;
         }
     }
 }
@@ -243,10 +318,22 @@ mod tests {
         out
     }
 
+    fn is_fine(outcome: CacheTreeDepth) -> bool {
+        matches!(outcome, CacheTreeDepth::Fine)
+    }
+
+    fn is_too_deep(outcome: CacheTreeDepth) -> bool {
+        matches!(outcome, CacheTreeDepth::TooDeep)
+    }
+
+    fn is_unreadable(outcome: CacheTreeDepth) -> bool {
+        matches!(outcome, CacheTreeDepth::Unreadable)
+    }
+
     #[test]
     fn a_single_root_node_is_not_too_deep() {
         let payload = node("", 0, 0);
-        assert!(!cache_tree_exceeds_depth(&payload, 2));
+        assert!(is_fine(cache_tree_depth(&payload, 2)));
     }
 
     #[test]
@@ -254,8 +341,11 @@ mod tests {
         let mut payload = node("", 3, 2);
         payload.extend(node("a", 1, 0));
         payload.extend(node("b", 1, 0));
-        assert!(!cache_tree_exceeds_depth(&payload, 2), "depth 2 must fit a limit of 2");
-        assert!(cache_tree_exceeds_depth(&payload, 1), "depth 2 must exceed a limit of 1");
+        assert!(is_fine(cache_tree_depth(&payload, 2)), "depth 2 must fit a limit of 2");
+        assert!(
+            is_too_deep(cache_tree_depth(&payload, 1)),
+            "depth 2 must exceed a limit of 1"
+        );
     }
 
     #[test]
@@ -266,8 +356,14 @@ mod tests {
             let subtree_count = usize::from(i + 1 < depth);
             payload.extend(node(&format!("d{i}"), 1, subtree_count));
         }
-        assert!(!cache_tree_exceeds_depth(&payload, depth), "exactly at the limit must not refuse");
-        assert!(cache_tree_exceeds_depth(&payload, depth - 1), "one over the limit must refuse");
+        assert!(
+            is_fine(cache_tree_depth(&payload, depth)),
+            "exactly at the limit must not refuse"
+        );
+        assert!(
+            is_too_deep(cache_tree_depth(&payload, depth - 1)),
+            "one over the limit must refuse"
+        );
     }
 
     #[test]
@@ -276,16 +372,37 @@ mod tests {
         // node's bytes start immediately after the newline.
         let mut payload = node("", -1, 1);
         payload.extend(node("a", 1, 0));
-        assert!(!cache_tree_exceeds_depth(&payload, 2));
+        assert!(is_fine(cache_tree_depth(&payload, 2)));
     }
 
+    /// The fail-closed fix: a payload that promises a child (`subtree_count:
+    /// 1`) but does not contain one is refused, not silently declared "not
+    /// too deep". Before this fix, a mid-chain parse failure returned `false`
+    /// ("not too deep") having only counted the levels it managed to read —
+    /// exactly the "found nothing" vs. "the check broke" confusion the module
+    /// doc warns about.
     #[test]
-    fn truncated_payload_is_reported_as_not_too_deep() {
-        // A node header with no bytes after it for the promised child: this
-        // module gives up rather than guess, leaving the malformed shape for
-        // `gix_index::State::from_bytes` to reject.
+    fn truncated_payload_is_unreadable_not_fine() {
         let payload = node("", 1, 1);
-        assert!(!cache_tree_exceeds_depth(&payload, 256));
+        assert!(is_unreadable(cache_tree_depth(&payload, 256)));
+    }
+
+    /// The same truncation, but positioned so that a short `limit` is
+    /// exceeded before the walk would ever need to read the missing child —
+    /// pinning down that the depth check still fires as `TooDeep`, not
+    /// `Unreadable`, when it can be decided first (the check runs
+    /// immediately after each push, before the next node is parsed).
+    #[test]
+    fn too_deep_is_reported_even_when_the_chain_is_truncated_further_in() {
+        let depth = 5;
+        let mut payload = Vec::new();
+        for i in 0..depth {
+            payload.extend(node(&format!("d{i}"), 1, 1)); // every node still promises one more child
+        }
+        // No more bytes after `depth` nodes, even though the last one promised
+        // a child — but a limit of `depth - 1` is exceeded before the walk
+        // would ever need to read that missing child.
+        assert!(is_too_deep(cache_tree_depth(&payload, depth - 1)));
     }
 
     #[test]
@@ -307,5 +424,23 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_be_bytes());
         bytes.extend_from_slice(&[0u8; HASH_LEN]);
         assert!(refuse_if_cache_tree_too_deep("status", &bytes).is_ok());
+    }
+
+    /// A dangling extension header — fewer than 8 bytes left, but not zero —
+    /// is refused, not read as "no more extensions". Exercises
+    /// `ExtensionsRegion::Extensions` reaching `next_extension` with data
+    /// that is short but nonempty, the fail-closed twin of the header-level
+    /// `NothingToCheck` cases above.
+    #[test]
+    fn a_dangling_extension_header_is_refused() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"DIRC");
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        // 3 bytes: not enough for a signature + size, and not empty either.
+        bytes.extend_from_slice(&[0u8; 3]);
+        bytes.extend_from_slice(&[0u8; HASH_LEN]);
+        let err = refuse_if_cache_tree_too_deep("status", &bytes).expect_err("must refuse");
+        assert!(matches!(err, GitError::IndexTreeUnreadable { .. }));
     }
 }

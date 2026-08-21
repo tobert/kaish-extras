@@ -303,6 +303,30 @@ pub enum GitError {
         limit: usize,
     },
 
+    /// The index's cache-tree could not be walked to completion by this
+    /// crate's own (non-recursive) depth check — not "too deep", just not
+    /// fully accounted for. Exit 1, same class as [`GitError::IndexTreeTooDeep`].
+    ///
+    /// This crate's depth check and gitoxide's real cache-tree decode are two
+    /// independently written readings of the same bytes; where they might
+    /// disagree is exactly where refusing matters. A bail here does not mean
+    /// gitoxide's decode would also stop — it might read on and recurse
+    /// arbitrarily deep on the very same bytes this crate could not finish
+    /// walking. So a bail is treated as "cannot certify this is safe," not
+    /// "probably fine": refused rather than handed to gitoxide unchecked. A
+    /// real index written by real git always parses to completion, so this
+    /// costs nothing legitimate.
+    #[error(
+        "git {operation}: this repository's index records cached directory \
+         info that {operation} could not read to the end — an index this \
+         build cannot fully account for is refused, not assumed safe. \
+         Nothing was read"
+    )]
+    IndexTreeUnreadable {
+        /// The verb that was asked for.
+        operation: &'static str,
+    },
+
     /// A `--path` argument used git pathspec magic this crate does not
     /// implement. Exit 2 — usage, and it names the unsupported syntax rather
     /// than silently matching nothing (B, "no git pathspec magic").
@@ -435,6 +459,7 @@ impl GitError {
             | GitError::BlobTooLarge { .. }
             | GitError::TreeTooDeep { .. }
             | GitError::IndexTreeTooDeep { .. }
+            | GitError::IndexTreeUnreadable { .. }
             | GitError::NoSuchRevision { .. }
             | GitError::AmbiguousRevision { .. } => 1,
             GitError::Usage { .. }
@@ -560,6 +585,7 @@ mod tests {
                 operation: "status",
                 limit: 256,
             },
+            GitError::IndexTreeUnreadable { operation: "status" },
             GitError::NoSuchRevision {
                 operation: "log",
                 rev: "nonesuch".into(),
