@@ -588,7 +588,7 @@ pub(crate) fn run(repo: &ReadRepo, opts: &LogOptions) -> Result<LogReport, GitEr
 /// The offset is the commit's, not the reader's: git records the timezone the
 /// author was in, and dropping it to UTC would lose a real fact about the
 /// commit that no other field carries. The instant is identical either way.
-fn signature(sig: &gix_actor::SignatureRef<'_>) -> Signature {
+pub(crate) fn signature(sig: &gix_actor::SignatureRef<'_>) -> Signature {
     Signature {
         name: sig.name.to_str_lossy().into_owned(),
         email: sig.email.to_str_lossy().into_owned(),
@@ -613,7 +613,7 @@ fn summary_of(message: &str) -> String {
     message.split('\n').next().unwrap_or_default().trim_end().to_string()
 }
 
-fn split_message(message: &str) -> (String, String) {
+pub(crate) fn split_message(message: &str) -> (String, String) {
     let mut lines = message.splitn(2, '\n');
     let summary = lines.next().unwrap_or_default().trim_end().to_string();
     let body = lines.next().unwrap_or_default().trim().to_string();

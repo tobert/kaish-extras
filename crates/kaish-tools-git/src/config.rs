@@ -60,11 +60,15 @@ pub enum Verb {
     Status,
     /// `git log` — commit history from a starting revision.
     Log,
+    /// `git ls` — a tree listing at a revision.
+    Ls,
+    /// `git show` — a commit, tag, tree, or blob at a revision.
+    Show,
 }
 
 impl Verb {
     /// Every verb this build knows how to execute.
-    pub const ALL: &'static [Verb] = &[Verb::Info, Verb::Status, Verb::Log];
+    pub const ALL: &'static [Verb] = &[Verb::Info, Verb::Status, Verb::Log, Verb::Ls, Verb::Show];
 
     /// The verb's argv spelling — the word an agent types.
     pub fn as_str(&self) -> &'static str {
@@ -72,13 +76,15 @@ impl Verb {
             Verb::Info => "info",
             Verb::Status => "status",
             Verb::Log => "log",
+            Verb::Ls => "ls",
+            Verb::Show => "show",
         }
     }
 
     /// The profile that grants this verb.
     pub fn profile(&self) -> Profile {
         match self {
-            Verb::Info | Verb::Status | Verb::Log => Profile::Read,
+            Verb::Info | Verb::Status | Verb::Log | Verb::Ls | Verb::Show => Profile::Read,
         }
     }
 }
@@ -270,6 +276,8 @@ mod tests {
             .without_verb(Verb::Info)
             .without_verb(Verb::Status)
             .without_verb(Verb::Log)
+            .without_verb(Verb::Ls)
+            .without_verb(Verb::Show)
             .with_tool_name("kgit")
             .with_limits(Limits {
                 max_rows: 5,

@@ -165,6 +165,14 @@ name = "log"
 path = "tests/log.rs"
 
 [[test]]
+name = "ls"
+path = "tests/ls.rs"
+
+[[test]]
+name = "show"
+path = "tests/show.rs"
+
+[[test]]
 name = "write_shaped_identifiers"
 path = "tests/write_shaped_identifiers.rs"
 

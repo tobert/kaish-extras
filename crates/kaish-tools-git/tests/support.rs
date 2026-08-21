@@ -290,6 +290,105 @@ impl RichRepo {
     }
 }
 
+/// A repository with a real tree to read: nested directories, a binary blob
+/// (NUL bytes and genuinely invalid UTF-8, for the `show` binary round-trip
+/// proof), a symlink, an annotated tag with its own tagger and message, and a
+/// linked worktree — everything `git ls` and `git show`'s tree/blob forms
+/// need an oracle for (architecture.md B.5, B.6).
+pub struct TreeRepo {
+    fixture: Fixture,
+    /// The main working tree's root.
+    pub root: PathBuf,
+    /// The linked worktree's root.
+    pub linked_worktree: PathBuf,
+}
+
+impl TreeRepo {
+    /// The binary fixture's bytes, exactly as written — NUL bytes plus bytes
+    /// that are not valid UTF-8 on their own (`0xFF`, `0xFE`, a lone
+    /// continuation byte `0x80`), so a round trip through this build's
+    /// `OutputPayload::Bytes` path is actually exercised rather than the
+    /// lossy `Text` one.
+    pub fn binary_bytes() -> Vec<u8> {
+        vec![0x00, 0x01, b'h', b'i', 0x00, 0xFF, 0xFE, 0x80, 0x00]
+    }
+
+    /// Build the fixture. Requires real git on PATH.
+    pub fn build() -> Self {
+        require_git();
+        let fixture = Fixture::empty();
+        let root = fixture.path("repo");
+        std::fs::create_dir_all(&root).expect("create repo dir");
+
+        git(&root, &["init", "--initial-branch=main", "--quiet"]);
+        git(&root, &["config", "gc.writeCommitGraph", "false"]);
+
+        write_file(&root, "README.md", "hello\n");
+        write_file(&root, "src/lib.rs", "pub fn one() -> u32 { 1 }\n");
+        write_file(&root, "src/nested/deep.rs", "pub fn deep() {}\n");
+        std::fs::write(root.join("data.bin"), Self::binary_bytes()).expect("write binary fixture");
+
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-m", "initial commit", "--quiet"]);
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("README.md", root.join("link.txt")).expect("create symlink");
+            git(&root, &["add", "link.txt"]);
+            git(&root, &["commit", "-m", "add a symlink", "--quiet"]);
+        }
+
+        // An annotated tag, with its own tagger identity and a real message —
+        // distinct from the commit's, so a test that read the commit's by
+        // mistake would fail rather than pass by coincidence.
+        let out = std::process::Command::new("git")
+            .args(["tag", "-a", "v1.0.0", "-m", "release notes\n\nbody line\n"])
+            .current_dir(&root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_AUTHOR_NAME", "Fixture Author")
+            .env("GIT_AUTHOR_EMAIL", "author@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Tag Tagger")
+            .env("GIT_COMMITTER_EMAIL", "tagger@example.invalid")
+            .env("GIT_AUTHOR_DATE", "2026-08-01T10:00:00+00:00")
+            .env("GIT_COMMITTER_DATE", "2026-08-01T10:00:00+00:00")
+            .output()
+            .expect("git tag -a");
+        assert!(out.status.success(), "git tag -a failed: {}", String::from_utf8_lossy(&out.stderr));
+
+        let linked_worktree = fixture.path("wt-side");
+        git(&root, &["branch", "side"]);
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                linked_worktree.to_str().expect("utf-8 path"),
+                "side",
+            ],
+        );
+
+        Self {
+            fixture,
+            root,
+            linked_worktree,
+        }
+    }
+
+    /// The fixture's scratch root — the parent of both working trees.
+    pub fn scratch(&self) -> PathBuf {
+        self.fixture.root()
+    }
+
+    /// The oid real git reports for `rev`, for oracle comparisons.
+    pub fn rev_parse(&self, rev: &str) -> String {
+        git(&self.root, &["rev-parse", rev])
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // The `.git` fingerprint (architecture.md D.4)
 // ═══════════════════════════════════════════════════════════════════════════

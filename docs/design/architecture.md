@@ -1448,3 +1448,22 @@ The notes' full text — including the reasoning that did not survive into the
 body, and the fork as it stood while it was open — is in this repo's git
 history: `git log --follow docs/design/architecture.md`, at and before the
 commit that added this section.
+
+**2026-08-21 — PR 4 (`git ls` + `git show`) landed; one deviation from the
+literal text above, kept deliberate rather than silent.** §B.6 spells `git
+ls`'s row `kind` in git's own object vocabulary, `blob|tree|commit(submodule)`.
+The implementation reuses [`EntryKind`](#b2-git-status) instead —
+`file`/`dir`/`symlink`/`commit`, the vocabulary `git status` already
+established — rather than introduce `blob`/`tree` as second names for "file"
+and "dir". AGENTS.md's "one term, one meaning" wins over matching git's own
+words verbatim: the surface must not call the same idea `dir` in one verb and
+`tree` in another. `EntryKind::Dir`'s doc comment, which said it is "only
+produced for a collapsed untracked directory" ([B.2](#b2-git-status)), is now
+false and was corrected — `ls` and `show`'s tree form both produce it for an
+ordinary subtree row in a non-recursive listing. Everything else in B.5/B.6
+landed as written: the revspec grammar's colon split happens in the caller
+(`show`/`ls`), not in `resolve_commit`, so `log` still refuses
+`<rev>:<path>` with the exact message that promises `show` supports it; bare
+`@` resolves to `HEAD` (closing the L4 backlog entry); and the blob form's
+cap declines the whole blob rather than serving a truncated prefix, matching
+`log --stat`'s existing blob-cap discipline in `verbs/log.rs`.

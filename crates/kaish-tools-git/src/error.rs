@@ -399,6 +399,41 @@ pub enum GitError {
         syntax: String,
     },
 
+    /// A `<rev>:<path>` navigation (`show`, `ls`) resolved `<rev>` to a blob,
+    /// which has no tree to descend into. Exit 1 — a git-level "no", the same
+    /// class as `NoSuchRevision`.
+    #[error(
+        "git {operation}: '{spec}' names a file (a blob), not a commit, tag or \
+         tree — there is no tree to read a path from. Repository '{repo}'"
+    )]
+    NotATree {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The revision half of the caller's spec, as spelled.
+        spec: String,
+        /// The repository the lookup ran against.
+        repo: PathBuf,
+    },
+
+    /// A `<rev>:<path>` navigation (`show`, `ls`) named a path this tree does
+    /// not contain. Exit 1 — a git-level "no", the same class git returns for
+    /// a path outside a tree ("path not tracked" in E.5's table).
+    #[error(
+        "git {operation}: '{path}' is not in the tree at '{rev}' in repository \
+         '{repo}' — no entry by that name, and no directory component of it \
+         either"
+    )]
+    NoSuchPath {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The revision half of the caller's spec, as spelled.
+        rev: String,
+        /// The path that was looked up, repo-relative.
+        path: String,
+        /// The repository the lookup ran against.
+        repo: PathBuf,
+    },
+
     /// `--patch` was asked of a build that has no unified-diff assembly. Exit 4
     /// — an environment/capability gap, the same class and code E.5 gives a
     /// `--patch` on a build without `textdiff`.
@@ -461,7 +496,9 @@ impl GitError {
             | GitError::IndexTreeTooDeep { .. }
             | GitError::IndexTreeUnreadable { .. }
             | GitError::NoSuchRevision { .. }
-            | GitError::AmbiguousRevision { .. } => 1,
+            | GitError::AmbiguousRevision { .. }
+            | GitError::NotATree { .. }
+            | GitError::NoSuchPath { .. } => 1,
             GitError::Usage { .. }
             | GitError::NoVerb { .. }
             | GitError::PathspecMagic { .. }
@@ -600,6 +637,17 @@ mod tests {
                 operation: "log",
                 spec: "A..B".into(),
                 syntax: "..".into(),
+            },
+            GitError::NotATree {
+                operation: "show",
+                spec: "HEAD:README.md".into(),
+                repo: repo.clone(),
+            },
+            GitError::NoSuchPath {
+                operation: "show",
+                rev: "HEAD".into(),
+                path: "nonesuch".into(),
+                repo: repo.clone(),
             },
             GitError::PatchNeedsTextdiff { operation: "log" },
         ];

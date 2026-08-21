@@ -30,15 +30,19 @@ const MOUNT: &str = "/mnt";
 
 /// Build the `ToolArgs` the kernel would, from an argv slice. A repeated
 /// `--flag value` accumulates into a list, which is how `--path` is passed
-/// more than once.
+/// more than once. A token with no leading `--` is a bare positional (a
+/// revision, git's own spelling for `git log main`), joining the verb word
+/// at the front of `positional`.
 fn tool_args(verb: &str, argv: &[&str]) -> ToolArgs {
     let mut args = ToolArgs::new();
     args.positional.push(Value::String(verb.to_string()));
     let mut i = 0;
     while i < argv.len() {
-        let token = argv[i]
-            .strip_prefix("--")
-            .unwrap_or_else(|| panic!("argv must use long flags: {}", argv[i]));
+        let Some(token) = argv[i].strip_prefix("--") else {
+            args.positional.push(Value::String(argv[i].to_string()));
+            i += 1;
+            continue;
+        };
         match argv.get(i + 1) {
             Some(value) if !value.starts_with("--") => {
                 // A repeated named argument is `Json(Array(Array))` — one inner
@@ -390,6 +394,50 @@ async fn unsupported_revspec_is_a_named_usage_error() {
             result.err
         );
     }
+}
+
+/// D2 (PR4 design notes): splitting the colon off for `show`/`ls` must not
+/// widen what `log` accepts. A bare-positional `HEAD:src/lib.rs` — git's own
+/// spelling for `git log main`, not `--rev` — still refuses with the exact
+/// message that promises `show` supports the form, since PR4 is where that
+/// promise comes true.
+#[tokio::test]
+async fn log_still_refuses_a_colon_path_bare_positional() {
+    let h = History::build();
+    let result = log(&h.scratch(), "/mnt/repo", &["HEAD:src/lib.rs"]).await;
+    assert_eq!(result.code, 2, "a colon path is still a usage error for log");
+    assert!(
+        result.err.contains("git show") && result.err.contains("git log"),
+        "the refusal must still promise show, not log: {}",
+        result.err
+    );
+}
+
+/// D3: `@` is accepted as an alias for `HEAD` wherever a revision is
+/// expected — `resolve_base` is shared by every verb that peels a revision
+/// to a commit, so `log` picks this up for free.
+#[tokio::test]
+async fn bare_at_sign_resolves_to_head() {
+    let h = History::build();
+    let head = h.rev_parse("HEAD");
+    let result = log(&h.scratch(), "/mnt/repo", &["--rev", "@", "--limit", "1"]).await;
+    assert_eq!(result.code, 0, "@ failed: {}", result.err);
+    assert_eq!(oids(&result)[0], head, "@ must resolve exactly like HEAD");
+
+    let result = log(&h.scratch(), "/mnt/repo", &["--rev", "@~1", "--limit", "1"]).await;
+    assert_eq!(result.code, 0, "@~1 failed: {}", result.err);
+    assert_eq!(oids(&result)[0], h.rev_parse("HEAD~1"), "@~1 must navigate like HEAD~1");
+}
+
+/// D3 also says what must NOT change: `@{...}` (reflog syntax) stays refused.
+/// The alias is a hard-coded substitution for the bare token `@` only, not a
+/// new door into the one revspec form this crate has always refused.
+#[tokio::test]
+async fn at_brace_syntax_is_still_refused() {
+    let h = History::build();
+    let result = log(&h.scratch(), "/mnt/repo", &["--rev", "@{upstream}"]).await;
+    assert_eq!(result.code, 2, "@{{...}} must still be refused");
+    assert!(result.err.contains("@{"), "the error names the form: {}", result.err);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

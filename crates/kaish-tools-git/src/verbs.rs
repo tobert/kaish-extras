@@ -12,4 +12,6 @@
 
 pub(crate) mod info;
 pub(crate) mod log;
+pub(crate) mod ls;
+pub(crate) mod show;
 pub(crate) mod status;
