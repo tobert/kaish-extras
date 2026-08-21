@@ -145,7 +145,16 @@ impl Repo {
 /// reduced to `(XY, new_path)` so both sides compare on the destination, and a
 /// trailing `/` on an untracked directory is dropped to match our path model.
 fn porcelain_oracle(repo_root: &Path) -> BTreeSet<(String, String)> {
-    let out = git(repo_root, &["status", "--porcelain=v1"]);
+    porcelain_oracle_args(repo_root, &[])
+}
+
+/// The same oracle with extra `git status` flags (`-uall`, `--ignored`, …) —
+/// how a non-default `--untracked`/`--ignored` fixture gets a real comparison
+/// instead of only the default-mode one.
+fn porcelain_oracle_args(repo_root: &Path, extra: &[&str]) -> BTreeSet<(String, String)> {
+    let mut argv = vec!["status", "--porcelain=v1"];
+    argv.extend_from_slice(extra);
+    let out = git(repo_root, &argv);
     let mut set = BTreeSet::new();
     for line in out.lines() {
         if line.len() < 3 {
@@ -356,10 +365,17 @@ async fn untracked_modes_differ() {
     repo.write("top.txt", "untracked top\n");
     repo.write("sub/deep.txt", "untracked deep\n");
 
-    let no = json(&status(&repo.mount(), "/mnt/repo", &["--untracked", "no", "--json"]).await);
+    let no_result = status(&repo.mount(), "/mnt/repo", &["--untracked", "no", "--json"]).await;
+    let no = json(&no_result);
     assert_eq!(no["totals"]["untracked"], 0, "-uno hides untracked: {no}");
+    assert_eq!(
+        our_oracle(&no_result),
+        porcelain_oracle_args(&repo.root, &["-uno"]),
+        "-uno against git's own -uno"
+    );
 
-    let normal = json(&status(&repo.mount(), "/mnt/repo", &["--untracked", "normal", "--json"]).await);
+    let normal_result = status(&repo.mount(), "/mnt/repo", &["--untracked", "normal", "--json"]).await;
+    let normal = json(&normal_result);
     let normal_paths: BTreeSet<String> = normal["entries"]
         .as_array()
         .unwrap()
@@ -375,8 +391,15 @@ async fn untracked_modes_differ() {
         !normal_paths.contains("sub/deep.txt"),
         "normal mode must not descend the untracked dir: {normal}"
     );
+    // Normal is git's own default, so the plain (no -u) oracle applies.
+    assert_eq!(
+        our_oracle(&normal_result),
+        porcelain_oracle(&repo.root),
+        "default --untracked normal against git's own default"
+    );
 
-    let all = json(&status(&repo.mount(), "/mnt/repo", &["--untracked", "all", "--json"]).await);
+    let all_result = status(&repo.mount(), "/mnt/repo", &["--untracked", "all", "--json"]).await;
+    let all = json(&all_result);
     let all_paths: BTreeSet<String> = all["entries"]
         .as_array()
         .unwrap()
@@ -392,6 +415,11 @@ async fn untracked_modes_differ() {
         !all_paths.contains("sub"),
         "all mode reports the files, not the collapsed dir: {all}"
     );
+    assert_eq!(
+        our_oracle(&all_result),
+        porcelain_oracle_args(&repo.root, &["-uall"]),
+        "-uall against git's own -uall"
+    );
 }
 
 /// `--ignored` toggles ignored entries, and an ignored file is never reported
@@ -405,7 +433,8 @@ async fn ignored_toggles_with_the_flag() {
     repo.write("debug.log", "ignored\n");
     repo.write("keep.txt", "untracked\n");
 
-    let off = json(&status(&repo.mount(), "/mnt/repo", &["--json"]).await);
+    let off_result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    let off = json(&off_result);
     assert_eq!(off["totals"]["ignored"], 0, "ignored are hidden by default: {off}");
     let off_paths: BTreeSet<String> = off["entries"]
         .as_array()
@@ -418,8 +447,14 @@ async fn ignored_toggles_with_the_flag() {
         !off_paths.contains("debug.log"),
         "an ignored file must not surface as untracked: {off}"
     );
+    assert_eq!(
+        our_oracle(&off_result),
+        porcelain_oracle(&repo.root),
+        "--ignored off against git's own default (ignored hidden)"
+    );
 
-    let on = json(&status(&repo.mount(), "/mnt/repo", &["--ignored", "--json"]).await);
+    let on_result = status(&repo.mount(), "/mnt/repo", &["--ignored", "--json"]).await;
+    let on = json(&on_result);
     assert_eq!(on["totals"]["ignored"], 1, "{on}");
     let ignored = on["entries"]
         .as_array()
@@ -429,6 +464,11 @@ async fn ignored_toggles_with_the_flag() {
         .unwrap_or_else(|| panic!("debug.log must appear with --ignored: {on}"));
     assert_eq!(ignored["index"], "ignored", "{ignored}");
     assert_eq!(ignored["worktree"], "ignored", "{ignored}");
+    assert_eq!(
+        our_oracle(&on_result),
+        porcelain_oracle_args(&repo.root, &["--ignored"]),
+        "--ignored against git's own --ignored"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -786,6 +826,7 @@ async fn deep_paths_and_symlink_leaves_still_work() {
     let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
     let j = json(&result);
     assert_eq!(j["clean"], true, "a committed deep tree must be clean: {j}");
+    assert_eq!(our_oracle(&result), porcelain_oracle(&repo.root), "clean deep tree");
 
     // And the leaf symlink is compared by its target, not by following it: a
     // retarget is a modification, never a read of the new target.
@@ -801,6 +842,11 @@ async fn deep_paths_and_symlink_leaves_still_work() {
         .find(|e| e["path"] == "link")
         .unwrap_or_else(|| panic!("expected a row for link: {j}"));
     assert_eq!(link["worktree"], "modified", "{link}");
+    assert_eq!(
+        our_oracle(&result),
+        porcelain_oracle(&repo.root),
+        "retargeted symlink leaf"
+    );
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -913,6 +959,7 @@ async fn a_deleted_tracked_file_under_a_live_directory_is_reported_deleted() {
         .find(|e| e["path"] == "dir/gone.txt")
         .unwrap_or_else(|| panic!("expected a row for dir/gone.txt: {j}"));
     assert_eq!(gone["worktree"], "deleted", "{gone}");
+    assert_eq!(our_oracle(&result), porcelain_oracle(&repo.root), "{j}");
 }
 
 /// Over-refusal guard (b): a tracked file whose whole parent directory was
@@ -937,6 +984,7 @@ async fn a_deleted_parent_directory_reports_its_entries_deleted() {
             .unwrap_or_else(|| panic!("expected a row for {path}: {j}"));
         assert_eq!(row["worktree"], "deleted", "{row}");
     }
+    assert_eq!(our_oracle(&result), porcelain_oracle(&repo.root), "{j}");
 }
 
 /// Over-refusal guard (c): a symlinked directory that stays *inside* the
@@ -972,6 +1020,12 @@ async fn an_internal_symlinked_directory_is_followed() {
     // The zero oid in the raw index never matches real content, so the
     // interesting assertion is that the file was *read and compared* at all.
     assert_eq!(row["worktree"], "modified", "{row}");
+    // No porcelain_oracle() comparison here, deliberately: this index also
+    // drops "link" and "real/x" from the index relative to HEAD, and git's
+    // *similarity*-based rename detector pairs the deleted "link" symlink
+    // with the added zero-oid "link/x" (`RD link/x`) — a already-documented,
+    // permanent divergence (`a_modified_then_moved_file_is_not_a_rename`),
+    // not something this fixture is about.
 }
 
 /// The leaf half of the same question: a tracked *symlink* whose target does
@@ -1123,6 +1177,7 @@ async fn a_tree_under_the_cap_is_read() {
         .find(|e| e["path"] == deep.as_str())
         .unwrap_or_else(|| panic!("expected a row for the deep leaf: {j}"));
     assert_eq!(row["worktree"], "deleted", "{row}");
+    assert_eq!(our_oracle(&result), porcelain_oracle(&repo.root), "{j}");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1212,4 +1267,310 @@ async fn a_deleted_symlink_does_not_pair_with_an_added_file() {
     assert_eq!(a["index"], "deleted", "{a}");
     let b = entries.iter().find(|e| e["path"] == "b").expect("b entry");
     assert_eq!(b["index"], "added", "{b}");
+    // Git's own rename detection also refuses to pair a symlink with a file,
+    // so the plain oracle applies without a rename-aware reduction.
+    assert_eq!(our_oracle(&result), porcelain_oracle(&repo.root), "{j}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// docs/issues.md C1, C2, C3 — the fixtures the divergences asked for
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Hand-write a version-2 index whose entries carry the given real blob oids,
+/// bypassing git's own path-uniqueness enforcement (the C1 fixture below
+/// needs it). This produces a shape ordinary `git add`/`update-index` refuses
+/// to write (both auto-remove the conflicting sibling; confirmed by probe),
+/// but that real git reads back the same as we do, since nothing on the read
+/// path rejects it as a malformed file.
+fn write_raw_index_with_oids(git_dir: &Path, entries: &[(&str, [u8; 20])]) {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"DIRC");
+    out.extend_from_slice(&2u32.to_be_bytes());
+    out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    for (path, oid) in entries {
+        let start = out.len();
+        out.extend_from_slice(&[0u8; 24]);
+        out.extend_from_slice(&0o100644u32.to_be_bytes());
+        out.extend_from_slice(&[0u8; 12]);
+        out.extend_from_slice(oid);
+        let flags = (path.len() as u16).min(0x0fff);
+        out.extend_from_slice(&flags.to_be_bytes());
+        out.extend_from_slice(path.as_bytes());
+        let padded = (out.len() - start + 8) & !7;
+        out.resize(start + padded, 0);
+    }
+    out.extend_from_slice(&[0u8; 20]);
+    std::fs::write(git_dir.join("index"), out).expect("write raw index");
+}
+
+fn hex_to_oid(hex: &str) -> [u8; 20] {
+    let mut oid = [0u8; 20];
+    for i in 0..20 {
+        oid[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect("hex byte");
+    }
+    oid
+}
+
+/// C1 investigation: does the staged half ever report `A` where real git
+/// reports `T` for a file↔dir typechange, as docs/issues.md's C1 hypothesizes?
+///
+/// Three constructions were tried against real git as the oracle, none of
+/// which git disagreed with us on:
+///
+/// 1. A real directory replacing a tracked file, staged with plain `git add`
+///    (`b: repo.write` + `git add foo/bar.txt` after removing the tracked
+///    `foo` file) — git auto-stages the conflicting delete and reports
+///    `D foo` + `A foo/bar.txt`, matching us exactly.
+/// 2. The mirror direction (a tracked directory replaced by a single file) —
+///    same result, `A foo` + `D foo/a.txt`, matching.
+/// 3. This test: a hand-written index (bypassing `git add`/`update-index`,
+///    which both auto-drop the conflicting sibling — confirmed by probe) that
+///    holds `foo` **and** `foo/a.txt` as siblings at once, a shape only a
+///    repository not written by ordinary git can produce. Real git still
+///    reads it: `git ls-files -s` shows both entries, and `git status
+///    --porcelain` folds the pair into a single `AD foo` line with no
+///    separate `foo/a.txt` row.
+///
+/// In every construction, git's own diff machinery treats the vanished
+/// directory prefix `foo` exactly the way `flatten_head_tree` does — as
+/// absent from the old side, not as a same-path type change — so it reports
+/// `A`, matching us on the staged half. The one real divergence in this
+/// fixture is C2 (the *worktree* half: we say `typechange`, git says `D`),
+/// asserted separately below. C1 as literally worded ("git reports `T`")
+/// could not be reproduced against real git in these three tries; the doc
+/// entry was written before a fixture existed (its own text says so), and
+/// this is the fixture. Recommend closing or rewording C1 rather than
+/// treating it as still open.
+#[tokio::test]
+async fn c1_a_staged_sibling_index_does_not_make_git_report_typechange() {
+    let repo = Repo::init("repo");
+    repo.write("foo/a.txt", "content\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init", "--quiet"]);
+
+    let a_oid = hex_to_oid(repo.git(&["rev-parse", "HEAD:foo/a.txt"]).trim());
+    let foo_oid = {
+        let out = Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(&repo.root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin")
+                    .write_all(b"a new foo blob\n")?;
+                child.wait_with_output()
+            })
+            .expect("hash-object -w --stdin");
+        assert!(out.status.success(), "{:?}", out);
+        hex_to_oid(String::from_utf8_lossy(&out.stdout).trim())
+    };
+
+    // Sibling entries "foo" and "foo/a.txt" in one index — real git will not
+    // write this (both `git add` and `git update-index --index-info` drop the
+    // conflicting sibling instead, confirmed by probe), but it does read it.
+    write_raw_index_with_oids(&repo.root.join(".git"), &[("foo", foo_oid), ("foo/a.txt", a_oid)]);
+
+    // Sanity check on the oracle itself: git really does read this index and
+    // really does fold it to one `AD foo` line, not a `T`.
+    let git_lines = git(&repo.root, &["status", "--porcelain=v1"]);
+    assert_eq!(
+        git_lines, "AD foo",
+        "the oracle fixture must produce the documented shape, or this test \
+         proves nothing about C1"
+    );
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    let j = json(&result);
+    let entries = j["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 1, "{j}");
+    let foo = &entries[0];
+    assert_eq!(foo["path"], "foo", "{j}");
+    // The staged half: `A`, matching git's `A` in `AD foo` — no C1 divergence
+    // found. (The worktree half is C2, asserted separately.)
+    assert_eq!(foo["index"], "added", "{j}");
+}
+
+/// C2 — unstaged half: a tracked file replaced by a directory reports
+/// `Typechange` in `--untracked all` mode, where git reports ` D` for the file
+/// plus `??` for the new directory's contents.
+///
+/// Default (`--untracked normal`) mode hides the divergence: git's own normal
+/// mode does not show the new directory's content either (confirmed by
+/// probe — plain `git status` here reports only ` D foo`, nothing about
+/// `foo/bar.txt`), so the two agree by coincidence in that mode. `-uall`
+/// forces both sides to say what they actually know, and that is where they
+/// part: `unstage_the_worktree` (status.rs) sees a directory where the index
+/// expects a blob and reports the path itself as `Typechange`, then the
+/// untracked walk (`walk_untracked_and_ignored`) never descends into `foo`
+/// because `foo` is already a tracked path — so `foo/bar.txt` is never
+/// reported at all.
+#[tokio::test]
+async fn c2_a_file_replaced_by_a_directory_diverges_from_git_in_all_mode() {
+    let repo = Repo::init("repo");
+    repo.write("foo", "content\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init", "--quiet"]);
+    std::fs::remove_file(repo.root.join("foo")).expect("remove tracked file");
+    std::fs::create_dir_all(repo.root.join("foo")).expect("create dir foo");
+    repo.write("foo/bar.txt", "inner\n");
+
+    let theirs = porcelain_oracle_args(&repo.root, &["-uall"]);
+    assert_eq!(
+        theirs,
+        BTreeSet::from([
+            (" D".to_string(), "foo".to_string()),
+            ("??".to_string(), "foo/bar.txt".to_string()),
+        ]),
+        "the oracle fixture must produce the documented shape, or this test \
+         proves nothing about C2: {theirs:?}"
+    );
+
+    let result = status_with(
+        GitConfig::read_only(),
+        &repo.mount(),
+        "/mnt/repo",
+        &["--untracked", "all", "--json"],
+    )
+    .await;
+    let ours = our_oracle(&result);
+
+    // docs/issues.md C2, confirmed: we report only the typechange on `foo`
+    // and never `foo/bar.txt` at all, where git reports both. Left failing —
+    // this is the fix's target, not a test-side mistake.
+    assert_eq!(
+        ours, theirs,
+        "C2: our report ({ours:?}) diverges from git's ({theirs:?}) for a \
+         file replaced by a directory"
+    );
+}
+
+/// C3 — an ignored directory that contains a tracked file: we emit `!!` for
+/// the directory and never descend it; git descends (tracked wins over
+/// ignore), reports the tracked file's real state, and never emits the
+/// directory itself.
+#[tokio::test]
+async fn c3_an_ignored_directory_holding_a_tracked_file_diverges_from_git() {
+    let repo = Repo::init("repo");
+    repo.write("keep.txt", "k\n");
+    repo.write("sub/tracked.txt", "t\n");
+    repo.git(&["add", "keep.txt", "sub/tracked.txt"]);
+    repo.git(&["commit", "-m", "init", "--quiet"]);
+    repo.write(".gitignore", "sub/\n");
+    repo.write("sub/untracked.txt", "u\n");
+
+    let theirs = porcelain_oracle_args(&repo.root, &["--ignored"]);
+    assert_eq!(
+        theirs,
+        BTreeSet::from([
+            ("??".to_string(), ".gitignore".to_string()),
+            ("!!".to_string(), "sub/untracked.txt".to_string()),
+        ]),
+        "the oracle fixture must produce the documented shape, or this test \
+         proves nothing about C3: {theirs:?}"
+    );
+
+    let result = status_with(
+        GitConfig::read_only(),
+        &repo.mount(),
+        "/mnt/repo",
+        &["--ignored", "--json"],
+    )
+    .await;
+    let ours = our_oracle(&result);
+
+    // docs/issues.md C3, confirmed: we emit `!! sub` for the whole directory
+    // and never descend into it, so `sub/tracked.txt` (unmodified, correctly
+    // silent) and `sub/untracked.txt` (wrongly folded into the directory row)
+    // never get git's per-path answer. Left failing — this pins the fix's
+    // target, not a test-side mistake.
+    assert_eq!(
+        ours, theirs,
+        "C3: our report ({ours:?}) diverges from git's ({theirs:?}) for an \
+         ignored directory holding a tracked file"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// C7, C8 — found by big_repo.rs against a real checkout, then minimized here
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// C7 (docs/issues.md): an untracked directory with nothing inside it is
+/// reported as `??`; git never reports an empty directory at all, because git
+/// has no concept of a directory as a trackable thing — only blobs are
+/// entries, so a directory with zero of them has nothing to report.
+///
+/// Found against a real repository (`crates/kaish-vfs/tests`, genuinely
+/// empty, in `KAISH_GIT_BIG_REPO=$HOME/src/kaish`), then minimized to this
+/// fixture. Left failing — this pins the fix's target.
+#[tokio::test]
+async fn c7_an_empty_untracked_directory_is_reported_where_git_reports_nothing() {
+    let repo = Repo::init("repo");
+    repo.write("tracked.txt", "t\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init", "--quiet"]);
+    std::fs::create_dir_all(repo.root.join("empty_dir")).expect("create empty dir");
+
+    let theirs = porcelain_oracle(&repo.root);
+    assert_eq!(
+        theirs,
+        BTreeSet::new(),
+        "the oracle fixture must produce the documented shape (nothing at \
+         all), or this test proves nothing about C7: {theirs:?}"
+    );
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    let ours = our_oracle(&result);
+    assert_eq!(
+        ours, theirs,
+        "C7: our report ({ours:?}) diverges from git's ({theirs:?}) for an \
+         empty untracked directory"
+    );
+}
+
+/// C8 (docs/issues.md): a directory that was never tracked, whose own nested
+/// `.gitignore` ignores everything inside it (including that `.gitignore`
+/// file itself), is reported as `??` (untracked); git reports nothing at all
+/// by default (and `!!` for its contents, never for the directory itself,
+/// under `--ignored`) — every path underneath is ignored, so there is nothing
+/// left inside the directory for the untracked-dir collapse to be *about*.
+///
+/// Found against a real repository (`.crush/`, a tool cache directory whose
+/// own `.gitignore` reads `*`, in `KAISH_GIT_BIG_REPO=$HOME/src/kaish`), then
+/// minimized to this fixture. Distinct from C3: C3 is a tracked file *inside*
+/// an ignored directory; this is a wholly-untracked directory that is not
+/// itself named by any ignore rule but whose entire contents are. Left
+/// failing — this pins the fix's target.
+#[tokio::test]
+async fn c8_a_directory_wholly_ignored_by_its_own_nested_gitignore_is_reported_untracked() {
+    let repo = Repo::init("repo");
+    repo.write("tracked.txt", "t\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init", "--quiet"]);
+    repo.write("sub/.gitignore", "*\n");
+    repo.write("sub/data.db", "stuff\n");
+
+    let theirs = porcelain_oracle(&repo.root);
+    assert_eq!(
+        theirs,
+        BTreeSet::new(),
+        "the oracle fixture must produce the documented shape (nothing at \
+         all under the default view), or this test proves nothing about C8: \
+         {theirs:?}"
+    );
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    let ours = our_oracle(&result);
+    assert_eq!(
+        ours, theirs,
+        "C8: our report ({ours:?}) diverges from git's ({theirs:?}) for a \
+         directory wholly ignored by its own nested .gitignore"
+    );
 }
