@@ -281,7 +281,20 @@ bespoke host-side tool costs several.
 under musl with a Rust toolchain and nothing else. Gate it the way
 `kaish-tools-git` gates spawn machinery: a CI tripwire over `cargo tree`
 asserting no `cc` or cmake build script entered the graph, matching kaibo's
-own aws-lc/openssl exclusion.
+own aws-lc/openssl exclusion. It belongs in the bundle's PR 0, the way git's
+tripwires did.
+
+**Give that tripwire a negative control, and treat that as part of building
+it.** A check of this shape has a specific failure mode: "the search found
+nothing" and "the command errored, so the search found nothing" are the same
+exit 0, so the gate goes green while proving nothing. kaibo's musl release
+gate failed exactly this way — it printed "Failed to find zig", exited 0, and
+a green check meant nothing for months. kaish's 0.14.0 approvals-ledger probe
+was the same shape: a probe of `/v/approvals` reported "not found" whether or
+not the feature worked, so the all-clear was empty. The fix is a case where
+the check provably reports differently when its subject is broken — assert a
+crate that IS in the graph is found, alongside asserting the forbidden ones
+are not, so a broken invocation fails the job instead of passing it.
 
 Operations, in the order they pay rent:
 
