@@ -192,7 +192,15 @@ pub(crate) struct LogOptions {
 /// The same reasoning as the status walk's cap: an oid cycle is hash-hard, but
 /// a cheaply-built deep tree would overflow the stack. Loud error, not a
 /// silent truncation.
-const MAX_TREE_DEPTH: usize = 64;
+///
+/// A different bound from `verbs::status::MAX_STATUS_TREE_DEPTH` (256) and
+/// `index_depth_guard`'s reuse of it, deliberately, not an oversight: this
+/// walk and that one measure different call sites with different frame
+/// sizes, so there is no single "the" tree-depth bound in this crate. Named
+/// `_STAT_` rather than a bare `MAX_TREE_DEPTH` so the two cannot be misread
+/// as the same constant (they collided by name, not by value, until this
+/// rename).
+const MAX_STAT_TREE_DEPTH: usize = 64;
 
 /// How many commits the walk may examine before giving up looking for matches.
 ///
@@ -658,10 +666,10 @@ fn flatten_tree(
     // before any cap could fire.
     let mut stack: Vec<(ObjectId, String, usize)> = vec![(tree, String::new(), 0)];
     while let Some((oid, prefix, depth)) = stack.pop() {
-        if depth > MAX_TREE_DEPTH {
+        if depth > MAX_STAT_TREE_DEPTH {
             return Err(GitError::TreeTooDeep {
                 operation: OP,
-                limit: MAX_TREE_DEPTH,
+                limit: MAX_STAT_TREE_DEPTH,
             });
         }
         let mut buf = Vec::new();
