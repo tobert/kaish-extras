@@ -103,27 +103,61 @@ fixture asserted against real `git status --porcelain` before fixing.
 
 ## Upstream
 
-- **R4 — unbounded recursion decoding the index cache-tree (gix-index).**
+- **R4 — unbounded recursion decoding the index cache-tree (gix-index),
+  guarded locally; upstream-only from here.**
   `gix_index::extension::tree::decode::one_recursive` (gix-index 0.54.0,
-  `src/extension/tree/decode.rs:36`) recurses once per subtree of the `TREE`
-  extension with no depth bound, so a `.git/index` carrying a deep enough
-  cache-tree aborts the process with a stack overflow. Confirmed by probe
-  while capping our own tree walk: a 1200-level chain, which `git write-tree`
-  produces on request, overflows a 2 MiB thread inside `ReadRepo::open_index`
-  — before any kaish-git code sees a tree. Backtrace is ~1200 frames of
-  `one_recursive`.
+  `src/extension/tree/decode.rs:36`) still recurses once per subtree of the
+  `TREE` extension with no depth bound of its own — a `.git/index` carrying a
+  deep enough cache-tree would abort the process with a stack overflow inside
+  that call, before any kaish-git code runs. Confirmed by probe: a 1200-level
+  chain, which `git write-tree` produces on request, overflows a 2 MiB thread
+  in a debug build (a release build's smaller frames do not overflow at that
+  depth — the guard below does not rely on that, but it is why the regression
+  test is debug-build-only). Backtrace is ~1200 frames of `one_recursive`.
 
-  We cannot close this from here. `gix_index::decode::Options` carries no way
-  to skip or bound the extension (`thread_limit`,
-  `min_extension_block_in_bytes_for_threading`, `expected_checksum`,
-  `alloc_limit_bytes`), and `alloc_limit_bytes` does not help: it bounds the
-  per-node subtree allocation, while the hostile shape is one subtree per
-  level. Our own `MAX_TREE_DEPTH` bounds `flatten_subtree` and nothing else,
-  so `a_tree_deeper_than_the_cap_is_refused` deletes the index to keep its
-  assertion pointed at our recursion.
+  `gix_index::decode::Options` still carries no way to skip or bound the
+  extension (`thread_limit`, `min_extension_block_in_bytes_for_threading`,
+  `expected_checksum`, `alloc_limit_bytes`), and `alloc_limit_bytes` does not
+  help: it bounds the per-node subtree allocation, while the hostile shape is
+  one subtree per level. That part of the analysis stands — this crate still
+  cannot make gitoxide itself bound the recursion.
 
-  Next step is a gitoxide issue plus a depth limit in `one_recursive`. Until
-  then a hostile index can crash any embedder of this crate.
+  **Closed for this crate** (not just raised): `ReadRepo::open_index`
+  (`crates/kaish-tools-git/src/repo.rs`) now calls
+  `index_depth_guard::refuse_if_cache_tree_too_deep` on the raw index bytes
+  *before* `gix_index::State::from_bytes` ever sees them. The guard
+  (`crates/kaish-tools-git/src/index_depth_guard.rs`) re-derives just enough
+  of the on-disk index format — the fixed header, the variable-length entry
+  records, and the `TREE` extension's own node encoding — to walk the
+  cache-tree's nesting with an explicit heap stack (a `Vec`) instead of
+  recursion, and refuses past `verbs::status::MAX_TREE_DEPTH` (256, the same
+  bound `flatten_subtree` uses) with `GitError::IndexTreeTooDeep` (exit 1)
+  before any recursive decode runs. Because the walk is iterative, no input
+  can make it recurse — this is a real bound, not a bigger stack raising the
+  threshold. It is deliberately not a validator: an index shape the guard
+  cannot account for (an unrecognized version, a truncated record) is left
+  for `gix_index::State::from_bytes` to reject on its own, which it already
+  does safely, without recursing, for anything short of a genuinely deep
+  cache-tree.
+
+  `a_tree_deeper_than_the_cap_is_refused` (`tests/status.rs`) still deletes
+  the index to keep its assertion pointed at our own `flatten_subtree`
+  recursion rather than the index path. The index path has its own coverage
+  now: `a_hostile_cache_tree_in_the_index_is_refused_not_crashed` builds a
+  1200-level cache-tree *without* deleting the index, and — because a stack
+  overflow aborts the whole test process, not just one test — runs the
+  guarded decode in a child process (this same test binary, re-invoked to run
+  only that one test on a thread with the 2 MiB stack the probe measured) and
+  asserts on the child's exit status: termination by signal is treated as R4
+  regressing, a clean exit 1 naming the depth limit is the guard working.
+
+  What is left is upstream-only: gitoxide's own `one_recursive` still has no
+  depth bound, so anything that calls `gix_index::State::from_bytes` directly
+  — outside this crate's guard — remains exposed. A gitoxide issue (a depth
+  limit in `one_recursive`, or a way to skip the `TREE` extension via
+  `decode::Options`) is still worth filing upstream; this repo's contribution
+  guidance reserves filing to repos we don't own for Amy personally, so that
+  step is hers, not an agent's.
 
 ## curl — deferred (see docs/curl.md)
 
