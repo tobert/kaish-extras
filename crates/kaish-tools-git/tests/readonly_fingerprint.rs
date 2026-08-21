@@ -118,31 +118,113 @@ const VERB_MATRIX: &[(&str, &[&[&str]])] = &[
             &["--repo", "/mnt/wt-side", "--json"],
         ],
     ),
+    (
+        "ls",
+        &[
+            // Bare, from the repository root: the tree walk over HEAD's root.
+            &[],
+            // Structured output, a different rendering path.
+            &["--json"],
+            // A bare positional revision and a subdirectory path — position,
+            // not content, decides which operand is which.
+            &["HEAD", "src", "--json"],
+            // Recursive expansion, which omits directory rows and descends.
+            &["HEAD", "src", "--recursive", "--json"],
+            // A path naming a single file — the one-row, non-tree case.
+            &["HEAD", "README.md", "--json"],
+            // A tag revision, peeled to its commit's tree.
+            &["v0.1.0", "--json"],
+            // A hard limit, the truncation-adjacent path.
+            &["--limit", "1"],
+            // A linked worktree has its own HEAD and tree to walk.
+            &["--repo", "/mnt/wt-side", "--json"],
+        ],
+    ),
+    (
+        "show",
+        &[
+            // Bare: HEAD's own commit metadata.
+            &[],
+            &["--json"],
+            // The flagship spelling — a blob at a revision, no checkout.
+            &["HEAD:src/lib.rs"],
+            &["HEAD:src/lib.rs", "--json"],
+            // A tree form, the same row shape `ls` reports.
+            &["HEAD:src", "--json"],
+            // An annotated tag — its own metadata, then the tagged commit.
+            &["v0.1.0", "--json"],
+            // A hard limit on the tree form.
+            &["HEAD:", "--limit", "1", "--json"],
+            // A linked worktree resolves its own HEAD.
+            &["--repo", "/mnt/wt-side", "--json"],
+        ],
+    ),
+];
+
+/// Flags whose next argv token is the flag's *value*, never a bare
+/// positional. `ls` and `show`'s flagship spellings are bare positionals
+/// (`show HEAD:src/lib.rs`, `ls HEAD src`), so this harness can no longer
+/// assume every non-`--` token is a value — it has no `ParamSchema` to
+/// consult the way the kernel's real binder does, so the value-taking flags
+/// are named here explicitly instead.
+///
+/// Adding a new value-taking flag anywhere in [`VERB_MATRIX`] means adding
+/// its name here too, or `tool_args` panics rather than silently mis-bind it
+/// as a bare positional.
+const VALUE_FLAGS: &[&str] = &["repo", "rev", "limit", "path", "since", "until", "author", "untracked"];
+
+/// Flags that never take a value — a bare `--flag`. Every long flag used
+/// anywhere in [`VERB_MATRIX`] must be classified in exactly one of this list
+/// or [`VALUE_FLAGS`].
+const BOOL_FLAGS: &[&str] = &[
+    "json",
+    "ignored",
+    "merges",
+    "no-merges",
+    "first-parent",
+    "body",
+    "stat",
+    "patch",
+    "recursive",
 ];
 
 /// Split an argv slice into the `ToolArgs` the kernel would have built.
 ///
 /// Mirrors the kernel's binding closely enough for the verbs shipped so far:
-/// `--flag value` becomes a named argument, a lone `--flag` becomes a flag,
-/// and the verb word leads the positionals.
+/// `--flag value` becomes a named argument when `flag` is in
+/// [`VALUE_FLAGS`], a lone `--flag` becomes a flag when it is in
+/// [`BOOL_FLAGS`], and a `--flag` in neither list is a fail-loud bug in the
+/// matrix rather than a guess. Any token that is not itself a flag (and was
+/// not just consumed as one's value) is a bare positional, joining the verb
+/// word at the front of `positional` — `ls`/`show`'s revision and path
+/// operands, and `log`'s bare-positional revision, all take this path.
 fn tool_args(verb: &str, argv: &[&str]) -> ToolArgs {
     let mut args = ToolArgs::new();
     args.positional.push(Value::String(verb.to_string()));
     let mut i = 0;
     while i < argv.len() {
-        let token = argv[i]
-            .strip_prefix("--")
-            .unwrap_or_else(|| panic!("matrix argv must use long flags: {}", argv[i]));
-        match argv.get(i + 1) {
-            Some(value) if !value.starts_with("--") => {
-                args.named
-                    .insert(token.to_string(), Value::String((*value).to_string()));
-                i += 2;
-            }
-            _ => {
-                args.flags.insert(token.to_string());
-                i += 1;
-            }
+        let token = argv[i];
+        let Some(name) = token.strip_prefix("--") else {
+            args.positional.push(Value::String(token.to_string()));
+            i += 1;
+            continue;
+        };
+        if VALUE_FLAGS.contains(&name) {
+            let value = argv
+                .get(i + 1)
+                .unwrap_or_else(|| panic!("matrix flag '--{name}' takes a value, but none followed in {argv:?}"));
+            args.named
+                .insert(name.to_string(), Value::String((*value).to_string()));
+            i += 2;
+        } else if BOOL_FLAGS.contains(&name) {
+            args.flags.insert(name.to_string());
+            i += 1;
+        } else {
+            panic!(
+                "matrix flag '--{name}' is not in VALUE_FLAGS or BOOL_FLAGS — \
+                 classify it as one or the other so this harness binds it the \
+                 way the kernel's real binder would"
+            );
         }
     }
     args
