@@ -169,3 +169,9 @@ path = "tests/write_shaped_identifiers.rs"
 [[test]]
 name = "operands"
 path = "tests/operands.rs"
+
+# Gated on KAISH_GIT_BIG_REPO (unset: prints why it is skipping and passes).
+# See tests/big_repo.rs's module doc.
+[[test]]
+name = "big_repo"
+path = "tests/big_repo.rs"
