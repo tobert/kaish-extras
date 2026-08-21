@@ -78,6 +78,15 @@ pub fn git(cwd: &Path, args: &[&str]) -> String {
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        // `GIT_CONFIG_GLOBAL=/dev/null` stops `~/.gitconfig`, but git's ignore
+        // handling is not a config setting: absent an explicit
+        // `core.excludesFile`, git unconditionally falls back to
+        // `$XDG_CONFIG_HOME/git/ignore`. On a machine where that file lists
+        // patterns (found via `big_repo.rs` against a real checkout — the
+        // oracle silently hid an untracked path the operator's personal
+        // ignore file matched), the "hermetic" oracle was reading a file nothing
+        // here ever wrote. Pointing `XDG_CONFIG_HOME` off to nowhere closes it.
+        .env("XDG_CONFIG_HOME", "/nonexistent-kaish-tools-git-hermetic-xdg")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_AUTHOR_NAME", "Fixture Author")
         .env("GIT_AUTHOR_EMAIL", "author@example.invalid")
@@ -94,7 +103,13 @@ pub fn git(cwd: &Path, args: &[&str]) -> String {
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    // `trim_end` only: `git status --porcelain` lines can legitimately start
+    // with a space (an unstaged-only change is ` M`/` D`/…), and a single-line
+    // result beginning with one is real content, not incidental whitespace. A
+    // full `trim()` here silently ate that leading space and shifted every
+    // column of the one line by one — invisible whenever a fixture also
+    // produced a second line, and wrong whenever it did not.
+    String::from_utf8_lossy(&out.stdout).trim_end().to_string()
 }
 
 /// Run `git` in `cwd` with the same hermetic environment as [`git`], but with
@@ -112,6 +127,15 @@ pub fn git_as(cwd: &Path, author: (&str, &str), date: &str, args: &[&str]) -> St
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        // `GIT_CONFIG_GLOBAL=/dev/null` stops `~/.gitconfig`, but git's ignore
+        // handling is not a config setting: absent an explicit
+        // `core.excludesFile`, git unconditionally falls back to
+        // `$XDG_CONFIG_HOME/git/ignore`. On a machine where that file lists
+        // patterns (found via `big_repo.rs` against a real checkout — the
+        // oracle silently hid an untracked path the operator's personal
+        // ignore file matched), the "hermetic" oracle was reading a file nothing
+        // here ever wrote. Pointing `XDG_CONFIG_HOME` off to nowhere closes it.
+        .env("XDG_CONFIG_HOME", "/nonexistent-kaish-tools-git-hermetic-xdg")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_AUTHOR_NAME", name)
         .env("GIT_AUTHOR_EMAIL", email)
@@ -128,7 +152,13 @@ pub fn git_as(cwd: &Path, author: (&str, &str), date: &str, args: &[&str]) -> St
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    // `trim_end` only: `git status --porcelain` lines can legitimately start
+    // with a space (an unstaged-only change is ` M`/` D`/…), and a single-line
+    // result beginning with one is real content, not incidental whitespace. A
+    // full `trim()` here silently ate that leading space and shifted every
+    // column of the one line by one — invisible whenever a fixture also
+    // produced a second line, and wrong whenever it did not.
+    String::from_utf8_lossy(&out.stdout).trim_end().to_string()
 }
 
 /// Whether real git is on PATH.

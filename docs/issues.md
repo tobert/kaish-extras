@@ -10,14 +10,63 @@ issue because someone outside the repo needs the link.
 Found by the PR #23 cross-model review (deepseek-v4-pro C-series); each needs a
 fixture asserted against real `git status --porcelain` before fixing.
 
-- **C1 — staged half, file↔dir typechange reports `A` not `T`.** HEAD tree
-  entries are dropped early in `stage_the_index` (status.rs), so the
-  comparison never sees the old class.
-- **C2 — unstaged half, file→dir reports `Typechange`.** git reports ` D` for
-  the file plus `??` for the directory's contents.
-- **C3 — ignored directory containing tracked files.** Emitted as `!!` and not
-  descended; git descends (tracked wins over ignore), reports the tracked
-  files' states, and never emits the directory itself.
+- **C1 — staged half, file↔dir typechange: investigated, not reproduced.**
+  The hypothesis was that a file↔dir typechange between HEAD and the index
+  reports `A` where git reports `T`. Three constructions were tried against
+  real git as the oracle (`status.rs`'s
+  `c1_a_staged_sibling_index_does_not_make_git_report_typechange`, plus two
+  discarded ones using plain `git add`/`update-index`, both of which those
+  tools refuse to write as a same-path pair): a real directory replacing a
+  tracked file staged with plain `git add`, the mirror direction, and a
+  hand-written index holding `foo` and `foo/a.txt` as siblings at once (a
+  shape ordinary git tooling will not write, but reads back the same as we
+  do). In every case git's own diff machinery treats the vanished directory
+  prefix as *absent* from the old side, not a same-path type change, and
+  reports `A` — agreeing with us. No fixture produced a `T` from real git.
+  Recommend closing this entry rather than carrying it as still open; the
+  worktree half (C2) is the real divergence in this area.
+- **C2 — unstaged half, file→dir reports `Typechange`, confirmed, and now
+  characterized by a named test.** Under `--untracked all`, git reports ` D`
+  for the file plus `??` for the directory's contents; we report only
+  `Typechange` on the file's path and never descend into the new directory at
+  all (`walk_untracked_and_ignored` skips it because the path is already
+  tracked). Default (`normal`) mode does not show the divergence — git's own
+  normal mode is equally silent about the new directory's content there.
+  Pinned by
+  `status.rs::c2_a_file_replaced_by_a_directory_diverges_from_git_in_all_mode`,
+  which asserts our exact output against a live git oracle; it goes red the
+  moment either side's behavior changes.
+- **C3 — ignored directory containing tracked files, confirmed, and now
+  characterized by a named test.** Emitted as `!!` and not descended; git
+  descends (tracked wins over ignore), reports the tracked files' states, and
+  never emits the directory itself. Pinned by
+  `status.rs::c3_an_ignored_directory_holding_a_tracked_file_diverges_from_git`,
+  which asserts our exact output against a live git oracle; it goes red the
+  moment either side's behavior changes.
+- **C7 — an empty untracked directory is reported as `??`, confirmed, and now
+  characterized by a named test.** Git has no concept of a directory as a
+  trackable thing — only blobs are entries — so a directory with nothing
+  inside it produces no output at all. We report it as `??`. Found against a
+  real repository (`crates/kaish-vfs/tests` in a real `kaish` checkout, via
+  `big_repo.rs`), minimized and pinned by
+  `status.rs::c7_an_empty_untracked_directory_is_reported_where_git_reports_nothing`,
+  which asserts our exact output against a live git oracle; it goes red the
+  moment either side's behavior changes.
+- **C8 — a directory wholly ignored by its own nested `.gitignore` is reported
+  as `??`, confirmed, and now characterized by a named test.** A never-tracked
+  directory whose own `.gitignore` ignores everything under it (that
+  `.gitignore` file included) has nothing left inside that qualifies as
+  untracked-and-not-ignored, so git reports nothing under the default view
+  (and `!!` only for its contents, never the directory, under `--ignored`). We
+  report the directory itself as `??`. Distinct from C3: C3 is a *tracked*
+  file inside an ignored directory; this is a wholly-untracked directory whose
+  *contents*, not the directory itself, are what an ignore rule names. Found
+  against `.crush/` — a tool cache dir with `.gitignore` containing `*` — and
+  reproduced identically in all three real repositories tried (`kaish`,
+  `kaibo`, `kaish-extras`, via `big_repo.rs`), minimized and pinned by
+  `status.rs::c8_a_directory_wholly_ignored_by_its_own_nested_gitignore_is_reported_untracked`,
+  which asserts our exact output against a live git oracle; it goes red the
+  moment either side's behavior changes.
 
 ## git status — known limitations (accepted for the read profile)
 
@@ -34,15 +83,19 @@ fixture asserted against real `git status --porcelain` before fixing.
 
 ## git status — needs a probe
 
-- **G4 — `guard_alternates` may be a 1-bit existence oracle (unconfirmed).**
-  A repository with a relative `objects/info/alternates` entry pointing outside
-  the mount is refused by `contain` (exit 4) when the target exists. The open
-  question is what `gix_odb::alternate::resolve` does when the target does *not*
-  exist: git's native behavior is to silently drop a broken alternate, and if
-  gix does the same, `contain` is never reached and the store opens (exit 0) —
-  the same outside-vs-nonexistent split G2 had. Needs a probe against
-  `gix_odb::alternate::resolve` (raised by gemini-pro in the PR #23 re-review;
-  behavioral, do not reason it out — build the fixture).
+- **G4 — `guard_alternates` may be a 1-bit existence oracle: probed, not an
+  oracle.** A repository with a relative `objects/info/alternates` entry
+  pointing outside the mount is refused by `contain` (exit 4) when the target
+  exists. The open question was what `gix_odb::alternate::resolve` does when
+  the target does *not* exist: git's native behavior is to silently drop a
+  broken alternate, and if gix did the same, `contain` would never be reached
+  and the store would open (exit 0) — the same outside-vs-nonexistent split G2
+  had. Probed in
+  `hostile_repo.rs::an_alternates_entry_cannot_report_whether_its_outside_target_exists`:
+  both cases (existing outside target, nonexistent outside target) exit 4 with
+  byte-identical error messages. `gix_odb::alternate::resolve` itself errors on
+  an unresolvable entry rather than silently dropping it, so `guard_alternates`
+  never sees an empty chain to wave through. Not an oracle. Safe to close.
 
 ## git log — known limitations (accepted for the read profile)
 
@@ -59,9 +112,14 @@ fixture asserted against real `git status --porcelain` before fixing.
 - **L2 — a filtered `log` walks history rather than stopping at `--limit`.**
   No filter (`--author`, `--path`, a date window) is sorted along ancestry, so
   the walk cannot stop when it has enough matches — it stops when it has enough
-  matches *or* has examined `MAX_COMMITS_EXAMINED` (100k) commits. On a large
-  repository an unmatched filter therefore pays a full-history walk and reports
-  `truncated: true`. Correct and bounded, but a commit-graph-backed date cutoff
+  matches *or* has examined `MAX_COMMITS_EXAMINED` (100k) commits. Confirmed
+  bounded against real repositories in
+  `big_repo.rs::an_unmatched_filter_is_bounded_not_hung`: a history smaller
+  than the cap (every candidate repo on this machine) completes the *whole*
+  walk and correctly reports `truncated: false` — an honest "nothing matched",
+  not a guess; only a history at or past 100k commits would see `truncated:
+  true`. Either way the walk finishes (well under a second on a ~1400-commit
+  repository) rather than hanging. A commit-graph-backed date cutoff
   (`gix-traverse`'s `ByCommitTimeCutoff`) would make the date case much cheaper.
   Not worth the complexity until a real repository makes it hurt.
 
@@ -80,6 +138,43 @@ fixture asserted against real `git status --porcelain` before fixing.
   `max_blob_bytes` but not in aggregate across a commit. A commit touching very
   many just-under-cap files is a large transient allocation. The row cap bounds
   commits, not bytes per commit.
+
+- **L5 — commits with a tied committer instant can order differently from
+  git.** Found against a real repository
+  (`big_repo.rs::log_oid_sequence_matches_git_at_several_limits`,
+  `KAISH_GIT_BIG_REPO=$HOME/src/kaish`, 2026-08-21): two merge commits
+  (`f8c1b508`, `3a74e505`), neither an ancestor of the other, share the exact
+  same committer instant to the second. Git's walk orders them one way; our
+  walk (a `BinaryHeap` keyed on committer time alone, log.rs) has no secondary
+  tiebreaker, so a tie resolves however the heap's internal structure happens
+  to pop it — not necessarily git's order. Narrow (needs two unrelated
+  same-second commits) but real: fast scripted merges, sub-second-granularity
+  clocks, or a CI-driven series can all produce one. Fix wants a tiebreaker
+  that matches git's own (likely a form of insertion/discovery order along the
+  walk) added to `Pending`'s ordering.
+
+- **L6 — `--stat` line counts can differ from `git show --numstat` by a small
+  amount on a real diff.** Found against three real repositories via
+  `big_repo.rs::stat_matches_git_numstat_on_a_sample_of_commits`
+  (`KAISH_GIT_BIG_REPO`, 2026-08-21), and it reproduces in *both* directions —
+  not a one-way "off by one":
+
+  | Repository | Commit | We report | git sums to |
+  |---|---|---|---|
+  | kaish | `264bc8431f9ec8aa7d927fc04a10968b51ce1d4a` | 178 additions | 177 |
+  | kaibo | `f06d86cee8d04be5a52c53f8957edd8fec790062` | 113 additions | 117 |
+  | kaish-extras | `4cc0d1604f7bce9a3535a861612b527b5fbecd9b` | 829 additions | 826 |
+
+  Every file in every case ends with a real trailing newline on both sides of
+  its commit, so not the missing-final-line edge case. `gix-imara-diff`'s
+  Myers implementation and git's own do not always produce the same edit
+  script when a hunk admits more than one minimal alignment (nearby repeated
+  or blank lines, common in real code) — the *edit distance* can match while
+  the *split* between which lines count as added differs by a handful either
+  way. Not isolated to a specific file or line yet; that is the fix's first
+  step, not something the fixtures above pin further. Same family as L1/L3,
+  found only because real, organically-grown diffs exercised it — no
+  synthetic fixture in this suite has hit it.
 
 ## kaish boundaries — for the write profiles
 

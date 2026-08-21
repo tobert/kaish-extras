@@ -769,6 +769,81 @@ async fn a_relative_alternates_entry_escaping_the_mount_is_refused() {
     assert_contained(&result, &outside_head);
 }
 
+/// G4-alt (docs/issues.md): does `guard_alternates` treat a nonexistent
+/// alternate target differently from an existing one outside the mount?
+///
+/// The doc entry is explicit that this is behavioral and must be probed, not
+/// reasoned about: git's own alternates handling silently drops a broken
+/// alternate, and `gix_odb::alternate::resolve` might do the same. If it does,
+/// an entry naming a *nonexistent* outside path never reaches `contain` at
+/// all — `guard_alternates` sees an empty chain and returns `Ok(())`, and the
+/// store opens (exit 0) — while the identical entry naming an *existing*
+/// outside path is refused (exit 4, confirmed above by
+/// `an_alternates_file_escaping_the_mount_is_refused`). That split is the same
+/// outside-vs-nonexistent host-existence oracle G2 and
+/// `a_gitdir_line_cannot_report_whether_its_target_exists` (below) closed for
+/// other repository-controlled paths.
+#[tokio::test]
+async fn an_alternates_entry_cannot_report_whether_its_outside_target_exists() {
+    async fn probe(target_exists: bool) -> (i64, String) {
+        require_git();
+        let fixture = Fixture::empty();
+
+        let outside = fixture.path("outside");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        // The candidate the alternates entry names: a real directory in one
+        // case (standing in for a real object store — guard_alternates never
+        // validates that a store is *valid*, only that it resolves inside the
+        // ceiling) and nothing at all in the other.
+        let target = outside.join("maybe-store/objects");
+        if target_exists {
+            std::fs::create_dir_all(&target).expect("create outside object dir");
+        }
+
+        let mount = fixture.path("mounted");
+        let repo = mount.join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+        support::write_file(&repo, "README.md", "inside\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "inside", "--quiet"]);
+
+        let info = repo.join(".git/objects/info");
+        std::fs::create_dir_all(&info).expect("create objects/info");
+        std::fs::write(info.join("alternates"), format!("{}\n", target.display()))
+            .expect("write alternates file");
+
+        let result = info_at(mount.clone(), "/mnt/repo").await;
+        let err = result
+            .err
+            .replace(&mount.display().to_string(), "<MOUNT>")
+            .replace(&fixture.root().display().to_string(), "<FIXTURE>");
+        (result.code, err)
+    }
+
+    let (code_present, err_present) = probe(true).await;
+    let (code_absent, err_absent) = probe(false).await;
+
+    // docs/issues.md G4: report both, don't reason about them.
+    eprintln!(
+        "G4-alt probe: existing outside target -> exit {code_present} ({err_present:?}); \
+         nonexistent outside target -> exit {code_absent} ({err_absent:?})"
+    );
+
+    assert_eq!(
+        code_present, code_absent,
+        "G4-alt confirmed: guard_alternates is a 1-bit host-existence oracle — \
+         an alternates entry naming an existing outside path exits \
+         {code_present} while the identical entry naming a nonexistent \
+         outside path exits {code_absent}. present: {err_present}; absent: \
+         {err_absent}"
+    );
+    assert_eq!(
+        code_present, 4,
+        "and both must be the exit-4 refusal, not a missing-store surprise: {err_present}"
+    );
+}
+
 /// Why there is no positive fixture for the `work_dir` ceiling check.
 ///
 /// The check is defense in depth, and this test records the reasoning it
