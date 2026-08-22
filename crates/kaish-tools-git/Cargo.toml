@@ -20,6 +20,22 @@ repository.workspace = true
 # targets keeps the documented layout without a `support/mod.rs` detour.
 autotests = false
 
+# architecture.md A.2's `textdiff` axis, and the only cargo feature this crate
+# has. It gates line hunks in the diff model and the unified-patch renderer
+# behind `git diff --patch`; with it off, `--patch` and `--context` exit 4
+# naming it.
+#
+# It adds no dependency, and that is the point A.2 makes: `gix-imara-diff` is
+# already unconditional (`git log --stat` and `git diff`'s line counts run it),
+# so the read/textdiff split is staging, not a dependency boundary. No build
+# links spawn machinery either way — CI asserts the `gix-command` /
+# `gix-transport` / `gix-filter` tripwires with this feature **on** as well as
+# off, because a tripwire that only ever ran on the default set would prove
+# nothing about the feature.
+[features]
+default = []
+textdiff = []
+
 # Path 2 plumbing pin set (docs/design/architecture.md, Co-architect note 3):
 # built directly on gix's low-level crates, skipping the `gix` facade crate
 # entirely. The facade links gix-command unconditionally (even with
@@ -193,6 +209,11 @@ path = "tests/show.rs"
 [[test]]
 name = "diff"
 path = "tests/diff.rs"
+
+# Empty without `--features textdiff`; the whole file is gated on it.
+[[test]]
+name = "textdiff"
+path = "tests/textdiff.rs"
 
 [[test]]
 name = "write_shaped_identifiers"

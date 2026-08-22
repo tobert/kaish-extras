@@ -899,6 +899,11 @@ async fn the_embedder_file_cap_bounds_one_commits_stat() {
 /// `--patch` is refused with exit 4, naming the missing capability. Answering
 /// it with a stat, or ignoring the flag, would be a wrong answer rather than a
 /// missing one.
+///
+/// `log --patch` is refused with `textdiff` on too, for a different reason and
+/// with a different message — `textdiff.rs::log_patch_points_at_diff_patch_
+/// rather_than_at_the_feature` is that half.
+#[cfg(not(feature = "textdiff"))]
 #[tokio::test]
 async fn patch_exits_four_naming_textdiff() {
     let h = History::build();

@@ -49,6 +49,11 @@ use crate::worktree::{read_worktree_blob, WorktreePaths};
 /// The revision `--to <B>` compares against when `--from` is absent.
 pub(crate) const DEFAULT_FROM_REV: &str = "HEAD";
 
+/// Context lines around each hunk when `--context` is not given — git's own
+/// default, so `git diff --patch` and `git diff` render the same hunks.
+#[cfg(feature = "textdiff")]
+pub(crate) const DEFAULT_CONTEXT: usize = 3;
+
 /// `git diff`'s argv surface (architecture.md B.4).
 #[derive(Parser, Debug)]
 #[command(name = "diff", about = "Compare two ends of a repository — which files changed, and by how much")]
@@ -85,15 +90,19 @@ pub(crate) struct DiffArgs {
     #[arg(long = "name-only", default_value_t = false)]
     pub name_only: bool,
 
-    /// Include the unified patch text. **This build exits 4**: assembling
-    /// hunks is the `textdiff` feature, built in a later phase. The
-    /// changed-file and line counts this verb reports by default need no
-    /// flag.
-    #[arg(long = "patch", default_value_t = false)]
+    /// Report the unified patch text as well as the counts. Text output
+    /// becomes the patch itself, so `git diff --patch | git apply` works and
+    /// the endpoints move to stderr; `--json` is unchanged except that every
+    /// file gains a `hunks` array. Needs the `textdiff` build feature —
+    /// without it this exits 4, and `git info` does not list `textdiff`.
+    /// Binary files carry `binary: true` and no hunks.
+    #[arg(long = "patch", default_value_t = false, conflicts_with = "name_only")]
     pub patch: bool,
 
-    /// Context lines around each hunk, default 3. Only `--patch` output has
-    /// hunks, so passing this exits 4 for the same reason `--patch` does.
+    /// Context lines around each hunk, default 3. Only `--patch` has hunks to
+    /// size, so `--context` without it is a usage error. Hunk text per file is
+    /// capped at this build's `max_hunk_bytes_per_file`, so a large `--context`
+    /// buys fewer hunks, not more output.
     #[arg(long = "context", value_name = "N")]
     pub context: Option<usize>,
 
@@ -167,6 +176,9 @@ pub(crate) struct DiffOptions {
     pub limit: usize,
     /// The embedder's `max_blob_bytes`, bounding each side that is read.
     pub max_blob_bytes: u64,
+    /// How to build hunks, or `None` when `--patch` was not asked for.
+    #[cfg(feature = "textdiff")]
+    pub hunks: Option<diffcore::HunkOptions>,
 }
 
 /// Compose a diff for `repo` under `opts` (architecture.md B.4).
@@ -624,6 +636,8 @@ fn finish(
         binary: None,
         additions: None,
         deletions: None,
+        #[cfg(feature = "textdiff")]
+        hunks: None,
         lines_capped: false,
         path: row.path,
         old_path: row.old_path,
@@ -634,7 +648,9 @@ fn finish(
     }
 
     // A rename is byte-identical by construction, so there is nothing to
-    // count and nothing to read.
+    // count, nothing to read, and no hunk to build — `hunks` stays null under
+    // `--patch` too, which is the same thing git says by printing a rename
+    // header with no `@@` under it.
     if file.status == EntryStatus::Renamed {
         file.binary = Some(false);
         file.additions = Some(0);
@@ -646,6 +662,39 @@ fn finish(
     let new_bytes = worktree_bytes(repo, opts, new, &file.path, row.new)?;
     let old_side = side_for(row.old, old, old_bytes.as_deref());
     let new_side = side_for(row.new, new, new_bytes.as_deref());
+
+    #[cfg(feature = "textdiff")]
+    if let Some(hunk_opts) = &opts.hunks {
+        match diffcore::line_hunks(
+            repo,
+            "diff",
+            old_side,
+            new_side,
+            opts.max_blob_bytes,
+            hunk_opts,
+        )? {
+            diffcore::HunkOutcome::Counted {
+                added,
+                deleted,
+                hunks,
+                capped,
+            } => {
+                file.binary = Some(false);
+                file.additions = Some(added);
+                file.deletions = Some(deleted);
+                file.hunks = Some(hunks);
+                file.lines_capped = capped;
+            }
+            diffcore::HunkOutcome::Binary => file.binary = Some(true),
+            diffcore::HunkOutcome::OverCap => file.lines_capped = true,
+            diffcore::HunkOutcome::Gitlink => {
+                file.binary = Some(false);
+                file.additions = Some(u64::from(row.new.is_some()));
+                file.deletions = Some(u64::from(row.old.is_some()));
+            }
+        }
+        return Ok(file);
+    }
 
     match diffcore::line_delta(repo, "diff", old_side, new_side, opts.max_blob_bytes)? {
         LineDelta::Counted { added, deleted } => {

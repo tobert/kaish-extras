@@ -475,6 +475,128 @@ impl DiffRepo {
     }
 }
 
+/// A repository built for **patch fidelity**: every header form F.1 names has
+/// a file that produces it, and every hunk shape has a file that produces it.
+///
+/// `HEAD~1 → HEAD` carries the whole set — an add, a delete, an exact rename,
+/// a mode flip, a binary change, a file that lost nothing but its trailing
+/// newline, a path with a space in it, CRLF content, and a source file with
+/// two changes far enough apart to be two hunks with two section headings.
+/// The working tree then carries one more unstaged change, so the
+/// index→worktree endpoint has a patch of its own.
+pub struct PatchRepo {
+    fixture: Fixture,
+    /// The working tree's root.
+    pub root: PathBuf,
+}
+
+impl PatchRepo {
+    /// The binary fixture's bytes — NUL bytes and invalid UTF-8, so git's own
+    /// binary heuristic fires on it exactly as ours does.
+    pub fn binary_bytes(tail: u8) -> Vec<u8> {
+        vec![0x00, 0x01, b'h', b'i', 0x00, 0xFF, 0xFE, 0x80, tail]
+    }
+
+    /// A source file whose two edits land far enough apart to be two hunks,
+    /// each under a declaration git's default heading rule will find.
+    fn source(first: u32, second: u32) -> String {
+        let mut out = String::from("fn open(path: &str) -> Result<()> {\n");
+        for i in 1u32..=12 {
+            let v = if i == 6 { first } else { i };
+            out.push_str(&format!("    let v{i} = {v};\n"));
+        }
+        out.push_str("}\n\nfn close(handle: Handle) -> Result<()> {\n");
+        for i in 1u32..=12 {
+            let v = if i == 6 { second } else { i };
+            out.push_str(&format!("    let w{i} = {v};\n"));
+        }
+        out.push_str("}\n");
+        out
+    }
+
+    /// Build the fixture. Requires real git on PATH.
+    pub fn build() -> Self {
+        require_git();
+        let fixture = Fixture::empty();
+        let root = fixture.path("repo");
+        std::fs::create_dir_all(&root).expect("create repo dir");
+
+        git(&root, &["init", "--initial-branch=main", "--quiet"]);
+        git(&root, &["config", "gc.writeCommitGraph", "false"]);
+        // The fixture writes CRLF content on purpose; a checkout filter that
+        // rewrote it would make the oracle disagree with itself on Windows-ish
+        // configurations. Nothing in this crate reads these, but real git —
+        // the oracle — does.
+        git(&root, &["config", "core.autocrlf", "false"]);
+
+        write_file(&root, "src/lib.rs", &Self::source(6, 6));
+        write_file(&root, "gone.txt", "one\ntwo\nthree\n");
+        write_file(&root, "mode.sh", "#!/bin/sh\necho hi\n");
+        write_file(&root, "moved.txt", "l1\nl2\nl3\n");
+        write_file(&root, "with space.txt", "spaced\ncontent\n");
+        write_file(&root, "crlf.txt", "one\r\ntwo\r\n");
+        std::fs::write(root.join("nonl.txt"), b"no trailing newline").expect("write nonl.txt");
+        std::fs::write(root.join("data.bin"), Self::binary_bytes(0x11)).expect("write binary");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-m", "base", "--quiet"]);
+
+        // Everything F.1 renders, in one commit.
+        write_file(&root, "src/lib.rs", &Self::source(600, 60));
+        git(&root, &["rm", "--quiet", "gone.txt"]);
+        write_file(&root, "added.txt", "brand new\nsecond line\n");
+        git(&root, &["mv", "moved.txt", "renamed.txt"]);
+        write_file(&root, "with space.txt", "spaced\ncontent\nmore\n");
+        write_file(&root, "crlf.txt", "one\r\nTWO\r\n");
+        std::fs::write(root.join("nonl.txt"), b"no trailing newline yet").expect("write nonl.txt");
+        std::fs::write(root.join("data.bin"), Self::binary_bytes(0x22)).expect("write binary");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = root.join("mode.sh");
+            let mut perms = std::fs::metadata(&path).expect("stat mode.sh").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod mode.sh");
+        }
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-m", "everything", "--quiet"]);
+
+        // One staged change, so HEAD→index has a patch of its own — on the
+        // path with a space in it, which is the header form most likely to be
+        // got wrong.
+        write_file(&root, "with space.txt", "spaced\ncontent\nmore\nstaged\n");
+        git(&root, &["add", "with space.txt"]);
+
+        // One unstaged change, so index→worktree has a patch of its own.
+        write_file(&root, "src/lib.rs", &Self::source(600, 6000));
+
+        Self { fixture, root }
+    }
+
+    /// The fixture's scratch root — the mount the tool sees.
+    pub fn scratch(&self) -> PathBuf {
+        self.fixture.root()
+    }
+
+    /// The oid real git reports for `rev`, for oracle comparisons.
+    pub fn rev_parse(&self, rev: &str) -> String {
+        git(&self.root, &["rev-parse", rev])
+    }
+
+    /// A clean checkout of `rev` in its own directory, for feeding a patch to
+    /// real `git apply --check`.
+    ///
+    /// A linked worktree rather than a copy: `git apply --check` wants a real
+    /// repository with an index, and this is how git itself makes one.
+    pub fn checkout_of(&self, rev: &str) -> PathBuf {
+        let dir = self.fixture.path(format!("apply-{}", rev.replace(['~', '^', '/'], "_")));
+        git(
+            &self.root,
+            &["worktree", "add", "--detach", "--quiet", dir.to_str().expect("utf-8 path"), rev],
+        );
+        dir
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // The `.git` fingerprint (architecture.md D.4)
 // ═══════════════════════════════════════════════════════════════════════════

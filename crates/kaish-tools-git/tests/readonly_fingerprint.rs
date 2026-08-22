@@ -189,6 +189,30 @@ const VERB_MATRIX: &[(&str, &[&[&str]])] = &[
     ),
 ];
 
+/// The invocations that exist only under the `textdiff` feature.
+///
+/// Kept out of [`VERB_MATRIX`] rather than `cfg`-gated inside it: the matrix
+/// is a `const` the coverage guard below also reads, and a feature-shaped
+/// hole in it would make that guard's verb list depend on the build. Reading
+/// blob content and rendering it is a new read path, so the fingerprint has
+/// to cover it or D.4's "every read verb" is no longer true of this build.
+#[cfg(feature = "textdiff")]
+const TEXTDIFF_MATRIX: &[(&str, &[&[&str]])] = &[(
+    "diff",
+    &[
+        // Hunks over the working tree, over the index, and over two
+        // revisions — the three content-reading endpoint shapes.
+        &["--patch"],
+        &["--patch", "--json"],
+        &["--patch", "--staged", "--json"],
+        &["--patch", "--from", "HEAD~1", "--to", "HEAD", "--json"],
+        // A context width that merges hunks, and one that removes context
+        // entirely.
+        &["--patch", "--context", "0", "--json"],
+        &["--patch", "--context", "40", "--json"],
+    ],
+)];
+
 /// Flags whose next argv token is the flag's *value*, never a bare
 /// positional. `ls` and `show`'s flagship spellings are bare positionals
 /// (`show HEAD:src/lib.rs`, `ls HEAD src`), so this harness can no longer
@@ -209,6 +233,7 @@ const VALUE_FLAGS: &[&str] = &[
 /// or [`VALUE_FLAGS`].
 const BOOL_FLAGS: &[&str] = &[
     "json",
+    "patch",
     "ignored",
     "merges",
     "no-merges",
@@ -276,6 +301,13 @@ async fn run(repo: &RichRepo, cwd: &str, verb: &str, argv: &[&str]) -> ExecResul
 /// Every invocation in the matrix, plus each verb run from a subdirectory cwd
 /// (which exercises `resolve_path` rather than `--repo`).
 async fn run_the_whole_matrix(repo: &RichRepo) {
+    #[cfg(feature = "textdiff")]
+    for (verb, matrix) in TEXTDIFF_MATRIX {
+        for argv in *matrix {
+            let result = run(repo, "/mnt/main", verb, argv).await;
+            assert_eq!(result.code, 0, "git {verb} {argv:?} failed: {}", result.err);
+        }
+    }
     for (verb, matrix) in VERB_MATRIX {
         for argv in *matrix {
             let result = run(repo, "/mnt/main", verb, argv).await;

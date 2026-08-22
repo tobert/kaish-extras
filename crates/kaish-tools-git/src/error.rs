@@ -472,6 +472,21 @@ pub enum GitError {
         instead: &'static str,
     },
 
+    /// A verb was asked for patch text it does not assemble, on a build that
+    /// does assemble patch text elsewhere. Exit 4 — the same capability-gap
+    /// class as [`GitError::PatchNeedsTextdiff`], and distinct from it on
+    /// purpose: naming the `textdiff` feature as the fix would be a lie when
+    /// the feature is already on.
+    #[error("git {operation}: {flag} is not available here — {operation} assembles no patch text. {instead}")]
+    PatchNotInThisVerb {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The flag that was refused, as the caller spelled it.
+        flag: &'static str,
+        /// What to reach for instead.
+        instead: &'static str,
+    },
+
     /// The repository is on disk but malformed, or a file we must read is
     /// unreadable. Exit 1 — a git-level failure about this repository, not a
     /// statement about the environment.
@@ -532,7 +547,8 @@ impl GitError {
             | GitError::EscapesMount { .. }
             | GitError::NoContainingMount { .. }
             | GitError::UntrustedRepository { .. }
-            | GitError::PatchNeedsTextdiff { .. } => 4,
+            | GitError::PatchNeedsTextdiff { .. }
+            | GitError::PatchNotInThisVerb { .. } => 4,
             GitError::VerbNotEnabled { .. } => 5,
         }
     }
@@ -674,6 +690,11 @@ mod tests {
                 operation: "log",
                 flag: "--patch",
                 instead: "Use --stat.",
+            },
+            GitError::PatchNotInThisVerb {
+                operation: "log",
+                flag: "--patch",
+                instead: "Use git diff --patch.",
             },
         ];
         for e in &variants {

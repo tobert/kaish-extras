@@ -665,6 +665,9 @@ async fn the_embedder_cap_is_not_raisable_by_an_argument() {
 
 /// The phasing gate, third half: `--patch` on a build without `textdiff`
 /// exits 4, names the feature, and points at what this build does compute.
+/// The other half of the pair is in `tests/textdiff.rs`, which is compiled
+/// only when the feature is on and asserts that `--patch` then works.
+#[cfg(not(feature = "textdiff"))]
 #[tokio::test]
 async fn patch_exits_four_naming_textdiff() {
     let repo = DiffRepo::build();
@@ -676,6 +679,9 @@ async fn patch_exits_four_naming_textdiff() {
 
 /// `--context` only sizes hunks, and this build produces none — so it is
 /// refused the same way rather than accepted as a flag that does nothing.
+/// With `textdiff` on it becomes a usage error instead
+/// (`textdiff.rs::context_without_patch_is_a_usage_error`).
+#[cfg(not(feature = "textdiff"))]
 #[tokio::test]
 async fn context_exits_four_for_the_same_reason() {
     let repo = DiffRepo::build();
