@@ -317,7 +317,7 @@ pub fn show_tag(tag: &ShowTag) -> OutputData {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// How one end of a diff reads in the text surface.
-fn endpoint_text(end: &DiffEndpoint) -> String {
+pub(crate) fn endpoint_text(end: &DiffEndpoint) -> String {
     match end {
         DiffEndpoint::Index => "index".to_string(),
         DiffEndpoint::Worktree => "worktree".to_string(),
@@ -434,6 +434,29 @@ pub fn diff(report: &DiffReport) -> (OutputData, String) {
     (data, text)
 }
 
+/// Render a [`DiffReport`] as unified patch text (architecture.md F.1).
+///
+/// The text payload is the patch and nothing else — no endpoint line, no
+/// summary — because `git diff --patch | git apply` must not have to skip a
+/// preamble. The typed model still rides along as `rich_json`, hunks
+/// included, so `--patch --json` is structured.
+#[cfg(feature = "textdiff")]
+pub fn diff_patch(report: &DiffReport) -> (OutputData, String) {
+    let text = crate::patch::render(report);
+    let data = OutputData::text(text.clone());
+    let data = match serde_json::to_value(report) {
+        Ok(json) => data.with_rich_json(json),
+        // A model of owned scalars cannot fail to serialize in practice; the
+        // patch is still a correct answer, and losing --json silently would be
+        // worse than saying so.
+        Err(e) => {
+            tracing::warn!(error = %e, "git diff --patch: could not build the --json payload");
+            data
+        }
+    };
+    (data, text)
+}
+
 /// `git`'s own shortstat wording, plus what a cap withheld.
 fn summary_line(report: &DiffReport) -> String {
     let plural = |n: u64, one: &str, many: &str| if n == 1 { one.to_string() } else { many.to_string() };
@@ -450,6 +473,13 @@ fn summary_line(report: &DiffReport) -> String {
         line.push_str(&format!(
             "; {} not counted (over this build's max_blob_bytes)",
             report.totals.lines_capped
+        ));
+    }
+    if report.totals.hunks_capped > 0 {
+        line.push_str(&format!(
+            "; {} with hunks cut short (over this build's \
+             max_hunk_bytes_per_file)",
+            report.totals.hunks_capped
         ));
     }
     line.push('\n');

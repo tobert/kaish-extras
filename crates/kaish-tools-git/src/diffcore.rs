@@ -12,6 +12,8 @@
 //!   explicit stack rather than recursion.
 //! - [`pair_exact_renames`] and [`line_delta`] — exact-match rename pairing,
 //!   and the added/deleted line counts from `gix-imara-diff`.
+//! - [`line_hunks`] (`textdiff` only) — the same comparison, keeping the
+//!   hunks instead of only the counts.
 //!
 //! What is **not** here is `gix-diff`'s tree platform. Its rename tracking is
 //! `blob`-gated and `blob` pulls `gix-command` (A.2), the spawn machinery the
@@ -29,6 +31,8 @@ use gix_odb::HeaderExt;
 
 use crate::error::GitError;
 use crate::model::EntryKind;
+#[cfg(feature = "textdiff")]
+use crate::model::{DiffHunk, DiffLine, DiffOp};
 use crate::repo::ReadRepo;
 
 /// A file's type, normalized so a tree entry, an index entry and a
@@ -292,32 +296,75 @@ pub(crate) fn line_delta(
     new: Side<'_>,
     max_blob_bytes: u64,
 ) -> Result<LineDelta, GitError> {
-    let old = load(repo, op, old, max_blob_bytes)?;
-    let new = load(repo, op, new, max_blob_bytes)?;
-    let (old, new) = match (&old, &new) {
-        (Loaded::Content(o), Loaded::Content(n)) => (o.as_ref(), n.as_ref()),
-        (Loaded::Gitlink, _) | (_, Loaded::Gitlink) => return Ok(LineDelta::Gitlink),
-        _ => return Ok(LineDelta::OverCap),
+    let (old, new) = match load_both(repo, op, old, new, max_blob_bytes)? {
+        Sides::Text { old, new } => (old, new),
+        Sides::OverCap => return Ok(LineDelta::OverCap),
+        Sides::Binary => return Ok(LineDelta::Binary),
+        Sides::Gitlink => return Ok(LineDelta::Gitlink),
     };
-    // A NUL byte is git's own binary heuristic, and a binary file has no line
-    // count worth reporting.
-    if old.contains(&0) || new.contains(&0) {
-        return Ok(LineDelta::Binary);
-    }
-
-    let old_text = String::from_utf8_lossy(old);
-    let new_text = String::from_utf8_lossy(new);
-    // `lines` tokenizes on line boundaries, so a "token" here is a line and
-    // the counts are line counts — the same unit `git diff --numstat` reports.
-    let input = gix_imara_diff::InternedInput::new(
-        gix_imara_diff::sources::lines(old_text.as_ref()),
-        gix_imara_diff::sources::lines(new_text.as_ref()),
-    );
+    let input = intern(&old, &new);
     let diff = gix_imara_diff::Diff::compute(gix_imara_diff::Algorithm::Myers, &input);
     Ok(LineDelta::Counted {
         added: u64::from(diff.count_additions()),
         deleted: u64::from(diff.count_removals()),
     })
+}
+
+/// Both sides materialized, or the one word that says why they were not.
+enum Sides {
+    /// Both sides are text this build will diff. Lossy UTF-8: content with a
+    /// NUL byte never reaches here, but content that merely is not valid
+    /// UTF-8 does, and carries U+FFFD where the invalid bytes were.
+    Text { old: String, new: String },
+    /// A side was over `max_blob_bytes`.
+    OverCap,
+    /// A NUL byte on at least one side — git's own binary heuristic.
+    Binary,
+    /// A submodule gitlink.
+    Gitlink,
+}
+
+/// Read both sides and classify them, the one place the cap, the binary
+/// heuristic and the gitlink rule are applied.
+fn load_both(
+    repo: &ReadRepo,
+    op: &'static str,
+    old: Side<'_>,
+    new: Side<'_>,
+    max_blob_bytes: u64,
+) -> Result<Sides, GitError> {
+    let old = load(repo, op, old, max_blob_bytes)?;
+    let new = load(repo, op, new, max_blob_bytes)?;
+    let (old, new) = match (&old, &new) {
+        (Loaded::Content(o), Loaded::Content(n)) => (o.as_ref(), n.as_ref()),
+        (Loaded::Gitlink, _) | (_, Loaded::Gitlink) => return Ok(Sides::Gitlink),
+        _ => return Ok(Sides::OverCap),
+    };
+    // A NUL byte is git's own binary heuristic, and a binary file has no line
+    // count worth reporting and no hunks worth rendering.
+    if old.contains(&0) || new.contains(&0) {
+        return Ok(Sides::Binary);
+    }
+    Ok(Sides::Text {
+        old: String::from_utf8_lossy(old).into_owned(),
+        new: String::from_utf8_lossy(new).into_owned(),
+    })
+}
+
+/// Intern both sides as lines.
+///
+/// `lines` tokenizes on line boundaries and keeps each line's terminator in
+/// the token, so a "token" here is a line, the counts are line counts — the
+/// same unit `git diff --numstat` reports — and a file that lost its final
+/// newline differs from one that kept it.
+fn intern<'a>(
+    old: &'a str,
+    new: &'a str,
+) -> gix_imara_diff::InternedInput<&'a str> {
+    gix_imara_diff::InternedInput::new(
+        gix_imara_diff::sources::lines(old),
+        gix_imara_diff::sources::lines(new),
+    )
 }
 
 /// One side's bytes, as far as the cap allowed us to read them.
@@ -358,6 +405,290 @@ fn load<'a>(
         .find(&oid, &mut buf)
         .map_err(|e| GitError::repository(op, "reading a blob", repo.git_dir(), e))?;
     Ok(Loaded::Content(std::borrow::Cow::Owned(data.data.to_vec())))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Hunks (the `textdiff` feature)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// How many bytes of a section heading git's default rule keeps
+/// (`funcbuf[80]` in xdiff's `xemit.c`), before trailing whitespace is
+/// removed.
+#[cfg(feature = "textdiff")]
+const MAX_SECTION_BYTES: usize = 80;
+
+/// What [`line_hunks`] was asked for.
+#[cfg(feature = "textdiff")]
+pub(crate) struct HunkOptions {
+    /// Context lines around each change — `--context`, default 3.
+    pub context: u32,
+    /// The embedder's `max_hunk_bytes_per_file`, bounding the total bytes of
+    /// hunk line text one file may produce.
+    pub max_bytes: u64,
+}
+
+/// What building one changed path's hunks produced.
+///
+/// The same four outcomes [`LineDelta`] has, for the same reasons, with the
+/// hunks carried alongside the counts on the one that has both.
+#[cfg(feature = "textdiff")]
+pub(crate) enum HunkOutcome {
+    /// Both sides were read and diffed.
+    Counted {
+        /// Lines added, the same number [`line_delta`] reports.
+        added: u64,
+        /// Lines deleted, the same number [`line_delta`] reports.
+        deleted: u64,
+        /// The hunks that fit under `max_bytes`.
+        hunks: Vec<DiffHunk>,
+        /// Whether `max_bytes` stopped the hunks short. The counts stay
+        /// exact — they are a property of the diff, not of what was emitted.
+        capped: bool,
+    },
+    /// A side was over `max_blob_bytes`, so nothing was read.
+    OverCap,
+    /// Binary content on at least one side.
+    Binary,
+    /// A submodule gitlink.
+    Gitlink,
+}
+
+/// The added and deleted line counts for one changed path, **and** its hunks.
+///
+/// One `gix-imara-diff` run per file, the same one [`line_delta`] would have
+/// made on the same content — `--patch` does not diff a file the counting
+/// path would have skipped, and does not diff any file twice. What it adds is
+/// `postprocess_lines`, git's own indent heuristic, which moves a slider to
+/// where git would put it and costs one linear pass.
+#[cfg(feature = "textdiff")]
+pub(crate) fn line_hunks(
+    repo: &ReadRepo,
+    op: &'static str,
+    old: Side<'_>,
+    new: Side<'_>,
+    max_blob_bytes: u64,
+    opts: &HunkOptions,
+) -> Result<HunkOutcome, GitError> {
+    let (old, new) = match load_both(repo, op, old, new, max_blob_bytes)? {
+        Sides::Text { old, new } => (old, new),
+        Sides::OverCap => return Ok(HunkOutcome::OverCap),
+        Sides::Binary => return Ok(HunkOutcome::Binary),
+        Sides::Gitlink => return Ok(HunkOutcome::Gitlink),
+    };
+    let input = intern(&old, &new);
+    let mut diff = gix_imara_diff::Diff::compute(gix_imara_diff::Algorithm::Myers, &input);
+    // git runs the indent heuristic by default (`diff.indentHeuristic`, on
+    // since 2.14), and it decides *where* an ambiguous run of added lines is
+    // placed. Skipping it would put our hunks a line or two off git's for the
+    // same change while reporting the same counts.
+    diff.postprocess_lines(&input);
+    let (hunks, capped) = assemble(&input, &diff, opts);
+    Ok(HunkOutcome::Counted {
+        added: u64::from(diff.count_additions()),
+        deleted: u64::from(diff.count_removals()),
+        hunks,
+        capped,
+    })
+}
+
+/// One group of changes that will be emitted as a single hunk: the old and
+/// new line ranges it covers, context included, and the changes inside it.
+#[cfg(feature = "textdiff")]
+struct Group {
+    old: std::ops::Range<u32>,
+    new: std::ops::Range<u32>,
+    changes: Vec<gix_imara_diff::Hunk>,
+}
+
+/// Turn a computed diff into hunks, bounded by `opts.max_bytes`.
+///
+/// The bound is applied to each group **before** its lines are built: a
+/// group's byte cost is the sum of its tokens' lengths, which the interner
+/// can answer without allocating anything. A cap that trimmed a `Vec` after
+/// filling it would have already paid for what it threw away — the defect
+/// found in `treewalk.rs` and again in curl's response path.
+#[cfg(feature = "textdiff")]
+fn assemble(
+    input: &gix_imara_diff::InternedInput<&str>,
+    diff: &gix_imara_diff::Diff,
+    opts: &HunkOptions,
+) -> (Vec<DiffHunk>, bool) {
+    let old_len = input.before.len() as u32;
+    let new_len = input.after.len() as u32;
+    let ctx = opts.context;
+
+    // Group the changes. Two changes join one hunk when their context
+    // regions touch or overlap — the gap between them is at most `2 * ctx` —
+    // which is git's own rule in `xdl_emit_diff`.
+    let mut groups: Vec<Group> = Vec::new();
+    for change in diff.hunks() {
+        let old = change.before.start.saturating_sub(ctx)..(change.before.end + ctx).min(old_len);
+        let new = change.after.start.saturating_sub(ctx)..(change.after.end + ctx).min(new_len);
+        match groups.last_mut() {
+            Some(last) if old.start <= last.old.end => {
+                last.old.end = last.old.end.max(old.end);
+                last.new.end = last.new.end.max(new.end);
+                last.changes.push(change);
+            }
+            _ => groups.push(Group {
+                old,
+                new,
+                changes: vec![change],
+            }),
+        }
+    }
+
+    let mut hunks = Vec::with_capacity(groups.len());
+    let mut used: u64 = 0;
+    let mut capped = false;
+    // git scans backwards for a section heading only as far as the previous
+    // hunk's first line, so the whole file is scanned once across all hunks
+    // rather than once per hunk. `-1` before the first hunk means "scan to
+    // the start of the file".
+    let mut section_limit: i64 = -1;
+    for group in &groups {
+        let cost = group_bytes(input, group);
+        if used.saturating_add(cost) > opts.max_bytes {
+            capped = true;
+            break;
+        }
+        used += cost;
+        let section = section_for(input, group.old.start, section_limit);
+        section_limit = i64::from(group.old.start);
+        hunks.push(materialize(input, group, section));
+    }
+    (hunks, capped)
+}
+
+/// What one group's line text will cost, without building any of it.
+#[cfg(feature = "textdiff")]
+fn group_bytes(input: &gix_imara_diff::InternedInput<&str>, group: &Group) -> u64 {
+    let mut total: u64 = 0;
+    // Every old-side line in range is emitted once, as context or as a
+    // deletion; every new-side line that is an insertion is emitted too. The
+    // new-side context lines are the same lines as the old-side context ones
+    // and are not emitted twice.
+    for token in &input.before[group.old.start as usize..group.old.end as usize] {
+        total += input.interner[*token].len() as u64;
+    }
+    for change in &group.changes {
+        for token in &input.after[change.after.start as usize..change.after.end as usize] {
+            total += input.interner[*token].len() as u64;
+        }
+    }
+    total
+}
+
+/// Build one group's [`DiffHunk`].
+#[cfg(feature = "textdiff")]
+fn materialize(
+    input: &gix_imara_diff::InternedInput<&str>,
+    group: &Group,
+    section: Option<String>,
+) -> DiffHunk {
+    let mut lines = Vec::new();
+    let mut o = group.old.start;
+    let mut n = group.new.start;
+    let old_line = |i: u32| -> &str { input.interner[input.before[i as usize]] };
+    let new_line = |i: u32| -> &str { input.interner[input.after[i as usize]] };
+
+    for change in &group.changes {
+        while o < change.before.start {
+            lines.push(line(DiffOp::Context, old_line(o)));
+            o += 1;
+            n += 1;
+        }
+        while o < change.before.end {
+            lines.push(line(DiffOp::Delete, old_line(o)));
+            o += 1;
+        }
+        while n < change.after.end {
+            lines.push(line(DiffOp::Insert, new_line(n)));
+            n += 1;
+        }
+    }
+    // Trailing context. `n` is not advanced with it: nothing reads it after
+    // the last change, and the new-side count comes from the group's range.
+    while o < group.old.end {
+        lines.push(line(DiffOp::Context, old_line(o)));
+        o += 1;
+    }
+
+    let old_lines = group.old.end - group.old.start;
+    let new_lines = group.new.end - group.new.start;
+    DiffHunk {
+        // git's convention for an empty side: the header names the line the
+        // hunk *follows*, so a new file reads `@@ -0,0 +1,3 @@`.
+        old_start: if old_lines == 0 {
+            group.old.start
+        } else {
+            group.old.start + 1
+        },
+        old_lines,
+        new_start: if new_lines == 0 {
+            group.new.start
+        } else {
+            group.new.start + 1
+        },
+        new_lines,
+        section,
+        lines,
+    }
+}
+
+/// One line, with its terminator taken off and recorded.
+#[cfg(feature = "textdiff")]
+fn line(op: DiffOp, raw: &str) -> DiffLine {
+    match raw.strip_suffix('\n') {
+        Some(text) => DiffLine {
+            op,
+            text: text.to_string(),
+            no_newline: false,
+        },
+        // The last line of a file that does not end in a newline. Patch text
+        // marks it `\ No newline at end of file`; a CR is content and stays.
+        None => DiffLine {
+            op,
+            text: raw.to_string(),
+            no_newline: true,
+        },
+    }
+}
+
+/// The section heading for a hunk starting at old line `start`, by git's
+/// default rule: the nearest preceding line whose first character is an ASCII
+/// letter, `_` or `$`, truncated to [`MAX_SECTION_BYTES`] with trailing
+/// whitespace removed.
+///
+/// `limit` is the previous hunk's first line, exclusive — the same bound
+/// git's `get_func_line` takes, which is what keeps the total scan linear in
+/// the file rather than quadratic in the hunk count. `-1` scans to the start.
+#[cfg(feature = "textdiff")]
+fn section_for(
+    input: &gix_imara_diff::InternedInput<&str>,
+    start: u32,
+    limit: i64,
+) -> Option<String> {
+    let mut l = i64::from(start) - 1;
+    while l > limit && l >= 0 {
+        let raw: &str = input.interner[input.before[l as usize]];
+        if raw
+            .as_bytes()
+            .first()
+            .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_' || *b == b'$')
+        {
+            // Truncate on a character boundary at or below git's byte limit:
+            // git counts bytes, and a String cannot be cut inside one.
+            let mut end = raw.len().min(MAX_SECTION_BYTES);
+            while end > 0 && !raw.is_char_boundary(end) {
+                end -= 1;
+            }
+            let text = raw[..end].trim_end();
+            return (!text.is_empty()).then(|| text.to_string());
+        }
+        l -= 1;
+    }
+    None
 }
 
 #[cfg(test)]

@@ -111,8 +111,15 @@ jobs:
         with:
           key: git-tool-native
 
+      # Both feature configurations, because `textdiff` gates a third of this
+      # crate's diff path and a lint clean on one build says nothing about the
+      # other. The suite is gated the same way: `tests/textdiff.rs` compiles to
+      # nothing without the feature, and three refusal tests in `diff.rs` and
+      # `log.rs` compile to nothing with it.
       - name: Clippy (deny warnings)
-        run: cargo clippy -p kaish-tools-git --all-targets --locked -- -D warnings
+        run: |
+          cargo clippy -p kaish-tools-git --all-targets --locked -- -D warnings
+          cargo clippy -p kaish-tools-git --all-targets --locked --features textdiff -- -D warnings
 
       - name: Build
         run: cargo build -p kaish-tools-git --locked
@@ -129,6 +136,7 @@ jobs:
         run: |
           git --version
           cargo test -p kaish-tools-git --locked
+          cargo test -p kaish-tools-git --locked --features textdiff
 
   curl-tool:
     name: kaish-tools-curl (native)
@@ -200,21 +208,43 @@ jobs:
       # prints the reverse-dependency tree when it is present — so success
       # is the failure case here. Distinguish "cleanly absent" from any
       # other cargo error so a broken invocation can't pass by accident.
+      # The negative control for the assertion below. `cargo tree -i` reports
+      # "did not match any packages" for a package that is absent *and* for a
+      # package name nobody can resolve — a typo, a renamed crate, a cargo
+      # that changed its wording. A tripwire that cannot distinguish those is
+      # a gate that can only pass. So first prove the invocation finds
+      # something: gix-imara-diff is in this graph and must resolve.
+      - name: Prove cargo tree -i can find a package that is present
+        run: |
+          cargo tree -i gix-imara-diff --workspace --locked
+          cargo tree -i gix-imara-diff --workspace --locked --features kaish-tools-git/textdiff
+
+      # Twice: the default feature set, and `kaish-tools-git/textdiff`. A
+      # tripwire that only ever ran on the default set would prove nothing
+      # about the feature — and `textdiff` is precisely the axis A.2 once
+      # described as the no-subprocess boundary, so it is the one an embedder
+      # would most want the assertion for. It adds no dependency today
+      # (gix-imara-diff is already unconditional); the second run is what says
+      # so, and what catches the day that changes.
       - name: Assert ${{ matrix.pkg }} is absent from the workspace lockfile
         run: |
-          set +e
-          out=$(cargo tree -i ${{ matrix.pkg }} --workspace --locked 2>&1)
-          code=$?
-          set -e
-          echo "$out"
-          if [ "$code" -eq 0 ]; then
-            echo "::error::${{ matrix.pkg }} IS present in the dependency graph — expected absent"
-            exit 1
-          fi
-          if ! echo "$out" | grep -q "did not match any packages"; then
-            echo "::error::cargo tree failed for a reason other than a clean 'not found'"
-            exit 1
-          fi
+          for features in "" "--features kaish-tools-git/textdiff"; do
+            echo "::group::${{ matrix.pkg }} with features: ${features:-<default>}"
+            set +e
+            out=$(cargo tree -i ${{ matrix.pkg }} --workspace --locked $features 2>&1)
+            code=$?
+            set -e
+            echo "$out"
+            echo "::endgroup::"
+            if [ "$code" -eq 0 ]; then
+              echo "::error::${{ matrix.pkg }} IS present in the dependency graph (${features:-default features}) — expected absent"
+              exit 1
+            fi
+            if ! echo "$out" | grep -q "did not match any packages"; then
+              echo "::error::cargo tree failed for a reason other than a clean 'not found' (${features:-default features})"
+              exit 1
+            fi
+          done
 
   git-tool-wasm-guard:
     name: kaish-tools-git wasm guard fires

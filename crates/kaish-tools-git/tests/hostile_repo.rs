@@ -31,7 +31,7 @@ use kaish_types::{ExecResult, ToolArgs, Value};
 
 use kaish_tools_git::GitConfig;
 
-use support::{git, require_git, Fixture, StrictBackend, TestCtx};
+use support::{git, require_git, write_file, Fixture, StrictBackend, TestCtx};
 
 /// A branch name that exists **only** in the repository outside the mount.
 const SENTINEL_BRANCH: &str = "pwned-outside-the-mount";
@@ -1004,4 +1004,418 @@ async fn a_gitdir_line_cannot_report_whether_its_target_exists() {
              read: {err}"
         );
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// D.3 layer 3 — a repository that declares textconv, filters and hooks
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The names the hostile fixture's scripts use, one sentinel file each.
+///
+/// Separate files rather than one, so a failure says *which* mechanism fired
+/// instead of only that something did.
+const PWN_KINDS: &[&str] = &[
+    "textconv",
+    "diff-command",
+    "clean",
+    "smudge",
+    "process",
+    "pre-commit",
+    "post-commit",
+    "post-checkout",
+    "post-index-change",
+    "reference-transaction",
+];
+
+/// The bytes the hostile scripts print in place of real content. If this ever
+/// reaches a caller, a repository's config decided what a read verb returned.
+const PWN_MARKER: &str = "PWNED-BY-REPO-CONFIG";
+
+/// A repository whose `.git/config` and `.gitattributes` try to make git run
+/// its code (architecture.md D.3).
+///
+/// `diff.pwn.textconv` and `diff.pwn.command` for the diff path,
+/// `filter.pwn.clean` / `smudge` / `process` for the content path,
+/// `core.hooksPath` for the hook path, and `.gitattributes` mapping
+/// `* diff=pwn filter=pwn` so all of it is in force for every file. Each
+/// script writes its own sentinel and prints [`PWN_MARKER`].
+struct PwnRepo {
+    fixture: Fixture,
+    root: PathBuf,
+    sentinels: PathBuf,
+}
+
+impl PwnRepo {
+    /// The real content, which is what every verb must report.
+    const OLD_LINE: &'static str = "the-real-second-line";
+    const NEW_LINE: &'static str = "the-real-third-line";
+
+    fn build() -> Self {
+        require_git();
+        let fixture = Fixture::empty();
+        let root = fixture.path("mount/repo");
+        let sentinels = fixture.path("sentinels");
+        let hooks = fixture.path("hooks");
+        let bin = fixture.path("bin");
+        std::fs::create_dir_all(&root).expect("create repo dir");
+        std::fs::create_dir_all(&sentinels).expect("create sentinel dir");
+        std::fs::create_dir_all(&hooks).expect("create hooks dir");
+        std::fs::create_dir_all(&bin).expect("create bin dir");
+
+        // One script per mechanism. `cat`-less on purpose: a textconv that
+        // printed the file would be indistinguishable from not running.
+        for kind in PWN_KINDS {
+            let dir = if kind.contains('-') && !kind.starts_with("diff") {
+                &hooks
+            } else {
+                &bin
+            };
+            let script = dir.join(kind);
+            std::fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\n: > '{}/{kind}'\necho '{PWN_MARKER}'\nexit 0\n",
+                    sentinels.display()
+                ),
+            )
+            .expect("write hostile script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod hostile script");
+            }
+        }
+
+        git(&root, &["init", "--initial-branch=main", "--quiet"]);
+        write_file(&root, "file.txt", &format!("first\n{}\n", Self::OLD_LINE));
+        write_file(&root, ".gitattributes", "* diff=pwn filter=pwn\n");
+        git(&root, &["add", "file.txt", ".gitattributes"]);
+        git(&root, &["commit", "-m", "real content", "--quiet"]);
+
+        // The config goes in *after* the commit, so the stored blob is the
+        // real content and not something a clean filter rewrote.
+        // `filter.pwn.process` is deliberately **not** set here: git speaks a
+        // packet protocol to a process filter, so a script that answers with
+        // plain text makes every real-git invocation die with a protocol
+        // error — which would leave the control below with nothing to prove.
+        // `arm_process` turns it on for the one test that wants exactly that.
+        for (key, kind) in [
+            ("diff.pwn.textconv", "textconv"),
+            ("diff.pwn.command", "diff-command"),
+            ("filter.pwn.clean", "clean"),
+            ("filter.pwn.smudge", "smudge"),
+        ] {
+            git(
+                &root,
+                &[
+                    "config",
+                    key,
+                    bin.join(kind).to_str().expect("utf-8 script path"),
+                ],
+            );
+        }
+        git(
+            &root,
+            &["config", "core.hooksPath", hooks.to_str().expect("utf-8 hooks path")],
+        );
+
+        // A real, unstaged content change, so every diff endpoint has
+        // something to report and the report can be checked for the real
+        // bytes rather than the script's.
+        write_file(&root, "file.txt", &format!("first\n{}\n", Self::NEW_LINE));
+
+        Self {
+            fixture,
+            root,
+            sentinels,
+        }
+    }
+
+    /// The mount root the tool sees. `repo` sits directly under it.
+    fn mount(&self) -> PathBuf {
+        self.fixture.path("mount")
+    }
+
+    /// Every sentinel that exists right now.
+    fn fired(&self) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(&self.sentinels)
+            .expect("read sentinel dir")
+            .map(|e| e.expect("dir entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Add `filter.pwn.process`, the long-running filter protocol.
+    fn arm_process(&self) {
+        git(
+            &self.root,
+            &[
+                "config",
+                "filter.pwn.process",
+                self.fixture
+                    .path("bin/process")
+                    .to_str()
+                    .expect("utf-8 script path"),
+            ],
+        );
+    }
+
+    /// Remove every sentinel, so the next observation starts from nothing.
+    fn disarm(&self) {
+        for name in self.fired() {
+            std::fs::remove_file(self.sentinels.join(name)).expect("remove sentinel");
+        }
+    }
+}
+
+/// Run one verb against the hostile repository.
+async fn pwn_run(repo: &PwnRepo, verb: &str, argv: &[&str]) -> ExecResult {
+    let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), repo.mount()));
+    let mut ctx = TestCtx::new(backend, "/mnt/repo");
+    let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
+    let mut args = ToolArgs::new();
+    args.positional.push(Value::String(verb.to_string()));
+    const VALUE_FLAGS: &[&str] = &["from", "to", "repo", "limit", "path"];
+    let mut i = 0;
+    while i < argv.len() {
+        let token = argv[i];
+        match token.strip_prefix("--") {
+            None => {
+                args.positional.push(Value::String(token.to_string()));
+                i += 1;
+            }
+            Some(name) if VALUE_FLAGS.contains(&name) => {
+                let value = argv
+                    .get(i + 1)
+                    .unwrap_or_else(|| panic!("'--{name}' takes a value in {argv:?}"));
+                args.named
+                    .insert(name.to_string(), Value::String((*value).to_string()));
+                i += 2;
+            }
+            Some(name) => {
+                args.flags.insert(name.to_string());
+                i += 1;
+            }
+        }
+    }
+    tool.execute(args, &mut ctx).await
+}
+
+/// **The negative control**, and the reason the assertion below means
+/// anything: this repository is armed. Hand it to real git and real git runs
+/// the scripts.
+///
+/// A test that only checks a file is absent passes just as well when the
+/// script was never executable, the config never took, or the fixture never
+/// built. So: run one script directly and watch its sentinel appear, then
+/// hand the same repository to real `git diff`, `git status` and
+/// `git commit`, and watch textconv, the clean and smudge filters, and the
+/// hooks fire. Only then is "our verbs leave the sentinel directory empty" a
+/// statement about this build rather than about a broken fixture.
+#[tokio::test]
+async fn the_hostile_fixture_pwns_real_git() {
+    let repo = PwnRepo::build();
+    assert!(repo.fired().is_empty(), "nothing has run yet");
+
+    // 1. The script itself works, and writes the file this test watches.
+    let script = repo.fixture.path("bin/textconv");
+    let out = std::process::Command::new(&script)
+        .arg(repo.root.join("file.txt"))
+        .output()
+        .unwrap_or_else(|e| panic!("run {}: {e}", script.display()));
+    assert!(out.status.success(), "the hostile script must run: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(PWN_MARKER),
+        "and print its marker"
+    );
+    assert_eq!(repo.fired(), vec!["textconv".to_string()]);
+    repo.disarm();
+
+    // 2. Real git, given this repository, runs it. `diff.pwn.command` — an
+    //    external diff driver — wins over `textconv`, so both spellings get
+    //    their own invocation: the plain one reaches the driver, and
+    //    `--no-ext-diff` turns the driver off and lets textconv through.
+    let theirs = git(&repo.root, &["diff"]);
+    assert!(
+        theirs.contains(PWN_MARKER),
+        "real git's whole answer here is the script's output, not the \
+         repository's content: {theirs}"
+    );
+    git(&repo.root, &["diff", "--no-ext-diff"]);
+    git(&repo.root, &["status", "--porcelain"]);
+    let after_read = repo.fired();
+    for kind in ["diff-command", "textconv", "clean"] {
+        assert!(
+            after_read.contains(&kind.to_string()),
+            "real git must run {kind} against this repository, or the fixture \
+             is not hostile: {after_read:?}"
+        );
+    }
+
+    // 3. And the hooks fire, which is the third mechanism D.3 names. Worth
+    //    knowing, and found here: `core.hooksPath` is reachable from a real
+    //    git *read* command, not only from a write — `post-index-change`
+    //    turns up in the sentinel list above, fired by `git status`
+    //    refreshing the index. It is asserted on the write instead, because
+    //    `post-index-change` only exists from git 2.22 and only fires when
+    //    the index is actually rewritten, while `pre-commit` on a commit is
+    //    stable everywhere. Nothing in this crate writes *or* refreshes an
+    //    index (D.4 is the test that says so), so neither is reachable here.
+    repo.disarm();
+    git(&repo.root, &["commit", "--allow-empty", "-m", "hook bait", "--quiet"]);
+    let after_write = repo.fired();
+    assert!(
+        after_write.contains(&"pre-commit".to_string()),
+        "real git must run the pre-commit hook from core.hooksPath: \
+         {after_write:?}"
+    );
+    repo.disarm();
+}
+
+/// D.3, layer 3, as behavior rather than as a dependency-graph argument:
+/// every verb that touches blob content, run against a repository that
+/// declares `diff.*.textconv`, `diff.*.command`, `filter.*.clean/smudge/
+/// process` and `core.hooksPath`, leaves every sentinel unwritten and
+/// reports the repository's real bytes.
+///
+/// The dependency tripwires (`cargo tree -i` over `gix-command`,
+/// `gix-transport`, `gix-filter`, `.github/workflows/ci.yml`) say the code
+/// that could act on any of this is not linked. This says what a caller
+/// actually gets, which is the claim that survives a pin bump quietly adding
+/// an edge — the case the tripwire is weakest against.
+#[tokio::test]
+async fn no_verb_runs_textconv_a_filter_or_a_hook() {
+    let repo = PwnRepo::build();
+    repo.disarm();
+
+    let cases: &[(&str, &[&str])] = &[
+        ("info", &[]),
+        ("status", &["--json"]),
+        ("ls", &["--json"]),
+        ("log", &["--stat", "--json"]),
+        ("show", &["HEAD", "--json"]),
+        ("show", &["HEAD:file.txt"]),
+        ("diff", &["--json"]),
+        ("diff", &["--staged", "--json"]),
+        ("diff", &["--from", "HEAD", "--json"]),
+        #[cfg(feature = "textdiff")]
+        ("diff", &["--patch"]),
+    ];
+
+    for (verb, argv) in cases {
+        let result = pwn_run(&repo, verb, argv).await;
+        assert_eq!(result.code, 0, "git {verb} {argv:?}: {}", result.err);
+        assert!(
+            repo.fired().is_empty(),
+            "git {verb} {argv:?} ran {:?} — a repository's own config decided \
+             what a read verb did",
+            repo.fired()
+        );
+        let text = result.text_out().to_string();
+        let json = result
+            .output()
+            .and_then(|o| o.rich_json.clone())
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        for surface in [&text, &json] {
+            assert!(
+                !surface.contains(PWN_MARKER),
+                "git {verb} {argv:?} returned the script's output: {surface}"
+            );
+        }
+    }
+}
+
+/// The other half of the same claim: not only did nothing run, the answer is
+/// the *internal* diff of the repository's real bytes.
+///
+/// An inert textconv could still have produced a wrong answer — an empty
+/// diff, say, which is what real git reports here because its clean filter
+/// flattens both sides to the same string. Ours reports the change.
+#[tokio::test]
+async fn the_answer_is_the_internal_diff_of_the_real_bytes() {
+    let repo = PwnRepo::build();
+    repo.disarm();
+
+    let result = pwn_run(&repo, "diff", &["--json"]).await;
+    assert_eq!(result.code, 0, "stderr: {}", result.err);
+    let model = result
+        .output()
+        .and_then(|o| o.rich_json.clone())
+        .expect("--json");
+    let files = model["files"].as_array().expect("files");
+    assert_eq!(files.len(), 1, "only file.txt changed: {model}");
+    assert_eq!(files[0]["path"], "file.txt");
+    assert_eq!(files[0]["additions"], 1);
+    assert_eq!(files[0]["deletions"], 1);
+
+    // `git show HEAD:file.txt` gives the committed bytes, not the script's.
+    let blob = pwn_run(&repo, "show", &["HEAD:file.txt"]).await;
+    assert_eq!(blob.code, 0, "stderr: {}", blob.err);
+    assert!(
+        blob.text_out().contains(PwnRepo::OLD_LINE),
+        "the blob must be the repository's own content: {}",
+        blob.text_out()
+    );
+
+    // And real git, on the same repository, answers with the script's output
+    // instead of a diff. That contrast is the whole of layer 3: this config
+    // is load-bearing for git and inert for us.
+    let theirs = git(&repo.root, &["diff"]);
+    assert!(
+        theirs.contains(PWN_MARKER),
+        "real git must be answering from the script here; if it is not, this \
+         fixture no longer demonstrates the difference: {theirs}"
+    );
+    assert!(
+        !theirs.contains(PwnRepo::NEW_LINE),
+        "and its answer must not contain the real content: {theirs}"
+    );
+    repo.disarm();
+}
+
+/// `filter.*.process` — git's long-running filter protocol — is inert here
+/// too, and this one comes with the loudest control of all: real git cannot
+/// even *read* this repository, because it opens the protocol and the script
+/// answers in prose.
+///
+/// Our verbs answer normally. Nothing spoke to anything.
+#[tokio::test]
+async fn a_long_running_process_filter_is_inert_too() {
+    let repo = PwnRepo::build();
+    repo.arm_process();
+    repo.disarm();
+
+    // The control: real git tries, and dies trying.
+    let out = std::process::Command::new("git")
+        .args(["diff", "--name-only"])
+        .current_dir(&repo.root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("run git diff");
+    assert!(
+        !out.status.success(),
+        "real git must try to speak the filter protocol, or this proves nothing"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("protocol error"),
+        "and fail on the protocol, not on something else: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    repo.disarm();
+
+    // And this build reads the repository as if the declaration were a
+    // comment, because to this build it is one.
+    let result = pwn_run(&repo, "diff", &["--json"]).await;
+    assert_eq!(result.code, 0, "stderr: {}", result.err);
+    assert!(repo.fired().is_empty(), "ran {:?}", repo.fired());
+    let model = result
+        .output()
+        .and_then(|o| o.rich_json.clone())
+        .expect("--json");
+    assert_eq!(model["files"][0]["path"], "file.txt");
+    assert_eq!(model["files"][0]["additions"], 1);
 }

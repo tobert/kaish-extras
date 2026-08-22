@@ -158,8 +158,14 @@ Notes that are load-bearing:
   correct answer for an agent, which wants raw content. What survives of the
   split is staging: `textdiff` gates the hand-written unified-patch renderer
   ([F.1](#f1-unified-patch-assembly), [H](#h-phasing) PR 6), which is the real
-  work. **Open:** whether `textdiff` stays a feature axis once that renderer
-  lands, or folds into `read`.
+  work. **Closed (PR 6): `textdiff` stays a feature axis, and it adds no
+  dependency.** `gix-imara-diff` is already unconditional — `log --stat` and
+  `diff`'s line counts run it — so the axis gates code and output size, not
+  the graph. It stays separate because it is the difference between a verb
+  that returns a bounded table and one that can return
+  `max_diff_files` x `max_hunk_bytes_per_file` of text, which is a choice an
+  embedder should make. The tripwires are asserted with it on as well as off,
+  so the structural claim covers both builds.
 - **Rename detection does not exist without `gix-diff`'s `blob` feature**, and
   `blob` is exactly what pulls `gix-command`. The whole `rewrites` tracker —
   `Rewrites`, `rewrites::Tracker`, `tree_with_rewrites` — is
@@ -262,8 +268,9 @@ are their own PR with the full test suite as the gate:
 | `gix-diff` | `=0.66` | **without the `blob` feature** — `blob` is what pulls `gix-command` |
 | `gix-config` | `=0.59` | `from_bytes_no_includes`; do **not** use 0.51, it resolves a whole second-generation graph |
 
-`gix-imara-diff` supplies line hunks under `textdiff`. The set resolves with no
-duplicate crates (`cargo tree -d` → nothing to print).
+`gix-imara-diff` supplies line counts unconditionally (`log --stat`, `diff`)
+and line hunks under `textdiff`; it is pinned `=0.2.4` like the rest. The set
+resolves with no duplicate crates (`cargo tree -d` → nothing to print).
 
 CI tripwires, all `cargo tree`-based, all on the **default** feature set unless
 noted:
@@ -844,15 +851,30 @@ on them is not linked.
   applied to blob bytes we fetched ourselves; there is no pipeline to
   configure, no driver set to empty out, and no `.gitattributes` consultation
   anywhere in the path.
-- **The hostile-repo fixture** (`tests/hostile_repo.rs`) runs anyway, on every
-  build: a repo whose `.git/config` declares `diff.pwn.textconv` pointing at a
-  script that creates a sentinel file, and whose `.gitattributes` maps
-  `* diff=pwn`. Every diff/show verb runs against it; the test asserts the
-  sentinel does not exist and the output is the internal diff. Same fixture
-  family covers `filter.*.clean/smudge` and `core.hooksPath` (nothing here runs
-  hooks — an assertion worth pinning, since it is a *feature*). A tripwire
-  proves absence in *our* graph; the fixture proves behavior, and it is what
-  catches a pin bump that quietly adds an edge.
+- **The hostile-repo fixture** (`tests/hostile_repo.rs`, `PwnRepo`) runs
+  anyway, whenever the suite runs: a repo whose `.git/config` declares
+  `diff.pwn.textconv`, `diff.pwn.command`, `filter.pwn.clean`/`smudge` and
+  `core.hooksPath`, each pointing at a script that creates its own sentinel
+  file, and whose `.gitattributes` maps `* diff=pwn filter=pwn`. Every verb
+  that touches blob content runs against it — `info`, `status`, `ls`,
+  `log --stat`, `show` in both forms, and `diff` at three endpoints plus
+  `--patch` — and the test asserts no sentinel exists and the output is the
+  internal diff. `filter.*.process` gets its own test, because git speaks a
+  packet protocol to a process filter and a script answering in prose kills
+  real git outright. A tripwire proves absence in *our* graph; the fixture
+  proves behavior, and it is what catches a pin bump that quietly adds an
+  edge.
+- **And the fixture has a control**, because a test that only asserts a file
+  is absent passes just as well over a fixture that never built.
+  `the_hostile_fixture_pwns_real_git` proves the repository is armed before
+  anything else is asserted: the script runs on its own and its sentinel
+  appears; real `git diff` on the same repository answers with the script's
+  output rather than a diff, firing textconv, the external diff driver and
+  the clean and smudge filters; and `git commit` fires the pre-commit hook
+  out of `core.hooksPath`. Then the sentinels are cleared and our verbs run.
+  Written in PR 6 — this section described it as already existing from the
+  day the design was written until then, which is recorded in the changelog
+  below.
 - **`include.path` escape: retired by construction.** Repo-local config can say
   `include.path = ../../../etc/…`. Because config is parsed with
   `from_bytes_no_includes` and includes are resolved by us
@@ -1182,10 +1204,14 @@ color; `--word-diff`; whitespace-config-driven rendering
 detection**, which is not a heuristic divergence but an absence — exact-match
 only, no similarity scoring, no copy detection ([B.4](#b4-git-diff)).
 
-Test strategy: golden fixtures for the shape, plus an opt-in `compat-tests`
-feature that, when real git is on PATH, pipes our patch through
-`git apply --check` against the fixture repo and asserts it applies. That is a
-falsifiable fidelity claim rather than an assertion of good intentions.
+Test strategy, as built (PR 6): the patch is compared line-for-line against
+`git diff --patch` for both object-backed endpoint pairs, `--context <N>`
+against `git diff -U<N>` at five widths, and the whole patch is fed to real
+`git apply --check` against a clean checkout of the revision it claims to
+apply to (`textdiff.rs::git_apply_check_accepts_our_patch`). No opt-in
+`compat-tests` feature: this suite already treats real git as a hard
+requirement rather than an optional extra, so gating one test on its presence
+would be a second, weaker rule.
 
 → kaish-extras#7.
 
@@ -1556,3 +1582,75 @@ root (the class the caller already has names it). Two `--stat` divergences
 from git are left standing with characterization tests: a mode-only change it
 misses, and a submodule move it counts as zero lines where git counts one
 each side (docs/issues.md, L8 and L9).
+
+**2026-08-22 — PR 6 (the `textdiff` feature) landed: hunks, unified patch
+text, and the D.3 fixture that this document said already existed.**
+
+- **`§D.3`'s hostile-textconv fixture now exists**, and this section has been
+  rewritten to describe what was built rather than what was imagined. From
+  the day this document was written until PR 6, "the hostile-repo fixture
+  runs anyway, on every build" was false — found in PR 8 while writing
+  [`docs/embedding-git.md`](../embedding-git.md), recorded in
+  `docs/issues.md`, and fixed here. `PwnRepo` covers `diff.*.textconv`,
+  `diff.*.command`, `filter.*.clean/smudge/process` and `core.hooksPath`,
+  and it has the control the original description never called for: the same
+  repository handed to real git gets pwned three separate ways before our
+  verbs are run at all. **It found nothing.** No sentinel fired, for any
+  verb, in either feature configuration. That is the expected result and it
+  is now a result rather than a belief.
+
+- **`--patch`'s text payload is the patch alone, and the endpoints move to
+  stderr.** §B.4 asks every result to state its endpoints "text and JSON".
+  Under `--patch` the text payload is what `git apply` reads, and a preamble
+  it would have to skip is a worse bargain than a stderr line. The endpoints
+  are still stated on every result, in `--json` and on stderr, and the
+  default table is unchanged.
+
+- **`hunks_capped` is a sibling of `lines_capped`, not an overload of it.**
+  PR 6 first landed the hunk cap on `lines_capped`, distinguished by whether
+  `additions` was `null`. Reverted on review before merge, for two reasons.
+  The narrow one: `model.rs` already documented `lines_capped` as meaning
+  "we declined to read it, **and nothing else**", with a `log --stat` test
+  asserting that exact reading — so the overload contradicted a stated
+  invariant and would have made that test's promise false for a sibling verb.
+  The broad one is *one term, one meaning*: an agent that must read
+  `additions` to learn which of two things `lines_capped` reported is doing
+  inference the schema should have done for it. The saving was one field; the
+  cost was a field that means different things depending on another field.
+
+- **The per-file `hunks` field exists only when the feature is on.** An
+  always-present `hunks: null` on a build with no hunk machinery is a
+  placeholder shaped like a fact — the same reasoning that replaced §B.4's
+  per-file `truncated` with `lines_capped` in PR 5.
+
+- **`git log --patch` is deferred, not forgotten** (`docs/issues.md`, T2).
+  §B.3 lists it as `textdiff`-only and §H's PR 6 row does not name it. The
+  reason it is not here is a bound: `git diff --patch` costs at most
+  `max_diff_files` x `max_hunk_bytes_per_file`, and a per-commit patch
+  multiplies that by `--limit` — 2.5 GiB on defaults, with no third cap in
+  `Limits` to stop it. Its refusal is honest in both builds now: without the
+  feature it names `textdiff`, with it on it names `git diff --patch --from
+  <commit>~1 --to <commit>` rather than a feature that is already enabled.
+  `git show --patch` (§B.5) is deferred with it, and is the cheaper of the
+  two to add later since a single commit is bounded.
+
+- **F.1's `compat-tests` feature was not added.** F.1 proposed gating the
+  `git apply --check` test behind an opt-in feature "when real git is on
+  PATH". This suite already treats real git as a hard requirement — every
+  fixture is built by shelling out to it, and `require_git()` asserts rather
+  than skips — so an opt-in gate would have been a second, weaker rule for
+  one test in a file full of tests with the same dependency.
+  `git_apply_check_accepts_our_patch` runs unconditionally under the
+  `textdiff` feature.
+
+- **Four non-fidelities, each measured rather than assumed** (F.1's list, as
+  built): no `index` line when a side is the working tree, because there is
+  no oid in the model to name and inventing one would send `git apply -3`
+  after an object that is not in the store; no binary patch encoding, which
+  makes such a patch unappliable — and real `git diff`'s own output is
+  unappliable the same way, pinned by
+  `a_binary_patch_is_unappliable_from_git_as_much_as_from_us`; lossy
+  rendering of content that is not valid UTF-8 (`docs/issues.md`, T1); and
+  seven-character abbreviated oids that are not grown for uniqueness.
+  Everything else in F.1's emitted list landed as written, and the patch is
+  byte-identical to `git diff --patch` for both object-backed endpoint pairs.

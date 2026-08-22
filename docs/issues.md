@@ -5,38 +5,6 @@ deliberately out of scope for the PR that discovered it. Entries move out when
 fixed (delete the entry in the fixing PR) or when they graduate to a GitHub
 issue because someone outside the repo needs the link.
 
-## git — the D.3 textconv/filter fixture described in architecture.md does not exist
-
-Found while writing `docs/embedding-git.md` (PR 8, 2026-08-22), checking each
-claim in the doc against an actual test before writing it down.
-architecture.md §D.3 describes a behavioral fixture as already running "on
-every build": a hostile repository declaring `diff.pwn.textconv` (pointed at
-a script that plants a sentinel file) and `.gitattributes` mapping `* diff=pwn`,
-run against every diff/show verb, asserting the sentinel never appears and the
-output is the internal diff — plus the same shape for `filter.*.clean`/`smudge`
-and `core.hooksPath`.
-
-No such fixture exists. `tests/hostile_repo.rs` (grepped for `textconv`,
-`hooksPath`, `filter.*.clean`, `sentinel`, `pwn` — nothing beyond the module
-doc's own reference to the D.3 premise) covers only the containment-escape
-surface: `commondir`, a `.git` file's `gitdir:` line, symlinked leaves,
-`objects/info/alternates`. Real: the *dependency-absence* tripwire
-(`.github/workflows/ci.yml`'s `git-tool-dependency-tripwires` job, `cargo
-tree -i` for `gix-command`/`gix-transport`/`gix-filter`) is genuinely
-enforced in CI. Not real: the *behavioral* proof that a repository
-attempting to use textconv/filter/hooks is inert against this build, which
-the design doc's D.3 prose reads as already covered.
-
-The dependency tripwire is strong evidence on its own — nothing that could
-act on `textconv` is even linked — but it is not the same claim as "a
-hostile repository was actually run against every verb and provably did
-nothing," and `docs/embedding-git.md` should not repeat the stronger claim
-until that fixture exists. Corrected in `docs/embedding-git.md` (PR 8) to
-state the tripwire accurately and name this gap rather than overclaim.
-Writing the missing fixture is out of scope for PR 8 (an embedder-boundary
-and config-plumbing PR, not a D.3 test-coverage PR) — worth its own small PR,
-modeled on the containment-escape fixtures already in `tests/hostile_repo.rs`.
-
 ## git status — divergences from git
 
 Found by the PR #23 cross-model review (deepseek-v4-pro C-series); each needs a
@@ -296,12 +264,34 @@ fixture asserted against real `git status --porcelain` before fixing.
   candidate set before that pass, which is the lever a caller has. Same cost
   `git status` already pays, and accepted for the same reason.
 
-- **D4 — `--patch` and `--context` exit 4 with no cargo feature to name.**
-  The error names `textdiff`, which is PR 6's feature and does not exist yet.
-  No empty `textdiff` feature was added to carry the name: `lib.rs`'s
-  `enabled_features()` rule is that an axis arrives with the code it gates,
-  and an embedder who could enable `textdiff` today would get nothing for it.
-  The feature and the flags start working in the same PR.
+## git diff --patch — deferred (architecture.md B.4, F.1, shipped in PR 6)
+
+- **T1 — hunk text for non-UTF-8 content is lossy, so its patch does not
+  apply.** Content with no NUL byte is text to git and to this build, but
+  hunk lines are `String`, so a latin-1 byte becomes U+FFFD on the way in and
+  the rendered patch is refused by `git apply` where git's own is accepted.
+  It is one conversion point — `diffcore.rs`'s `load_both` — and the counting
+  path has always had it, so this is not new with hunks; what is new is that
+  the lossy bytes now reach the caller. Closing it means carrying hunk text
+  as bytes and giving `ExecResult` a bytes payload for `--patch`, which is a
+  kaish-side question (`success_text_or_bytes` exists for blobs but does not
+  compose with `with_output_and_text`). Pinned both ways by
+  `textdiff.rs::latin1_content_renders_lossily_and_git_does_not`, which
+  asserts git keeps the byte, we do not, and the consequence.
+
+- **T2 — `git log --patch` refuses even with `textdiff` on.** Not an
+  oversight: `git diff --patch` is bounded at `max_diff_files` x
+  `max_hunk_bytes_per_file` (500 x 256 KiB), and a per-commit patch
+  multiplies that by `--limit` — 20 commits of defaults is 2.5 GiB of patch
+  text with no third cap to stop it. `Limits` has no whole-report patch
+  budget, and adding one is a `GitConfig` change (C.1), which is a model
+  change and not a same-PR fix. The refusal names
+  `git diff --patch --from <commit>~1 --to <commit>`, which is bounded and
+  answers the same question for one commit. `git show --patch` is the same
+  shape and the same deferral: a single commit is bounded, so it is the
+  cheaper of the two to add, and B.5 already specifies `--name-only`,
+  `--stat` and `--patch` for `show` as one group. Pinned by
+  `textdiff.rs::log_patch_points_at_diff_patch_rather_than_at_the_feature`.
 
 ## git — what the tool schema actually publishes (read from the schema, 2026-08-22)
 
@@ -609,7 +599,15 @@ repository size, not result size.
   blobs can stall one call. `max_diff_files` bounds how many such pairs one
   invocation attempts, so the exposure is `limit x Myers(2 x max_blob_bytes)`.
   There is no per-diff deadline, and `ctx.patient` is not wired up either
-  (see the `git log` entry above), so nothing interrupts it.
+  (see the `git log` entry above), so nothing interrupts it. **PR 6's hunk
+  path does not widen this**: `diffcore::line_hunks` makes the same one
+  `Diff::compute` call per file that `line_delta` makes, on the same content,
+  for the same set of files — `--patch` diffs nothing the counting path would
+  have skipped. It adds `postprocess_lines`, one linear pass.
+  `max_hunk_bytes_per_file` bounds the hunk *output*, not the Myers run that
+  precedes it, so it does not bound time either; checking it before the diff
+  would mean declining a patch for any file larger than 256 KiB, which is the
+  wrong answer for a one-line change in a large file.
 
 - **G10 — `status`'s `flatten_subtree` is the one tree walk that recurses on
   the call stack.** `verbs/status.rs:822-870`, bounded at

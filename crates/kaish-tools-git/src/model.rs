@@ -472,6 +472,81 @@ pub enum DiffEndpoint {
     },
 }
 
+/// What one line of a [`DiffHunk`] does (architecture.md B.4).
+///
+/// A word, never a sigil. Patch text spells these ` `, `-` and `+`, and a
+/// JSON consumer reading that would have to tell a leading space from an
+/// empty line — a distinction whitespace-trimming middleware quietly
+/// destroys. The word survives.
+#[cfg(feature = "textdiff")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum DiffOp {
+    /// Present unchanged on both sides.
+    Context,
+    /// Present on the `from` side only.
+    Delete,
+    /// Present on the `to` side only.
+    Insert,
+}
+
+/// One line inside a [`DiffHunk`] (architecture.md B.4).
+#[cfg(feature = "textdiff")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiffLine {
+    /// What this line does.
+    pub op: DiffOp,
+    /// The line's text, without its trailing newline and without a leading
+    /// sigil. Content that is not valid UTF-8 carries U+FFFD in place of the
+    /// bytes that were not — see [`DiffFile::hunks`].
+    pub text: String,
+    /// Whether the file ends here with no trailing newline — the
+    /// `\ No newline at end of file` marker in patch text. Absent from
+    /// `--json` when false, and only ever true on the last line of a side.
+    #[serde(skip_serializing_if = "is_false")]
+    pub no_newline: bool,
+}
+
+/// Whether to leave a false flag out of the JSON. One line per hunk line is
+/// the largest thing this model emits; a field that is false everywhere but
+/// two places in a repository is worth spending nothing on.
+#[cfg(feature = "textdiff")]
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+/// One hunk of a changed file (architecture.md B.4).
+///
+/// The four numbers are the ones the `@@ -old_start,old_lines
+/// +new_start,new_lines @@` header carries, in git's own convention: a side
+/// with zero lines reports the line it *follows*, so a new file's hunk is
+/// `old_start: 0, old_lines: 0`.
+#[cfg(feature = "textdiff")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiffHunk {
+    /// First line of this hunk on the `from` side, 1-based.
+    pub old_start: u32,
+    /// How many `from`-side lines this hunk covers.
+    pub old_lines: u32,
+    /// First line of this hunk on the `to` side, 1-based.
+    pub new_start: u32,
+    /// How many `to`-side lines this hunk covers.
+    pub new_lines: u32,
+    /// The enclosing declaration, as git's default heading rule finds it: the
+    /// nearest preceding `from`-side line whose first character is an ASCII
+    /// letter, `_` or `$`, truncated to 80 bytes with trailing whitespace
+    /// removed. `null` when there is none above the hunk.
+    ///
+    /// git's per-language `diff.<driver>.xfuncname` patterns are **not**
+    /// consulted: they live in `.gitattributes`, which nothing in this build
+    /// reads (D.3). A repository that configures one gets the default rule
+    /// here and git's pattern from `git diff`.
+    pub section: Option<String>,
+    /// The hunk's lines, in patch order.
+    pub lines: Vec<DiffLine>,
+}
+
 /// One changed path in a [`DiffReport`] (architecture.md B.4).
 ///
 /// `additions`, `deletions` and `binary` are `null` rather than zero whenever
@@ -522,9 +597,39 @@ pub struct DiffFile {
     /// Lines removed from the `from` side, or `null` when nothing was
     /// counted.
     pub deletions: Option<u64>,
-    /// Whether a side was over the embedder's `max_blob_bytes`, so the line
-    /// counts were declined. The file still counts in `totals.files`.
+    /// This file's hunks, or `null` when there are none to give: `--patch`
+    /// was not asked for, the content is binary, a submodule pointer moved,
+    /// only the mode or the path changed, or a cap declined the read.
+    /// `binary`, `lines_capped` and `status` say which.
+    ///
+    /// Hunk text is UTF-8. A side that is not valid UTF-8 but holds no NUL
+    /// byte is text to git and to `binary` here, and its hunks carry U+FFFD
+    /// where the invalid bytes were — so those hunks read correctly and the
+    /// patch rendered from them does not apply. Content with a NUL byte is
+    /// `binary: true` and has no hunks at all.
+    #[cfg(feature = "textdiff")]
+    pub hunks: Option<Vec<DiffHunk>>,
+    /// Whether a cap withheld line-level detail for this file. Two caps can
+    /// set it, and `additions` says which: a side over the embedder's
+    /// `max_blob_bytes` declines the counts too (`additions` is `null`), and
+    /// The file counts in `totals.files` either way.
+    ///
+    /// This is **not** the flag for trimmed hunks — see `hunks_capped`. The
+    /// two were one field briefly, disambiguated by whether `additions` was
+    /// `null`. That made an agent cross-reference two fields to learn which
+    /// of two different things happened, and it contradicted this type's own
+    /// rule that `lines_capped` means "we declined to read it, and nothing
+    /// else".
     pub lines_capped: bool,
+    /// Whether `max_hunk_bytes_per_file` stopped this file's hunks short.
+    ///
+    /// Distinct from `lines_capped` in the way that matters to a reader: the
+    /// counts are **exact** here (`additions` and `deletions` are numbers,
+    /// because they are a property of the diff rather than of what was
+    /// emitted), and `hunks` holds as many whole hunks as fit — never a
+    /// partial hunk, which is not a patch. `false` without the `textdiff`
+    /// feature, where there are no hunks to cap.
+    pub hunks_capped: bool,
 }
 
 /// The running totals a diff reports (architecture.md B.4).
@@ -538,9 +643,13 @@ pub struct DiffTotals {
     pub additions: Option<u64>,
     /// Total lines removed, under the same rule as `additions`.
     pub deletions: Option<u64>,
-    /// How many reported files had their line counts declined by
-    /// `max_blob_bytes`. Zero in the common case.
+    /// How many reported files carry `lines_capped` — a cap withheld their
+    /// counts entirely. Zero in the common case.
     pub lines_capped: usize,
+    /// How many reported files carry `hunks_capped` — their counts are exact
+    /// but their hunks were cut short. Zero in the common case, and always
+    /// zero without the `textdiff` feature.
+    pub hunks_capped: usize,
 }
 
 /// `git diff`'s result (architecture.md B.4).

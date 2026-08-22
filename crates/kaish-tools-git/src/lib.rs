@@ -70,8 +70,12 @@
 //! PR 5 adds `git diff` — the typed change model over five endpoint pairs,
 //! every result stating which one it used — and lifts the comparison
 //! machinery `status`, `log --stat` and `diff` all needed into
-//! `diffcore.rs`. No patch text: `--patch` and `--context` exit 4 naming the
-//! `textdiff` feature a later phase adds.
+//! `diffcore.rs`. PR 6 adds the `textdiff` feature: line hunks in the diff
+//! model, the unified-patch renderer behind `git diff --patch`, and the D.3
+//! hostile-textconv fixture that proves a repository declaring
+//! `diff.*.textconv`, `filter.*.clean/smudge` or `core.hooksPath` gets
+//! nothing from this build. With `textdiff` off, `--patch` and `--context`
+//! exit 4 naming it.
 
 #[cfg(target_family = "wasm")]
 compile_error!(
@@ -103,6 +107,8 @@ mod repo;
 mod tool;
 #[cfg(not(target_family = "wasm"))]
 mod diffcore;
+#[cfg(all(not(target_family = "wasm"), feature = "textdiff"))]
+mod patch;
 #[cfg(not(target_family = "wasm"))]
 mod treewalk;
 #[cfg(not(target_family = "wasm"))]
@@ -120,6 +126,8 @@ pub use model::{
     EntryStatus, Head, LimitsReport, LogReport, LsReport, RefBackend, RepoInfo, ShowTag,
     ShowTarget, Signature, StatSummary, StatusEntry, StatusReport, StatusTotals, TreeRow,
 };
+#[cfg(all(not(target_family = "wasm"), feature = "textdiff"))]
+pub use model::{DiffHunk, DiffLine, DiffOp};
 #[cfg(not(target_family = "wasm"))]
 pub use repo::ReadRepo;
 #[cfg(not(target_family = "wasm"))]
@@ -165,13 +173,20 @@ pub fn gix_pins() -> std::collections::BTreeMap<String, String> {
 
 /// The cargo features this build was compiled with.
 ///
-/// `read` is unconditional today: architecture.md A.2's feature axes exist in
-/// the design, but only the read profile is implemented, so declaring cargo
-/// features that gate nothing would advertise a choice an embedder does not
-/// have. Each axis arrives with the code it gates.
+/// `read` is unconditional: it is the profile, not an option. `textdiff` is
+/// reported only when the cargo feature of that name is on, which is what
+/// makes `git info` answerable — an agent that read `--patch` in the schema
+/// and got exit 4 can find out from here whether the build has the code at
+/// all. The remaining A.2 axes (`worktree`, `commit`, `remote`, `parallel`)
+/// are not declared: a cargo feature that gates nothing advertises a choice
+/// an embedder does not have, so each axis arrives with the code it gates.
 #[cfg(not(target_family = "wasm"))]
 pub fn enabled_features() -> Vec<String> {
-    vec!["read".to_string()]
+    let mut features = vec!["read".to_string()];
+    if cfg!(feature = "textdiff") {
+        features.push("textdiff".to_string());
+    }
+    features
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]

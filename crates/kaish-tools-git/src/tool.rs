@@ -236,16 +236,27 @@ impl GitTool {
         };
         parsed.global.apply(ctx);
 
-        // `--patch` is refused before anything is read. This build assembles no
-        // unified-diff text, and answering a `--patch` request with a stat — or
-        // with a silently flag-less log — would be a wrong answer rather than a
-        // missing one (E.5's precedent).
+        // `--patch` is refused before anything is read, and the refusal has to
+        // say the true thing in both builds: without `textdiff` there is no
+        // patch machinery at all, and with it `git log` still assembles none.
+        // Answering a `--patch` request with a stat — or with a silently
+        // flag-less log — would be a wrong answer rather than a missing one
+        // (E.5's precedent).
         if parsed.patch {
+            #[cfg(not(feature = "textdiff"))]
             return failure(GitError::PatchNeedsTextdiff {
                 operation: OP,
                 flag: "--patch",
                 instead: "Use --stat for the changed-file and line counts this \
                           build does compute.",
+            });
+            #[cfg(feature = "textdiff")]
+            return failure(GitError::PatchNotInThisVerb {
+                operation: OP,
+                flag: "--patch",
+                instead: "One commit's patch is 'git diff --patch --from \
+                          <commit>~1 --to <commit>'; --stat gives every \
+                          commit's changed-file and line counts.",
             });
         }
 
@@ -628,9 +639,11 @@ impl GitTool {
         };
         parsed.global.apply(ctx);
 
-        // Both flags are refused before anything is read. This build assembles
-        // no unified-diff text, and answering either with the default table
-        // would be a wrong answer rather than a missing one (E.5).
+        // Without `textdiff` both flags are refused before anything is read:
+        // this build assembles no unified-diff text, and answering either with
+        // the default table would be a wrong answer rather than a missing one
+        // (E.5).
+        #[cfg(not(feature = "textdiff"))]
         if parsed.patch {
             return failure(GitError::PatchNeedsTextdiff {
                 operation: OP,
@@ -640,12 +653,24 @@ impl GitTool {
                           --name-only reports the paths alone.",
             });
         }
+        #[cfg(not(feature = "textdiff"))]
         if parsed.context.is_some() {
             return failure(GitError::PatchNeedsTextdiff {
                 operation: OP,
                 flag: "--context",
                 instead: "Only --patch output has hunks for --context to \
                           size, and this build produces none.",
+            });
+        }
+        // With it, `--context` still needs something to size.
+        #[cfg(feature = "textdiff")]
+        if parsed.context.is_some() && !parsed.patch {
+            return failure(GitError::Usage {
+                operation: OP,
+                message: "--context sizes the context around each --patch \
+                          hunk, and without --patch there are no hunks to \
+                          size. Add --patch, or drop --context"
+                    .to_string(),
             });
         }
 
@@ -697,6 +722,17 @@ impl GitTool {
         // can be explicit, and clap refuses the pair.
         let find_renames = !parsed.no_find_renames;
         let name_only = parsed.name_only;
+        // Not lowerable by an argument either: `--context` decides how much
+        // context a hunk carries, and this decides how much hunk text one file
+        // may cost whatever the caller asked for.
+        #[cfg(feature = "textdiff")]
+        let hunks = parsed.patch.then(|| crate::diffcore::HunkOptions {
+            context: u32::try_from(parsed.context.unwrap_or(verbs::diff::DEFAULT_CONTEXT))
+                .unwrap_or(u32::MAX),
+            max_bytes: self.config.limits().max_hunk_bytes_per_file,
+        });
+        #[cfg(feature = "textdiff")]
+        let patch_wanted = parsed.patch;
 
         let outcome = block_in_place_compat(move || {
             let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
@@ -707,6 +743,8 @@ impl GitTool {
                 find_renames,
                 limit,
                 max_blob_bytes,
+                #[cfg(feature = "textdiff")]
+                hunks,
             };
             let root = repo.root().display().to_string();
             verbs::diff::run(&repo, &opts).map(|model| (model, root))
@@ -717,9 +755,44 @@ impl GitTool {
             Err(e) => return failure(e),
         };
 
+        #[cfg(feature = "textdiff")]
+        let (data, text) = if patch_wanted {
+            crate::render::diff_patch(&model)
+        } else {
+            crate::render::diff(&model)
+        };
+        #[cfg(not(feature = "textdiff"))]
         let (data, text) = crate::render::diff(&model);
+
         let mut result = ExecResult::with_output_and_text(data, text);
         let mut notes: Vec<String> = Vec::new();
+        // The patch payload is a patch and nothing else — `git diff --patch |
+        // git apply` must not have to skip a preamble — so the endpoints B.4
+        // asks every result to state move to stderr, beside `--json`.
+        #[cfg(feature = "textdiff")]
+        if patch_wanted {
+            notes.push(format!(
+                "{} → {}",
+                crate::render::endpoint_text(&model.from),
+                crate::render::endpoint_text(&model.to)
+            ));
+            if model.totals.lines_capped > 0 {
+                notes.push(format!(
+                    "{} file(s) were not read: a side was over \
+                     max_blob_bytes, so their counts and hunks are absent; \
+                     'lines_capped' says which file",
+                    model.totals.lines_capped
+                ));
+            }
+            if model.totals.hunks_capped > 0 {
+                notes.push(format!(
+                    "{} file(s) have their hunks cut short at \
+                     max_hunk_bytes_per_file; their counts are exact and \
+                     'hunks_capped' says which file",
+                    model.totals.hunks_capped
+                ));
+            }
+        }
         if model.truncated {
             notes.push(format!(
                 "output truncated at {} files (--limit); 'truncated' is true \
