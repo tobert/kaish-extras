@@ -778,10 +778,18 @@ impl GitTool {
             ));
             if model.totals.lines_capped > 0 {
                 notes.push(format!(
-                    "{} file(s) have no hunks or no counts: a side was over \
-                     max_blob_bytes, or the hunks were over \
-                     max_hunk_bytes_per_file; 'lines_capped' says which file",
+                    "{} file(s) were not read: a side was over \
+                     max_blob_bytes, so their counts and hunks are absent; \
+                     'lines_capped' says which file",
                     model.totals.lines_capped
+                ));
+            }
+            if model.totals.hunks_capped > 0 {
+                notes.push(format!(
+                    "{} file(s) have their hunks cut short at \
+                     max_hunk_bytes_per_file; their counts are exact and \
+                     'hunks_capped' says which file",
+                    model.totals.hunks_capped
                 ));
             }
         }

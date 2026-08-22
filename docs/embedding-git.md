@@ -76,7 +76,8 @@ cannot actually run.
 | `max_rows` | 1000 | Rows any listing verb (`status`, `log`, `ls`, `show`'s tree form) returns. Not `diff` — a diff's rows are files, and they have their own cap below. |
 | `max_diff_files` | 500 | Files compared in one invocation: `git diff`'s whole result, and `log --stat`'s per-commit file list. A verb's `--limit` may lower it, never raise it. |
 | `max_blob_bytes` | 8 MiB (`8 * 1024 * 1024`) | Bytes of blob content `show` will read, and of a single working-tree file `status` will hash. Over the cap: the read is declined and reported (`git show: blob '<oid>' is <size> bytes, over this build's <cap>-byte cap`), never silently truncated. |
-| `max_hunk_bytes_per_file` | 256 KiB | Bytes of hunk text `git diff --patch` will produce for one file, under the `textdiff` feature. Measured before a hunk's lines are built and applied at whole-hunk granularity — a half-hunk is not a patch — so a file it cuts is marked `lines_capped` with its counts still exact. Not consulted by a build without `textdiff`, which has no hunks. |
+| `max_hunk_bytes_per_file` | 256 KiB | Bytes of hunk text `git diff --patch` will produce for one file, under the `textdiff` feature. Measured before a hunk's lines are built and applied at whole-hunk granularity — a half-hunk is not a patch — so a file it cuts is marked `hunks_capped` with its counts still exact —
+distinct from `lines_capped`, which means the file was not read at all. Not consulted by a build without `textdiff`, which has no hunks. |
 | `submodule_depth` | 1 | Reserved; `git info`'s `submodules` count reads `.gitmodules` in the working tree only, no recursive descent exists yet to bound. |
 
 Pinned by `limits_defaults_match_the_design` (`src/config.rs`) — a silent

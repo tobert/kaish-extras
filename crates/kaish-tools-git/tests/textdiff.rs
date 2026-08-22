@@ -576,8 +576,12 @@ async fn an_exact_rename_has_a_header_and_no_hunks() {
 /// `max_hunk_bytes_per_file` is a real cap and it is applied **before** the
 /// lines are built, not after: a group's cost is summed from the interner and
 /// compared to what is left, so the `Vec` a cap would have trimmed is never
-/// filled. Observable in the output rather than silent — `lines_capped` says
+/// filled. Observable in the output rather than silent — `hunks_capped` says
 /// so on the file and in the totals, and a stderr note fires.
+///
+/// `hunks_capped`, not `lines_capped`: the counts here are exact, and this
+/// type reserves `lines_capped` for "we declined to read it, and nothing
+/// else". Asserted together below so the two cannot be conflated again.
 #[tokio::test]
 async fn hunks_over_the_per_file_cap_are_declined_and_reported() {
     let repo = PatchRepo::build();
@@ -602,8 +606,11 @@ async fn hunks_over_the_per_file_cap_are_declined_and_reported() {
         result.err
     );
     let model = json(&result);
-    assert_eq!(model["files"][0]["lines_capped"], true);
-    assert_eq!(model["totals"]["lines_capped"], 1);
+    assert_eq!(model["files"][0]["hunks_capped"], true);
+    assert_eq!(model["totals"]["hunks_capped"], 1);
+    // The other cap did not fire: nothing was declined, only cut short.
+    assert_eq!(model["files"][0]["lines_capped"], false);
+    assert_eq!(model["totals"]["lines_capped"], 0);
     // The counts are a property of the diff, not of what was emitted, so a
     // cut patch still reports them exactly. This is what tells an agent the
     // difference between "over max_hunk_bytes_per_file" and "over
@@ -623,6 +630,7 @@ async fn hunks_over_the_per_file_cap_are_declined_and_reported() {
         )
         .await,
     );
+    assert_eq!(normal["files"][0]["hunks_capped"], false);
     assert_eq!(normal["files"][0]["lines_capped"], false);
     assert_eq!(normal["files"][0]["hunks"].as_array().expect("hunks").len(), 2);
 }
@@ -649,7 +657,7 @@ async fn an_enormous_context_is_bounded_by_the_hunk_cap() {
     )
     .await;
     assert_eq!(result.code, 0, "stderr: {}", result.err);
-    assert_eq!(json(&result)["files"][0]["lines_capped"], true);
+    assert_eq!(json(&result)["files"][0]["hunks_capped"], true);
     assert!(!result.text_out().contains("@@ "));
 }
 

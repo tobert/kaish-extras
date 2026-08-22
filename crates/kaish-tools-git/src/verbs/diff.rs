@@ -257,6 +257,7 @@ pub(crate) fn run(repo: &ReadRepo, opts: &DiffOptions) -> Result<DiffReport, Git
         additions: if opts.name_only { None } else { Some(0) },
         deletions: if opts.name_only { None } else { Some(0) },
         lines_capped: 0,
+        hunks_capped: 0,
     };
     for file in &files {
         if let (Some(t), Some(a)) = (totals.additions.as_mut(), file.additions) {
@@ -267,6 +268,9 @@ pub(crate) fn run(repo: &ReadRepo, opts: &DiffOptions) -> Result<DiffReport, Git
         }
         if file.lines_capped {
             totals.lines_capped += 1;
+        }
+        if file.hunks_capped {
+            totals.hunks_capped += 1;
         }
     }
 
@@ -639,6 +643,7 @@ fn finish(
         #[cfg(feature = "textdiff")]
         hunks: None,
         lines_capped: false,
+        hunks_capped: false,
         path: row.path,
         old_path: row.old_path,
         status: row.status,
@@ -683,7 +688,7 @@ fn finish(
                 file.additions = Some(added);
                 file.deletions = Some(deleted);
                 file.hunks = Some(hunks);
-                file.lines_capped = capped;
+                file.hunks_capped = capped;
             }
             diffcore::HunkOutcome::Binary => file.binary = Some(true),
             diffcore::HunkOutcome::OverCap => file.lines_capped = true,

@@ -475,6 +475,13 @@ fn summary_line(report: &DiffReport) -> String {
             report.totals.lines_capped
         ));
     }
+    if report.totals.hunks_capped > 0 {
+        line.push_str(&format!(
+            "; {} with hunks cut short (over this build's \
+             max_hunk_bytes_per_file)",
+            report.totals.hunks_capped
+        ));
+    }
     line.push('\n');
     line
 }

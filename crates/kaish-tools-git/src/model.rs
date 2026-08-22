@@ -612,10 +612,24 @@ pub struct DiffFile {
     /// Whether a cap withheld line-level detail for this file. Two caps can
     /// set it, and `additions` says which: a side over the embedder's
     /// `max_blob_bytes` declines the counts too (`additions` is `null`), and
-    /// hunks over `max_hunk_bytes_per_file` leave the counts exact
-    /// (`additions` is a number) with `hunks` holding as many whole hunks as
-    /// fit. The file counts in `totals.files` either way.
+    /// The file counts in `totals.files` either way.
+    ///
+    /// This is **not** the flag for trimmed hunks — see `hunks_capped`. The
+    /// two were one field briefly, disambiguated by whether `additions` was
+    /// `null`. That made an agent cross-reference two fields to learn which
+    /// of two different things happened, and it contradicted this type's own
+    /// rule that `lines_capped` means "we declined to read it, and nothing
+    /// else".
     pub lines_capped: bool,
+    /// Whether `max_hunk_bytes_per_file` stopped this file's hunks short.
+    ///
+    /// Distinct from `lines_capped` in the way that matters to a reader: the
+    /// counts are **exact** here (`additions` and `deletions` are numbers,
+    /// because they are a property of the diff rather than of what was
+    /// emitted), and `hunks` holds as many whole hunks as fit — never a
+    /// partial hunk, which is not a patch. `false` without the `textdiff`
+    /// feature, where there are no hunks to cap.
+    pub hunks_capped: bool,
 }
 
 /// The running totals a diff reports (architecture.md B.4).
@@ -630,8 +644,12 @@ pub struct DiffTotals {
     /// Total lines removed, under the same rule as `additions`.
     pub deletions: Option<u64>,
     /// How many reported files carry `lines_capped` — a cap withheld their
-    /// counts or cut their hunks. Zero in the common case.
+    /// counts entirely. Zero in the common case.
     pub lines_capped: usize,
+    /// How many reported files carry `hunks_capped` — their counts are exact
+    /// but their hunks were cut short. Zero in the common case, and always
+    /// zero without the `textdiff` feature.
+    pub hunks_capped: usize,
 }
 
 /// `git diff`'s result (architecture.md B.4).

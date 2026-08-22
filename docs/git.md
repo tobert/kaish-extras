@@ -388,9 +388,10 @@ Under `--patch` a third cap applies: `max_hunk_bytes_per_file` (256 KiB by
 default) bounds the hunk text one file may produce. It is measured before a
 hunk's lines are built, so the memory a cap would have trimmed is never
 allocated, and it stops at whole hunks — a half-hunk is not a patch. A file it
-cut is marked `lines_capped` with its counts still exact; a file over
-`max_blob_bytes` is marked `lines_capped` with its counts `null`, which is how
-the two are told apart.
+cut is marked **`hunks_capped`**, with its counts still exact. A file over
+`max_blob_bytes` is marked **`lines_capped`** instead, and its counts are
+`null` — nothing was read, so there is nothing to count. Two caps, two flags,
+one question each.
 
 ## Non-goals
 

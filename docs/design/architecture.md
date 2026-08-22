@@ -1606,12 +1606,17 @@ text, and the D.3 fixture that this document said already existed.**
   are still stated on every result, in `--json` and on stderr, and the
   default table is unchanged.
 
-- **`lines_capped` carries both caps rather than gaining a sibling.** PR 5
-  documented it as "a side was over `max_blob_bytes`". It now also means "the
-  hunks were over `max_hunk_bytes_per_file`", with `additions` distinguishing
-  them: `null` when the counts were declined, a number when only the hunk
-  text was cut. A second field meaning almost the same thing would have made
-  an agent read two fields to answer one question.
+- **`hunks_capped` is a sibling of `lines_capped`, not an overload of it.**
+  PR 6 first landed the hunk cap on `lines_capped`, distinguished by whether
+  `additions` was `null`. Reverted on review before merge, for two reasons.
+  The narrow one: `model.rs` already documented `lines_capped` as meaning
+  "we declined to read it, **and nothing else**", with a `log --stat` test
+  asserting that exact reading — so the overload contradicted a stated
+  invariant and would have made that test's promise false for a sibling verb.
+  The broad one is *one term, one meaning*: an agent that must read
+  `additions` to learn which of two things `lines_capped` reported is doing
+  inference the schema should have done for it. The saving was one field; the
+  cost was a field that means different things depending on another field.
 
 - **The per-file `hunks` field exists only when the feature is on.** An
   always-present `hunks: null` on a build with no hunk machinery is a
