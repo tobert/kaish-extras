@@ -964,3 +964,115 @@ fn git_allow_fail(cwd: &Path, args: &[&str]) -> std::process::Output {
         .output()
         .expect("git runs")
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// `--stat` divergences found while PR 5 factored the comparison core out
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// **Characterization, not an assertion of correctness.** `--stat` compares
+/// blob oids alone, so a commit that only flips the executable bit changes no
+/// oid and is reported as touching **no files**. Git counts it as one file
+/// changed with zero lines, and `git diff` in this crate agrees with git —
+/// only `log --stat` does not (docs/issues.md, L8).
+///
+/// Both behaviors are asserted separately, so the day either one changes this
+/// test says which. Do not "fix" it by relaxing an assertion.
+#[tokio::test]
+#[cfg(unix)]
+async fn stat_misses_a_mode_only_change_that_git_counts() {
+    use std::os::unix::fs::PermissionsExt;
+
+    require_git();
+    let fixture = Fixture::empty();
+    let root = fixture.path("repo");
+    std::fs::create_dir_all(&root).expect("create repo");
+    git(&root, &["init", "--initial-branch=main", "--quiet"]);
+    write_file(&root, "run.sh", "#!/bin/sh\necho hi\n");
+    git(&root, &["add", "run.sh"]);
+    git(&root, &["commit", "-m", "base", "--quiet"]);
+
+    let path = root.join("run.sh");
+    let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).expect("chmod");
+    git(&root, &["add", "run.sh"]);
+    git(&root, &["commit", "-m", "chmod", "--quiet"]);
+
+    // Ours: the mode flip is invisible to a blob-oid comparison.
+    let model = json(&log(&fixture.root(), "/mnt/repo", &["--stat", "--limit", "1"]).await);
+    assert_eq!(
+        model["commits"][0]["stat"]["files"], 0,
+        "log --stat compares blob oids, so a mode-only change is invisible to it"
+    );
+
+    // Git's: one file changed, zero lines either way.
+    let oracle = git(&root, &["log", "-1", "--numstat", "--format="]);
+    assert_eq!(
+        oracle.trim(),
+        "0\t0\trun.sh",
+        "git is expected to count the mode flip as a changed file"
+    );
+}
+
+/// **Characterization, not an assertion of correctness.** A submodule pointer
+/// move has no blob to read, so `--stat` counts the file and no lines. Git
+/// renders `-Subproject commit <old>` / `+Subproject commit <new>` and counts
+/// `1 1`. `git diff` in this crate matches git here; `log --stat` does not
+/// (docs/issues.md, L9).
+///
+/// The fixture needs `protocol.file.allow=always` to add a local submodule,
+/// which recent git refuses by default. Both behaviors are asserted
+/// separately.
+#[tokio::test]
+async fn stat_counts_no_lines_for_a_submodule_move_that_git_counts_as_one() {
+    require_git();
+    let fixture = Fixture::empty();
+    let sub = fixture.path("sub");
+    std::fs::create_dir_all(&sub).expect("create sub");
+    git(&sub, &["init", "--initial-branch=main", "--quiet"]);
+    write_file(&sub, "f.txt", "one\n");
+    git(&sub, &["add", "f.txt"]);
+    git(&sub, &["commit", "-m", "s1", "--quiet"]);
+    let first = git(&sub, &["rev-parse", "HEAD"]);
+    write_file(&sub, "f.txt", "one\ntwo\n");
+    git(&sub, &["add", "f.txt"]);
+    git(&sub, &["commit", "-m", "s2", "--quiet"]);
+
+    let root = fixture.path("super");
+    std::fs::create_dir_all(&root).expect("create super");
+    git(&root, &["init", "--initial-branch=main", "--quiet"]);
+    git(
+        &root,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            "../sub",
+            "sub",
+        ],
+    );
+    git(&root, &["commit", "-m", "add the submodule", "--quiet"]);
+    git(&root.join("sub"), &["checkout", "--quiet", &first]);
+    git(&root, &["add", "sub"]);
+    git(&root, &["commit", "-m", "move the pointer", "--quiet"]);
+
+    let model = json(&log(&fixture.root(), "/mnt/super", &["--stat", "--limit", "1"]).await);
+    assert_eq!(
+        model["commits"][0]["stat"]["files"], 1,
+        "the gitlink is a changed file"
+    );
+    assert_eq!(
+        model["commits"][0]["stat"]["additions"], 0,
+        "log --stat has no blob to read for a gitlink, so it counts no lines"
+    );
+    assert_eq!(model["commits"][0]["stat"]["deletions"], 0);
+
+    let oracle = git(&root, &["log", "-1", "--numstat", "--format="]);
+    assert_eq!(
+        oracle.trim(),
+        "1\t1\tsub",
+        "git is expected to count one line per side of the pointer"
+    );
+}

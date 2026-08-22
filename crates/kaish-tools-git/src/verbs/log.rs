@@ -43,7 +43,7 @@ use gix_object::FindExt;
 
 use kaish_tool_api::GlobalFlags;
 
-use crate::diffcore::{flatten_tree, line_delta, LineDelta, Side};
+use crate::diffcore::{flatten_tree, line_delta, Class, LineDelta, Side};
 use crate::error::GitError;
 use crate::model::{CommitInfo, LogReport, Signature, StatSummary};
 use crate::pathfilter::PathFilter;
@@ -613,8 +613,8 @@ pub(crate) fn split_message(message: &str) -> (String, String) {
 /// blob oids on each side so a caller can count lines without walking again.
 struct Change {
     path: String,
-    old: Option<ObjectId>,
-    new: Option<ObjectId>,
+    old: Option<(ObjectId, Class)>,
+    new: Option<(ObjectId, Class)>,
 }
 
 /// The tree of a commit, or the empty tree for `None` (a root commit's parent).
@@ -652,9 +652,13 @@ fn changes_against(
         // The class rides along on the shared flatten; `--stat` compares blob
         // oids alone, so a mode-only change (`chmod +x`) is not reported here
         // even though git counts it as a changed file (docs/issues.md, L8).
-        let old = old_side.get(path).map(|(oid, _)| *oid);
-        let new = new_side.get(path).map(|(oid, _)| *oid);
-        if old != new {
+        let old = old_side.get(path).copied();
+        let new = new_side.get(path).copied();
+        // The oids alone decide whether the path changed: a mode-only change
+        // (`chmod +x`) keeps the blob and is therefore invisible here, even
+        // though git counts it as a changed file (docs/issues.md, L8).
+        let (old_oid, new_oid) = (old.map(|(o, _)| o), new.map(|(o, _)| o));
+        if old_oid != new_oid {
             out.push(Change {
                 path: path.clone(),
                 old,
@@ -663,6 +667,19 @@ fn changes_against(
         }
     }
     Ok(out)
+}
+
+/// Which end of [`line_delta`] one side of a change is.
+///
+/// A gitlink is named from its class rather than probed from the object
+/// store: its oid is a commit in another repository, and asking this store
+/// for the header fails outright.
+fn side_of(side: Option<(ObjectId, Class)>) -> Side<'static> {
+    match side {
+        None => Side::Absent,
+        Some((_, Class::Commit)) => Side::Gitlink,
+        Some((oid, _)) => Side::Object(oid),
+    }
 }
 
 /// A commit's `--stat` summary against its first parent.
@@ -696,8 +713,8 @@ fn commit_stat(
             summary.lines_capped += changes.len() - i;
             break;
         }
-        let old = change.old.map_or(Side::Absent, Side::Object);
-        let new = change.new.map_or(Side::Absent, Side::Object);
+        let old = side_of(change.old);
+        let new = side_of(change.new);
         match line_delta(repo, "log", old, new, max_blob_bytes)? {
             LineDelta::Counted { added, deleted } => {
                 summary.additions += added;

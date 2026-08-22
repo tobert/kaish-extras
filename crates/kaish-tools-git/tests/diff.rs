@@ -806,3 +806,165 @@ async fn a_subtracted_diff_verb_is_unroutable() {
     let result = diff_with(config, &repo.scratch(), "/mnt/repo", &[]).await;
     assert_eq!(result.code, 2, "routing has nothing to select: {}", result.err);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// States that are not an ordinary comparison
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// An unborn HEAD has no commit to compare against, which is a first-class
+/// state and not an error: every staged file is an addition against the empty
+/// tree, and `git diff --staged --name-status` agrees.
+#[tokio::test]
+async fn staged_against_an_unborn_head_is_all_additions() {
+    support::require_git();
+    let fixture = support::Fixture::empty();
+    let root = fixture.path("fresh");
+    std::fs::create_dir_all(&root).expect("create repo");
+    git(&root, &["init", "--initial-branch=main", "--quiet"]);
+    support::write_file(&root, "new.txt", "one\ntwo\n");
+    git(&root, &["add", "new.txt"]);
+
+    let result = diff(&fixture.root(), "/mnt/fresh", &["--staged"]).await;
+    assert_eq!(result.code, 0, "stderr: {}", result.err);
+    let model = json(&result);
+    assert_eq!(model["from"]["rev"], "HEAD");
+    assert_eq!(
+        model["from"]["oid"], "",
+        "an unborn HEAD names no commit, and must not invent one"
+    );
+    assert_eq!(
+        sorted(our_name_status(&model)),
+        git_lines(&root, &["diff", "--staged", "--name-status"])
+    );
+    assert_eq!(model["totals"]["additions"], 2);
+}
+
+/// An unmerged path has no stage 0 to compare, so it is left out of the
+/// comparison rather than reported as an add or a delete — and the result
+/// says how many were left out, in `--json` and on stderr. Silence here would
+/// be the worst option: a conflicted file simply missing from a diff is a
+/// wrong answer an agent cannot detect.
+#[tokio::test]
+async fn unmerged_paths_are_declared_not_silently_dropped() {
+    support::require_git();
+    let fixture = support::Fixture::empty();
+    let root = fixture.path("conflict");
+    std::fs::create_dir_all(&root).expect("create repo");
+    git(&root, &["init", "--initial-branch=main", "--quiet"]);
+    support::write_file(&root, "shared.txt", "base\n");
+    support::write_file(&root, "other.txt", "untouched\n");
+    git(&root, &["add", "shared.txt", "other.txt"]);
+    git(&root, &["commit", "-m", "base", "--quiet"]);
+
+    git(&root, &["checkout", "--quiet", "-b", "side"]);
+    support::write_file(&root, "shared.txt", "side\n");
+    git(&root, &["add", "shared.txt"]);
+    git(&root, &["commit", "-m", "side", "--quiet"]);
+
+    git(&root, &["checkout", "--quiet", "main"]);
+    support::write_file(&root, "shared.txt", "main\n");
+    git(&root, &["add", "shared.txt"]);
+    git(&root, &["commit", "-m", "main", "--quiet"]);
+
+    // A conflicting merge, which leaves stages 1..3 in the index.
+    let merge = std::process::Command::new("git")
+        .args(["merge", "side"])
+        .current_dir(&root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Fixture Author")
+        .env("GIT_AUTHOR_EMAIL", "author@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Fixture Author")
+        .env("GIT_COMMITTER_EMAIL", "author@example.invalid")
+        .output()
+        .expect("git merge");
+    assert!(!merge.status.success(), "the merge must actually conflict");
+
+    let result = diff(&fixture.root(), "/mnt/conflict", &["--staged"]).await;
+    assert_eq!(result.code, 0, "stderr: {}", result.err);
+    let model = json(&result);
+    assert_eq!(model["unmerged"], 1, "the conflicted path must be counted");
+    assert!(
+        result.err.contains("unmerged"),
+        "stderr must say a path was left out: {}",
+        result.err
+    );
+    assert!(
+        !model["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .any(|f| f["path"] == "shared.txt"),
+        "a path with no stage 0 has nothing to compare, and reporting it as \
+         deleted would be a wrong answer wearing a normal status"
+    );
+
+    // Git's own answer, asserted as git's: it reports a `U` row. This surface
+    // has no unmerged row shape — B.4's file carries no `conflicted` field,
+    // and adding one is a model change (docs/issues.md, D2) — so it declares
+    // the omission instead. Both behaviors are pinned, so the day either one
+    // changes this test says which.
+    let oracle = git(&root, &["diff", "--staged", "--name-status"]);
+    assert!(
+        oracle.starts_with("U\t"),
+        "git is expected to report an unmerged row; it reported:\n{oracle}"
+    );
+}
+
+/// A submodule pointer move is one line each side, which is what git counts —
+/// the `Subproject commit <oid>` pair a patch would show. Nothing asks the
+/// object store about the gitlink's oid: it names a commit in *another*
+/// repository, and a header lookup for it fails with "could not be found"
+/// rather than answering "not a blob". That lookup is exactly the crash
+/// `log --stat` had before PR 5 (docs/issues.md, L9), so this test is also
+/// the proof that `diff` never reintroduces it.
+#[tokio::test]
+async fn a_submodule_pointer_move_counts_one_line_each_side() {
+    support::require_git();
+    let fixture = support::Fixture::empty();
+    let sub = fixture.path("sub");
+    std::fs::create_dir_all(&sub).expect("create sub");
+    git(&sub, &["init", "--initial-branch=main", "--quiet"]);
+    support::write_file(&sub, "f.txt", "one\n");
+    git(&sub, &["add", "f.txt"]);
+    git(&sub, &["commit", "-m", "s1", "--quiet"]);
+    let first = git(&sub, &["rev-parse", "HEAD"]);
+    support::write_file(&sub, "f.txt", "one\ntwo\n");
+    git(&sub, &["add", "f.txt"]);
+    git(&sub, &["commit", "-m", "s2", "--quiet"]);
+
+    let root = fixture.path("super");
+    std::fs::create_dir_all(&root).expect("create super");
+    git(&root, &["init", "--initial-branch=main", "--quiet"]);
+    git(
+        &root,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            "../sub",
+            "sub",
+        ],
+    );
+    git(&root, &["commit", "-m", "add the submodule", "--quiet"]);
+    git(&root.join("sub"), &["checkout", "--quiet", &first]);
+    git(&root, &["add", "sub"]);
+
+    let model = json(&diff(&fixture.root(), "/mnt/super", &["--staged"]).await);
+    let link = model["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .find(|f| f["path"] == "sub")
+        .expect("the gitlink moved");
+    assert_eq!(link["status"], "modified");
+    assert_eq!(link["old_mode"], "160000");
+    assert_eq!(link["additions"], 1);
+    assert_eq!(link["deletions"], 1);
+    assert_eq!(
+        sorted(our_numstat(&model)),
+        git_lines(&root, &["diff", "--staged", "--numstat"])
+    );
+}

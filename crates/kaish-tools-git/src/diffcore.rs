@@ -248,8 +248,15 @@ pub(crate) enum Side<'a> {
     /// The path does not exist on this side — an add's old side, or a
     /// delete's new side. Genuinely empty, not a declined read.
     Absent,
-    /// An object in this repository's store.
+    /// A blob in this repository's store.
     Object(ObjectId),
+    /// A submodule gitlink. Named by the caller from the tree or index mode,
+    /// never probed from the object store: a gitlink's oid is a commit in
+    /// *another* repository, so asking this store for its header fails with
+    /// "could not be found" rather than answering "not a blob". Reading the
+    /// class the caller already has is both cheaper and the only way that
+    /// works.
+    Gitlink,
     /// Content already read from the working tree, which has no object to
     /// name (`git diff --raw` prints all-zeros for the same reason).
     Bytes(&'a [u8]),
@@ -335,15 +342,13 @@ fn load<'a>(
     let oid = match side {
         Side::Absent => return Ok(Loaded::Content(std::borrow::Cow::Borrowed(&[]))),
         Side::Bytes(bytes) => return Ok(Loaded::Content(std::borrow::Cow::Borrowed(bytes))),
+        Side::Gitlink => return Ok(Loaded::Gitlink),
         Side::Object(oid) => oid,
     };
     let header = repo
         .objects()
         .header(oid)
         .map_err(|e| GitError::repository(op, "reading an object header", repo.git_dir(), e))?;
-    if header.kind() != gix_object::Kind::Blob {
-        return Ok(Loaded::Gitlink);
-    }
     if header.size() > max_blob_bytes {
         return Ok(Loaded::OverCap);
     }

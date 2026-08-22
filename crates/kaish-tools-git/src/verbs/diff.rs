@@ -169,12 +169,12 @@ pub(crate) fn run(repo: &ReadRepo, opts: &DiffOptions) -> Result<DiffReport, Git
     // Both ends, and where each one's content will come from. Resolving the
     // revisions first means a bad `--from` fails before anything is read.
     let (from_end, to_end) = describe_endpoints(repo, &opts.endpoints)?;
-    let mut unmerged = 0usize;
+    let mut unmerged = BTreeSet::new();
 
-    let old = match &opts.endpoints {
+    let mut old = match &opts.endpoints {
         Endpoints::IndexToWorktree => {
-            let (map, count) = index_side(repo, &filter)?;
-            unmerged = count;
+            let (map, conflicted) = index_side(repo, &filter)?;
+            unmerged = conflicted;
             SideMap::objects(map)
         }
         Endpoints::HeadToIndex => SideMap::objects(tree_side(repo, repo.head_tree_id()?, &filter)?),
@@ -183,10 +183,10 @@ pub(crate) fn run(repo: &ReadRepo, opts: &DiffOptions) -> Result<DiffReport, Git
         }
     };
 
-    let new = match &opts.endpoints {
+    let mut new = match &opts.endpoints {
         Endpoints::HeadToIndex => {
-            let (map, count) = index_side(repo, &filter)?;
-            unmerged = count;
+            let (map, conflicted) = index_side(repo, &filter)?;
+            unmerged = conflicted;
             SideMap::objects(map)
         }
         Endpoints::RevToRev { to, .. } => {
@@ -196,11 +196,25 @@ pub(crate) fn run(repo: &ReadRepo, opts: &DiffOptions) -> Result<DiffReport, Git
         // untracked file is not part of any diff, which is why `git diff`
         // says nothing about a file removed from the index and still on disk.
         Endpoints::IndexToWorktree | Endpoints::RevToWorktree { .. } => {
-            let (index, count) = index_side(repo, &filter)?;
-            unmerged = count;
+            let (index, conflicted) = index_side(repo, &filter)?;
+            unmerged = conflicted;
             worktree_side(repo, opts, &index)?
         }
     };
+
+    // An unmerged path is dropped from **both** sides, not just from the one
+    // that lacks a stage 0. Leaving it on the other side would report a
+    // conflicted file as deleted, which is a wrong answer wearing a normal
+    // status — worse than the omission, which the count and the stderr note
+    // declare. Git reports a `U` row here instead; this surface has no
+    // unmerged row shape (B.4's file has no `conflicted` field, B.2's entry
+    // does), and inventing one is a model change, not a same-PR fix
+    // (docs/issues.md, D2).
+    for path in &unmerged {
+        old.entries.remove(path);
+        new.entries.remove(path);
+        new.foreign.remove(path);
+    }
 
     let (files, truncated) = compare(repo, opts, &old, &new)?;
 
@@ -227,7 +241,7 @@ pub(crate) fn run(repo: &ReadRepo, opts: &DiffOptions) -> Result<DiffReport, Git
         to: to_end,
         files,
         totals,
-        unmerged,
+        unmerged: unmerged.len(),
         truncated,
     })
 }
@@ -311,17 +325,17 @@ fn tree_side(
     Ok(out)
 }
 
-/// The index at stage 0, flattened and filtered, plus how many paths were
-/// skipped for being unmerged.
+/// The index at stage 0, flattened and filtered, plus the paths that have no
+/// stage 0 because they are unmerged.
 fn index_side(
     repo: &ReadRepo,
     filter: &PathFilter,
-) -> Result<(PathMap, usize), GitError> {
+) -> Result<(PathMap, BTreeSet<String>), GitError> {
     const OP: &str = "diff";
     let mut out = BTreeMap::new();
     let mut unmerged = BTreeSet::new();
     let Some(index) = repo.open_index()? else {
-        return Ok((out, 0));
+        return Ok((out, unmerged));
     };
     let work_dir = repo.work_dir().unwrap_or_else(|| repo.git_dir());
     for entry in index.entries() {
@@ -358,7 +372,7 @@ fn index_side(
     // A path can be both: `git checkout --merge` leaves stages behind. Only a
     // path with no stage 0 at all is missing from the comparison.
     unmerged.retain(|path| !out.contains_key(path));
-    Ok((out, unmerged.len()))
+    Ok((out, unmerged))
 }
 
 /// The working tree, hashed at every tracked path the filter kept.
@@ -678,7 +692,12 @@ fn side_for<'a>(
     match entry {
         None => Side::Absent,
         Some((oid, class)) => {
-            if side.from_worktree && class != Class::Commit {
+            if class == Class::Commit {
+                // A gitlink's oid is a commit in another repository, so the
+                // class names it rather than the object store being asked for
+                // a header it cannot answer.
+                Side::Gitlink
+            } else if side.from_worktree {
                 // Working-tree content is not in the object store, so the
                 // bytes travel instead of the oid. An absent read (the file
                 // vanished between passes) is an empty side, not a lie about
