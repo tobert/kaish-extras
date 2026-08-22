@@ -6,8 +6,8 @@
 //! produces one of these inside a single blocking closure; nothing `!Send`
 //! survives the closure's end.
 //!
-//! Only `git info`'s model exists so far. Later phasing PRs add theirs beside
-//! it.
+//! Every implemented verb's model lives here, beside the others — `info`,
+//! `status`, `log`, `ls`, `show`, `diff`, `branch`, `tag`, `worktree list`.
 
 use std::collections::BTreeMap;
 

@@ -75,7 +75,14 @@
 //! hostile-textconv fixture that proves a repository declaring
 //! `diff.*.textconv`, `filter.*.clean/smudge` or `core.hooksPath` gets
 //! nothing from this build. With `textdiff` off, `--patch` and `--context`
-//! exit 4 naming it.
+//! exit 4 naming it. PR 7 adds the listing verbs — `git branch` (with
+//! `--contains`/`--merged`/`--ahead-behind`, each metered through
+//! `reach.rs`'s budget), `git tag`, and `git worktree list`. `git blame` is
+//! specified in architecture.md B.8 and deliberately unbuilt; see
+//! `docs/issues.md`.
+//!
+//! That is the read profile: nine verbs, `info status log ls show diff branch
+//! tag worktree-list`. `Verb::ALL` is the list this doc must agree with.
 
 #[cfg(target_family = "wasm")]
 compile_error!(

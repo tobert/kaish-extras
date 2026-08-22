@@ -44,8 +44,8 @@ impl Profile {
 /// A verb this build can execute.
 ///
 /// `#[non_exhaustive]`, and it carries **only the verbs that are implemented**
-/// — one, today. Architecture.md C.1 sketches the enum with all ten read
-/// verbs, but a config that can enable `Verb::Status` in a build with no
+/// — nine, as of PR 7. Architecture.md C.1 sketches the enum with all ten read
+/// verbs (`blame` is the one still unbuilt — see `docs/issues.md`), but a config that can enable `Verb::Status` in a build with no
 /// status implementation would put a verb in `tools --json` that cannot run;
 /// the schema is built from this enum (E.1), so an unimplemented variant is a
 /// promise the tool cannot keep. Each phasing PR adds its own variant with

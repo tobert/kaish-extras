@@ -729,6 +729,141 @@ untouched here (out of scope for a padding-guard PR, and neither has a
   [`docs/design/publishing.md`](design/publishing.md) — Amy's call, not made
   here.
 
+## git — from the pre-publish review round (2026-08-22)
+
+Four reviews before 0.9.0, framed as *"what tests are missing"* rather than
+*"find bugs"*: `crusoe-ds4` and `qwen38` for breadth on different families,
+`gemini-pro` and `gpt-5.6-sol` deliberating over one shared dossier. Two live
+bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
+0`); the stale module docs are fixed. What is left, ranked:
+
+- **P1 — a branch whose tip is an annotated tag makes `--merged` silently
+  wrong.** `git update-ref refs/heads/foo <tag-oid>` is legal and git peels for
+  ancestry questions; `ref_object` follows symbolic chains only, so the tag's
+  own oid reaches the ancestry machinery. `--contains` and `--ahead-behind`
+  exit 1 ("reading a commit"), which is at least loud. **`--merged` compares
+  the tag oid against a set of commit oids and reports the branch as not
+  merged** — a confidently wrong answer, the shape this crate is organized
+  against. No oracle test caught it because every fixture branch points at a
+  commit. Fix is to peel through tag objects in `ref_object` before handing an
+  oid to `reach`; the test asserts all three flags against
+  `git branch --contains/--merged` and `git rev-list --left-right --count`.
+  **Worth fixing before publish.**
+
+- **P2 — a non-canonical index mode is silently dropped, and the comment
+  misattributes the skip.** `Class::from_index` returns `None` for anything
+  outside the four canonical modes, and both call sites skip it with a comment
+  saying "a sparse-directory entry (cone mode)". A sparse entry is `040000`; a
+  `100664` entry — which `git update-index --cacheinfo 100664,...` writes
+  happily — is dropped too. The tree side *does* classify it, so `status` and
+  `diff --staged` report the file **deleted** where git reports a mode change.
+  The comment would send the next reader at the wrong fix. Separately,
+  `treewalk` normalizes raw modes through `mode.kind().as_octal_str()`, so
+  `ls` prints `100644` where `git ls-tree` prints `100664`.
+
+- **P3 — refs are the one attacker-controlled parser surface with no hostile
+  fixture.** `embedding-git.md` names `.git/index`, packfiles, refs and config
+  as the risk axis for a long-lived server; index has many fixtures, config has
+  the escaping-include set, refs have none. Missing: `packed-refs` as binary
+  garbage / a half line / one 10 MB line; a loose ref containing `zzz`; `HEAD`
+  containing garbage; a detached `HEAD` naming a valid-shaped but absent oid.
+  Run each against every ref-reading verb and assert a stable exit — in-process
+  tests, so the test *is* the no-panic assertion.
+
+- **P4 — the gix open-by-name carve-out reaches further for refs than the doc
+  admits.** `repo.rs` documents that gix opens objects, packs, `HEAD` and ref
+  files by name after discovery, and characterizes the consequence as a read
+  that "almost always fails to parse as a git object". True for objects, false
+  for refs: a loose ref is 40 hex chars and `packed-refs` is `<40hex> <name>`
+  lines — shapes real host files have. A symlinked `refs/heads/pwn` pointing at
+  a host file whose first line is 40 hex characters would surface those 160
+  bits as a branch oid in `branch --json`; non-hex content fails the parse,
+  which is still a one-bit content probe. `HEAD` and `packed-refs` are fixed
+  names and *are* interceptable the way `open_leaf` intercepts other fixed
+  leaves. Decide: intercept, or state the leak louder than "almost always".
+
+- **P5 — a `.gitignore` symlinked out of the mount is a content oracle.**
+  `gix-worktree` reads per-directory `.gitignore` itself during the untracked
+  walk, and its content decides which paths are reported ignored. Plant an
+  untracked file `N`, symlink `sub/.gitignore` at a host file: `status
+  --ignored` reports `!! N` exactly when that file contains a pattern matching
+  `N`. One bit per invocation against any host file. `walk_untracked_and_ignored`
+  already visits every directory itself, so a `symlink_metadata` pre-screen is
+  available without touching gix.
+
+- **P6 — a symlinked start path walks discovery outside the ceiling.**
+  `screen_gitdir_file` returns `Ok(())` when the start path canonicalizes
+  outside the ceiling, on the comment's reasoning that "discovery will report
+  the missing path". It does not — it walks from there, and the ceiling's
+  lexical prefix match drops. The *result* is still refused with no content
+  read, but gix's ownership check fires on outside candidates, so
+  `NoTrustedGitRepository` (exit 4) versus nothing-there (exit 1) is one bit:
+  "is there a repo I do not own above my symlink's target".
+
+- **P7 — a repo-relative `include.path` hides the format and extension
+  gates.** `check_include_paths` refuses only *escaping* includes, and includes
+  are never followed (`from_bytes_no_includes`) — so a repository can put
+  `core.repositoryformatversion = 2` or `extensions.objectFormat = sha256` in
+  an included file and `check_format_version`/`check_extensions` never see it.
+  The bare config reads as format 0, the gates are skipped. Blast radius is
+  bounded today (nothing honors `core.worktree`, and a `reftable/` directory is
+  caught by an on-disk probe regardless of config), but this is the refusal
+  layer's own bypass.
+
+- **P8 — the fingerprint samples `.git` and the linked worktree, never the
+  main working tree or the scratch root.** Pointing `Fingerprint::take` at
+  `RichRepo::scratch()` subsumes both existing fingerprint tests and catches
+  two classes they structurally cannot see: a write to a main-worktree file,
+  and a temp file created outside `.git`. One line of test change, and it
+  widens the falsification surface of the flagship claim. Also worth: a pack
+  with its `.idx` deleted (does gix-odb write one on open? reasoning will not
+  answer it, the fingerprint will), and a positive control for transient
+  create-then-remove detection, which `support.rs` asserts works and no test
+  exercises.
+
+- **P9 — `work_dir_is_bounded_by_discovery` can pass vacuously.** Its needle is
+  the literal string `"core.worktree"`, but this crate's config accessor takes
+  section and key separately — a future `config_values("core", "worktree")`
+  contains no such literal, and the guard stays green while the invariant it
+  protects is false. Needs a positive control over a planted string and a
+  second needle for the two-argument form.
+
+- **P10 — untested semantic inputs, each a characterization test.** Shallow
+  clones (the `refuse_shallow` gate exists, nothing exercises it); replace refs
+  and grafts (git honors them by default, this walk never consults them);
+  octopus merges (every fixture merge has two parents, while `--merges`,
+  `--first-parent`, `--stat` and `^3` all have 3+-parent paths); `status` on an
+  unborn HEAD; deep tag chains against the depth-8 `show` and depth-32
+  `peel_tag_chain` bounds; non-UTF-8 tree entry names (rendered lossily where
+  `git ls-tree` C-quotes, and silently skipped in the untracked walk);
+  `--path ""` (silently matches everything, git errors); and `core.autocrlf`,
+  whose divergence C5 records in prose while every fixture sets it false.
+
+- **P11 — narrow the "byte-identical to `git diff --patch`" claim, or test it
+  to the claim.** Both deep reviewers flagged it. Verified since: our
+  `quote_c_style` is correct, including that a space is *not* quoted (git
+  disambiguates it with a trailing tab instead) — so the reviewers' specific
+  charge was wrong. But the quoting is unit-tested against our belief about
+  git rather than against git itself, in a crate whose whole discipline is
+  real-git-as-oracle. Untested inputs that would settle it: paths containing a
+  quote, a tab, or non-ASCII bytes; combined mode-and-content change; empty-file
+  transitions; one-sided missing-newline; `.gitattributes` function context;
+  and oid-abbreviation growth on collision. Note non-UTF-8 *paths* cannot reach
+  the renderer at all — it takes `&str` — which is a boundary to document
+  rather than test.
+
+- **P12 — `status` fails the whole call on one over-cap tracked file, and the
+  guide implies otherwise.** `read_worktree_blob` returns `BlobTooLarge` and
+  `status` propagates it, so a repository holding any tracked file over
+  `max_blob_bytes` (8 MiB default) gets exit 1 and no report at all. That is
+  deliberate and tested (`a_tracked_file_over_the_blob_cap_is_refused`) — a
+  loud refusal beats an unbounded read — but `embedding-git.md`'s Limits table
+  says "the read is declined and reported", which reads as *that file* being
+  declined while the rest of the report arrives. For a code-review server
+  pointed at real repositories (vendored binaries, fixtures, models) this is
+  common, and real `git status` handles it fine. **Decide** whether whole-call
+  failure is right, then make the guide say what the code does.
+
 ## git — cost shapes `--limit` does not bound
 
 Found by the 2026-08-22 cross-model review (kaibo default cast, whole files,
