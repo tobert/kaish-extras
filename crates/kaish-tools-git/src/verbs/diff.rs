@@ -97,16 +97,19 @@ pub(crate) struct DiffArgs {
     #[arg(long = "context", value_name = "N")]
     pub context: Option<usize>,
 
-    /// Pair a deleted path with an added path carrying the same content —
-    /// on by default. **Exact match only**: a rename is a blob oid
-    /// reappearing at a new path, so `similarity` is always 100 and a file
-    /// that was edited *and* moved is reported as a delete plus an add.
-    /// Copy detection does not exist here.
-    #[arg(long = "find-renames", default_value_t = false, conflicts_with = "no_find_renames")]
+    /// Pair a deleted path with an added path carrying the same content.
+    /// **This is already what happens** — rename pairing is on unless
+    /// `--no-find-renames` turns it off — so the flag only makes the choice
+    /// explicit. **Exact match only**: a rename is a blob oid reappearing at
+    /// a new path, so `similarity` is always 100, and a file that was edited
+    /// *and* moved is reported as a delete plus an add where git would fold
+    /// the pair. Copy detection does not exist here.
+    #[arg(long = "find-renames", conflicts_with = "no_find_renames")]
     pub find_renames: bool,
 
     /// Report a moved file as a delete plus an add, without pairing them.
-    #[arg(long = "no-find-renames", default_value_t = false)]
+    /// Rename pairing is on by default, and this is the only way off.
+    #[arg(long = "no-find-renames")]
     pub no_find_renames: bool,
 
     /// Maximum files to report, default 500. Line counts are computed only

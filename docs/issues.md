@@ -259,6 +259,32 @@ fixture asserted against real `git status --porcelain` before fixing.
   and an embedder who could enable `textdiff` today would get nothing for it.
   The feature and the flags start working in the same PR.
 
+## git — what the tool schema actually publishes (read from the schema, 2026-08-22)
+
+Read out of `ToolSchema` rather than inferred from the source, per AGENTS.md
+("do not infer the published text by grepping"). Two things every verb
+publishes that no agent should be reading, both pre-existing and both
+cross-verb, so neither is a PR 5 fix:
+
+- **`--operands` is in the schema.** Every verb carries an
+  `#[arg(hide = true)] operands: Vec<String>` sink so clap accepts the
+  `--`-terminated tail `ToolArgs::to_argv()` emits (E.1). `schema_from_clap`
+  does not honor clap's `hide`, so it reaches agents as a real parameter
+  whose description is a note to *us* — "do not read this field, it cannot
+  distinguish them either". An agent that types `git ls --operands x` gets
+  something incoherent. Two possible fixes: teach the sink a description
+  written for the reader who will actually see it, or ask kaish to skip
+  hidden args in `schema_from_clap` (a kaish PR, same maintainer). The second
+  is the right one; the first is the stopgap if the boundary takes a while.
+
+- **`--limit` publishes `type=string` and no default.** It is `usize` in
+  every verb's parser with a real `default_value_t` (1000 for `ls`/`show`,
+  20 for `log`, 500 for `diff`), and the schema carries neither the type nor
+  the number. `diff`'s and `log`'s argument docs state the default in prose,
+  which is the "provide specific values" rule doing the work the schema
+  field is not; `ls`'s and `show`'s do not, and should. Whether the type hint
+  can be fixed at all is a `schema_from_clap` question.
+
 ## kaish boundaries — for the write profiles
 
 - **S1 — an out-of-tree tool cannot name kaish's effect ids type-safely.**
