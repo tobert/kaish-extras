@@ -84,9 +84,16 @@ pub(crate) fn run(
     //
     // "Has a main working tree" is read off the common dir being named `.git`,
     // gitoxide's own `DOT_GIT_DIR` convention and the same rule
-    // `ReadRepo::worktree_count` applies. A repository whose git directory is
-    // named something else is listed without its main working tree; that shape
-    // needs the `core.worktree` handling this build does not have.
+    // `ReadRepo::worktree_count` applies. Two shapes have no row here as a
+    // result, and they are different:
+    //
+    // - A **bare** repository has no working tree at all, so leaving it out of
+    //   a listing of working trees is the answer. Git lists its git directory
+    //   with a `bare` marker instead; ours reports the linked worktrees alone.
+    //   Recorded as docs/issues.md B7.
+    // - A repository whose git directory is named something other than `.git`
+    //   *does* have a working tree, and it is missing from the listing. That
+    //   shape needs the `core.worktree` handling this build does not have.
     if let Some(main) = main_worktree_path(repo) {
         let (head_oid, branch) = head_of(repo, repo.common_dir())?;
         rows.push(row(
@@ -120,18 +127,21 @@ pub(crate) fn run(
             let entry = entry.map_err(|e| {
                 GitError::repository(OP, "listing linked worktrees", &dir, e)
             })?;
-            // A registration is a real directory carrying a `gitdir` file. A
-            // symlinked entry is not something git writes here, and following
-            // one would step outside the mount to read it, so it is skipped —
-            // `symlink_metadata` does not follow it. An unreadable entry is
-            // treated as not a registration rather than swallowed silently:
-            // there is nothing else it could be, and the alternative is
-            // failing the whole listing over one stray name.
-            let path = entry.path();
-            let is_symlink = std::fs::symlink_metadata(&path)
+            // A registration is a real directory. A symlinked entry is not
+            // something git writes here, and following one would step outside
+            // the mount to read it, so it is skipped — `symlink_metadata` does
+            // not follow it. An entry that cannot be stat-ed is treated as not
+            // a registration rather than failing the whole listing over one
+            // stray name; there is nothing else it could be.
+            //
+            // Whether it carries a `gitdir` file is decided below, through
+            // `contained_leaf`. Probing for one here with `Path::is_file`
+            // would follow a symlink out of the mount to answer, which is one
+            // bit about an arbitrary host path per registration.
+            let is_symlink = std::fs::symlink_metadata(entry.path())
                 .map(|m| m.file_type().is_symlink())
                 .unwrap_or(true);
-            if is_symlink || !path.join("gitdir").is_file() {
+            if is_symlink {
                 continue;
             }
             if let Some(name) = entry.file_name().to_str() {
@@ -144,6 +154,9 @@ pub(crate) fn run(
             let Some(private) = repo.contained_leaf("worktree registration", &dir, &name)? else {
                 continue;
             };
+            // No `gitdir` file means this directory is not a registration —
+            // a stray name under `worktrees/`, or one a `git worktree prune`
+            // was interrupted halfway through removing.
             let Some(gitdir_file) = repo.contained_leaf("worktree gitdir file", &private, "gitdir")?
             else {
                 continue;

@@ -388,3 +388,71 @@ async fn subtracting_the_verb_removes_the_worktree_node() {
     let names: Vec<&str> = schema.subcommands.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains(&"worktree"), "{names:?}");
 }
+
+/// A bare repository has no working tree of its own, and the listing says so
+/// by leaving it out. **Divergence, pinned (docs/issues.md B7):** git lists
+/// the bare git directory as a worktree row with a `bare` marker.
+///
+/// The linked worktrees a bare repository owns are reported normally, which
+/// is what keeps this from being "the verb does not work on a bare repo".
+#[tokio::test]
+async fn a_bare_repository_lists_its_linked_worktrees_and_not_itself() {
+    require_git();
+    let fixture = support::Fixture::empty();
+    let source = fixture.path("source");
+    std::fs::create_dir_all(&source).expect("create source repo");
+    support::git(&source, &["init", "--initial-branch=main", "--quiet"]);
+    support::write_file(&source, "a.txt", "a\n");
+    support::git(&source, &["add", "a.txt"]);
+    support::git(&source, &["commit", "-m", "initial", "--quiet"]);
+
+    let bare = fixture.path("bare.git");
+    support::git(
+        &fixture.root(),
+        &[
+            "clone",
+            "--bare",
+            "--quiet",
+            source.to_str().expect("utf-8"),
+            bare.to_str().expect("utf-8"),
+        ],
+    );
+    let linked = fixture.path("bare-wt");
+    support::git(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            linked.to_str().expect("utf-8"),
+            "-b",
+            "from-bare",
+        ],
+    );
+
+    let result = run(&fixture.root(), "/mnt/bare.git", &["--json"]).await;
+    let model = json(&result);
+    let paths: Vec<&str> = model["worktrees"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|r| r["path_real"].as_str().expect("path_real"))
+        .collect();
+    assert_eq!(
+        paths,
+        vec![linked.to_str().expect("utf-8")],
+        "the linked worktree, and only it"
+    );
+
+    // Git's own answer, asserted rather than described: it lists the bare git
+    // directory too, marked `bare`.
+    let porcelain = support::git(&bare, &["worktree", "list", "--porcelain"]);
+    assert!(
+        porcelain.contains("\nbare"),
+        "git marks the bare repository as a worktree row: {porcelain}"
+    );
+    assert!(
+        porcelain.contains(bare.to_str().expect("utf-8")),
+        "and names its git directory: {porcelain}"
+    );
+}

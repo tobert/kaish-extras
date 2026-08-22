@@ -473,6 +473,11 @@ branch as not matching, which is a wrong answer wearing a success code.
   `%(contents:subject)` falls back to the *target commit's* subject there,
   which is a line nobody wrote about the tag.
 
+`git worktree list` has one divergence of its own: **a bare repository is not
+a row.** Git lists the bare git directory with a `bare` marker; a bare
+repository has no working tree, so this listing reports only the linked
+worktrees it owns.
+
 ## `git worktree list` — what the built verb does
 
 The design is [architecture.md B.9](design/architecture.md#b9-git-worktree-list).

@@ -385,6 +385,18 @@ fixture asserted against real `git status --porcelain` before fixing.
   it". Pinned as unit cases in `verbs/worktree.rs`; add the count if an
   embedder ever asks.
 
+- **B7 — a bare repository is not a row in `git worktree list`.** Git lists
+  the bare git directory as a worktree with a `bare` marker; we list only the
+  linked worktrees it owns. A bare repository has no working tree, so leaving
+  it out of a listing *of working trees* is defensible — but it is a
+  divergence, and B.9's row shape has no `bare` field to carry it if we ever
+  want parity. Pinned with git's own answer asserted beside ours in
+  `worktree.rs::a_bare_repository_lists_its_linked_worktrees_and_not_itself`.
+  The neighbouring case is worse and is not a divergence anybody has hit: a
+  repository whose git directory is named something other than `.git` *does*
+  have a working tree, and it is missing from the listing. That one needs the
+  `core.worktree` handling this build does not have.
+
 ## git blame — deferred, and a good contribution-sized piece
 
 **BL1 — `git blame` is designed and unbuilt.** It was scoped into PR 7 with
