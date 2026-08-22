@@ -464,8 +464,16 @@ struct Changed {
 /// what survived.
 ///
 /// The order matters: `--limit` is applied *before* any blob is read, so it
-/// bounds the reading and not only the reporting. A cap that only trimmed the
-/// output would have already paid for every file it threw away.
+/// bounds the line-counting reads and not only the reporting. A cap that only
+/// trimmed the output would have already paid for every blob it threw away.
+///
+/// What it does **not** bound is the work that produced the two sides. Both
+/// are fully materialized before this function is called — `tree_side`
+/// flattens the whole tree, `index_side` reads every entry, `worktree_side`
+/// hashes every tracked file — because you cannot know which paths changed
+/// without looking at all of them. `--limit` is a cap on blob reads and on
+/// rows, never on the comparison itself. `--path` is the flag that bounds the
+/// flattening, and it is the real mitigation on a large repository.
 fn compare(
     repo: &ReadRepo,
     opts: &DiffOptions,

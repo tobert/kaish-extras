@@ -574,6 +574,55 @@ untouched here (out of scope for a padding-guard PR, and neither has a
   [`docs/design/publishing.md`](design/publishing.md) — Amy's call, not made
   here.
 
+## git — cost shapes `--limit` does not bound
+
+Found by the 2026-08-22 cross-model review (kaibo default cast, whole files,
+no diff) over the merged PR 5 + PR 8 round. None is a memory-safety bug; each
+is a cost an embedder running a long-lived server should be able to see coming.
+Grouped because they share one cause: **flatten-and-compare has to look at
+every path before it knows which ones changed**, so per-invocation cost tracks
+repository size, not result size.
+
+- **G7 — worktree hashing is unbounded per invocation.** `diff` and `status`
+  both hash every tracked index entry against its worktree file
+  (`verbs/diff.rs:422-450`, `verbs/status.rs:467-521`). `max_blob_bytes` caps
+  each file; nothing caps the count, and `--limit` does not apply — it bounds
+  rows and blob reads after the comparison. A repository with a million
+  tracked files costs a million reads per call. For a long-lived server
+  pointed at a repository chosen by a caller, that is a CPU/IO denial of
+  service that no existing knob prevents. A `max_files_examined` limit would
+  bound it; the argument against is that a partial `status` is a wrong
+  `status`, so the honest form is a refusal, not a truncation. Not built —
+  the shape of the first real report should decide it.
+
+- **G8 — `flatten_tree` bounds depth, not width.** `diffcore.rs:157-198` caps
+  depth at 64 but the output `PathMap` grows with the tree's total leaf count.
+  Shared by `status`'s `flatten_head_tree`, `log`'s `changes_against`, and
+  `diff`. Same family as the `treewalk.rs` width bug fixed on 2026-08-21, but
+  not the same fix: that one materialized a listing it was about to truncate,
+  where this one genuinely needs every path.
+
+- **G9 — Myers has no time bound.** `diffcore.rs:316` runs
+  `gix_imara_diff::Diff::compute` with `Algorithm::Myers` over two blobs each
+  capped at `max_blob_bytes` (8 MiB). Memory is bounded; time is O(ND) in the
+  edit distance, so a single pathological pair of large, wholly different
+  blobs can stall one call. `max_diff_files` bounds how many such pairs one
+  invocation attempts, so the exposure is `limit x Myers(2 x max_blob_bytes)`.
+  There is no per-diff deadline, and `ctx.patient` is not wired up either
+  (see the `git log` entry above), so nothing interrupts it.
+
+- **G10 — `status`'s `flatten_subtree` is the one tree walk that recurses on
+  the call stack.** `verbs/status.rs:822-870`, bounded at
+  `MAX_STATUS_TREE_DEPTH` (256). The bound was set empirically against a 2 MiB
+  thread, where overflow was measured at 700-800 levels — a ~3x margin. Every
+  other walk here avoids the stack: `diffcore::flatten_tree` uses an explicit
+  `Vec`, `index_depth_guard` is iterative by design, `treewalk` recurses but
+  at depth 64. The margin is against a 2 MiB stack; an embedder running the
+  tool on a smaller thread has less than they would read from the constant.
+  Either convert it to an explicit stack like its siblings, or state the
+  thread-stack assumption where an embedder will see it. **The doc half is
+  done** (`docs/embedding-git.md`); the conversion is not.
+
 ## git — the embedder boundary
 
 - **G6 — "mount the common dir" may be a wider grant than the git verbs need.**

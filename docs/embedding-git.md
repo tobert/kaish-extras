@@ -21,8 +21,9 @@ let git = kaish_tools_git::tool(GitConfig::read_only())?;
 
 This is `src/lib.rs`'s own module-doc example, compiled by
 `cargo test --doc -p kaish-tools-git` on every run — it cannot silently rot.
-`GitConfig::read_only()` is the *only* constructor: the read profile, all five
-implemented verbs (`info`, `status`, `log`, `ls`, `show`), tool name `git`
+`GitConfig::read_only()` is the *only* constructor: the read profile, all six
+implemented verbs (`info`, `status`, `log`, `ls`, `show`, `diff`), tool name
+`git`
 (deliberately shadowing external `git` — kaish resolves builtins before
 `PATH`), and the default [`Limits`](#limits). `tool()` fails at registration,
 not at first use, if the config could never produce a working tool — an empty
@@ -54,14 +55,17 @@ chain of calls, however long, can widen a build's surface past what
 
 | Method | Default | What it costs to change |
 |---|---|---|
-| `GitConfig::read_only()` | — | The only constructor. Read profile, all 5 verbs, name `git`, default `Limits`. |
+| `GitConfig::read_only()` | — | The only constructor. Read profile, every verb in `Verb::ALL`, name `git`, default `Limits`. |
 | `.without_verb(Verb)` | none subtracted | Removes a verb from the schema, not just from dispatch — see [Verb visibility](#verb-visibility-a-disabled-verb-is-genuinely-gone). Subtracting an already-absent verb is a no-op. Subtracting every verb makes `tool()` fail at registration (`NoVerbsEnabled`). |
 | `.with_tool_name(name)` | `"git"` | Registering as anything else means external `git` on `PATH` is not shadowed — a caller who types `git` gets whichever one kaish's own PATH-vs-builtin resolution picks, not necessarily this tool. An empty or whitespace-containing name is rejected at registration (`UnusableToolName`). |
 | `.with_limits(Limits)` | see below | Every field is a **hard cap** — a verb's own `--limit` flag may only lower it, never raise it. Raising a limit raises real cost: `max_blob_bytes` and `max_diff_files` bound single-allocation and single-invocation work respectively (see [L3](#known-limitations) for where "per-blob bounded, not per-commit bounded" still bites). |
 
-`Verb` is `#[non_exhaustive]` and today carries exactly the five implemented
-verbs (`read_only_enables_every_implemented_verb`, `src/config.rs`) — a
-verb is added to the enum in the same PR that implements it, never ahead of
+`Verb` is `#[non_exhaustive]` and today carries exactly the six implemented
+verbs — `info`, `status`, `log`, `ls`, `show`, `diff`
+(`read_only_enables_every_implemented_verb`, `src/config.rs`, and
+`the_embedding_guide_names_every_verb` pins this list against `Verb::ALL` so
+the two cannot drift again). A verb is added to the enum in the same PR that
+implements it, never ahead of
 its implementation, so there is never a schema entry for something that
 cannot actually run.
 
@@ -69,8 +73,8 @@ cannot actually run.
 
 | Field | Default | Bounds |
 |---|---|---|
-| `max_rows` | 1000 | Rows any listing verb (`status`, `log`, `ls`, `show`'s tree form) returns. |
-| `max_diff_files` | 500 | Files `log --stat` will diff in one commit. |
+| `max_rows` | 1000 | Rows any listing verb (`status`, `log`, `ls`, `show`'s tree form) returns. Not `diff` — a diff's rows are files, and they have their own cap below. |
+| `max_diff_files` | 500 | Files compared in one invocation: `git diff`'s whole result, and `log --stat`'s per-commit file list. A verb's `--limit` may lower it, never raise it. |
 | `max_blob_bytes` | 8 MiB (`8 * 1024 * 1024`) | Bytes of blob content `show` will read, and of a single working-tree file `status` will hash. Over the cap: the read is declined and reported (`git show: blob '<oid>' is <size> bytes, over this build's <cap>-byte cap`), never silently truncated. |
 | `max_hunk_bytes_per_file` | 256 KiB | Reserved for the unbuilt `--patch`/`textdiff` feature (see [Known limitations](#known-limitations)); not consulted by anything in this build today. |
 | `submodule_depth` | 1 | Reserved; `git info`'s `submodules` count reads `.gitmodules` in the working tree only, no recursive descent exists yet to bound. |
@@ -376,6 +380,39 @@ dispatch seam gets some protection against a crash taking down more than
 the one call; one that calls this tool inline in its
 main request loop does not, and should decide that with the risk above in
 view rather than after finding out the hard way.
+
+### Cost that scales with the repository, not with the result
+
+Found by cross-model review on 2026-08-22 and stated here because a
+long-lived server is where it bites. **`--limit` bounds rows and blob reads.
+It does not bound the work that finds the changed paths.** Flatten-and-compare
+has to look at every path before it can know which ones changed, so
+per-invocation cost tracks repository size, not answer size.
+
+Concretely, for a repository a caller chose rather than one you control:
+
+- **`git status` and `git diff` hash every tracked file** against its worktree
+  entry. `max_blob_bytes` caps each read; nothing caps how many. A million
+  tracked files is a million reads per call, and `--limit 1` does not change
+  that (`docs/issues.md` **G7**).
+- **A tree flatten allocates one map entry per leaf.** Depth is capped at 64,
+  width is not (**G8**).
+- **A single diff has no deadline.** Myers is O(ND) in edit distance over
+  blobs capped at 8 MiB each, so one pathological pair can stall a call, and
+  there is no cancellation to interrupt it (**G9**, and see the no-cancellation
+  entry below).
+- **`git status`'s tree walk recurses on the call stack**, bounded at 256
+  levels. That bound was measured against a **2 MiB thread**, where overflow
+  began at 700–800 levels. If you run this tool on a smaller stack, your real
+  margin is smaller than the constant suggests — size the thread, or prefer
+  the verbs that walk iteratively (**G10**).
+
+None of these is a memory-safety problem and none is reachable past the
+containment boundary. They are resource cost, and the mitigation available
+today is the same one in every case: **pass `--path` to bound the flatten**,
+size your timeouts against repository scale rather than result size, and do
+not point a shared server at an arbitrary repository without a budget around
+the call.
 
 ## Checklist: containing this tool
 

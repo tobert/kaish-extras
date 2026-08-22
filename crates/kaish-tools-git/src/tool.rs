@@ -1217,6 +1217,53 @@ mod tests {
     }
 
 
+    /// `docs/embedding-git.md` is the guide two embedders read before
+    /// registering this tool, and it enumerates the verb set in prose. Prose
+    /// cannot iterate `Verb::ALL`, so it went stale the moment `diff` merged:
+    /// the guide said "five verbs" in three places and named none of them
+    /// `diff`, so an embedder reading it would not have learned the verb
+    /// exists. A cross-model review found it; nothing in the build did.
+    ///
+    /// This is the cheapest thing that would have. It is deliberately dumb —
+    /// it asserts each verb's name appears somewhere in the file, not that the
+    /// file describes it well — because the failure it exists to catch is a
+    /// verb landing with no mention at all.
+    #[test]
+    fn the_embedding_guide_names_every_verb() {
+        let guide = include_str!("../../../docs/embedding-git.md");
+        for verb in Verb::ALL {
+            let quoted = format!("`{}`", verb.as_str());
+            assert!(
+                guide.contains(&quoted),
+                "docs/embedding-git.md never names {:?} — a verb landed \
+                 without reaching the guide two embedders read before \
+                 registering this tool",
+                verb
+            );
+        }
+        // Negative control: prove the search can return false, so the loop
+        // above is not passing because `contains` always succeeds.
+        //
+        // The first spelling tried here was "`commit`", on the reasoning that
+        // a write verb in a read-profile guide would be a real finding. It
+        // fired immediately — on `gix-ref`'s `transaction`/`prepare`/`commit`
+        // API names in the read-only layer discussion, which are legitimate.
+        // A control that reports a defect for correct content is worse than
+        // no control, so this one tests the mechanism instead of guessing at
+        // content.
+        assert!(
+            !guide.contains("`a-verb-this-crate-will-never-have`"),
+            "the sentinel matched, so `contains` is not discriminating and \
+             the loop above proves nothing"
+        );
+        // And prove the file was actually loaded, not empty.
+        assert!(
+            guide.len() > 4096,
+            "embedding-git.md is {} bytes — too small to be the guide",
+            guide.len()
+        );
+    }
+
     /// AGENTS.md, "Published text is published": a `///` on a clap argument is
     /// copied into `ParamSchema.description` and reaches agents through the
     /// tool schema. Behavior goes there; mechanism goes in a `//` comment.
