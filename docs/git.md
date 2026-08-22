@@ -6,6 +6,15 @@ from kaish core in kaish PR #8 and will be **reinvented here** as a deliberately
 shallow, safety-first git surface. kaish core keeps a one-line pointer to this
 document; everything else lives and evolves here.
 
+**Registering the reinvented crate today?** This document is history and
+design intent — read [`docs/embedding-git.md`](embedding-git.md) instead for
+the current API: every `GitConfig` knob, the read-only story stated as five
+falsifiable layers, the mount-table requirement for a linked worktree, and
+the known limitations an adoption decision should see first. Appendix A below
+reproduces the *old* libgit2-era embedding guide for provenance only — it
+describes `GitVfs` and a write-capable builtin, neither of which exist in the
+reinvention.
+
 ## Provenance
 
 All in the kaish repo's history — the code is recoverable, not lost:

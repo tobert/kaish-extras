@@ -646,7 +646,12 @@ impl Tool for GitTool {
         if self.config.has(Verb::Show) {
             cmd = cmd.subcommand(verbs::show::ShowArgs::command().name("show"));
         }
-        schema_tree_from_clap(&cmd, self.config.tool_name(), DESCRIPTION, EXAMPLES)
+        schema_tree_from_clap(
+            &cmd,
+            self.config.tool_name(),
+            DESCRIPTION,
+            examples_for(&self.config),
+        )
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -684,13 +689,42 @@ const DESCRIPTION: &str =
     "Read a git repository — shallow, safety-first, and read-only by construction";
 
 /// Examples the schema carries into `help git` and completion.
-const EXAMPLES: [(&str, &str); 5] = [
+///
+/// Every example's command starts `git <verb>`, and [`examples_for`] filters
+/// on that word before the schema is built — an example for a verb this
+/// config subtracted is exactly the kind of thing E.1's gate exists to keep
+/// out of `help git`: a disabled verb must be absent from what an agent is
+/// told exists, not merely refused once it tries the example. There is one
+/// entry per implemented [`Verb`] — `help <tool>`'s renderer
+/// (`kaish-help`'s `tool_help`) shows only params and examples, never a bare
+/// subcommand list, so a verb with no example here would never be named in
+/// `help git` at all, enabled or not.
+const EXAMPLES: [(&str, &str); 7] = [
     ("What repository is this", "git info"),
     ("Inspect a specific repository", "git info --repo /mnt/repos/kaish"),
     ("Structured, for a script", "git info --json"),
+    ("What changed in the working tree", "git status"),
+    ("Recent commit history", "git log"),
     ("Read a file as of the last release", "git show v0.1.0:src/lib.rs"),
     ("List a directory as of HEAD", "git ls HEAD src"),
 ];
+
+/// [`EXAMPLES`], narrowed to the ones whose verb this config still enables.
+///
+/// Driven by `Verb::ALL`/[`GitConfig::has`] rather than a hand-matched list
+/// of example strings, so a verb subtracted by an embedder — or added by a
+/// later phasing PR, per the coordination rule with the sibling `git diff`
+/// PR — needs no change here to stay correct.
+fn examples_for(config: &GitConfig) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {
+    EXAMPLES.iter().copied().filter(move |(_, code)| {
+        // Every example is `git <verb> ...`; the second whitespace-separated
+        // word is the verb it demonstrates.
+        code.split_whitespace()
+            .nth(1)
+            .and_then(|word| Verb::ALL.iter().find(|v| v.as_str() == word))
+            .is_some_and(|verb| config.has(*verb))
+    })
+}
 
 /// Wrap a [`GitError`] as an [`ExecResult`] carrying its taxonomy code.
 fn failure(err: GitError) -> ExecResult {
@@ -1136,6 +1170,47 @@ mod tests {
         assert_eq!(block_in_place_compat(|| 42), 42);
     }
 
+    /// Every implemented verb has at least one example, and `examples_for`
+    /// drops exactly the ones belonging to a subtracted verb — driven by
+    /// `Verb::ALL`, so a verb added later needs an `EXAMPLES` entry to be
+    /// visible in `help git` at all, but no change here to stay filtered
+    /// correctly once it has one.
+    #[test]
+    fn examples_are_filtered_by_the_config_and_every_verb_has_one() {
+        let full = GitConfig::read_only();
+        let all: Vec<&str> = examples_for(&full).map(|(_, code)| code).collect();
+        for verb in Verb::ALL {
+            assert!(
+                all.iter().any(|code| code.split_whitespace().nth(1) == Some(verb.as_str())),
+                "{verb:?} has no EXAMPLES entry, so help git would never name \
+                 it even when enabled"
+            );
+        }
+
+        for verb in Verb::ALL {
+            let narrowed = GitConfig::read_only().without_verb(*verb);
+            let remaining: Vec<&str> = examples_for(&narrowed).map(|(_, code)| code).collect();
+            assert!(
+                !remaining
+                    .iter()
+                    .any(|code| code.split_whitespace().nth(1) == Some(verb.as_str())),
+                "an example for disabled verb {verb:?} survived filtering: {remaining:?}"
+            );
+            // Negative control: every other verb's examples survive.
+            for other in Verb::ALL {
+                if other == verb {
+                    continue;
+                }
+                assert!(
+                    remaining
+                        .iter()
+                        .any(|code| code.split_whitespace().nth(1) == Some(other.as_str())),
+                    "disabling {verb:?} dropped {other:?}'s example too: {remaining:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn capabilities_report_the_configured_limits() {
         let limits = Limits {
@@ -1146,7 +1221,21 @@ mod tests {
         let caps = git.capabilities();
         assert_eq!(caps.limits.max_rows, 7);
         assert_eq!(caps.profiles, ["read"]);
-        assert_eq!(caps.verbs, ["info", "status", "log", "ls", "show"]);
+        assert_eq!(caps.verbs.len(), Verb::ALL.len());
+        for verb in Verb::ALL {
+            assert!(
+                caps.verbs.contains(&verb.as_str().to_string()),
+                "{verb:?} missing from capabilities.verbs: {:?}",
+                caps.verbs
+            );
+        }
     }
 
+    // E.1's router drift test — comparing this file's `route()` against the
+    // kernel's own dispatch — lives in `tests/router_kernel_drift.rs`, not
+    // here. The kernel's `select_leaf` is `pub(crate)` to `kaish-kernel`
+    // (unreachable even as a dev-dependency), so that test drives a real
+    // `kaish_kernel::Kernel` through `Kernel::execute` instead of calling
+    // kernel internals directly — exercising the kernel's actual dispatch
+    // path rather than a belief about it.
 }

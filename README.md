@@ -12,11 +12,14 @@ live here:
 - **`site/`** — the *try kaish* playground built on it: a REPL seeded with
   the kaish and kaish-extras source trees, so you can `grep` the shell's own
   implementation from inside the shell. Published via GitHub Pages.
-- *(planned)* tool bundles that were deliberately kept out of kaish core to
-  keep its dependency tree light: a reinvented git plugin (history, autopsy,
-  and design intent in [docs/git.md](docs/git.md); the crates.io name
-  `kaish-tools-git` is reserved — see kaish GH #119), jq and ripgrep as
-  add-ons.
+- **`crates/kaish-tools-git`** — a reinvented git plugin, deliberately kept out
+  of kaish core to keep its dependency tree light: shallow, safety-first,
+  read-only by construction, gitoxide plumbing rather than the `gix` facade.
+  History, autopsy, and design intent in [docs/git.md](docs/git.md); the
+  registration guide, every `GitConfig` knob, and the read-only story stated
+  precisely in [docs/embedding-git.md](docs/embedding-git.md).
+- *(planned)* further tool bundles kept out of kaish core the same way: jq and
+  ripgrep as add-ons.
 
 ## How the playground works
 

@@ -75,13 +75,29 @@ pub enum GitError {
     /// (`.git/commondir` says `/etc/shadow`; the error tells you whether that
     /// resolved). The repository and the ceiling are both already known to the
     /// caller, so nothing an honest embedder needs is withheld.
+    ///
+    /// What the message names instead is a command, not a path: `git
+    /// rev-parse --git-common-dir --path-format=absolute`, run inside `repo`
+    /// (named explicitly, so the caller knows *where* to run it — the
+    /// command answers relative to cwd), gets the escaping directory from a
+    /// source the caller trusts — real git on their own machine — rather
+    /// than from this refusal. It answers both routes to this variant: a
+    /// linked worktree's `gitdir:` target always nests under
+    /// `<common-dir>/worktrees/<name>`, so mounting what the command reports
+    /// satisfies both the `gitdir:`-line gate ([`crate::repo`]'s
+    /// `screen_gitdir_file`) and the `commondir`-content gate below it. That
+    /// closes the round trip for the common, legitimate case (a linked
+    /// worktree mounted without its main repository — the sibling-worktree
+    /// layout kaibo's own PR flow uses) without this crate ever repeating
+    /// repository-controlled bytes back to the caller.
     #[error(
         "git {operation}: repository '{repo}' points its {what} outside the \
          mount rooted at '{ceiling}', and kaish-git reads nothing outside that \
-         mount. If that is a real directory you meant to expose — a linked \
-         worktree whose main repository lives elsewhere is the usual case — \
-         mount it too and retry. If it is not, this repository is asking \
-         kaish-git to read a path it was never given. Nothing was read"
+         mount. If this is a linked worktree whose main repository lives \
+         elsewhere — the usual case — run `git rev-parse --git-common-dir \
+         --path-format=absolute` inside '{repo}' to find that repository, \
+         then mount it too and retry. If it is not, this repository named a \
+         path it was never given. Nothing was read"
     )]
     EscapesMount {
         /// The verb that was asked for.
@@ -687,6 +703,31 @@ mod tests {
         assert!(
             msg.contains("Nothing was read"),
             "must state that no read happened: {msg}"
+        );
+        // The recovery command, not the escaping path itself: an embedder
+        // finds the directory to mount from a source they trust (real git on
+        // their own machine) instead of this refusal echoing
+        // repository-controlled bytes. Pinned together with "inside
+        // '{repo}'" rather than as two separate substring checks, so a future
+        // edit cannot keep the command while quietly dropping the clause
+        // that says where to run it — `git rev-parse` answers relative to
+        // cwd, so the location is not optional detail.
+        assert!(
+            msg.contains(
+                "run `git rev-parse --git-common-dir --path-format=absolute` \
+                 inside '/mnt/repo/.git' to find that repository"
+            ),
+            "must name the command AND where to run it, from a trusted \
+             source, without echoing the escaping path ourselves: {msg}"
+        );
+        // The other reading, kept deliberately. Without it the refusal reads
+        // as pure friction: an operator who did NOT mean to expose anything
+        // needs to know this repository asked for a path it was never given,
+        // because their next step is to investigate it, not to mount it.
+        assert!(
+            msg.contains("this repository named a path it was never given"),
+            "must name the hostile reading too, so the fix is not the only \
+             next step on offer: {msg}"
         );
     }
 
