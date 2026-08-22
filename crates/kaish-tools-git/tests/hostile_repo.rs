@@ -333,6 +333,28 @@ async fn a_legitimate_worktree_whose_common_dir_is_unmounted_is_refused_helpfull
         "the refusal must name the legitimate shape it might be: {}",
         result.err
     );
+    // This is the layout a `git worktree add` PR workflow actually produces
+    // when the worktree and its main repository are sibling directories
+    // (kaibo's own layout: `~/src/wt/<repo>-<topic>` beside `~/src/<repo>`),
+    // so the refusal an embedder hits here is not an edge case — it is the
+    // first thing they see on their first call. The message must hand them a
+    // way to find the escaping directory themselves rather than have this
+    // crate echo it — and must say *where* to run that command, since
+    // `git rev-parse` answers relative to cwd and the wrong cwd gives a
+    // plausible-looking answer for a different repository. Pinned together
+    // so a future edit cannot keep the command while dropping the location.
+    let linked_real = std::fs::canonicalize(&linked).expect("canonicalize the refused worktree");
+    let expected = format!(
+        "run `git rev-parse --git-common-dir --path-format=absolute` inside \
+         '{}' to find that repository",
+        linked_real.display()
+    );
+    assert!(
+        result.err.contains(&expected),
+        "the refusal must name the command AND the worktree to run it in: \
+         wanted a substring '{expected}', got: {}",
+        result.err
+    );
 }
 
 /// The symlink spelling of the same escape, and the one a lexical ceiling
