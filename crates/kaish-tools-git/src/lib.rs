@@ -69,6 +69,8 @@ mod tool;
 #[cfg(not(target_family = "wasm"))]
 mod treewalk;
 #[cfg(not(target_family = "wasm"))]
+mod worktree;
+#[cfg(not(target_family = "wasm"))]
 mod verbs;
 
 #[cfg(not(target_family = "wasm"))]
