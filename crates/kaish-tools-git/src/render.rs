@@ -8,7 +8,10 @@
 
 use kaish_types::{OutputData, OutputNode};
 
-use crate::model::{CommitInfo, LogReport, LsReport, RepoInfo, ShowTag, StatusReport, TreeRow};
+use crate::model::{
+    CommitInfo, DiffEndpoint, DiffFile, DiffReport, EntryStatus, LogReport, LsReport, RepoInfo,
+    ShowTag, StatusReport, TreeRow,
+};
 
 /// Render [`RepoInfo`] as a `FIELD`/`VALUE` table carrying the full object as
 /// `rich_json`.
@@ -307,4 +310,148 @@ pub fn show_tag(tag: &ShowTag) -> OutputData {
             table
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// git diff (architecture.md B.4)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// How one end of a diff reads in the text surface.
+fn endpoint_text(end: &DiffEndpoint) -> String {
+    match end {
+        DiffEndpoint::Index => "index".to_string(),
+        DiffEndpoint::Worktree => "worktree".to_string(),
+        // An unborn HEAD resolves to no oid; naming the revision alone is the
+        // whole truth there.
+        DiffEndpoint::Rev { rev, oid } if oid.is_empty() => rev.clone(),
+        DiffEndpoint::Rev { rev, oid } => format!("{rev} ({})", &oid[..oid.len().min(7)]),
+    }
+}
+
+/// The porcelain letter for a diff row, `R100` included.
+///
+/// Letters in the text surface, words in `--json` — the same split
+/// `git status` uses (B.2), and the same letters `git diff --name-status`
+/// prints, so a model reading either one reads it correctly.
+fn diff_letter(file: &DiffFile) -> String {
+    match file.status {
+        EntryStatus::Added => "A".to_string(),
+        EntryStatus::Deleted => "D".to_string(),
+        EntryStatus::Modified => "M".to_string(),
+        EntryStatus::Typechange => "T".to_string(),
+        EntryStatus::Renamed => match file.similarity {
+            Some(score) => format!("R{score}"),
+            None => "R".to_string(),
+        },
+        // Not produced by a diff: `none`/`untracked`/`ignored` are status's
+        // vocabulary for states a comparison has no row for, and `copied`
+        // needs copy detection this build does not have.
+        other => serde_json::to_value(other)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "?".to_string()),
+    }
+}
+
+/// Render a [`DiffReport`] as the B.4 table, with the endpoints on the line
+/// above it and a `git`-shaped summary below.
+///
+/// Returns the text and the [`OutputData`] that carries it plus the typed
+/// model as `rich_json`. The endpoints are in **both**: a result that did not
+/// say what it compared would leave an agent guessing which of B.4's five
+/// endpoint pairs it asked for, and an empty diff has no rows to infer it
+/// from.
+pub fn diff(report: &DiffReport) -> (OutputData, String) {
+    let name_only = report.totals.additions.is_none();
+    let cell = |v: Option<u64>| match v {
+        Some(n) => n.to_string(),
+        // Git's `--numstat` prints `-` for a file it did not count.
+        None => "-".to_string(),
+    };
+
+    let mut rows: Vec<Vec<String>> = Vec::with_capacity(report.files.len() + 1);
+    rows.push(if name_only {
+        vec!["STATUS".into(), "PATH".into()]
+    } else {
+        vec!["STATUS".into(), "+ADD".into(), "-DEL".into(), "PATH".into()]
+    });
+    for file in &report.files {
+        let path = match &file.old_path {
+            Some(orig) => format!("{} ← {orig}", file.path),
+            None => file.path.clone(),
+        };
+        rows.push(if name_only {
+            vec![diff_letter(file), path]
+        } else {
+            vec![
+                diff_letter(file),
+                cell(file.additions),
+                cell(file.deletions),
+                path,
+            ]
+        });
+    }
+
+    let widths: Vec<usize> = (0..rows[0].len())
+        .map(|col| rows.iter().map(|r| r[col].chars().count()).max().unwrap_or(0))
+        .collect();
+    let mut text = format!(
+        "{} → {}\n",
+        endpoint_text(&report.from),
+        endpoint_text(&report.to)
+    );
+    for row in &rows {
+        let mut line = String::new();
+        for (col, value) in row.iter().enumerate() {
+            if col + 1 == row.len() {
+                line.push_str(value);
+            } else {
+                let pad = widths[col] - value.chars().count();
+                line.push_str(value);
+                line.push_str(&" ".repeat(pad + 2));
+            }
+        }
+        text.push_str(line.trim_end());
+        text.push('\n');
+    }
+    if report.files.is_empty() {
+        text.push_str("no changes\n");
+    } else if !name_only {
+        text.push_str(&summary_line(report));
+    }
+
+    let data = OutputData::text(text.clone());
+    let data = match serde_json::to_value(report) {
+        Ok(json) => data.with_rich_json(json),
+        // A model of owned scalars cannot fail to serialize in practice; the
+        // text is still a correct answer, and losing --json silently would be
+        // worse than saying so.
+        Err(e) => {
+            tracing::warn!(error = %e, "git diff: could not build the --json payload");
+            data
+        }
+    };
+    (data, text)
+}
+
+/// `git`'s own shortstat wording, plus what a cap withheld.
+fn summary_line(report: &DiffReport) -> String {
+    let plural = |n: u64, one: &str, many: &str| if n == 1 { one.to_string() } else { many.to_string() };
+    let files = report.totals.files;
+    let adds = report.totals.additions.unwrap_or(0);
+    let dels = report.totals.deletions.unwrap_or(0);
+    let mut line = format!(
+        "{files} {} changed, {adds} {}(+), {dels} {}(-)",
+        if files == 1 { "file" } else { "files" },
+        plural(adds, "insertion", "insertions"),
+        plural(dels, "deletion", "deletions"),
+    );
+    if report.totals.lines_capped > 0 {
+        line.push_str(&format!(
+            "; {} not counted (over this build's max_blob_bytes)",
+            report.totals.lines_capped
+        ));
+    }
+    line.push('\n');
+    line
 }

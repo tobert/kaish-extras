@@ -67,6 +67,11 @@
 //! tree and blob forms — no `--patch` yet, that is a later phase): a shared
 //! tree walk in `treewalk.rs`, the `<rev>:<path>` colon grammar `show` and
 //! `ls` accept and `log` still refuses, and `@` as an alias for `HEAD`.
+//! PR 5 adds `git diff` — the typed change model over five endpoint pairs,
+//! every result stating which one it used — and lifts the comparison
+//! machinery `status`, `log --stat` and `diff` all needed into
+//! `diffcore.rs`. No patch text: `--patch` and `--context` exit 4 naming the
+//! `textdiff` feature a later phase adds.
 
 #[cfg(target_family = "wasm")]
 compile_error!(
@@ -97,7 +102,11 @@ mod repo;
 #[cfg(not(target_family = "wasm"))]
 mod tool;
 #[cfg(not(target_family = "wasm"))]
+mod diffcore;
+#[cfg(not(target_family = "wasm"))]
 mod treewalk;
+#[cfg(not(target_family = "wasm"))]
+mod worktree;
 #[cfg(not(target_family = "wasm"))]
 mod verbs;
 
@@ -107,9 +116,9 @@ pub use config::{ConfigError, GitConfig, Limits, Profile, Verb};
 pub use error::GitError;
 #[cfg(not(target_family = "wasm"))]
 pub use model::{
-    Capabilities, CommitInfo, EntryKind, EntryStatus, Head, LimitsReport, LogReport, LsReport,
-    RefBackend, RepoInfo, ShowTag, ShowTarget, Signature, StatSummary, StatusEntry, StatusReport,
-    StatusTotals, TreeRow,
+    Capabilities, CommitInfo, DiffEndpoint, DiffFile, DiffReport, DiffTotals, EntryKind,
+    EntryStatus, Head, LimitsReport, LogReport, LsReport, RefBackend, RepoInfo, ShowTag,
+    ShowTarget, Signature, StatSummary, StatusEntry, StatusReport, StatusTotals, TreeRow,
 };
 #[cfg(not(target_family = "wasm"))]
 pub use repo::ReadRepo;

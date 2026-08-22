@@ -50,9 +50,14 @@ pub(crate) struct LsArgs {
     #[command(flatten)]
     pub global: GlobalFlags,
 
-    /// Bound so clap can accept the `--`-terminated tail `ToolArgs::to_argv()`
-    /// always emits. The real operands are read off `args.positional` in
-    /// `tool.rs`; do not read this field, it cannot distinguish them either.
+    /// The revision to list, then a path under it: `git ls HEAD src`.
+    /// Position decides which is which, so no `--` is needed. The colon form
+    /// `git ls HEAD:src` works too. Omit the path to list the repository root.
+    // Bound so clap accepts the `--`-terminated tail `ToolArgs::to_argv()`
+    // always emits. The real operands are read off `args.positional` in
+    // `tool.rs` — the kernel's own convention, because `to_argv` inserts a
+    // `--` of its own and clap cannot tell it from the caller's. Do not read
+    // this field; it cannot distinguish them either.
     #[arg(hide = true)]
     pub operands: Vec<String>,
 }

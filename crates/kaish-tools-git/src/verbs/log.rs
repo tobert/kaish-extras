@@ -40,10 +40,10 @@ use clap::Parser;
 use gix_index::hash::ObjectId;
 use gix_object::bstr::ByteSlice;
 use gix_object::FindExt;
-use gix_odb::HeaderExt;
 
 use kaish_tool_api::GlobalFlags;
 
+use crate::diffcore::{flatten_tree, line_delta, Class, LineDelta, Side};
 use crate::error::GitError;
 use crate::model::{CommitInfo, LogReport, Signature, StatSummary};
 use crate::pathfilter::PathFilter;
@@ -133,11 +133,14 @@ pub(crate) struct LogArgs {
     #[command(flatten)]
     pub global: GlobalFlags,
 
-    /// Bound so clap can accept the `--`-terminated tail `ToolArgs::to_argv()`
-    /// always emits. The real operands are read off `args.positional` in
-    /// `tool.rs` — the kernel's own convention, because `to_argv` inserts a
-    /// `--` of its own and clap cannot tell it from the caller's. Do not read
-    /// this field; it cannot distinguish them either.
+    /// A revision to start from, then paths after `--`:
+    /// `git log HEAD~5 -- src/lib.rs`. At most one revision — a range is two
+    /// calls, not `A B`. Omit it to start from `HEAD`.
+    // Bound so clap accepts the `--`-terminated tail `ToolArgs::to_argv()`
+    // always emits. The real operands are read off `args.positional` in
+    // `tool.rs` — the kernel's own convention, because `to_argv` inserts a
+    // `--` of its own and clap cannot tell it from the caller's. Do not read
+    // this field; it cannot distinguish them either.
     #[arg(hide = true)]
     pub operands: Vec<String>,
 }
@@ -186,21 +189,6 @@ pub(crate) struct LogOptions {
     /// bounds how many reads one commit can ask for.
     pub max_diff_files: usize,
 }
-
-/// How deep a `--stat` tree comparison may recurse before it is refused.
-///
-/// The same reasoning as the status walk's cap: an oid cycle is hash-hard, but
-/// a cheaply-built deep tree would overflow the stack. Loud error, not a
-/// silent truncation.
-///
-/// A different bound from `verbs::status::MAX_STATUS_TREE_DEPTH` (256) and
-/// `index_depth_guard`'s reuse of it, deliberately, not an oversight: this
-/// walk and that one measure different call sites with different frame
-/// sizes, so there is no single "the" tree-depth bound in this crate. Named
-/// `_STAT_` rather than a bare `MAX_TREE_DEPTH` so the two cannot be misread
-/// as the same constant (they collided by name, not by value, until this
-/// rename).
-const MAX_STAT_TREE_DEPTH: usize = 64;
 
 /// How many commits the walk may examine before giving up looking for matches.
 ///
@@ -628,8 +616,8 @@ pub(crate) fn split_message(message: &str) -> (String, String) {
 /// blob oids on each side so a caller can count lines without walking again.
 struct Change {
     path: String,
-    old: Option<ObjectId>,
-    new: Option<ObjectId>,
+    old: Option<(ObjectId, Class)>,
+    new: Option<(ObjectId, Class)>,
 }
 
 /// The tree of a commit, or the empty tree for `None` (a root commit's parent).
@@ -646,59 +634,6 @@ fn tree_of(repo: &ReadRepo, commit: Option<ObjectId>) -> Result<Option<ObjectId>
     Ok(Some(c.tree()))
 }
 
-/// Flatten a tree into `path → (oid, is_blob)`, bounded in depth.
-///
-/// `gix-diff`'s tree platform is the richer tool, but it is also the one whose
-/// rename tracking is `blob`-gated (→ `gix-command`). A direct flatten-and-
-/// compare needs none of that, and it is the same shape `status` already uses
-/// for HEAD-vs-index — one mechanism, two callers.
-fn flatten_tree(
-    repo: &ReadRepo,
-    tree: Option<ObjectId>,
-    out: &mut std::collections::BTreeMap<String, ObjectId>,
-) -> Result<(), GitError> {
-    const OP: &str = "log";
-    let Some(tree) = tree else {
-        return Ok(());
-    };
-    // An explicit stack rather than recursion: a hostile repository can make a
-    // tree as deep as it likes, and a deep recursion would overflow the stack
-    // before any cap could fire.
-    let mut stack: Vec<(ObjectId, String, usize)> = vec![(tree, String::new(), 0)];
-    while let Some((oid, prefix, depth)) = stack.pop() {
-        if depth > MAX_STAT_TREE_DEPTH {
-            return Err(GitError::TreeTooDeep {
-                operation: OP,
-                limit: MAX_STAT_TREE_DEPTH,
-            });
-        }
-        let mut buf = Vec::new();
-        let iter = repo
-            .objects()
-            .find_tree_iter(&oid, &mut buf)
-            .map_err(|e| GitError::repository(OP, "reading a tree", repo.git_dir(), e))?;
-        for entry in iter {
-            let entry = entry
-                .map_err(|e| GitError::repository(OP, "decoding a tree", repo.git_dir(), e))?;
-            let name = entry.filename.to_str_lossy();
-            let path = if prefix.is_empty() {
-                name.into_owned()
-            } else {
-                format!("{prefix}/{name}")
-            };
-            if entry.mode.is_tree() {
-                stack.push((entry.oid.to_owned(), path, depth + 1));
-            } else {
-                // Blobs and gitlinks both land here; a gitlink's oid is a
-                // commit in another repository, which `--stat` counts as a
-                // changed file with no line delta (it has no blob to read).
-                out.insert(path, entry.oid.to_owned());
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Every path that differs between a commit's tree and the given parent's.
 ///
 /// A `None` parent is the empty tree, which is what a root commit is compared
@@ -708,17 +643,25 @@ fn changes_against(
     commit: ObjectId,
     parent: Option<ObjectId>,
 ) -> Result<Vec<Change>, GitError> {
+    const OP: &str = "log";
     let mut new_side = std::collections::BTreeMap::new();
     let mut old_side = std::collections::BTreeMap::new();
-    flatten_tree(repo, tree_of(repo, Some(commit))?, &mut new_side)?;
-    flatten_tree(repo, tree_of(repo, parent)?, &mut old_side)?;
+    flatten_tree(repo, OP, tree_of(repo, Some(commit))?, &mut new_side)?;
+    flatten_tree(repo, OP, tree_of(repo, parent)?, &mut old_side)?;
 
     let mut out = Vec::new();
     let paths: BTreeSet<&String> = new_side.keys().chain(old_side.keys()).collect();
     for path in paths {
+        // The class rides along on the shared flatten; `--stat` compares blob
+        // oids alone, so a mode-only change (`chmod +x`) is not reported here
+        // even though git counts it as a changed file (docs/issues.md, L8).
         let old = old_side.get(path).copied();
         let new = new_side.get(path).copied();
-        if old != new {
+        // The oids alone decide whether the path changed: a mode-only change
+        // (`chmod +x`) keeps the blob and is therefore invisible here, even
+        // though git counts it as a changed file (docs/issues.md, L8).
+        let (old_oid, new_oid) = (old.map(|(o, _)| o), new.map(|(o, _)| o));
+        if old_oid != new_oid {
             out.push(Change {
                 path: path.clone(),
                 old,
@@ -727,6 +670,19 @@ fn changes_against(
         }
     }
     Ok(out)
+}
+
+/// Which end of [`line_delta`] one side of a change is.
+///
+/// A gitlink is named from its class rather than probed from the object
+/// store: its oid is a commit in another repository, and asking this store
+/// for the header fails outright.
+fn side_of(side: Option<(ObjectId, Class)>) -> Side<'static> {
+    match side {
+        None => Side::Absent,
+        Some((_, Class::Commit)) => Side::Gitlink,
+        Some((oid, _)) => Side::Object(oid),
+    }
 }
 
 /// A commit's `--stat` summary against its first parent.
@@ -760,135 +716,22 @@ fn commit_stat(
             summary.lines_capped += changes.len() - i;
             break;
         }
-        match line_delta(repo, change, max_blob_bytes)? {
+        let old = side_of(change.old);
+        let new = side_of(change.new);
+        match line_delta(repo, "log", old, new, max_blob_bytes)? {
             LineDelta::Counted { added, deleted } => {
                 summary.additions += added;
                 summary.deletions += deleted;
             }
             // Declined by a limit — the caller is owed the count.
             LineDelta::OverCap => summary.lines_capped += 1,
-            // No lines to count by nature. Git's shortstat leaves these out of
-            // its totals too, and they are not "capped": nothing was withheld,
-            // there was nothing there.
-            LineDelta::NotText => {}
+            // No lines to count by nature. Git's shortstat leaves binary files
+            // and gitlinks out of its totals too, and they are not "capped":
+            // nothing was withheld, there was nothing there.
+            LineDelta::Binary | LineDelta::Gitlink => {}
         }
     }
     Ok(summary)
-}
-
-/// What counting one changed file's lines produced.
-///
-/// Three outcomes, not two. Collapsing "declined by a limit" and "has no lines"
-/// into one `None` made `lines_capped` mean "files with no delta for any
-/// reason", so an agent reading `lines_capped: 3` on a commit touching three
-/// PNGs would believe three files were too large to read.
-enum LineDelta {
-    /// Both sides were read and diffed.
-    Counted { added: u64, deleted: u64 },
-    /// A side was over `max_blob_bytes`, so the delta was declined.
-    OverCap,
-    /// Binary content or a submodule gitlink — no line count exists to report.
-    NotText,
-}
-
-/// Added and deleted line counts for one changed path, or `None` when a side
-/// was over the cap or is not text.
-///
-/// Returning `None` rather than zero is the honest encoding: zero would claim
-/// the file changed no lines, which is a different fact from "we declined to
-/// read it". The caller counts these in `lines_capped`.
-fn line_delta(
-    repo: &ReadRepo,
-    change: &Change,
-    max_blob_bytes: u64,
-) -> Result<LineDelta, GitError> {
-    let old = read_blob(repo, change.old, max_blob_bytes)?;
-    let new = read_blob(repo, change.new, max_blob_bytes)?;
-    let (old, new) = match (old, new) {
-        (Blob::Text(o), Blob::Text(n)) => (o, n),
-        // A gitlink on either side: a commit in another repository, with no
-        // blob here to count lines in.
-        (Blob::Gitlink, _) | (_, Blob::Gitlink) => return Ok(LineDelta::NotText),
-        // Either side was over the embedder's cap.
-        _ => return Ok(LineDelta::OverCap),
-    };
-    // A NUL byte is git's own binary heuristic, and a binary file has no line
-    // count worth reporting — git leaves those out of its shortstat totals too.
-    if old.contains(&0) || new.contains(&0) {
-        return Ok(LineDelta::NotText);
-    }
-
-    let old_text = String::from_utf8_lossy(&old);
-    let new_text = String::from_utf8_lossy(&new);
-    // `lines` tokenizes on line boundaries, so a "token" here is a line and the
-    // counts are line counts — the same unit `git log --numstat` reports.
-    let input = gix_imara_diff::InternedInput::new(
-        gix_imara_diff::sources::lines(old_text.as_ref()),
-        gix_imara_diff::sources::lines(new_text.as_ref()),
-    );
-    let diff = gix_imara_diff::Diff::compute(gix_imara_diff::Algorithm::Myers, &input);
-    Ok(LineDelta::Counted {
-        added: u64::from(diff.count_additions()),
-        deleted: u64::from(diff.count_removals()),
-    })
-}
-
-/// One side of a changed path, as far as the cap allowed us to read it.
-enum Blob {
-    /// Content we are allowed to diff. An absent side (an add or a delete) is
-    /// genuinely empty, not a declined read.
-    Text(Vec<u8>),
-    /// A side over `max_blob_bytes`.
-    OverCap,
-    /// The oid names a submodule gitlink — a commit in another repository.
-    Gitlink,
-}
-
-/// Read a blob, refusing one larger than the embedder's cap.
-///
-/// The size is checked from the object header before the content is read, so an
-/// oversized blob is never allocated — the same discipline `status` follows for
-/// worktree files. Unlike `status`, this returns `None` instead of erroring:
-/// a `--stat` over a repository with one huge file should still answer, with
-/// that file's lines honestly absent (`lines_capped`), rather than fail the
-/// whole log.
-fn read_blob(
-    repo: &ReadRepo,
-    oid: Option<ObjectId>,
-    max_blob_bytes: u64,
-) -> Result<Blob, GitError> {
-    const OP: &str = "log";
-    let Some(oid) = oid else {
-        // An absent side is a real, empty side: an added file's "old" content
-        // is genuinely zero lines, not a declined read.
-        return Ok(Blob::Text(Vec::new()));
-    };
-    // The header first, and the content only if the header says it fits.
-    // `find` decompresses the whole object into `buf` before returning, so
-    // checking the size afterwards would mean a multi-gigabyte blob is fully
-    // materialized and *then* declined — the cap would bound the line count
-    // and not the allocation it exists to bound. `header` reads only the
-    // object's type and size, which is the object-store equivalent of the
-    // `meta.len()` check `status` does before `std::fs::read`.
-    let header = repo
-        .objects()
-        .header(oid)
-        .map_err(|e| GitError::repository(OP, "reading an object header", repo.git_dir(), e))?;
-    if header.kind() != gix_object::Kind::Blob {
-        // A gitlink points at a commit in another repository; there is no blob
-        // here to count lines in.
-        return Ok(Blob::Gitlink);
-    }
-    if header.size() > max_blob_bytes {
-        return Ok(Blob::OverCap);
-    }
-
-    let mut buf = Vec::new();
-    let data = repo
-        .objects()
-        .find(&oid, &mut buf)
-        .map_err(|e| GitError::repository(OP, "reading a blob", repo.git_dir(), e))?;
-    Ok(Blob::Text(data.data.to_vec()))
 }
 
 #[cfg(test)]

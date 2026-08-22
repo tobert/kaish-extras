@@ -389,6 +389,92 @@ impl TreeRepo {
     }
 }
 
+/// A repository with all five of `git diff`'s endpoint pairs to compare
+/// (architecture.md B.4), and a real answer at each one.
+///
+/// The working state is deliberately mixed: something modified only in the
+/// working tree, something modified only in the index, an exact rename staged,
+/// a tracked file deleted from disk, a mode flip, a binary blob, a symlink,
+/// and an untracked file that must appear in **no** diff at all.
+pub struct DiffRepo {
+    fixture: Fixture,
+    /// The working tree's root.
+    pub root: PathBuf,
+}
+
+impl DiffRepo {
+    /// The binary fixture's bytes — NUL bytes and invalid UTF-8, so git's own
+    /// binary heuristic fires on it exactly as ours does.
+    pub fn binary_bytes() -> Vec<u8> {
+        vec![0x00, 0x01, b'h', b'i', 0x00, 0xFF, 0xFE, 0x80, 0x00]
+    }
+
+    /// Build the fixture. Requires real git on PATH.
+    pub fn build() -> Self {
+        require_git();
+        let fixture = Fixture::empty();
+        let root = fixture.path("repo");
+        std::fs::create_dir_all(&root).expect("create repo dir");
+
+        git(&root, &["init", "--initial-branch=main", "--quiet"]);
+        git(&root, &["config", "gc.writeCommitGraph", "false"]);
+
+        write_file(&root, "a.txt", "one\ntwo\nthree\nfour\n");
+        write_file(&root, "b.txt", "beta\n");
+        write_file(&root, "keep.txt", "keep\n");
+        write_file(&root, "run.sh", "#!/bin/sh\necho hi\n");
+        write_file(&root, "dir/nested.txt", "nested\ncontent\n");
+        // Ten lines, so a move that edits one of them stays similar enough for
+        // git's own rename detector to score it — the case our exact-match
+        // detector cannot pair.
+        write_file(&root, "long.txt", "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n");
+        std::fs::write(root.join("data.bin"), Self::binary_bytes()).expect("write binary fixture");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("a.txt", root.join("link.txt")).expect("create symlink");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-m", "base", "--quiet"]);
+
+        // A second commit, so `--from HEAD~1` has real history to name.
+        write_file(&root, "a.txt", "one\ntwo\nthree\nfour\nfive\n");
+        write_file(&root, "second.txt", "second\n");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-m", "second", "--quiet"]);
+
+        // Staged: a content change, an exact rename, and a mode flip.
+        write_file(&root, "b.txt", "beta\ngamma\n");
+        git(&root, &["add", "b.txt"]);
+        git(&root, &["mv", "dir/nested.txt", "dir/moved.txt"]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = root.join("run.sh");
+            let mut perms = std::fs::metadata(&path).expect("stat run.sh").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod run.sh");
+            git(&root, &["add", "run.sh"]);
+        }
+
+        // Unstaged: a content change and a delete on disk.
+        write_file(&root, "a.txt", "one\ntwo\nthree\nfour\nfive\nsix\n");
+        std::fs::remove_file(root.join("keep.txt")).expect("remove keep.txt");
+
+        // Untracked: must never appear in a diff.
+        write_file(&root, "untracked.txt", "not tracked\n");
+
+        Self { fixture, root }
+    }
+
+    /// The fixture's scratch root — the mount the tool sees.
+    pub fn scratch(&self) -> PathBuf {
+        self.fixture.root()
+    }
+
+    /// The oid real git reports for `rev`, for oracle comparisons.
+    pub fn rev_parse(&self, rev: &str) -> String {
+        git(&self.root, &["rev-parse", rev])
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // The `.git` fingerprint (architecture.md D.4)
 // ═══════════════════════════════════════════════════════════════════════════

@@ -241,7 +241,12 @@ impl GitTool {
         // with a silently flag-less log — would be a wrong answer rather than a
         // missing one (E.5's precedent).
         if parsed.patch {
-            return failure(GitError::PatchNeedsTextdiff { operation: OP });
+            return failure(GitError::PatchNeedsTextdiff {
+                operation: OP,
+                flag: "--patch",
+                instead: "Use --stat for the changed-file and line counts this \
+                          build does compute.",
+            });
         }
 
         let resolved = match resolve_repo_paths(OP, ctx, parsed.repo.as_deref()) {
@@ -604,6 +609,138 @@ impl GitTool {
         result.baggage.insert("git.show_kind".to_string(), kind.to_string());
         result
     }
+
+    #[tracing::instrument(
+        level = "info",
+        name = "git.verb",
+        skip_all,
+        fields(verb = "diff", repo)
+    )]
+    async fn run_diff(&self, args: ToolArgs, consumed: usize, ctx: &mut dyn ToolCtx) -> ExecResult {
+        const OP: &str = "diff";
+        if let Err(e) = verb_enabled(&self.config, Verb::Diff, OP) {
+            return failure(e);
+        }
+
+        let parsed = match parse_leaf::<verbs::diff::DiffArgs>(&args, consumed, OP) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+
+        // Both flags are refused before anything is read. This build assembles
+        // no unified-diff text, and answering either with the default table
+        // would be a wrong answer rather than a missing one (E.5).
+        if parsed.patch {
+            return failure(GitError::PatchNeedsTextdiff {
+                operation: OP,
+                flag: "--patch",
+                instead: "The default output already reports every changed \
+                          file with its added and deleted line counts; \
+                          --name-only reports the paths alone.",
+            });
+        }
+        if parsed.context.is_some() {
+            return failure(GitError::PatchNeedsTextdiff {
+                operation: OP,
+                flag: "--context",
+                instead: "Only --patch output has hunks for --context to \
+                          size, and this build produces none.",
+            });
+        }
+
+        let resolved = match resolve_repo_paths(OP, ctx, parsed.repo.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return failure(e),
+        };
+        tracing::Span::current().record("repo", tracing::field::display(resolved.real.display()));
+
+        // `git diff [-- <path>...]`: paths after the marker, and nothing
+        // before it. A bare positional in git is a revision, and this surface
+        // spells a revision `--from`/`--to` — treating one as a path would
+        // silently answer about a file named `HEAD`.
+        let ops = operands(&args, consumed);
+        if !ops.before.is_empty() {
+            return failure(GitError::Usage {
+                operation: OP,
+                message: format!(
+                    "takes no bare operands, but got '{}'. Name a revision \
+                     with --from/--to ('diff --from HEAD~1 --to HEAD') and a \
+                     path after '--' ('diff -- src')",
+                    ops.before.join("' '")
+                ),
+            });
+        }
+        let mut paths = parsed.path.clone();
+        paths.extend(ops.after.iter().cloned());
+
+        let endpoints = match (parsed.staged, parsed.from.clone(), parsed.to.clone()) {
+            // clap's `conflicts_with_all` refuses --staged beside --from/--to,
+            // so the revisions are None here by construction.
+            (true, _, _) => verbs::diff::Endpoints::HeadToIndex,
+            (false, None, None) => verbs::diff::Endpoints::IndexToWorktree,
+            (false, Some(from), None) => verbs::diff::Endpoints::RevToWorktree { from },
+            (false, from, Some(to)) => verbs::diff::Endpoints::RevToRev {
+                from: from.unwrap_or_else(|| verbs::diff::DEFAULT_FROM_REV.to_string()),
+                to,
+            },
+        };
+
+        // The embedder's `max_diff_files` is a hard cap; `--limit` may only
+        // lower it. Not `max_rows`: a diff's rows are files, and C.1 gives
+        // them their own cap.
+        let limit = parsed.limit.min(self.config.limits().max_diff_files);
+        // Not lowerable by an argument: this one caps a read, not an output.
+        let max_blob_bytes = self.config.limits().max_blob_bytes;
+        // On by default, matching git since 2.9. `--no-find-renames` is the
+        // only way to turn it off; `--find-renames` is accepted so a caller
+        // can be explicit, and clap refuses the pair.
+        let find_renames = !parsed.no_find_renames;
+        let name_only = parsed.name_only;
+
+        let outcome = block_in_place_compat(move || {
+            let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
+            let opts = verbs::diff::DiffOptions {
+                endpoints,
+                paths,
+                name_only,
+                find_renames,
+                limit,
+                max_blob_bytes,
+            };
+            let root = repo.root().display().to_string();
+            verbs::diff::run(&repo, &opts).map(|model| (model, root))
+        });
+
+        let (model, repo_root) = match outcome {
+            Ok(pair) => pair,
+            Err(e) => return failure(e),
+        };
+
+        let (data, text) = crate::render::diff(&model);
+        let mut result = ExecResult::with_output_and_text(data, text);
+        let mut notes: Vec<String> = Vec::new();
+        if model.truncated {
+            notes.push(format!(
+                "output truncated at {} files (--limit); 'truncated' is true \
+                 in --json",
+                model.files.len()
+            ));
+        }
+        if model.unmerged > 0 {
+            notes.push(format!(
+                "{} unmerged path(s) have no stage 0 to compare and are not \
+                 in this diff; 'unmerged' says so in --json, and `git status` \
+                 reports their state",
+                model.unmerged
+            ));
+        }
+        if !notes.is_empty() {
+            result.err = format!("git diff: {}", notes.join("; "));
+        }
+        result.baggage.insert("git.repo".to_string(), repo_root);
+        result
+    }
 }
 
 /// The repo-relative, slash-separated directory of `real` within `root`, or
@@ -646,6 +783,9 @@ impl Tool for GitTool {
         if self.config.has(Verb::Show) {
             cmd = cmd.subcommand(verbs::show::ShowArgs::command().name("show"));
         }
+        if self.config.has(Verb::Diff) {
+            cmd = cmd.subcommand(verbs::diff::DiffArgs::command().name("diff"));
+        }
         schema_tree_from_clap(
             &cmd,
             self.config.tool_name(),
@@ -669,6 +809,7 @@ impl Tool for GitTool {
             "log" => self.run_log(args, consumed, ctx).await,
             "ls" => self.run_ls(args, consumed, ctx).await,
             "show" => self.run_show(args, consumed, ctx).await,
+            "diff" => self.run_diff(args, consumed, ctx).await,
             // Unreachable: `route` only returns names it found in the schema,
             // and the schema is built from the verbs this file dispatches.
             // Reached anyway means a verb was added to `schema()` without a
@@ -694,12 +835,12 @@ const DESCRIPTION: &str =
 /// on that word before the schema is built — an example for a verb this
 /// config subtracted is exactly the kind of thing E.1's gate exists to keep
 /// out of `help git`: a disabled verb must be absent from what an agent is
-/// told exists, not merely refused once it tries the example. There is one
-/// entry per implemented [`Verb`] — `help <tool>`'s renderer
+/// told exists, not merely refused once it tries the example. There is at
+/// least one entry per implemented [`Verb`] — `help <tool>`'s renderer
 /// (`kaish-help`'s `tool_help`) shows only params and examples, never a bare
 /// subcommand list, so a verb with no example here would never be named in
 /// `help git` at all, enabled or not.
-const EXAMPLES: [(&str, &str); 7] = [
+const EXAMPLES: [(&str, &str); 10] = [
     ("What repository is this", "git info"),
     ("Inspect a specific repository", "git info --repo /mnt/repos/kaish"),
     ("Structured, for a script", "git info --json"),
@@ -707,6 +848,9 @@ const EXAMPLES: [(&str, &str); 7] = [
     ("Recent commit history", "git log"),
     ("Read a file as of the last release", "git show v0.1.0:src/lib.rs"),
     ("List a directory as of HEAD", "git ls HEAD src"),
+    ("See the unstaged changes", "git diff"),
+    ("See what is staged", "git diff --staged"),
+    ("Compare two revisions under one directory", "git diff --from v0.1.0 --to HEAD -- src"),
 ];
 
 /// [`EXAMPLES`], narrowed to the ones whose verb this config still enables.
@@ -1018,7 +1162,8 @@ mod tests {
                 .without_verb(Verb::Status)
                 .without_verb(Verb::Log)
                 .without_verb(Verb::Ls)
-                .without_verb(Verb::Show),
+                .without_verb(Verb::Show)
+                .without_verb(Verb::Diff),
         )
         .expect_err("a tool with no verbs cannot run anything");
         assert_eq!(err, ConfigError::NoVerbsEnabled);
@@ -1028,7 +1173,7 @@ mod tests {
     fn schema_carries_only_the_enabled_verbs() {
         let full = tool(GitConfig::read_only()).expect("read-only config").schema();
         let names: Vec<&str> = full.subcommands.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["info", "status", "log", "ls", "show"]);
+        assert_eq!(names, ["info", "status", "log", "ls", "show", "diff"]);
 
         // Subtract one, and only the others survive — the schema is built from
         // the config, so a disabled verb is absent, not merely rejected.
@@ -1036,7 +1181,7 @@ mod tests {
             .expect("the rest is a valid config")
             .schema();
         let names: Vec<&str> = narrowed.subcommands.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["info", "log", "ls", "show"]);
+        assert_eq!(names, ["info", "log", "ls", "show", "diff"]);
 
         // Subtract a different one, to prove the removal tracks the config
         // rather than the last verb in the list.
@@ -1044,7 +1189,7 @@ mod tests {
             .expect("the rest is a valid config")
             .schema();
         let names: Vec<&str> = narrowed.subcommands.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["info", "status", "log", "ls"]);
+        assert_eq!(names, ["info", "status", "log", "ls", "diff"]);
     }
 
     /// The disabled verb must vanish from the schema, because that is what
@@ -1059,7 +1204,8 @@ mod tests {
                 .without_verb(Verb::Status)
                 .without_verb(Verb::Log)
                 .without_verb(Verb::Ls)
-                .without_verb(Verb::Show),
+                .without_verb(Verb::Show)
+                .without_verb(Verb::Diff),
         };
         let schema = git.schema();
         assert!(
@@ -1068,6 +1214,189 @@ mod tests {
         );
         let err = route(&schema, &[word("info")]).expect_err("nothing to route to");
         assert_eq!(err.exit_code(), 2);
+    }
+
+
+    /// AGENTS.md, "Published text is published": a `///` on a clap argument is
+    /// copied into `ParamSchema.description` and reaches agents through the
+    /// tool schema. Behavior goes there; mechanism goes in a `//` comment.
+    ///
+    /// The rule was broken on all six verbs at once and nobody saw it, because
+    /// the offending text was a doc comment on a field marked `hide = true` —
+    /// and `hide` does not mean hidden here. `params_from_clap` deliberately
+    /// keeps hidden *positionals* (kaish-tool-api 0.15's `clap_schema.rs`
+    /// documents why: for most tools they ARE the public surface, `cat
+    /// paths…`), dropping only hidden *flags*. So six descriptions reading
+    /// "do not read this field" and naming `ToolArgs::to_argv` shipped to
+    /// agents as parameter documentation.
+    ///
+    /// Reads the built schema rather than the source, because AGENTS.md also
+    /// says not to infer the published text by grepping.
+    #[test]
+    fn no_published_description_is_a_note_to_ourselves() {
+        let schema = tool(GitConfig::read_only()).expect("config").schema();
+        // Internal vocabulary: types, modules and fields an agent cannot
+        // resolve, and second-person instructions aimed at this codebase.
+        const INTERNAL: &[&str] = &[
+            "ToolArgs",
+            "to_argv",
+            "args.positional",
+            "tool.rs",
+            "clap",
+            "do not read this field",
+        ];
+        let mut checked = 0usize;
+        for leaf in &schema.subcommands {
+            for param in &leaf.params {
+                let lowered = param.description.to_lowercase();
+                for needle in INTERNAL {
+                    assert!(
+                        !lowered.contains(&needle.to_lowercase()),
+                        "'git {} --{}' publishes '{}' to agents: {:?}",
+                        leaf.name,
+                        param.name,
+                        needle,
+                        param.description
+                    );
+                }
+                checked += 1;
+            }
+        }
+        // Negative control: a guard that only ever proves absence passes
+        // vacuously over an empty schema. The `operands` sink is the param
+        // that carried the defect, so prove it is present and described.
+        assert!(checked >= 6, "only {checked} params checked — schema is empty?");
+        for leaf in &schema.subcommands {
+            let operands = leaf
+                .params
+                .iter()
+                .find(|p| p.name == "operands")
+                .unwrap_or_else(|| panic!("'git {}' publishes no operands param", leaf.name));
+            assert!(
+                operands.description.contains("git "),
+                "'git {}' operands must show the spelling an agent types: {:?}",
+                leaf.name,
+                operands.description
+            );
+        }
+    }
+
+    /// The schema and the leaf parsers are two hand-maintained lists, and
+    /// `help git` is nearly everything an embedded agent learns about this
+    /// tool. This fails the moment they disagree: every flag the schema
+    /// advertises for a verb is fed to that verb's own clap parser, and a
+    /// flag the schema invents fails with clap's own "unexpected argument".
+    ///
+    /// The same instinct as `kaish-tools-curl`'s `schema_matches_the_parser`,
+    /// applied per verb because this tool's schema is a tree.
+    #[test]
+    fn schema_matches_the_parser() {
+        let schema = tool(GitConfig::read_only()).expect("config").schema();
+        assert_eq!(
+            schema.subcommands.len(),
+            Verb::ALL.len(),
+            "the guard must see every verb this build ships"
+        );
+
+        // The negative control. This guard is a search for one phrase in
+        // clap's error text, so it fails open the day clap rewords it — and a
+        // gate that can only pass proves nothing. A flag no verb has must
+        // produce the phrase the loop below looks for.
+        let planted = verbs::diff::DiffArgs::try_parse_from([
+            "git diff".to_string(),
+            "--no-such-flag".to_string(),
+        ])
+        .expect_err("a flag no verb has must not parse");
+        assert!(
+            planted.to_string().contains("unexpected argument"),
+            "clap no longer says 'unexpected argument'; this guard would pass \
+             over a schema that advertises flags the parser refuses. Its \
+             wording now: {planted}"
+        );
+
+        for leaf in &schema.subcommands {
+            assert!(
+                !leaf.params.is_empty(),
+                "'{}' advertises no parameters — the guard would pass \
+                 vacuously over it",
+                leaf.name
+            );
+            for param in &leaf.params {
+                // The hidden `operands` sink is the `--`-terminated tail
+                // every verb carries for `to_argv()`; it is not a flag an
+                // agent types, and clap hides it from help for that reason.
+                if param.name == "operands" {
+                    continue;
+                }
+                let mut argv = vec![format!("git {}", leaf.name), format!("--{}", param.name)];
+                if param.param_type != "bool" {
+                    // A value every value-taking flag on this surface accepts:
+                    // `--limit`/`--context` want a number, the rest a string.
+                    argv.push("1".to_string());
+                }
+                let parsed = match leaf.name.as_str() {
+                    "info" => verbs::info::InfoArgs::try_parse_from(&argv).map(|_| ()),
+                    "status" => verbs::status::StatusArgs::try_parse_from(&argv).map(|_| ()),
+                    "log" => verbs::log::LogArgs::try_parse_from(&argv).map(|_| ()),
+                    "ls" => verbs::ls::LsArgs::try_parse_from(&argv).map(|_| ()),
+                    "show" => verbs::show::ShowArgs::try_parse_from(&argv).map(|_| ()),
+                    "diff" => verbs::diff::DiffArgs::try_parse_from(&argv).map(|_| ()),
+                    other => panic!("verb '{other}' is in the schema with no parser here"),
+                };
+                if let Err(e) = parsed {
+                    // A value the flag rejects (`--untracked 1`) is the
+                    // parser honoring it, not ignoring it; only "this flag
+                    // does not exist" is drift.
+                    let text = e.to_string();
+                    assert!(
+                        !text.contains("unexpected argument"),
+                        "`help git {}` advertises --{}, which its parser does \
+                         not accept: {text}",
+                        leaf.name,
+                        param.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// The converse direction: a flag the parser honors that the schema never
+    /// mentions is invisible to every agent, which is the half of the drift
+    /// that fails silently. Spot-checked on `diff`, whose flag set is the
+    /// newest and therefore the likeliest to be half-wired.
+    #[test]
+    fn every_diff_flag_reaches_the_schema() {
+        let schema = tool(GitConfig::read_only()).expect("config").schema();
+        let leaf = schema
+            .subcommands
+            .iter()
+            .find(|s| s.name == "diff")
+            .expect("diff is in the schema");
+        let named: Vec<&str> = leaf.params.iter().map(|p| p.name.as_str()).collect();
+        for flag in [
+            "staged",
+            "from",
+            "to",
+            "path",
+            "name-only",
+            "patch",
+            "context",
+            "find-renames",
+            "no-find-renames",
+            "limit",
+            "repo",
+            // `--json` is deliberately absent: it comes from the flattened
+            // `GlobalFlags`, which the kernel merges from the root into every
+            // leaf lookup (E.1). It binds at any depth without the leaf's own
+            // param list carrying it.
+        ] {
+            assert!(
+                named.contains(&flag),
+                "the parser honors --{flag} and the schema never mentions it; \
+                 `help git diff` would hide a flag that works. Schema has: \
+                 {named:?}"
+            );
+        }
     }
 
     #[test]

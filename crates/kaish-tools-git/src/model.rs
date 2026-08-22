@@ -445,6 +445,127 @@ pub enum ShowTarget {
     },
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// git diff (architecture.md B.4)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// One end of a comparison (architecture.md B.4).
+///
+/// Every `git diff` result states both ends, in the text surface and in
+/// `--json`, because the endpoint selection is a decision the caller made out
+/// of five and an agent reading only rows cannot tell which one it got.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum DiffEndpoint {
+    /// The index (the staging area), at stage 0.
+    Index,
+    /// The working tree's files on disk.
+    Worktree,
+    /// A revision's tree.
+    Rev {
+        /// The revision, verbatim as the caller spelled it (`HEAD`, a branch,
+        /// a tag, `HEAD~2`) — not the oid it resolved to.
+        rev: String,
+        /// The commit or tree oid it resolved to.
+        oid: String,
+    },
+}
+
+/// One changed path in a [`DiffReport`] (architecture.md B.4).
+///
+/// `additions`, `deletions` and `binary` are `null` rather than zero whenever
+/// nothing was counted — under `--name-only`, or when a cap declined the read.
+/// Zero would claim the file changed no lines, which is a different fact from
+/// "we did not look".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiffFile {
+    /// The repository-relative path on the `to` side, slash-separated. For a
+    /// deletion, the path it had on the `from` side.
+    pub path: String,
+    /// The rename source, set only when `status` is
+    /// [`EntryStatus::Renamed`]. Exact-match renames only.
+    pub old_path: Option<String>,
+    /// What happened to this path: `added`, `deleted`, `modified`,
+    /// `renamed`, or `typechange` — the same words `git status` uses for the
+    /// same ideas (B.2), so an agent that has read one has read both.
+    pub status: EntryStatus,
+    /// Whether either side holds binary content (a NUL byte, git's own
+    /// heuristic). `null` when nothing was read — under `--name-only`, or
+    /// when a cap declined the file.
+    pub binary: Option<bool>,
+    /// The six-digit octal mode on the `from` side (`100644`, `100755`,
+    /// `120000`, `160000`), or `null` when the path is absent there.
+    pub old_mode: Option<String>,
+    /// The six-digit octal mode on the `to` side, or `null` when the path is
+    /// absent there.
+    pub new_mode: Option<String>,
+    /// The blob oid on the `from` side, or `null` when the path is absent
+    /// there or that side is the working tree — working-tree content is not
+    /// in the object store, and naming an oid nothing can read would send an
+    /// agent to `git show` for an object that is not there. `git diff --raw`
+    /// prints all-zeros in the same place.
+    pub old_oid: Option<String>,
+    /// The blob oid on the `to` side, under the same rule as `old_oid`.
+    pub new_oid: Option<String>,
+    /// `100` for a rename, `null` for everything else — and never anything
+    /// between. Rename detection here is exact-match only: a rename is a blob
+    /// oid reappearing at a new path, so the two sides are byte-identical and
+    /// 100 is measured, not assumed. A file that was edited *and* moved is
+    /// reported as a delete plus an add, where git would have scored it (say
+    /// `R087`) and folded the pair. This field will never carry a computed
+    /// score — `gix-diff`'s rename tracker is `blob`-gated and `blob` pulls
+    /// `gix-command` (A.2). Copy detection does not exist here at all.
+    pub similarity: Option<u8>,
+    /// Lines added on the `to` side, or `null` when nothing was counted.
+    pub additions: Option<u64>,
+    /// Lines removed from the `from` side, or `null` when nothing was
+    /// counted.
+    pub deletions: Option<u64>,
+    /// Whether a side was over the embedder's `max_blob_bytes`, so the line
+    /// counts were declined. The file still counts in `totals.files`.
+    pub lines_capped: bool,
+}
+
+/// The running totals a diff reports (architecture.md B.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DiffTotals {
+    /// How many files are reported. This is the count after `--limit`, and
+    /// `truncated` says whether more were found.
+    pub files: usize,
+    /// Total lines added across the files that were counted, or `null` under
+    /// `--name-only`, where none were.
+    pub additions: Option<u64>,
+    /// Total lines removed, under the same rule as `additions`.
+    pub deletions: Option<u64>,
+    /// How many reported files had their line counts declined by
+    /// `max_blob_bytes`. Zero in the common case.
+    pub lines_capped: usize,
+}
+
+/// `git diff`'s result (architecture.md B.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiffReport {
+    /// The side compared *from*.
+    pub from: DiffEndpoint,
+    /// The side compared *to*.
+    pub to: DiffEndpoint,
+    /// The changed paths, sorted by path and capped at the effective
+    /// `--limit`.
+    pub files: Vec<DiffFile>,
+    /// The running totals.
+    pub totals: DiffTotals,
+    /// How many unmerged (conflicted) index entries were left out of the
+    /// comparison. An unmerged path has no stage 0 to compare, so it is
+    /// skipped rather than reported as an add or a delete; `git status` is
+    /// where its state is reported. Zero in the common case, and a stderr
+    /// note fires when it is not.
+    pub unmerged: usize,
+    /// Whether the file list was truncated by `--limit`. Always reported,
+    /// never silent (E.5); a stderr note fires alongside it.
+    pub truncated: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

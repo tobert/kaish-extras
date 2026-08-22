@@ -450,21 +450,26 @@ pub enum GitError {
         repo: PathBuf,
     },
 
-    /// `--patch` was asked of a build that has no unified-diff assembly. Exit 4
-    /// — an environment/capability gap, the same class and code E.5 gives a
-    /// `--patch` on a build without `textdiff`.
+    /// A flag that only shapes unified-diff text was asked of a build that
+    /// assembles none. Exit 4 — an environment/capability gap, the class and
+    /// code E.5 gives a `--patch` on a build without `textdiff`.
     ///
-    /// Loud and specific on purpose: an agent that passes `--patch` deserves
-    /// "this build cannot", naming the feature, not a generic "unknown flag".
+    /// Loud and specific on purpose: an agent that passes the flag deserves
+    /// "this build cannot", naming the feature and what it will do, not a
+    /// generic "unknown flag".
     #[error(
-        "git {operation}: --patch needs per-commit unified-diff text, which \
-         this build does not assemble — that is the 'textdiff' feature, built \
-         in a later phase (architecture.md H.5/H.6). Use --stat for changed-file \
-         and line counts, which this build does compute"
+        "git {operation}: {flag} needs unified-diff text, which this build \
+         does not assemble — that is the 'textdiff' feature, added in a later \
+         phase, where it will render hunks and patch text from the same model \
+         this verb already returns. {instead}"
     )]
     PatchNeedsTextdiff {
         /// The verb that was asked for.
         operation: &'static str,
+        /// The flag that was refused, as the caller spelled it.
+        flag: &'static str,
+        /// What to reach for instead, in this verb.
+        instead: &'static str,
     },
 
     /// The repository is on disk but malformed, or a file we must read is
@@ -665,7 +670,11 @@ mod tests {
                 path: "nonesuch".into(),
                 repo: repo.clone(),
             },
-            GitError::PatchNeedsTextdiff { operation: "log" },
+            GitError::PatchNeedsTextdiff {
+                operation: "log",
+                flag: "--patch",
+                instead: "Use --stat.",
+            },
         ];
         for e in &variants {
             let code = e.exit_code();

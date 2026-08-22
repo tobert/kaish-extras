@@ -237,6 +237,82 @@ upstream it, or delegate worktree lifecycle to the shell-out fallback tier
 behind `subprocess` while everything else stays pure-Rust. Decide at
 architecture time, not implementation time.
 
+## `git diff` — what the built verb does
+
+The design is [architecture.md B.4](design/architecture.md#b4-git-diff); this
+is what shipped, for a reader who wants the behavior without the argument.
+
+**The structure is the answer.** Every result is a list of changed files with
+a status, the modes and oids on each side, and added/deleted line counts.
+`--json` carries all of it. Patch text is a rendering of the same model and is
+not built yet — `--patch` exits 4 naming the `textdiff` feature.
+
+**Five endpoint pairs, chosen by flag**, and every result states which pair it
+used — on the first line of the text output and in `from`/`to` in `--json`:
+
+| Invocation | From | To |
+|---|---|---|
+| `git diff` | index | worktree |
+| `git diff --staged` | `HEAD` | index |
+| `git diff --from <A>` | `A` | worktree |
+| `git diff --to <B>` | `HEAD` | `B` |
+| `git diff --from <A> --to <B>` | `A` | `B` |
+
+Bare `git diff` is git parity — unstaged changes only. `A..B` is not a
+spelling here; `--from`/`--to` is the one way to name a range, and `--from
+HEAD~1..HEAD` is a usage error that says so. A bare operand is refused for the
+same reason: in git it is a revision, and quietly reading it as a path would
+answer a different question.
+
+```sh
+kaish> git diff                                   # unstaged
+kaish> git diff --staged --json                   # staged, structured
+kaish> git diff --from v0.1.0 --to HEAD -- src    # two revisions, one directory
+kaish> git diff --name-only                       # paths and statuses only
+```
+
+The text surface is a table under the endpoint line:
+
+```
+index → worktree
+STATUS  +ADD  -DEL  PATH
+M       1     0     a.txt
+D       0     1     keep.txt
+2 files changed, 1 insertion(+), 1 deletion(-)
+```
+
+Letters in the text surface, words in `--json` — the same split `git status`
+uses, and the same letters `git diff --name-status` prints, `R100` included.
+
+### What it does not do
+
+- **Renames are exact-match only.** A rename is a blob oid reappearing at a
+  new path, so `similarity` is always `100` — measured, since the two sides
+  are byte-identical — and never a score between. A file that was *edited and
+  moved* has a different oid, never pairs, and is reported as a delete plus an
+  add where git would fold the pair as (say) `R087`. **Copy detection does not
+  exist at all.** This is permanent under this dependency set: `gix-diff`'s
+  rename tracker is behind its `blob` feature, and `blob` pulls `gix-command`,
+  the subprocess-spawn machinery this crate must not link.
+- **No hunks, no patch text.** `--patch` and `--context` both exit 4.
+- **Unmerged paths are left out.** A conflicted path has no stage 0 to
+  compare, so it is skipped, counted in `unmerged`, and named on stderr. Git
+  reports a `U` row instead; this surface has no unmerged row shape yet.
+- **Working-tree sides carry no oid.** The content is not in the object store,
+  so `old_oid`/`new_oid` are `null` there rather than an oid `git show` could
+  not find. `git diff --raw` prints all-zeros in the same place.
+
+### Bounds
+
+`--limit` (default 500, and the embedder's `max_diff_files` is a hard ceiling
+`--limit` can only lower) is applied **before** any blob is read, so it bounds
+the reading and not only the reporting. `--path` is applied to the candidate
+set before the working tree is hashed, for the same reason. Each blob read is
+bounded by `max_blob_bytes`: a file over it counts in `files`, contributes no
+lines, and is marked `lines_capped`. A *working-tree* file over the cap is a
+loud refusal rather than a skipped row, because the comparison has to hash
+every tracked file to know what changed — the same rule `git status` follows.
+
 ## Non-goals
 
 - Reimplementing git porcelain faithfully (use real git via `subprocess` for that).
