@@ -24,7 +24,7 @@
 //! self-describing words in [`crate::model`] (decision 9). Both are computed
 //! from one [`StatusReport`], so they cannot disagree.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::path::Path;
 
@@ -32,19 +32,18 @@ use clap::{Parser, ValueEnum};
 
 use gix_object::bstr::{BStr, ByteSlice};
 
-use gix_index::entry::Mode as IndexMode;
 use gix_index::hash::ObjectId;
-use gix_object::tree::EntryKind as TreeEntryKind;
 use gix_object::{FindExt, TreeRefIter};
 
 use kaish_tool_api::GlobalFlags;
 
+use crate::diffcore::Class;
 use crate::error::GitError;
 use crate::model::{EntryKind, EntryStatus, StatusEntry, StatusReport, StatusTotals};
 use crate::pathfilter::PathFilter;
 use crate::repo::ReadRepo;
 use crate::worktree::{
-    is_executable, is_repo_relative, join_repo_relative, read_worktree_blob, WorktreePaths,
+    is_repo_relative, join_repo_relative, read_worktree_blob, WorktreePaths,
     ESCAPING_INDEX_ENTRY,
 };
 
@@ -243,65 +242,6 @@ impl Building {
 // Normalized item classes, for comparing tree modes to index modes
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// A file's type, normalized so a tree entry and an index entry compare on the
-/// same axis. The executable bit is a class of its own because git treats a
-/// mode flip (`100644` ↔ `100755`) as a modification.
-///
-/// `Ord` so a rename candidate can be keyed by `(oid, class)`: pairing across
-/// classes is what fabricates a rename out of a deleted symlink and an added
-/// file that happen to share a blob.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Class {
-    File,
-    Exec,
-    Symlink,
-    Commit,
-}
-
-impl Class {
-    fn from_tree(kind: TreeEntryKind) -> Option<Class> {
-        Some(match kind {
-            TreeEntryKind::Blob => Class::File,
-            TreeEntryKind::BlobExecutable => Class::Exec,
-            TreeEntryKind::Link => Class::Symlink,
-            TreeEntryKind::Commit => Class::Commit,
-            TreeEntryKind::Tree => return None,
-        })
-    }
-
-    fn from_index(mode: IndexMode) -> Option<Class> {
-        Some(match mode {
-            IndexMode::FILE => Class::File,
-            IndexMode::FILE_EXECUTABLE => Class::Exec,
-            IndexMode::SYMLINK => Class::Symlink,
-            IndexMode::COMMIT => Class::Commit,
-            _ => return None,
-        })
-    }
-
-    fn kind(self) -> EntryKind {
-        match self {
-            Class::File | Class::Exec => EntryKind::File,
-            Class::Symlink => EntryKind::Symlink,
-            Class::Commit => EntryKind::Commit,
-        }
-    }
-
-    /// Whether two classes differ in *type* (file↔symlink↔submodule), which is
-    /// a typechange, as opposed to only in the executable bit, which is a
-    /// modification.
-    fn is_typechange_from(self, other: Class) -> bool {
-        fn family(c: Class) -> u8 {
-            match c {
-                Class::File | Class::Exec => 0,
-                Class::Symlink => 1,
-                Class::Commit => 2,
-            }
-        }
-        family(self) != family(other)
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // The composition
 // ═══════════════════════════════════════════════════════════════════════════
@@ -483,41 +423,25 @@ fn stage_the_index(
         deleted.push((path.clone(), *oid, *class));
     }
 
-    // Exact-match renames: a deleted blob oid reappearing at an added path,
-    // *of the same class*. No similarity scoring — that needs `gix-diff`'s
-    // `blob` feature, which pulls `gix-command` (A.2). A modified-then-moved
-    // file has a different oid, so it never pairs, and is reported as delete +
-    // add (the honest limitation, asserted by the rename fixture).
-    //
-    // The class is part of the key, not an afterthought: a symlink's blob is
-    // its target string, so `ln -s hello a` and a file containing `hello`
-    // share an oid, and pairing on oid alone reports a rename between two
-    // things git would never call one. The candidates are keyed into queues
-    // in path order — `deleted` comes out of a `BTreeMap` — so the source a
-    // rename claims is the lowest-sorting unclaimed one, the same on every
-    // run, rather than whatever a linear scan reached first.
-    let mut candidates: BTreeMap<(ObjectId, Class), VecDeque<usize>> = BTreeMap::new();
-    for (i, (_, oid, class)) in deleted.iter().enumerate() {
-        candidates.entry((*oid, *class)).or_default().push_back(i);
-    }
-    let mut consumed_deletes: BTreeSet<usize> = BTreeSet::new();
-    for (add_path, add_oid, add_class) in &added {
-        let claimed = candidates
-            .get_mut(&(*add_oid, *add_class))
-            .and_then(VecDeque::pop_front);
-        let Some(di) = claimed else {
-            out.entry(add_path.clone())
-                .or_insert_with(|| Building::empty(add_class.kind()))
-                .index = Code::Added;
-            continue;
-        };
-        consumed_deletes.insert(di);
-        let (orig, _, _) = &deleted[di];
+    // Exact-match renames, paired by `diffcore` — one implementation shared
+    // with `diff`, so a rename means the same thing in both verbs. No
+    // similarity scoring: that needs `gix-diff`'s `blob` feature, which pulls
+    // `gix-command` (A.2). A modified-then-moved file has a different oid, so
+    // it never pairs and is reported as delete + add (the honest limitation,
+    // asserted by the rename fixture).
+    let pairs = crate::diffcore::pair_exact_renames(&added, &deleted);
+    let consumed_deletes: BTreeSet<usize> = pairs.values().copied().collect();
+    for (ai, (add_path, _, add_class)) in added.iter().enumerate() {
         let b = out
             .entry(add_path.clone())
             .or_insert_with(|| Building::empty(add_class.kind()));
-        b.index = Code::Renamed;
-        b.orig_path = Some(orig.clone());
+        match pairs.get(&ai) {
+            None => b.index = Code::Added,
+            Some(di) => {
+                b.index = Code::Renamed;
+                b.orig_path = Some(deleted[*di].0.clone());
+            }
+        }
     }
     for (i, (path, _, class)) in deleted.iter().enumerate() {
         if consumed_deletes.contains(&i) {
@@ -565,17 +489,9 @@ fn unstage_the_worktree(
             }
         };
 
-        let fs_class = if meta.file_type().is_symlink() {
-            Class::Symlink
-        } else if meta.is_file() {
-            if is_executable(&meta) {
-                Class::Exec
-            } else {
-                Class::File
-            }
-        } else {
-            // A directory (or something exotic) where the index has a blob.
-            // git calls this a typechange.
+        // A directory (or something exotic) where the index has a blob: git
+        // calls that a typechange.
+        let Some(fs_class) = Class::from_metadata(&meta) else {
             out.entry(path.clone())
                 .or_insert_with(|| Building::empty(class.kind()))
                 .worktree = Code::Typechange;

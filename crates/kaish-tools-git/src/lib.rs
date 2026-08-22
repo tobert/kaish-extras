@@ -67,6 +67,8 @@ mod repo;
 #[cfg(not(target_family = "wasm"))]
 mod tool;
 #[cfg(not(target_family = "wasm"))]
+mod diffcore;
+#[cfg(not(target_family = "wasm"))]
 mod treewalk;
 #[cfg(not(target_family = "wasm"))]
 mod worktree;
