@@ -81,9 +81,9 @@ pub use config::{ConfigError, GitConfig, Limits, Profile, Verb};
 pub use error::GitError;
 #[cfg(not(target_family = "wasm"))]
 pub use model::{
-    Capabilities, CommitInfo, EntryKind, EntryStatus, Head, LimitsReport, LogReport, LsReport,
-    RefBackend, RepoInfo, ShowTag, ShowTarget, Signature, StatSummary, StatusEntry, StatusReport,
-    StatusTotals, TreeRow,
+    Capabilities, CommitInfo, DiffEndpoint, DiffFile, DiffReport, DiffTotals, EntryKind,
+    EntryStatus, Head, LimitsReport, LogReport, LsReport, RefBackend, RepoInfo, ShowTag,
+    ShowTarget, Signature, StatSummary, StatusEntry, StatusReport, StatusTotals, TreeRow,
 };
 #[cfg(not(target_family = "wasm"))]
 pub use repo::ReadRepo;

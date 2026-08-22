@@ -139,6 +139,10 @@ impl Class {
 /// records why they are not expected to converge.
 pub(crate) const MAX_FLAT_TREE_DEPTH: usize = 64;
 
+/// One end of a comparison, flattened: every path it holds, with the blob oid
+/// and class at that path.
+pub(crate) type PathMap = BTreeMap<String, (ObjectId, Class)>;
+
 /// Flatten a tree to `path → (oid, class)`, bounded in depth.
 ///
 /// Leaves only: a subtree is a step to more entries, not an entry. `None` is
@@ -154,7 +158,7 @@ pub(crate) fn flatten_tree(
     repo: &ReadRepo,
     op: &'static str,
     tree: Option<ObjectId>,
-    out: &mut BTreeMap<String, (ObjectId, Class)>,
+    out: &mut PathMap,
 ) -> Result<(), GitError> {
     let Some(tree) = tree else {
         return Ok(());

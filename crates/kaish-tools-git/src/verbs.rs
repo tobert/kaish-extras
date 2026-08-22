@@ -10,6 +10,7 @@
 //! has leaked out of it — into a directory that is not there yet, which is
 //! exactly when the assertion is cheapest to keep true.
 
+pub(crate) mod diff;
 pub(crate) mod info;
 pub(crate) mod log;
 pub(crate) mod ls;

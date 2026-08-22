@@ -159,6 +159,34 @@ const VERB_MATRIX: &[(&str, &[&[&str]])] = &[
             &["--repo", "/mnt/wt-side", "--json"],
         ],
     ),
+    (
+        "diff",
+        &[
+            // Bare, over the fixture's dirty tree: the index read plus a
+            // worktree hash of every tracked file — the same traffic
+            // `status`'s unstaged half generates, and the case that catches a
+            // persisted stat-cache refresh (D.4).
+            &[],
+            &["--json"],
+            // HEAD↔index: the F.4 endpoint, a tree flatten against the index.
+            &["--staged", "--json"],
+            // A revision against the working tree, and two revisions against
+            // each other — the object-only path, which reads packs.
+            &["--from", "HEAD~1", "--json"],
+            &["--from", "HEAD~1", "--to", "HEAD", "--json"],
+            &["--to", "HEAD~1"],
+            // Rename pairing on and off, which walks the same maps twice.
+            &["--staged", "--no-find-renames", "--json"],
+            // Paths-only, which reads no blob at all.
+            &["--name-only", "--json"],
+            // A path filter and a hard limit, the two truncation-adjacent
+            // paths.
+            &["--path", "src", "--json"],
+            &["--limit", "1"],
+            // A linked worktree has its own index at its private git dir.
+            &["--repo", "/mnt/wt-side", "--json"],
+        ],
+    ),
 ];
 
 /// Flags whose next argv token is the flag's *value*, never a bare
@@ -171,7 +199,10 @@ const VERB_MATRIX: &[(&str, &[&[&str]])] = &[
 /// Adding a new value-taking flag anywhere in [`VERB_MATRIX`] means adding
 /// its name here too, or `tool_args` panics rather than silently mis-bind it
 /// as a bare positional.
-const VALUE_FLAGS: &[&str] = &["repo", "rev", "limit", "path", "since", "until", "author", "untracked"];
+const VALUE_FLAGS: &[&str] = &[
+    "repo", "rev", "limit", "path", "since", "until", "author", "untracked", "from", "to",
+    "context",
+];
 
 /// Flags that never take a value — a bare `--flag`. Every long flag used
 /// anywhere in [`VERB_MATRIX`] must be classified in exactly one of this list
@@ -186,6 +217,10 @@ const BOOL_FLAGS: &[&str] = &[
     "stat",
     "patch",
     "recursive",
+    "staged",
+    "name-only",
+    "find-renames",
+    "no-find-renames",
 ];
 
 /// Split an argv slice into the `ToolArgs` the kernel would have built.

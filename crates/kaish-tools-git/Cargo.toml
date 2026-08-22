@@ -178,6 +178,10 @@ name = "show"
 path = "tests/show.rs"
 
 [[test]]
+name = "diff"
+path = "tests/diff.rs"
+
+[[test]]
 name = "write_shaped_identifiers"
 path = "tests/write_shaped_identifiers.rs"
 
