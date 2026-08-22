@@ -107,6 +107,30 @@ that it applies to names, with one exception: an address written into the
 allowlist itself is permitted, because the embedder named that address on
 purpose and there is no name-to-address gap left to close.
 
+**Name the allowlist; do not inherit it.** `CurlConfig::default()` denies
+egress by an empty `AllowByList`, so an embedder that changes nothing reaches
+nothing. Build the policy explicitly anyway:
+
+```rust
+CurlConfig::default()
+    .with_limits(Limits { max_time: 10.0, ..Limits::default() })
+    .with_allow_egress(AllowByList::new().with_allowed_hosts(["api.internal.example"]))
+```
+
+The reason is not style. Between 2026-08-15 and 2026-08-20 this default was
+`AllowAll` while this document, the module header, and `CurlConfig::new`'s own
+doc all said deny — and the unit test asserting it was named
+`..._with_deny_by_default_egress` and asserted `Allowed`. A cross-model review
+found it. The one embedder in flight was unaffected, because it named its
+allowlist at a single call site and never read the default. An explicit
+allowlist survives its dependency's default being wrong; an inherited one is
+only as good as the last person to check.
+
+Set `max_time` explicitly too, under whatever timeout encloses the call, so a
+slow request surfaces as curl exit 28 inside that budget rather than the outer
+timeout firing and hiding the cause. The 30s default is a safety net, not a
+fit.
+
 ### Headers the embedder supplies
 
 `CurlConfig::with_injected_headers` adds headers to every request that the
