@@ -76,7 +76,7 @@ cannot actually run.
 | `max_rows` | 1000 | Rows any listing verb (`status`, `log`, `ls`, `show`'s tree form) returns. Not `diff` — a diff's rows are files, and they have their own cap below. |
 | `max_diff_files` | 500 | Files compared in one invocation: `git diff`'s whole result, and `log --stat`'s per-commit file list. A verb's `--limit` may lower it, never raise it. |
 | `max_blob_bytes` | 8 MiB (`8 * 1024 * 1024`) | Bytes of blob content `show` will read, and of a single working-tree file `status` will hash. Over the cap: the read is declined and reported (`git show: blob '<oid>' is <size> bytes, over this build's <cap>-byte cap`), never silently truncated. |
-| `max_hunk_bytes_per_file` | 256 KiB | Reserved for the unbuilt `--patch`/`textdiff` feature (see [Known limitations](#known-limitations)); not consulted by anything in this build today. |
+| `max_hunk_bytes_per_file` | 256 KiB | Bytes of hunk text `git diff --patch` will produce for one file, under the `textdiff` feature. Measured before a hunk's lines are built and applied at whole-hunk granularity — a half-hunk is not a patch — so a file it cuts is marked `lines_capped` with its counts still exact. Not consulted by a build without `textdiff`, which has no hunks. |
 | `submodule_depth` | 1 | Reserved; `git info`'s `submodules` count reads `.gitmodules` in the working tree only, no recursive descent exists yet to bound. |
 
 Pinned by `limits_defaults_match_the_design` (`src/config.rs`) — a silent
@@ -143,18 +143,24 @@ keep that from being a false sense of safety.
    `gix-filter` are absent from the dependency tree — verified empirically
    in CI's `git-tool-dependency-tripwires` job (`.github/workflows/ci.yml`),
    which runs `cargo tree -i` for each of the three and fails the build if
-   any resolves, not assumed from a feature flag. That means a repository's
-   `diff.*.textconv` or `filter.*.clean` declaration is inert text with
-   nothing to read it. **What is not yet true, and is stated here rather
-   than left to look otherwise:** architecture.md §D.3 describes a
-   behavioral fixture — a hostile repository that declares a real
-   `textconv`, pointed at a script that plants a sentinel file, run against
-   every verb with an assertion the sentinel never appears — as already
-   part of `tests/hostile_repo.rs`. It is not; that file's fixtures cover
-   the containment-escape surface below, not textconv/filter/`hooksPath`
-   behavior. The dependency-absence *tripwire* is real and enforced; the
-   *behavioral* proof described in the design doc has not been written.
-   Filed as a finding rather than fixed here — see `docs/issues.md`.
+   any resolves, not assumed from a feature flag. Both feature
+   configurations are asserted, `textdiff` included, because a tripwire that
+   only ran on the default set would say nothing about the feature. That
+   means a repository's `diff.*.textconv` or `filter.*.clean` declaration is
+   inert text with nothing to read it. **And that is proved as behavior, not
+   only as a dependency graph.** `PwnRepo` in `tests/hostile_repo.rs` is a
+   repository declaring `diff.pwn.textconv`, `diff.pwn.command`,
+   `filter.pwn.clean` / `smudge` / `process` and `core.hooksPath`, with
+   `.gitattributes` mapping `* diff=pwn filter=pwn` and a script per
+   mechanism that plants its own sentinel file. Every verb that touches blob
+   content runs against it (`no_verb_runs_textconv_a_filter_or_a_hook`) and
+   none of them plants anything. The control that makes that mean something
+   is `the_hostile_fixture_pwns_real_git`: the same repository, handed to
+   real git, answers `git diff` with the script's output, and fires textconv,
+   the external diff driver, the clean and smudge filters, and the
+   pre-commit hook out of `core.hooksPath`. The tripwire says the code is not
+   linked; the fixture says what a caller gets, which is the claim that
+   survives a pin bump quietly adding an edge.
 4. **The proof: a `.git` fingerprint.** `tests/readonly_fingerprint.rs`
    builds a repository with packed objects, multiple branches, and a dirty,
    multi-state working tree; fingerprints every path, size, mtime, and
@@ -486,9 +492,18 @@ tree-depth bounds and the entries not listed here.
   other named consumer) is unimplemented. `--limit` and the kernel's output cap
   are the only bounds on a full-history `log`. If you run this inline on a
   request path, size the timeout around that.
-- **No `--patch` / unified diff text yet.** `--patch` on any verb that
-  accepts it refuses with exit 4, naming the gap explicitly rather than
-  answering with a stat or silently ignoring the flag.
+- **`--patch` is a build feature, and only `git diff` has it.** Unified patch
+  text needs the `textdiff` cargo feature, which is off by default; `git info`
+  lists it under `capabilities.features` so an agent can tell. Without it,
+  `git diff --patch` and `--context` refuse with exit 4 naming the feature.
+  With it, `git diff --patch` renders the patch — byte-identical to
+  `git diff --patch` for the two object-backed endpoint pairs, and accepted
+  by `git apply --check` — with four stated non-fidelities: no `index` line
+  for a working-tree side, no binary patch encoding, lossy rendering of
+  content that is not valid UTF-8, and git's default section-heading rule
+  rather than a `.gitattributes` `xfuncname` pattern. `git log --patch`
+  refuses in both builds: bounding a patch per commit needs a cap `Limits`
+  does not have. See `docs/git.md`, "`--patch`".
 
 ## Version and pin guidance
 
@@ -531,14 +546,6 @@ this is one more thing that can quietly go stale:
   returns no call site), not a property any test asserts. Load-bearing if you
   are deciding whether to run this inline on a request path, so it is stated
   in "Known limitations" too rather than only here.
-- **The layer-3 behavioral proof** that a repository declaring
-  `diff.*.textconv`, `filter.*.clean/smudge`, or `core.hooksPath` is inert
-  against this build. The *dependency-absence* tripwire is real and enforced
-  in CI (`cargo tree -i` over `gix-command`/`gix-transport`/`gix-filter`); the
-  behavioral fixture architecture.md §D.3 describes as already running does
-  not exist. The tripwire is strong evidence and a weaker claim, and it is
-  weakest against exactly the case the fixture was meant to catch: a pin bump
-  that quietly adds an edge.
 
 ## See also
 

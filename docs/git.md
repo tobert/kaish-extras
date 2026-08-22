@@ -244,8 +244,9 @@ is what shipped, for a reader who wants the behavior without the argument.
 
 **The structure is the answer.** Every result is a list of changed files with
 a status, the modes and oids on each side, and added/deleted line counts.
-`--json` carries all of it. Patch text is a rendering of the same model and is
-not built yet — `--patch` exits 4 naming the `textdiff` feature.
+`--json` carries all of it. Patch text is a rendering of the same model, built
+by `--patch` under the `textdiff` build feature — see "`--patch`" below; a
+build without the feature exits 4 and names it.
 
 **Five endpoint pairs, chosen by flag**, and every result states which pair it
 used — on the first line of the text output and in `from`/`to` in `--json`:
@@ -269,6 +270,7 @@ kaish> git diff                                   # unstaged
 kaish> git diff --staged --json                   # staged, structured
 kaish> git diff --from v0.1.0 --to HEAD -- src    # two revisions, one directory
 kaish> git diff --name-only                       # paths and statuses only
+kaish> git diff --patch                           # the unified patch, textdiff builds
 ```
 
 The text surface is a table under the endpoint line:
@@ -284,6 +286,72 @@ D       0     1     keep.txt
 Letters in the text surface, words in `--json` — the same split `git status`
 uses, and the same letters `git diff --name-status` prints, `R100` included.
 
+### `--patch`
+
+Needs the `textdiff` cargo feature. `git info` lists it under
+`capabilities.features`; a build without it exits 4 on `--patch` and on
+`--context`, naming the feature.
+
+With it, `--patch` changes what the **text** payload is and adds to what
+`--json` carries:
+
+- **Text becomes the patch and nothing else** — no endpoint line, no summary
+  — so `git diff --patch | git apply` needs no preamble skipped. The
+  endpoints move to stderr and stay in `--json`.
+- **`--json` gains a `hunks` array on every file**, and `op` on each line is
+  a word (`context` / `delete` / `insert`), never a sigil. `text` carries no
+  sigil either, so a JSON consumer never has to tell a leading space from an
+  empty line.
+- **`--context <N>`** sets the context lines around each hunk, default 3.
+  Without `--patch` it is a usage error; there are no hunks for it to size.
+
+```sh
+kaish> git diff --patch                                  # unstaged, as a patch
+kaish> git diff --patch --from HEAD~1 --to HEAD          # one commit's patch
+kaish> git diff --patch --context 0 -- src/lib.rs        # changes only, no context
+kaish> git diff --patch --json                           # hunks in the model
+kaish> git diff --patch --from HEAD~1 --to HEAD | git apply --check -
+```
+
+A hunk in `--json`:
+
+```json
+{"old_start":4,"old_lines":7,"new_start":4,"new_lines":7,
+ "section":"fn open(path: &str) -> Result<()> {",
+ "lines":[{"op":"context","text":"    let v5 = 5;"},
+          {"op":"delete","text":"    let v6 = 6;"},
+          {"op":"insert","text":"    let v6 = 600;"}]}
+```
+
+A line that ends its side of the file without a trailing newline carries
+`"no_newline": true`, which the patch spells `\ No newline at end of file`.
+The field is absent, not `false`, everywhere else.
+
+**How close to `git diff --patch` it is.** For `--staged` and for
+`--from A --to B` — the pairs where both sides are objects — the patch is
+byte-identical to git's, exercised over an add, a delete, an exact rename, a
+mode flip, a binary file, a lost trailing newline, a path with a space, CRLF
+content, and a two-hunk source file. `git apply --check` accepts it. Four
+things it does not do:
+
+- **No `index` line for a working-tree side.** Working-tree content has no oid
+  in the model, so the line `git apply -3` reads is omitted rather than
+  invented. An ordinary `git apply` does not need it.
+- **No binary patch encoding.** A binary file renders
+  `Binary files a/x and b/x differ`, which is also what `git diff` prints
+  without `--binary` — and `git apply` refuses such a patch from git's output
+  as readily as from ours.
+- **Content that is not valid UTF-8** but holds no NUL byte is text to git and
+  to this build, and its hunks carry U+FFFD where the invalid bytes were, so
+  that patch will not apply.
+- **Section headings use git's default rule** — the nearest preceding line
+  starting with a letter, `_` or `$` — never a `diff.<driver>.xfuncname`
+  pattern, which lives in `.gitattributes` and nothing here reads.
+
+**`git log --patch` is not this.** It exits 4 in both builds, naming
+`git diff --patch --from <commit>~1 --to <commit>` as the spelling for one
+commit's patch. `git log --stat` still gives every commit's counts.
+
 ### What it does not do
 
 - **Renames are exact-match only.** A rename is a blob oid reappearing at a
@@ -294,7 +362,10 @@ uses, and the same letters `git diff --name-status` prints, `R100` included.
   exist at all.** This is permanent under this dependency set: `gix-diff`'s
   rename tracker is behind its `blob` feature, and `blob` pulls `gix-command`,
   the subprocess-spawn machinery this crate must not link.
-- **No hunks, no patch text.** `--patch` and `--context` both exit 4.
+- **No per-commit patches.** `git log --patch` exits 4 even with `textdiff`
+  on: a `--limit` of commits times `max_diff_files` times
+  `max_hunk_bytes_per_file` has no third cap bounding it, and adding one is a
+  `GitConfig` change (docs/issues.md, "git log --patch").
 - **Unmerged paths are left out.** A conflicted path has no stage 0 to
   compare, so it is skipped, counted in `unmerged`, and named on stderr. Git
   reports a `U` row instead; this surface has no unmerged row shape yet.
@@ -312,6 +383,14 @@ bounded by `max_blob_bytes`: a file over it counts in `files`, contributes no
 lines, and is marked `lines_capped`. A *working-tree* file over the cap is a
 loud refusal rather than a skipped row, because the comparison has to hash
 every tracked file to know what changed — the same rule `git status` follows.
+
+Under `--patch` a third cap applies: `max_hunk_bytes_per_file` (256 KiB by
+default) bounds the hunk text one file may produce. It is measured before a
+hunk's lines are built, so the memory a cap would have trimmed is never
+allocated, and it stops at whole hunks — a half-hunk is not a patch. A file it
+cut is marked `lines_capped` with its counts still exact; a file over
+`max_blob_bytes` is marked `lines_capped` with its counts `null`, which is how
+the two are told apart.
 
 ## Non-goals
 
