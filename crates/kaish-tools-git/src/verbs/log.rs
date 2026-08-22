@@ -534,6 +534,18 @@ pub(crate) fn run(repo: &ReadRepo, opts: &LogOptions) -> Result<LogReport, GitEr
             None
         };
 
+        // Before the push, not after: at `limit == 0` the post-push check
+        // below would already have a commit in the vector, so `git log
+        // --limit 0` reported one. Every other verb caps with
+        // `Vec::truncate(limit)`, which handles 0 by construction; this walk
+        // cannot, because it must stop reading rather than trim afterwards.
+        // For any `limit >= 1` this is never the branch that fires — the
+        // post-push check breaks first — so it changes only the zero case.
+        if commits.len() >= opts.limit {
+            truncated = true;
+            break;
+        }
+
         commits.push(CommitInfo {
             oid: oid.to_string(),
             short_oid: oid.to_string()[..7].to_string(),

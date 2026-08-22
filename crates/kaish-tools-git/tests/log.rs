@@ -1081,3 +1081,54 @@ async fn stat_counts_no_lines_for_a_submodule_move_that_git_counts_as_one() {
         "git is expected to count one line per side of the pointer"
     );
 }
+
+/// `--limit 0` must report no commits. It reported one.
+///
+/// The walk pushed a commit and *then* checked `commits.len() >= opts.limit`,
+/// so at `limit = 0` the first commit was already in the vector when the
+/// check first ran. Git's `-n 0` returns nothing, and every other verb here
+/// gets this right by calling `Vec::truncate(limit)`, which handles 0 by
+/// construction.
+///
+/// It is reachable two ways: a caller typing `--limit 0`, and an embedder
+/// setting `Limits { max_rows: 0, .. }`, since `tool.rs` takes the `min` of
+/// the two. The second is worse — a build configured to report nothing
+/// reported one commit per call, and the stderr note then claimed "output
+/// truncated at 1 commits", describing a constraint that was not the one in
+/// force.
+///
+/// Found by cross-model review (kaibo, crusoe-ds4 cast), 2026-08-22.
+#[tokio::test]
+async fn a_zero_limit_reports_no_commits() {
+    require_git();
+    let fixture = Fixture::empty();
+    let mount = fixture.path("mount");
+    let repo = mount.join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+    write_file(&repo, "a.txt", "one\n");
+    git(&repo, &["add", "a.txt"]);
+    git(&repo, &["commit", "-m", "one", "--quiet"]);
+    write_file(&repo, "b.txt", "two\n");
+    git(&repo, &["add", "b.txt"]);
+    git(&repo, &["commit", "-m", "two", "--quiet"]);
+
+    let result = log(&mount, "/mnt/repo", &["--limit", "0", "--json"]).await;
+    assert_eq!(result.code, 0, "a zero limit is not an error: {}", result.err);
+    let j = json(&result);
+    assert_eq!(
+        j["commits"].as_array().map(|a| a.len()),
+        Some(0),
+        "`--limit 0` must report no commits, the way `git log -n 0` does: {j}"
+    );
+
+    // The negative control: the same repository with a real limit still
+    // reports, so the assertion above is about the zero and not about a
+    // fixture that produced nothing.
+    let one = log(&mount, "/mnt/repo", &["--limit", "1", "--json"]).await;
+    assert_eq!(
+        json(&one)["commits"].as_array().map(|a| a.len()),
+        Some(1),
+        "--limit 1 must still report one commit"
+    );
+}
