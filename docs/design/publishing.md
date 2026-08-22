@@ -1,8 +1,18 @@
 # `kaish-tools-git` — the crates.io version timeline
 
-Decision needed before the first publish from this repo. Not made here —
-Amy's call — but the options and their consequences are laid out below so the
-call is a quick read, not a re-derivation.
+**Decided 2026-08-22 (Amy): option (b) — publish forward as `0.9.0`.** No
+yanks. The 0.8.x libgit2 line stays exactly as reachable as it is today, and
+`^0.8` does not resolve to `0.9.0`, so nobody currently pinned moves. Yanking
+stays available later if a concrete reason appears; it is not a prerequisite
+for shipping the rewrite.
+
+One consequence to carry: `kaish-tools-git` no longer inherits
+`workspace.package.version`. It carries `version = "0.9.0"` in its own
+`Cargo.toml` while `kaish-web` and `kaish-tools-curl` stay on the workspace
+`0.1.0`. The publish itself is still [H](architecture.md#h-phasing) PR 9,
+gated on the read profile being complete.
+
+The options and their consequences are laid out below.
 
 ## The situation, verified against crates.io (2026-08-21)
 

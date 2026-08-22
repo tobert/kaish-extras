@@ -3,7 +3,12 @@ name = "kaish-tools-git"
 description = "A shallow, safety-first git read surface for kaish, built on gitoxide plumbing (not the gix facade) to keep spawn-capable machinery out of the dependency graph"
 keywords = ["git", "gitoxide", "kaish", "read-only"]
 categories = ["development-tools", "filesystem"]
-version.workspace = true
+# Not the workspace version. crates.io already holds a libgit2-era
+# `kaish-tools-git` at 0.8.4 (a different codebase under the same name), so
+# this rewrite publishes forward rather than resetting the number — see
+# docs/design/publishing.md. `^0.8` does not resolve to 0.9.0, so no existing
+# consumer moves.
+version = "0.9.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
