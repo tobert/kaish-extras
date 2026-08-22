@@ -1182,6 +1182,125 @@ mod tests {
         assert_eq!(err.exit_code(), 2);
     }
 
+
+    /// The schema and the leaf parsers are two hand-maintained lists, and
+    /// `help git` is nearly everything an embedded agent learns about this
+    /// tool. This fails the moment they disagree: every flag the schema
+    /// advertises for a verb is fed to that verb's own clap parser, and a
+    /// flag the schema invents fails with clap's own "unexpected argument".
+    ///
+    /// The same instinct as `kaish-tools-curl`'s `schema_matches_the_parser`,
+    /// applied per verb because this tool's schema is a tree.
+    #[test]
+    fn schema_matches_the_parser() {
+        let schema = tool(GitConfig::read_only()).expect("config").schema();
+        assert_eq!(
+            schema.subcommands.len(),
+            Verb::ALL.len(),
+            "the guard must see every verb this build ships"
+        );
+
+        // The negative control. This guard is a search for one phrase in
+        // clap's error text, so it fails open the day clap rewords it — and a
+        // gate that can only pass proves nothing. A flag no verb has must
+        // produce the phrase the loop below looks for.
+        let planted = verbs::diff::DiffArgs::try_parse_from([
+            "git diff".to_string(),
+            "--no-such-flag".to_string(),
+        ])
+        .expect_err("a flag no verb has must not parse");
+        assert!(
+            planted.to_string().contains("unexpected argument"),
+            "clap no longer says 'unexpected argument'; this guard would pass \
+             over a schema that advertises flags the parser refuses. Its \
+             wording now: {planted}"
+        );
+
+        for leaf in &schema.subcommands {
+            assert!(
+                !leaf.params.is_empty(),
+                "'{}' advertises no parameters — the guard would pass \
+                 vacuously over it",
+                leaf.name
+            );
+            for param in &leaf.params {
+                // The hidden `operands` sink is the `--`-terminated tail
+                // every verb carries for `to_argv()`; it is not a flag an
+                // agent types, and clap hides it from help for that reason.
+                if param.name == "operands" {
+                    continue;
+                }
+                let mut argv = vec![format!("git {}", leaf.name), format!("--{}", param.name)];
+                if param.param_type != "bool" {
+                    // A value every value-taking flag on this surface accepts:
+                    // `--limit`/`--context` want a number, the rest a string.
+                    argv.push("1".to_string());
+                }
+                let parsed = match leaf.name.as_str() {
+                    "info" => verbs::info::InfoArgs::try_parse_from(&argv).map(|_| ()),
+                    "status" => verbs::status::StatusArgs::try_parse_from(&argv).map(|_| ()),
+                    "log" => verbs::log::LogArgs::try_parse_from(&argv).map(|_| ()),
+                    "ls" => verbs::ls::LsArgs::try_parse_from(&argv).map(|_| ()),
+                    "show" => verbs::show::ShowArgs::try_parse_from(&argv).map(|_| ()),
+                    "diff" => verbs::diff::DiffArgs::try_parse_from(&argv).map(|_| ()),
+                    other => panic!("verb '{other}' is in the schema with no parser here"),
+                };
+                if let Err(e) = parsed {
+                    // A value the flag rejects (`--untracked 1`) is the
+                    // parser honoring it, not ignoring it; only "this flag
+                    // does not exist" is drift.
+                    let text = e.to_string();
+                    assert!(
+                        !text.contains("unexpected argument"),
+                        "`help git {}` advertises --{}, which its parser does \
+                         not accept: {text}",
+                        leaf.name,
+                        param.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// The converse direction: a flag the parser honors that the schema never
+    /// mentions is invisible to every agent, which is the half of the drift
+    /// that fails silently. Spot-checked on `diff`, whose flag set is the
+    /// newest and therefore the likeliest to be half-wired.
+    #[test]
+    fn every_diff_flag_reaches_the_schema() {
+        let schema = tool(GitConfig::read_only()).expect("config").schema();
+        let leaf = schema
+            .subcommands
+            .iter()
+            .find(|s| s.name == "diff")
+            .expect("diff is in the schema");
+        let named: Vec<&str> = leaf.params.iter().map(|p| p.name.as_str()).collect();
+        for flag in [
+            "staged",
+            "from",
+            "to",
+            "path",
+            "name-only",
+            "patch",
+            "context",
+            "find-renames",
+            "no-find-renames",
+            "limit",
+            "repo",
+            // `--json` is deliberately absent: it comes from the flattened
+            // `GlobalFlags`, which the kernel merges from the root into every
+            // leaf lookup (E.1). It binds at any depth without the leaf's own
+            // param list carrying it.
+        ] {
+            assert!(
+                named.contains(&flag),
+                "the parser honors --{flag} and the schema never mentions it; \
+                 `help git diff` would hide a flag that works. Schema has: \
+                 {named:?}"
+            );
+        }
+    }
+
     #[test]
     fn verb_enabled_refuses_with_exit_five() {
         let cfg = GitConfig::read_only().without_verb(Verb::Info);
