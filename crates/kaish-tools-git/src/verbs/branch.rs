@@ -288,15 +288,17 @@ fn shorten(full: &str) -> String {
 /// configured-but-absent upstream as `[gone]`, and so does
 /// [`BranchRow::upstream_gone`].
 fn upstreams(repo: &ReadRepo) -> Result<BTreeMap<String, String>, GitError> {
-    let remotes = repo.config_values("branch", "remote")?;
-    let merges: BTreeMap<Option<String>, String> =
-        repo.config_values("branch", "merge")?.into_iter().collect();
+    // First value wins on a duplicate key, which is git's own rule for
+    // `@{upstream}`. `collect()` into a map keeps the *last*, which would
+    // count a branch against the wrong upstream in a repository that
+    // configures `branch.<name>.merge` more than once.
+    let remotes = first_per_subsection(repo.config_values("branch", "remote")?);
+    let merges = first_per_subsection(repo.config_values("branch", "merge")?);
     let fetch_specs = repo.config_values("remote", "fetch")?;
 
     let mut out = BTreeMap::new();
     for (branch, remote) in remotes {
-        let Some(branch) = branch else { continue };
-        let Some(merge) = merges.get(&Some(branch.clone())) else {
+        let Some(merge) = merges.get(&branch) else {
             // `branch.<name>.remote` with no `.merge` names a remote but not
             // what to track on it. Git treats that as no upstream.
             continue;
@@ -316,6 +318,19 @@ fn upstreams(repo: &ReadRepo) -> Result<BTreeMap<String, String>, GitError> {
         }
     }
     Ok(out)
+}
+
+/// Keep the first value configured for each subsection, dropping the rest and
+/// dropping the section-wide values that name no subsection.
+fn first_per_subsection(
+    values: Vec<(Option<String>, String)>,
+) -> BTreeMap<String, String> {
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    for (subsection, value) in values {
+        let Some(subsection) = subsection else { continue };
+        out.entry(subsection).or_insert(value);
+    }
+    out
 }
 
 /// Map a source refname through one fetch refspec, or `None` when it does not

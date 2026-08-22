@@ -498,7 +498,10 @@ tree-depth bounds and the entries not listed here.
   probe it (B5).** A worktree registered outside every mount gets
   `path_vfs: null` **and** `prunable: null`: deciding prunability would mean
   stat-ing a host path the repository chose, which is a one-bit existence
-  oracle for anything outside the sandbox. Its registration metadata — name,
+  oracle for anything outside the sandbox. The same null covers a worktree
+  *inside* the mount whose `.git` is a symlink pointing out of it — a shape a
+  cross-model review found this verb answering before the review, and one the
+  suite now pins in both directions. Its registration metadata — name,
   branch, HEAD, lock — still comes through, because all of that lives under
   the common dir. `git branch` also does not mark a branch as checked out in
   another working tree the way `git branch`'s `+` does; `git worktree list`'s

@@ -139,10 +139,14 @@ impl Reaches {
                     }
                 }
                 Step::Exit(oid, parents) => {
-                    // A parent with no answer would mean a cycle in the commit
-                    // graph, which is not a shape git can produce. Reading it
-                    // as `false` keeps a corrupt repository from hanging here
-                    // rather than inventing a `true`.
+                    // Every parent has an answer by now: `Exit` is pushed
+                    // before the parents' `Enter` frames, so it pops after
+                    // them. `unwrap_or(false)` is defensive rather than
+                    // reachable — a genuine cycle (which git cannot produce,
+                    // but a hand-built object store can) never reaches an
+                    // `Exit` at all: the `Enter` frames re-push forever and
+                    // the walk ends at the budget's loud refusal, which is the
+                    // answer we want over a confidently-wrong `false`.
                     let reached = parents
                         .iter()
                         .any(|p| self.memo.get(p).copied().unwrap_or(false));
@@ -191,8 +195,12 @@ pub(crate) fn ancestors(
 /// `behind 2` where git reports `behind 1`, and a clock that ran backwards did
 /// the same. Both are pinned in `tests/branch.rs`.
 ///
-/// **What it costs.** Both histories, to their roots — this reads the same
-/// commits `git rev-list <local> <upstream>` would. The early stop is what a
+/// **What it costs.** Both histories, to their roots. A commit is read once
+/// when a side first reaches it and once more if the other side widens it
+/// later, so `commits_examined` runs up to twice the number of distinct
+/// commits — roughly `2 x |ancestors(local) union ancestors(upstream)|` in the
+/// worst case, and the union itself when the two histories barely overlap.
+/// The early stop is what a
 /// cheaper version would buy, and it is not available without an assumption
 /// about clocks that this crate is not willing to make. `--limit` bounds how
 /// many branches pay it, [`MAX_ANCESTRY_COMMITS`] refuses when one invocation's

@@ -353,13 +353,42 @@ fn prunability(repo: &ReadRepo, work_path: &Path) -> Result<(Option<bool>, Optio
     // The directory is there. Git also calls a registration prunable when the
     // directory survives but its `.git` file is gone, which is what a manual
     // move leaves behind.
-    if !cur.join(".git").exists() {
-        return Ok((
-            Some(true),
-            Some("the working tree's .git file is missing".to_string()),
-        ));
+    //
+    // On the same terms as every component above it. `Path::exists` was the
+    // first spelling and it is wrong here: it follows symlinks, so a `.git`
+    // linked out of the mount would be stat-ed at its target and the answer —
+    // `prunable: false` if the target is there, `prunable: true` if it is not
+    // — is one bit about an arbitrary host path, per registration. That is the
+    // oracle this whole walk exists to refuse, reintroduced at the one leaf
+    // the walk did not cover.
+    let dot_git = cur.join(".git");
+    match std::fs::symlink_metadata(&dot_git) {
+        Ok(meta) if meta.file_type().is_symlink() => match std::fs::canonicalize(&dot_git) {
+            // Inside the mount: an ordinary answer about the caller's own
+            // sandbox.
+            Ok(real) if real.starts_with(ceiling) => Ok((Some(false), None)),
+            // Escaping or dangling, made indistinguishable on purpose.
+            _ => Ok((None, None)),
+        },
+        Ok(_) => Ok((Some(false), None)),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok((
+                Some(true),
+                Some("the working tree's .git file is missing".to_string()),
+            ))
+        }
+        Err(e) => Err(GitError::repository(
+            OP,
+            "examining a working tree's .git file",
+            &dot_git,
+            e,
+        )),
     }
-    Ok((Some(false), None))
 }
 
 /// The working tree root a `gitdir` file's contents name.

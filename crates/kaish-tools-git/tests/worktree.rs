@@ -456,3 +456,78 @@ async fn a_bare_repository_lists_its_linked_worktrees_and_not_itself() {
         "and names its git directory: {porcelain}"
     );
 }
+
+/// A `.git` file symlinked out of the mount makes `prunable` unanswerable, and
+/// the row says so rather than reporting what a stat of the target found.
+///
+/// The bug this pins: the prunability walk screens every *directory* component
+/// of a recorded worktree path, and the final `.git` probe used
+/// `Path::exists`, which follows symlinks. A repository could plant an
+/// in-mount worktree whose `.git` links to any host path, and read one bit
+/// about that path — `prunable: false` if it is there, `prunable: true` if it
+/// is not — out of an otherwise ordinary listing. Found by cross-model review
+/// (kaibo, 2026-08-22).
+#[tokio::test]
+async fn a_dot_git_symlinked_out_of_the_mount_is_not_probed() {
+    let repo = WorktreeRepo::build();
+    let outside = std::env::temp_dir().join("kaish-tools-git-no-such-oracle-target");
+    assert!(
+        !outside.exists(),
+        "the oracle target must not exist, or the test proves nothing"
+    );
+
+    // Replace the plain worktree's `.git` file with a symlink pointing out of
+    // the mount at a path that does not exist.
+    let dot_git = repo.plain.join(".git");
+    std::fs::remove_file(&dot_git).expect("remove the .git file");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &dot_git).expect("plant the symlink");
+    #[cfg(not(unix))]
+    return;
+
+    let rows = rows_by_path(&json(&run(&repo.scratch(), "/mnt/repo", &["--json"]).await));
+    let plain = &rows[repo.plain.to_str().expect("utf-8")];
+    assert!(
+        plain["path_vfs"].is_string(),
+        "the worktree itself is still inside the mount: {plain}"
+    );
+    assert!(
+        plain["prunable"].is_null(),
+        "a .git that leaves the mount is not ours to resolve, and a dangling \
+         one must not be distinguishable from an escaping one: {plain}"
+    );
+    assert!(plain["prunable_reason"].is_null(), "{plain}");
+
+    // Negative control: the other worktrees are still examined, so the null
+    // above is about this one `.git` and not about the walk having stopped.
+    let inside = &rows[repo.inside.to_str().expect("utf-8")];
+    assert_eq!(inside["prunable"], false, "{inside}");
+    let gone = &rows[repo.gone.to_str().expect("utf-8")];
+    assert_eq!(gone["prunable"], true, "{gone}");
+}
+
+/// The same shape, staying inside the mount: a `.git` symlink whose target is
+/// in the sandbox is followed and answered normally.
+///
+/// This is what keeps the test above from passing over an implementation that
+/// answered `null` for every symlinked `.git`, which would be a different bug
+/// — a worktree the caller can reach reported as un-examinable.
+#[tokio::test]
+async fn a_dot_git_symlinked_inside_the_mount_is_still_examined() {
+    let repo = WorktreeRepo::build();
+    let dot_git = repo.plain.join(".git");
+    let moved = repo.plain.join("dot-git-moved");
+    std::fs::rename(&dot_git, &moved).expect("move the .git file aside");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&moved, &dot_git).expect("plant the symlink");
+    #[cfg(not(unix))]
+    return;
+
+    let rows = rows_by_path(&json(&run(&repo.scratch(), "/mnt/repo", &["--json"]).await));
+    let plain = &rows[repo.plain.to_str().expect("utf-8")];
+    assert_eq!(
+        plain["prunable"], false,
+        "an in-mount symlink is an ordinary answer about the caller's own \
+         sandbox: {plain}"
+    );
+}

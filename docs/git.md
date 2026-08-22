@@ -525,6 +525,13 @@ oid, the lock and its reason. Each of those files is opened through the same
 ceiling check `git info` uses, so a `gitdir` or `HEAD` symlinked out of the
 mount is refused rather than followed.
 
+The same null covers a worktree that *is* inside the mount but whose `.git` is
+a symlink pointing out of it. The recorded path is walked one component at a
+time from the mount root, and every component — the `.git` leaf included — is
+classified before it is traversed: a symlink that stays inside is followed, and
+one that escapes or dangles ends the walk with the identical answer, so neither
+can be told from the other.
+
 ## Non-goals
 
 - Reimplementing git porcelain faithfully (use real git via `subprocess` for that).
