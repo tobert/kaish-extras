@@ -5,6 +5,38 @@ deliberately out of scope for the PR that discovered it. Entries move out when
 fixed (delete the entry in the fixing PR) or when they graduate to a GitHub
 issue because someone outside the repo needs the link.
 
+## git — the D.3 textconv/filter fixture described in architecture.md does not exist
+
+Found while writing `docs/embedding-git.md` (PR 8, 2026-08-22), checking each
+claim in the doc against an actual test before writing it down.
+architecture.md §D.3 describes a behavioral fixture as already running "on
+every build": a hostile repository declaring `diff.pwn.textconv` (pointed at
+a script that plants a sentinel file) and `.gitattributes` mapping `* diff=pwn`,
+run against every diff/show verb, asserting the sentinel never appears and the
+output is the internal diff — plus the same shape for `filter.*.clean`/`smudge`
+and `core.hooksPath`.
+
+No such fixture exists. `tests/hostile_repo.rs` (grepped for `textconv`,
+`hooksPath`, `filter.*.clean`, `sentinel`, `pwn` — nothing beyond the module
+doc's own reference to the D.3 premise) covers only the containment-escape
+surface: `commondir`, a `.git` file's `gitdir:` line, symlinked leaves,
+`objects/info/alternates`. Real: the *dependency-absence* tripwire
+(`.github/workflows/ci.yml`'s `git-tool-dependency-tripwires` job, `cargo
+tree -i` for `gix-command`/`gix-transport`/`gix-filter`) is genuinely
+enforced in CI. Not real: the *behavioral* proof that a repository
+attempting to use textconv/filter/hooks is inert against this build, which
+the design doc's D.3 prose reads as already covered.
+
+The dependency tripwire is strong evidence on its own — nothing that could
+act on `textconv` is even linked — but it is not the same claim as "a
+hostile repository was actually run against every verb and provably did
+nothing," and `docs/embedding-git.md` should not repeat the stronger claim
+until that fixture exists. Corrected in `docs/embedding-git.md` (PR 8) to
+state the tripwire accurately and name this gap rather than overclaim.
+Writing the missing fixture is out of scope for PR 8 (an embedder-boundary
+and config-plumbing PR, not a D.3 test-coverage PR) — worth its own small PR,
+modeled on the containment-escape fixtures already in `tests/hostile_repo.rs`.
+
 ## git status — divergences from git
 
 Found by the PR #23 cross-model review (deepseek-v4-pro C-series); each needs a
@@ -210,6 +242,23 @@ fixture asserted against real `git status --porcelain` before fixing.
   declares one is destructive (`write`, `mv`, `cp`, `dd`, `rm`, `patch`, `tee`,
   `sed`). A read-only git tool correctly declares none, so today's empty vector
   is the right answer rather than an omission.
+
+## git log — `ctx.patient(budget)` is not wired up yet
+
+Found alongside the D.3 fixture gap above while writing `docs/embedding-git.md`
+(PR 8, 2026-08-22). architecture.md §E.3 names `ctx.patient(budget)` as the
+answer to "Cancellation is the one honest weakness" — used, per that section,
+"for `blame` and full-history `log` so the script watchdog does not kill a
+legitimately slow read." `blame` is not implemented (no `Verb::Blame` exists
+yet), and `grep -rn patient src/` finds no call site in `verbs/log.rs` or
+anywhere else in this crate — `log` calls no `patient()` today. Today's only
+bounds on an unbounded `log` walk are `--limit` and the kernel's own output
+cap; a legitimately slow full-history read on a very large repository is
+exposed to the script watchdog exactly as an unbounded one would be. Corrected
+in `docs/embedding-git.md` (PR 8) to state this plainly rather than repeat
+§E.3's aspirational framing as current behavior. Wiring it up is a small,
+self-contained PR against `verbs/log.rs` once there is a concrete watchdog
+timeout to test against.
 
 ## Upstream
 

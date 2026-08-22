@@ -1467,3 +1467,40 @@ landed as written: the revspec grammar's colon split happens in the caller
 `@` resolves to `HEAD` (closing the L4 backlog entry); and the blob form's
 cap declines the whole blob rather than serving a truncated prefix, matching
 `log --stat`'s existing blob-cap discipline in `verbs/log.rs`.
+
+**2026-08-22 — PR 8 (the embedder boundary) landed:
+[`docs/embedding-git.md`](../embedding-git.md), `git info`'s capability report
+pinned against the schema, and the E.1 gate made verb-set-agnostic.** Three
+things worth recording:
+
+- **The router drift test could not call `select_leaf` directly.** §E.1 asks
+  for a test that "assert[s] our `route()` and the kernel's `select_leaf`
+  select the same leaf." `scheduler::pipeline::select_leaf` is `pub(crate)` to
+  `kaish-kernel`, unreachable even as a dev-dependency — consistent with this
+  crate's "depends on nothing but `kaish-tool-api` + `kaish-types`" posture
+  ([G.2](#g2-nothing-else-is-required-for-the-read-profile)), which turned out
+  to hold even under a dev-only dependency add. `tests/router_kernel_drift.rs`
+  builds a real `kaish_kernel::Kernel`, registers the tool, and drives it
+  through `Kernel::execute` instead — the kernel's actual dispatch path,
+  including `select_leaf`, exercised rather than called into directly. Every
+  case there iterates `Verb::ALL`, so it needs no change when the sibling `git
+  diff` PR's `Verb::Diff` lands.
+- **`help git`'s Examples section was not filtered by config**, and disabling
+  a verb left its example — `git info`, `git show …` — still advertised as
+  usable. `EXAMPLES` is now filtered per-config (`examples_for` in
+  `src/tool.rs`) before the schema is built, and two missing entries (`status`,
+  `log` had none at all, so neither could ever be named in `help git` even
+  when enabled) were added alongside the fix. Found by the drift test's own
+  negative control, not by inspection — the gate this PR exists to build
+  caught a gap in what it was gating.
+- **Two claims in this document do not match the current test suite**, found
+  while writing the embedder doc and checked against actual tests before being
+  written down rather than assumed: the [D.3](#d3-layer-3--the-textconvfilter-attack-surface)
+  hostile-textconv *behavioral* fixture ("runs anyway, on every build") does
+  not exist — only the dependency-absence tripwire does, which is real and
+  enforced in CI, but is a narrower claim; and [E.3](#e3-blocking-calls-and-send-ness)'s
+  `ctx.patient(budget)` is not called anywhere in `src/`, so an unbounded
+  `log` walk today has only `--limit` and the kernel's output cap between it
+  and completion. Neither is fixed here — both are `docs/issues.md` entries,
+  and `docs/embedding-git.md` states the actual, narrower guarantee rather
+  than repeat this document's more optimistic framing.

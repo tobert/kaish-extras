@@ -16,6 +16,36 @@
 //! # Ok(()) }
 //! ```
 //!
+//! See [`docs/embedding-git.md`](https://github.com/tobert/kaish-extras/blob/main/docs/embedding-git.md)
+//! for the embedder guide: every [`GitConfig`] knob, the read-only story as
+//! five separately falsifiable layers, the mount-table requirement for a
+//! linked worktree, and the known limitations an adoption decision should
+//! see before it is made.
+//!
+//! # Narrowing the profile
+//!
+//! [`GitConfig::without_verb`] is the only way to shrink the verb set — there
+//! is no `with_verb`, so no chain of calls can widen it past what
+//! [`GitConfig::read_only`] granted. This is the same shape a real embedder
+//! reaches for: drop a verb, rename the command word, and lower the output
+//! caps, all before the tool is ever registered.
+//!
+//! ```no_run
+//! use kaish_tools_git::{GitConfig, Limits, Verb};
+//! # fn demo() -> Result<(), Box<dyn std::error::Error>> {
+//! let git = kaish_tools_git::tool(
+//!     GitConfig::read_only()
+//!         .without_verb(Verb::Show) // no blob/tree reads from this build
+//!         .with_tool_name("kgit")   // register beside real `git`, not over it
+//!         .with_limits(Limits {
+//!             max_rows: 200,
+//!             ..Limits::default()
+//!         }),
+//! )?;
+//! # let _ = git;
+//! # Ok(()) }
+//! ```
+//!
 //! # Read-only, and why you should believe it
 //!
 //! The claim is not that a flag is checked. It is that in a default build the
