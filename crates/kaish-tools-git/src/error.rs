@@ -96,7 +96,8 @@ pub enum GitError {
          mount. If this is a linked worktree whose main repository lives \
          elsewhere — the usual case — run `git rev-parse --git-common-dir \
          --path-format=absolute` inside '{repo}' to find that repository, \
-         then mount it too and retry. Nothing was read"
+         then mount it too and retry. If it is not, this repository named a \
+         path it was never given. Nothing was read"
     )]
     EscapesMount {
         /// The verb that was asked for.
@@ -718,6 +719,15 @@ mod tests {
             ),
             "must name the command AND where to run it, from a trusted \
              source, without echoing the escaping path ourselves: {msg}"
+        );
+        // The other reading, kept deliberately. Without it the refusal reads
+        // as pure friction: an operator who did NOT mean to expose anything
+        // needs to know this repository asked for a path it was never given,
+        // because their next step is to investigate it, not to mount it.
+        assert!(
+            msg.contains("this repository named a path it was never given"),
+            "must name the hostile reading too, so the fix is not the only \
+             next step on offer: {msg}"
         );
     }
 
