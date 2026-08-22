@@ -589,6 +589,39 @@ standalone before being written down.
   not this API. Trigger to revisit: ping kaijutsu when the git crates' surface
   settles, by which point they will know whether the work laptop is in play.
 
+## Cross-embedder obligations and a pattern worth stealing
+
+Recorded 2026-08-22 out of the kaijutsu and kaibo exchanges. These are things
+we owe other people, or things they do better than us.
+
+- **X3 — a kaish dependency behavior canary.** kaijutsu carries
+  `command_substitution_survives_a_non_last_pipeline_stage`, a test whose only
+  job is to fail loudly if the kaish dependency regresses on a behavior they
+  depend on. We have `dependency tripwires` over `cargo tree` for the gix
+  plumbing (asserting `gix-command`/`gix-transport`/`gix-filter` never enter
+  the graph) and an e2e stage asserting the MOTD version matches
+  `kaish-version` — but nothing that pins a kaish *behavior* we rely on.
+  A silent behavior regression across a 0.15.x patch would reach us as a
+  mystery, not a failure. Pick the behaviors the tool crates actually depend
+  on (argv binding order under `with_raw_argv`, `GlobalFlags` handling,
+  `ToolCtx::resolve_path` refusal shapes) and pin one test each. Cheap, and it
+  is exactly the shape that would have caught the 0.15.0 undeclared breaking
+  changes early.
+
+- **X4 — tell kaijutsu when kaish #385/#386 lands in a published release.**
+  An `if` condition's stderr reaching the enclosing statement. kaijutsu's gate
+  guard bodies are `if`-shaped and their deny reasons arrive empty without it.
+  **Published release, not merged to main** — a merged sha is not something
+  they can consume. We track the 0.16 bump for our own reasons and talk to
+  kaish-lead directly, so this costs us one message at a moment we are already
+  paying attention.
+
+- **X5 — ping kaijutsu when the git crates' surface settles**, as the trigger
+  to look at CU46b (proxy and cert store) together. Agreed with them in place
+  of an open-ended wait, because it is an event both sides can observe. By then
+  they will know whether the work laptop — the only place a corporate
+  TLS-inspecting CA would appear — is actually in play.
+
 ## kaish-tools-image — a proposed third tool crate
 
 Proposed 2026-08-21 by the kaibo session, on Amy's instruction to record it
