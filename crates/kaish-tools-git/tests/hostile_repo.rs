@@ -1254,9 +1254,15 @@ async fn the_hostile_fixture_pwns_real_git() {
         );
     }
 
-    // 3. And the hooks fire on a write, which is the third mechanism D.3
-    //    names. Nothing in this crate writes, so nothing here can reach it —
-    //    which is exactly the claim that needs a control.
+    // 3. And the hooks fire, which is the third mechanism D.3 names. Worth
+    //    knowing, and found here: `core.hooksPath` is reachable from a real
+    //    git *read* command, not only from a write — `post-index-change`
+    //    turns up in the sentinel list above, fired by `git status`
+    //    refreshing the index. It is asserted on the write instead, because
+    //    `post-index-change` only exists from git 2.22 and only fires when
+    //    the index is actually rewritten, while `pre-commit` on a commit is
+    //    stable everywhere. Nothing in this crate writes *or* refreshes an
+    //    index (D.4 is the test that says so), so neither is reachable here.
     repo.disarm();
     git(&repo.root, &["commit", "--allow-empty", "-m", "hook bait", "--quiet"]);
     let after_write = repo.fired();
