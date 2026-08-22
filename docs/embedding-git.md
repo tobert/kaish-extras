@@ -259,8 +259,8 @@ worktree's `gitdir:` target always nests under
 what needs mounting either way. Verified on a real worktree:
 
 ```
-gitdir:  /home/atobey/src/kaibo/.git/worktrees/kaibo-media-ops
-common:  /home/atobey/src/kaibo/.git
+gitdir:  ~/src/<repo>/.git/worktrees/<name>
+common:  ~/src/<repo>/.git
 ```
 
 Mount what it reports, and retry.
@@ -288,8 +288,12 @@ allowed-tree entry to cover it.
 The threat model this crate addresses is stated above: read-only by
 construction (layers 1–4), containment against a repository naming its own
 escape, no spawn surface, and a falsifiable fingerprint test rather than an
-argument. It is real, and it is what a short-lived CLI invocation of real
-`git` cannot offer at all.
+argument. It is real, and it holds against a repository that names its own
+escape — the axis those layers were built for.
+
+It does not hold on the axis this section is about, and on that one a
+short-lived `git(1)` invocation is *better* off than you are. Read on before
+deciding how much the layers above buy you.
 
 What it does not address: **a pure-Rust, no-exec git tool still puts a large
 parser over attacker-controlled bytes — `.git/index`, packfiles, refs,
@@ -308,7 +312,16 @@ chain overflows a 2 MiB thread before any of this crate's code runs. This
 crate's own `index_depth_guard` re-derives enough of the index format to
 walk that structure iteratively (a heap `Vec`, not the call stack) *before*
 handing the bytes to `gix_index::State::from_bytes`, and refuses past 256
-levels, exit 1. It fails **closed**: an index shape the guard cannot fully
+levels, exit 1.
+
+That threshold sits far above any real repository rather than close to one.
+The bound is on cache-tree nesting, which tracks directory nesting; measured
+across five checkouts on hand, the deepest tracked path was 10 directories
+(in a 2,640-file workspace), so 256 is roughly twenty-five times the deepest
+shape we have seen. It is `MAX_STATUS_TREE_DEPTH` in `verbs/status.rs` if you
+want the reasoning.
+
+The guard fails **closed**: an index shape it cannot fully
 account for — a truncated record, an unrecognized structure — is refused as
 unreadable, not waved through on the assumption that gitoxide's own decode
 would also stop. This is `docs/issues.md`'s **R4** entry, in full.
@@ -419,6 +432,23 @@ tree-depth bounds and the entries not listed here.
   levels, genuinely self-recursive, empirically anchored to a measured
   overflow point) are different mechanisms with different appropriate
   values — not an oversight, and not planned to converge.
+- **A fail-closed guard can refuse a legitimate repository.** The
+  `.git/index` depth guard walks the entries itself before handing them to
+  gitoxide, and an index shape it cannot fully account for is refused as
+  unreadable (exit 4) rather than passed through. That is the safe direction
+  and it is deliberate — the alternative is a stack overflow that takes your
+  whole process — but the consequence a user meets is a **false refusal**: a
+  real repository this build declines to read. It has happened. The 2026-08-21
+  follow-up bug had exactly this direction: the guard mis-skipped
+  NUL-terminated entry names by 8 bytes, walking to a wrong offset. If you see
+  exit 4 on a repository real `git` reads without complaint, that is a bug in
+  this crate, not a policy decision — report it with the index, and read
+  "What this tool does not protect you from" for why the guard exists at all.
+- **No cancellation.** A slow read cannot be interrupted: `ctx.patient(budget)`
+  is named by the design doc and called nowhere in this crate, and `blame` (its
+  other named consumer) is unimplemented. `--limit` and the kernel's output cap
+  are the only bounds on a full-history `log`. If you run this inline on a
+  request path, size the timeout around that.
 - **No `--patch` / unified diff text yet.** `--patch` on any verb that
   accepts it refuses with exit 4, naming the gap explicitly rather than
   answering with a stat or silently ignoring the flag.
@@ -445,8 +475,9 @@ trusting this document to stay current between releases.
 
 ## Guarantees without a test
 
-Everything else in this document is backed by a named test. Two things are
-not, and are named here rather than left as an implicit gap:
+Most of this document is backed by a named test. These are the claims that
+are not — enumerated rather than counted, because a count in a section like
+this is one more thing that can quietly go stale:
 
 - **Process-isolation advice** in "What this tool does not protect you
   from" (supervised tasks, `catch_unwind` at the dispatch seam) is guidance,
@@ -457,6 +488,20 @@ not, and are named here rather than left as an implicit gap:
   makes about itself in code. It can only go stale in the direction of
   becoming false — if fuzzing infrastructure is added later, this section
   should be the first thing updated.
+- **The absence of cancellation** — `ctx.patient(budget)` is named by
+  architecture.md §E.3 and called nowhere in this crate. Same category as the
+  fuzz corpus: an absence verified by search (`grep -rn 'patient(' crates/`
+  returns no call site), not a property any test asserts. Load-bearing if you
+  are deciding whether to run this inline on a request path, so it is stated
+  in "Known limitations" too rather than only here.
+- **The layer-3 behavioral proof** that a repository declaring
+  `diff.*.textconv`, `filter.*.clean/smudge`, or `core.hooksPath` is inert
+  against this build. The *dependency-absence* tripwire is real and enforced
+  in CI (`cargo tree -i` over `gix-command`/`gix-transport`/`gix-filter`); the
+  behavioral fixture architecture.md §D.3 describes as already running does
+  not exist. The tripwire is strong evidence and a weaker claim, and it is
+  weakest against exactly the case the fixture was meant to catch: a pin bump
+  that quietly adds an edge.
 
 ## See also
 
