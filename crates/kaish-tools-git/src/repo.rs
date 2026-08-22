@@ -549,7 +549,22 @@ impl ReadRepo {
             let is_symlink = std::fs::symlink_metadata(&entry_path)
                 .map(|m| m.file_type().is_symlink())
                 .unwrap_or(true);
-            if !is_symlink && entry_path.join("gitdir").is_file() {
+            if is_symlink {
+                continue;
+            }
+            // The leaf, on the same terms as the directory above it.
+            // `Path::is_file` was the first spelling and it is wrong here: it
+            // follows symlinks, so a registration whose `gitdir` links to a
+            // host path was counted exactly when that path existed and was a
+            // file — and `git info` publishes this count, so that is one bit
+            // about an arbitrary host path per registration, out of an
+            // ordinary call. `verbs::worktree` refuses the same spelling for
+            // the same reason; this is its twin and it was missed.
+            let gitdir = entry_path.join("gitdir");
+            let is_real_file = std::fs::symlink_metadata(&gitdir)
+                .map(|m| m.file_type().is_file())
+                .unwrap_or(false);
+            if is_real_file {
                 count += 1;
             }
         }

@@ -1419,3 +1419,73 @@ async fn a_long_running_process_filter_is_inert_too() {
     assert_eq!(model["files"][0]["path"], "file.txt");
     assert_eq!(model["files"][0]["additions"], 1);
 }
+
+/// A registration's `gitdir` leaf must not be probed with a symlink-following
+/// call, because `git info` publishes the count it feeds.
+///
+/// `worktree_count` screens the registration *directory* with
+/// `symlink_metadata` and then asked whether `<dir>/gitdir` `is_file()` —
+/// which follows symlinks. A registration whose `gitdir` is a symlink to a
+/// host path was counted exactly when that path existed and was a file, so
+/// `info`'s `worktrees` number carried one bit about an arbitrary host path,
+/// per registration, out of an ordinary call.
+///
+/// The same probe is written correctly 400 lines away in `verbs/worktree.rs`,
+/// whose comment refuses `Path::is_file` in as many words and routes through
+/// `contained_leaf` instead. This is the careful thing done everywhere except
+/// one spot — the shape that produced both prior containment bugs here.
+///
+/// Found by cross-model review (kaibo, qwen38 cast), 2026-08-22.
+#[tokio::test]
+async fn a_registrations_gitdir_symlink_cannot_report_whether_its_target_exists() {
+    require_git();
+
+    async fn probe(target_exists: bool) -> (i64, String) {
+        let fixture = Fixture::empty();
+        let mount = fixture.path("mount");
+        let outside = fixture.path("outside");
+        std::fs::create_dir_all(&mount).expect("create mount");
+        std::fs::create_dir_all(&outside).expect("create outside");
+
+        let repo = mount.join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+        support::write_file(&repo, "README.md", "hi\n");
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-m", "one", "--quiet"]);
+
+        // The one bit under test: a host path that is a real file in one arm
+        // and absent in the other. Nothing else differs between the arms.
+        let target = outside.join("secret.txt");
+        if target_exists {
+            std::fs::write(&target, "present\n").expect("write outside target");
+        }
+
+        // A registration directory that is NOT itself a symlink — so the
+        // directory screen passes — whose `gitdir` leaf is.
+        let reg = repo.join(".git/worktrees/probe");
+        std::fs::create_dir_all(&reg).expect("create registration dir");
+        std::os::unix::fs::symlink(&target, reg.join("gitdir")).expect("symlink gitdir");
+
+        let result = info_at(mount.clone(), "/mnt/repo").await;
+        // Each arm builds its own temp root, and that difference is ours, not
+        // the repository's — normalize it out so the comparison is about the
+        // one bit under test.
+        let rendered = format!("{:?}", result.output())
+            .replace(&fixture.root().display().to_string(), "<FIXTURE>");
+        (result.code, rendered)
+    }
+
+    let (code_present, out_present) = probe(true).await;
+    let (code_absent, out_absent) = probe(false).await;
+
+    assert_eq!(
+        code_present, code_absent,
+        "the exit code must not depend on whether a host path exists"
+    );
+    assert_eq!(
+        out_present, out_absent,
+        "`info`'s output changed with the existence of a path outside the \
+         mount -- the worktree count is a one-bit host oracle"
+    );
+}
