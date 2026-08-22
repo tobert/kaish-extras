@@ -87,8 +87,12 @@ fn write_shaped_plumbing_appears_only_under_verbs_write() {
     let src = crate_src();
     let mut files = Vec::new();
     rust_sources(&src, &mut files);
+    // The floor tracks the crate as it grows: a scan that silently stopped
+    // walking would otherwise pass over the modules it never opened. Raise
+    // it when modules are added, the way PR 5 did (worktree.rs, diffcore.rs,
+    // verbs/diff.rs).
     assert!(
-        files.len() >= 7,
+        files.len() >= 17,
         "found only {} source files under {} — the scan is not seeing the \
          crate",
         files.len(),

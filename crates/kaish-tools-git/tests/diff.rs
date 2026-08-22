@@ -785,13 +785,19 @@ async fn a_bare_repository_refuses_the_worktree_endpoints() {
     );
     assert!(bare.join("HEAD").exists(), "the bare clone must exist");
 
-    let result = diff(&repo.scratch(), "/mnt/bare.git", &["--from", "HEAD"]).await;
-    assert_eq!(result.code, 1, "stderr: {}", result.err);
-    assert!(
-        result.err.contains("working tree"),
-        "the refusal must name what is missing: {}",
-        result.err
-    );
+    // All three endpoint pairs that touch the index or the working tree
+    // refuse. `--staged` is the one that matters most: with no index file to
+    // read it would otherwise compare a real tree against an empty map and
+    // report every tracked file as deleted.
+    for argv in [vec!["--from", "HEAD"], vec!["--staged"], vec![]] {
+        let result = diff(&repo.scratch(), "/mnt/bare.git", &argv).await;
+        assert_eq!(result.code, 1, "git diff {argv:?}: {}", result.err);
+        assert!(
+            result.err.contains("working tree"),
+            "the refusal must name what is missing: {}",
+            result.err
+        );
+    }
 
     // Two revisions need no working tree, so that comparison still answers.
     let ok = diff(&repo.scratch(), "/mnt/bare.git", &["--from", "HEAD~1", "--to", "HEAD"]).await;

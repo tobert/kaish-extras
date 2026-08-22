@@ -171,6 +171,19 @@ pub(crate) fn run(repo: &ReadRepo, opts: &DiffOptions) -> Result<DiffReport, Git
 
     // Both ends, and where each one's content will come from. Resolving the
     // revisions first means a bad `--from` fails before anything is read.
+    // A bare repository has no index and no working tree, so three of the
+    // five endpoint pairs cannot be answered there at all. Refusing by name
+    // beats the alternative: with no index file to read, HEAD↔index would
+    // compare a real tree against an empty map and report every tracked file
+    // as deleted — a confident wrong answer. Git refuses the same way ("this
+    // operation must be run in a work tree").
+    if !matches!(opts.endpoints, Endpoints::RevToRev { .. }) && repo.work_dir().is_none() {
+        return Err(GitError::NeedsWorktree {
+            operation: OP,
+            repo: repo.git_dir().to_path_buf(),
+        });
+    }
+
     let (from_end, to_end) = describe_endpoints(repo, &opts.endpoints)?;
     let mut unmerged = BTreeSet::new();
 
