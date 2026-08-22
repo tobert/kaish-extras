@@ -278,16 +278,32 @@ Read out of `ToolSchema` rather than inferred from the source, per AGENTS.md
 publishes that no agent should be reading, both pre-existing and both
 cross-verb, so neither is a PR 5 fix:
 
-- **`--operands` is in the schema.** Every verb carries an
-  `#[arg(hide = true)] operands: Vec<String>` sink so clap accepts the
-  `--`-terminated tail `ToolArgs::to_argv()` emits (E.1). `schema_from_clap`
-  does not honor clap's `hide`, so it reaches agents as a real parameter
-  whose description is a note to *us* — "do not read this field, it cannot
-  distinguish them either". An agent that types `git ls --operands x` gets
-  something incoherent. Two possible fixes: teach the sink a description
-  written for the reader who will actually see it, or ask kaish to skip
-  hidden args in `schema_from_clap` (a kaish PR, same maintainer). The second
-  is the right one; the first is the stopgap if the boundary takes a while.
+- **`--operands` is in the schema — FIXED in PR 5, and the first diagnosis was
+  wrong.** Every verb carries an `#[arg(hide = true)] operands: Vec<String>`
+  sink so clap accepts the `--`-terminated tail `ToolArgs::to_argv()` emits
+  (E.1). Those sinks reached agents carrying a description written for *us*
+  ("do not read this field, it cannot distinguish them either", naming
+  `ToolArgs::to_argv` and `tool.rs`) on all six verbs.
+
+  The first reading was that `schema_from_clap` fails to honor clap's `hide`
+  and the fix is a kaish PR. **Checked at the source, and kaish is right.**
+  `kaish-tool-api` 0.15's `clap_schema.rs:104-125` skips hidden *flags* and
+  deliberately keeps hidden *positionals*, documenting why: for most tools
+  the hidden positional IS the public surface (`cat paths…`). That is true
+  here too — `git show HEAD:src/lib.rs` and `git ls HEAD src` are positional,
+  and an agent needs them documented. Asking kaish to drop them would have
+  deleted the only schema entry describing the flagship spelling of two verbs.
+
+  So the defect was entirely ours, and it is the AGENTS.md rule "Published
+  text is published" broken six times in one place: behavior belongs in the
+  `///`, mechanism in a `//`. Each verb's operand doc now states what an agent
+  types (`git status -- src tests`, `git log HEAD~5 -- src/lib.rs`,
+  `git ls HEAD src`, `git show HEAD:src/lib.rs`, `git diff -- src`, and
+  `info` taking none), and the mechanism moved to `//`.
+  `no_published_description_is_a_note_to_ourselves` reads the built schema —
+  not the source, per the same rule — and fails on internal vocabulary, with a
+  negative control asserting the `operands` param is present and shows a real
+  spelling. Mutation-tested: it goes red on a reverted description.
 
 - **`--limit` publishes `type=string` and no default.** It is `usize` in
   every verb's parser with a real `default_value_t` (1000 for `ls`/`show`,

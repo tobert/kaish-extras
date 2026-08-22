@@ -133,11 +133,14 @@ pub(crate) struct LogArgs {
     #[command(flatten)]
     pub global: GlobalFlags,
 
-    /// Bound so clap can accept the `--`-terminated tail `ToolArgs::to_argv()`
-    /// always emits. The real operands are read off `args.positional` in
-    /// `tool.rs` — the kernel's own convention, because `to_argv` inserts a
-    /// `--` of its own and clap cannot tell it from the caller's. Do not read
-    /// this field; it cannot distinguish them either.
+    /// A revision to start from, then paths after `--`:
+    /// `git log HEAD~5 -- src/lib.rs`. At most one revision — a range is two
+    /// calls, not `A B`. Omit it to start from `HEAD`.
+    // Bound so clap accepts the `--`-terminated tail `ToolArgs::to_argv()`
+    // always emits. The real operands are read off `args.positional` in
+    // `tool.rs` — the kernel's own convention, because `to_argv` inserts a
+    // `--` of its own and clap cannot tell it from the caller's. Do not read
+    // this field; it cannot distinguish them either.
     #[arg(hide = true)]
     pub operands: Vec<String>,
 }

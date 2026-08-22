@@ -126,9 +126,15 @@ pub(crate) struct DiffArgs {
     #[command(flatten)]
     pub global: GlobalFlags,
 
-    /// Bound so clap can accept the `--`-terminated tail `ToolArgs::to_argv()`
-    /// always emits. The real operands are read off `args.positional` in
-    /// `tool.rs`; do not read this field, it cannot distinguish them either.
+    /// Paths after `--`, and nothing before it: `git diff -- src`. Name
+    /// revisions with `--from`/`--to` (`git diff --from HEAD~1 --to HEAD`);
+    /// a bare `HEAD` would be ambiguous with a file of that name, so it is
+    /// refused rather than guessed.
+    // Bound so clap accepts the `--`-terminated tail `ToolArgs::to_argv()`
+    // always emits. The real operands are read off `args.positional` in
+    // `tool.rs` — the kernel's own convention, because `to_argv` inserts a
+    // `--` of its own and clap cannot tell it from the caller's. Do not read
+    // this field; it cannot distinguish them either.
     #[arg(hide = true)]
     pub operands: Vec<String>,
 }

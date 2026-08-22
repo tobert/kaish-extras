@@ -1183,6 +1183,70 @@ mod tests {
     }
 
 
+    /// AGENTS.md, "Published text is published": a `///` on a clap argument is
+    /// copied into `ParamSchema.description` and reaches agents through the
+    /// tool schema. Behavior goes there; mechanism goes in a `//` comment.
+    ///
+    /// The rule was broken on all six verbs at once and nobody saw it, because
+    /// the offending text was a doc comment on a field marked `hide = true` —
+    /// and `hide` does not mean hidden here. `params_from_clap` deliberately
+    /// keeps hidden *positionals* (kaish-tool-api 0.15's `clap_schema.rs`
+    /// documents why: for most tools they ARE the public surface, `cat
+    /// paths…`), dropping only hidden *flags*. So six descriptions reading
+    /// "do not read this field" and naming `ToolArgs::to_argv` shipped to
+    /// agents as parameter documentation.
+    ///
+    /// Reads the built schema rather than the source, because AGENTS.md also
+    /// says not to infer the published text by grepping.
+    #[test]
+    fn no_published_description_is_a_note_to_ourselves() {
+        let schema = tool(GitConfig::read_only()).expect("config").schema();
+        // Internal vocabulary: types, modules and fields an agent cannot
+        // resolve, and second-person instructions aimed at this codebase.
+        const INTERNAL: &[&str] = &[
+            "ToolArgs",
+            "to_argv",
+            "args.positional",
+            "tool.rs",
+            "clap",
+            "do not read this field",
+        ];
+        let mut checked = 0usize;
+        for leaf in &schema.subcommands {
+            for param in &leaf.params {
+                let lowered = param.description.to_lowercase();
+                for needle in INTERNAL {
+                    assert!(
+                        !lowered.contains(&needle.to_lowercase()),
+                        "'git {} --{}' publishes '{}' to agents: {:?}",
+                        leaf.name,
+                        param.name,
+                        needle,
+                        param.description
+                    );
+                }
+                checked += 1;
+            }
+        }
+        // Negative control: a guard that only ever proves absence passes
+        // vacuously over an empty schema. The `operands` sink is the param
+        // that carried the defect, so prove it is present and described.
+        assert!(checked >= 6, "only {checked} params checked — schema is empty?");
+        for leaf in &schema.subcommands {
+            let operands = leaf
+                .params
+                .iter()
+                .find(|p| p.name == "operands")
+                .unwrap_or_else(|| panic!("'git {}' publishes no operands param", leaf.name));
+            assert!(
+                operands.description.contains("git "),
+                "'git {}' operands must show the spelling an agent types: {:?}",
+                leaf.name,
+                operands.description
+            );
+        }
+    }
+
     /// The schema and the leaf parsers are two hand-maintained lists, and
     /// `help git` is nearly everything an embedded agent learns about this
     /// tool. This fails the moment they disagree: every flag the schema

@@ -95,11 +95,14 @@ pub(crate) struct StatusArgs {
     #[command(flatten)]
     pub global: GlobalFlags,
 
-    /// Bound so clap can accept the `--`-terminated tail `ToolArgs::to_argv()`
-    /// always emits. The real operands are read off `args.positional` in
-    /// `tool.rs` — the kernel's own convention, because `to_argv` inserts a
-    /// `--` of its own and clap cannot tell it from the caller's. Do not read
-    /// this field; it cannot distinguish them either.
+    /// Paths to restrict the report to, the same pathspecs `--path` takes:
+    /// `git status -- src tests`. `git status` takes no revision, so every
+    /// operand is a path whether or not it follows `--`.
+    // Bound so clap accepts the `--`-terminated tail `ToolArgs::to_argv()`
+    // always emits. The real operands are read off `args.positional` in
+    // `tool.rs` — the kernel's own convention, because `to_argv` inserts a
+    // `--` of its own and clap cannot tell it from the caller's. Do not read
+    // this field; it cannot distinguish them either.
     #[arg(hide = true)]
     pub operands: Vec<String>,
 }
