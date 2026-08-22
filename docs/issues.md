@@ -400,6 +400,29 @@ untouched here (out of scope for a padding-guard PR, and neither has a
   [`docs/design/publishing.md`](design/publishing.md) — Amy's call, not made
   here.
 
+## git — the embedder boundary
+
+- **G6 — "mount the common dir" may be a wider grant than the git verbs need.**
+  Raised by kaibo on 2026-08-22 from a measured case, not a hypothetical. A
+  linked worktree whose main repository is outside the allowed set is refused
+  with exit 4 at `screen_gitdir_file` (`repo.rs:138`), and the fix we tell the
+  embedder is to mount the common git dir too. For an embedder whose allowed
+  set doubles as its **kaish mount table** — kaibo's does — that single grant
+  also makes `.git` readable to the model-facing shell: `cat`, `grep`,
+  packfiles, reflogs, every branch's history. The git verbs need read access to
+  the object store; the shell does not need it as a side effect.
+
+  kaibo is explicit that the conflation is theirs and not ours to design
+  around, and this is **not** scheduled. It is recorded because the shape
+  recurs: if a second embedder reports it, the answer is a narrower grant than
+  a mount — a path the git tool may read that is not a shell mount root — and
+  that is a `GitConfig` question, possibly a kaish `ToolCtx` one. Do not build
+  it on one report; the shape of the second ask should decide it, the way
+  CU46b is being held for curl.
+
+  Cost disclosure belongs in `docs/embedding-git.md` regardless, and is in
+  scope for PR 8.
+
 ## curl — deferred (see docs/curl.md)
 
 `kaish-tools-curl` ships native first (kaijutsu); the rest is parked here.
