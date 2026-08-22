@@ -187,6 +187,54 @@ const VERB_MATRIX: &[(&str, &[&[&str]])] = &[
             &["--repo", "/mnt/wt-side", "--json"],
         ],
     ),
+    (
+        "branch",
+        &[
+            // The plain listing: refs read, no commit decoded.
+            &[],
+            &["--json"],
+            // Both other namespaces, which read `refs/remotes/` as well.
+            &["--remote", "--json"],
+            &["--all", "--json"],
+            // The two filters, each of which walks history — the heaviest
+            // object traffic this verb generates, and where a naive peel
+            // could rewrite `packed-refs`.
+            &["--contains", "HEAD~1", "--json"],
+            &["--merged", "HEAD", "--json"],
+            // The counts, which walk both sides of every reported branch.
+            &["--ahead-behind", "--json"],
+            // Truncation, and the counts under it.
+            &["--limit", "1"],
+            &["--ahead-behind", "--limit", "1", "--json"],
+            // A linked worktree resolves refs through the common dir.
+            &["--repo", "/mnt/wt-side", "--json"],
+        ],
+    ),
+    (
+        "tag",
+        &[
+            &[],
+            &["--json"],
+            // Peeling an annotated tag reads the tag object.
+            &["--contains", "HEAD~1", "--json"],
+            &["--limit", "1"],
+            &["--repo", "/mnt/wt-side", "--json"],
+        ],
+    ),
+    (
+        "worktree list",
+        &[
+            // Reads every registration under `<common>/worktrees/`, plus each
+            // one's private HEAD — a second place a worktree-aware verb could
+            // write.
+            &[],
+            &["--json"],
+            &["--limit", "1"],
+            // From inside the linked worktree, which resolves the same set
+            // through a private git dir.
+            &["--repo", "/mnt/wt-side", "--json"],
+        ],
+    ),
 ];
 
 /// The invocations that exist only under the `textdiff` feature.
@@ -225,7 +273,7 @@ const TEXTDIFF_MATRIX: &[(&str, &[&[&str]])] = &[(
 /// as a bare positional.
 const VALUE_FLAGS: &[&str] = &[
     "repo", "rev", "limit", "path", "since", "until", "author", "untracked", "from", "to",
-    "context",
+    "context", "contains", "merged",
 ];
 
 /// Flags that never take a value — a bare `--flag`. Every long flag used
@@ -246,6 +294,9 @@ const BOOL_FLAGS: &[&str] = &[
     "name-only",
     "find-renames",
     "no-find-renames",
+    "all",
+    "remote",
+    "ahead-behind",
 ];
 
 /// Split an argv slice into the `ToolArgs` the kernel would have built.
@@ -260,7 +311,11 @@ const BOOL_FLAGS: &[&str] = &[
 /// operands, and `log`'s bare-positional revision, all take this path.
 fn tool_args(verb: &str, argv: &[&str]) -> ToolArgs {
     let mut args = ToolArgs::new();
-    args.positional.push(Value::String(verb.to_string()));
+    // A verb can be two words (`worktree list`), and the kernel binds each as
+    // its own positional — the same way it splits the command line.
+    for word in verb.split_whitespace() {
+        args.positional.push(Value::String(word.to_string()));
+    }
     let mut i = 0;
     while i < argv.len() {
         let token = argv[i];

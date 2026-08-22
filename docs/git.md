@@ -393,6 +393,145 @@ cut is marked **`hunks_capped`**, with its counts still exact. A file over
 `null` — nothing was read, so there is nothing to count. Two caps, two flags,
 one question each.
 
+## `git branch` and `git tag` — what the built verbs do
+
+The design is [architecture.md B.7](design/architecture.md#b7-git-branch--git-tag);
+this is what shipped. Listing only — creation belongs to the commit profile.
+
+```sh
+kaish> git branch                                 # local branches
+kaish> git branch --all --json                    # local and remote-tracking
+kaish> git branch --contains 1a2b3c4              # which branches carry a fix
+kaish> git branch --merged main                   # what is already in main
+kaish> git branch --ahead-behind                  # counts against each upstream
+kaish> git tag                                    # every tag
+kaish> git tag --contains v0.1.0 --json           # tags descended from a tag
+```
+
+The text surface:
+
+```
+BRANCH          OID      UPSTREAM
+  feature/side  1b716f1
+* main          d0467d0  origin/main [ahead 1, behind 1]
+  old           26c410d  origin/main
+```
+
+**A branch row** is `{name, kind, oid, is_head, upstream, upstream_gone,
+ahead, behind}`. `kind` is `local` or `remote`, and the name has its namespace
+prefix removed — `main`, `origin/main`. `upstream` is the short name git's
+`branch.<name>.remote` plus `branch.<name>.merge` plus the remote's `fetch`
+refspec resolve to; it is reported whether or not that ref exists, and
+`upstream_gone` says which, the way git renders `[gone]`.
+
+**A tag row** is `{name, oid, kind, target_oid, target_kind, tagger,
+message_summary}`. The two oids are the pair git's `%(objectname)` and
+`%(*objectname)` name: `oid` is the object the ref points at, `target_oid` is
+what it ultimately points at once every tag object in the chain is peeled.
+For a lightweight tag they are equal and `kind` is `lightweight`; there is no
+tagger and no message, because there is no tag object to carry them.
+
+### Cost, and why `--ahead-behind` is opt-in
+
+**A plain listing reads refs and decodes no commit.** `commits_examined` in
+`--json` is 0, and that is the number to watch: it reports how many commit
+objects the invocation read, and three flags make it non-zero.
+
+- **`--contains` and `--merged` are filters.** A filter has to judge every
+  candidate ref *before* `--limit` truncates, or the truncation would cut rows
+  the filter never looked at. Lowering `--limit` therefore does not lower
+  their cost. `--contains` memoizes per commit, so asking it of forty branches
+  costs the union of their histories, not the sum.
+- **`--ahead-behind` is decoration**, so it runs only on the rows that survive
+  truncation, and lowering `--limit` does lower its cost. It reads each
+  reported branch's history and its upstream's, to the roots. That is more
+  than the divergence, and it is deliberate: the cheaper walk stops at the
+  common part in commit-time order, which is only correct if committer time
+  increases from parent to child. It does not have to — a scripted import
+  gives every commit one instant, and a clock can run backwards — and the
+  cheap walk answered `behind 2` where git answers 1 in both cases. Exact
+  counts cost the full read.
+
+Every one of those walks is metered against a shared budget of **100,000
+commit reads per invocation**. Passing it is a **refusal**, exit 1, naming the
+limit — not a shorter listing. A filter that gave up looking would report a
+branch as not matching, which is a wrong answer wearing a success code.
+
+### What they do not do
+
+- **No sort or filter flags beyond the ones listed.** No `--sort`, no
+  `--points-at`, no glob pattern. Rows come back in full-refname order, which
+  puts `refs/heads/` before `refs/remotes/` and sorts alphabetically inside
+  each.
+- **`git branch` does not mark a branch checked out in another working tree.**
+  Git prints `+` for that; `git worktree list`'s `branch` column is where it
+  lives here.
+- **`refs/remotes/<remote>/HEAD` is named `origin/HEAD`**, not `origin` — a
+  deliberate divergence from git's `%(refname:short)`, which shortens that one
+  ref to the bare remote name. `origin` reads like a branch called origin.
+- **A lightweight tag's `message_summary` is `null`.** Git's
+  `%(contents:subject)` falls back to the *target commit's* subject there,
+  which is a line nobody wrote about the tag.
+
+`git worktree list` has one divergence of its own: **a bare repository is not
+a row.** Git lists the bare git directory with a `bare` marker; a bare
+repository has no working tree, so this listing reports only the linked
+worktrees it owns.
+
+## `git worktree list` — what the built verb does
+
+The design is [architecture.md B.9](design/architecture.md#b9-git-worktree-list).
+Read-side enumeration is genuinely read-only, so it ships in the read profile
+even though create, remove, lock and prune wait on the ledger.
+
+```sh
+kaish> git worktree list
+kaish> git worktree list --json
+```
+
+`worktree` is a group rather than a verb: a bare `git worktree` is a usage
+error naming what the group holds. The text surface:
+
+```
+PATH                  HEAD                  STATE
+/mnt/repo             main
+/mnt/repo/nested/wt   wt-inside-branch
+/mnt/wt-locked        wt-locked-branch      locked: held for review
+/mnt/wt-gone          wt-gone-branch        prunable: the working tree directory no longer exists
+```
+
+A row is `{name, path_real, path_vfs, head_oid, branch, locked, lock_reason,
+prunable, prunable_reason}`. The main working tree comes first and has
+`name: null` — it has no registration under `.git/worktrees/`. The linked ones
+follow in **path** order, which is git's own; a registration's name and its
+path can disagree after a `git worktree move`.
+
+### The two nulls, and what they mean
+
+**`path_vfs` is `null` when the working tree is outside every mount.** An
+agent should be told when it cannot reach a path it can see, rather than
+handed a VFS path that resolves to something else.
+
+**`prunable` is `null` for the same worktree**, and that is the part worth
+reading twice. Deciding whether a registration outlived its directory means
+stat-ing a path the *repository* chose, and answering that for a path outside
+the mount is one bit about an arbitrary host path, per registration — the
+existence oracle this crate's containment refuses everywhere else. So the row
+names the path and says it did not look.
+
+Everything else on the row still comes through, because all of it lives under
+the common dir, inside the mount: the registration name, the branch, the HEAD
+oid, the lock and its reason. Each of those files is opened through the same
+ceiling check `git info` uses, so a `gitdir` or `HEAD` symlinked out of the
+mount is refused rather than followed.
+
+The same null covers a worktree that *is* inside the mount but whose `.git` is
+a symlink pointing out of it. The recorded path is walked one component at a
+time from the mount root, and every component — the `.git` leaf included — is
+classified before it is traversed: a symlink that stays inside is followed, and
+one that escapes or dangles ends the walk with the identical answer, so neither
+can be told from the other.
+
 ## Non-goals
 
 - Reimplementing git porcelain faithfully (use real git via `subprocess` for that).

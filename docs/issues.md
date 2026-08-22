@@ -138,14 +138,27 @@ fixture asserted against real `git status --porcelain` before fixing.
   (`big_repo.rs::log_oid_sequence_matches_git_at_several_limits`,
   `KAISH_GIT_BIG_REPO=$HOME/src/kaish`, 2026-08-21): two merge commits
   (`f8c1b508`, `3a74e505`), neither an ancestor of the other, share the exact
-  same committer instant to the second. Git's walk orders them one way; our
-  walk (a `BinaryHeap` keyed on committer time alone, log.rs) has no secondary
-  tiebreaker, so a tie resolves however the heap's internal structure happens
-  to pop it — not necessarily git's order. Narrow (needs two unrelated
-  same-second commits) but real: fast scripted merges, sub-second-granularity
-  clocks, or a CI-driven series can all produce one. Fix wants a tiebreaker
-  that matches git's own (likely a form of insertion/discovery order along the
-  walk) added to `Pending`'s ordering.
+  same committer instant to the second. Git's walk orders them one way; ours
+  orders them another.
+
+  **The cause recorded here on 2026-08-21 was wrong, and is corrected
+  2026-08-22 (PR 7).** It said the `BinaryHeap` is "keyed on committer time
+  alone" and "has no secondary tiebreaker". It has one: `Pending::cmp` in
+  `log.rs` breaks a tie on the oid, and has since 2026-08-13 (`4495cb0`), a
+  week before the finding was written. So the order is *deterministic* — the
+  same repository answers the same way twice, which the original text says it
+  would not — it is just **not git's** order. Git resolves the tie by its own
+  discovery order along the walk; we resolve it by hash. Narrow (needs two
+  unrelated same-second commits) but real: fast scripted merges,
+  sub-second-granularity clocks, or a CI-driven series can all produce one.
+  The fix is still a tiebreaker matching git's, added to `Pending`'s ordering.
+
+  **It does not reach `git branch` or `git tag` (checked in PR 7).**
+  `--contains` and `--merged` are boolean ancestry predicates, which no
+  ordering can move, and `--ahead-behind` counts rather than orders — and its
+  walk was deliberately made order-independent for a different reason (**B1**).
+  Nothing in those verbs sorts by commit time at all: rows come back in
+  full-refname order.
 
 - **L6 — `--stat` line counts can differ from `git show --numstat` by a small
   amount on a real diff.** Found against three real repositories via
@@ -292,6 +305,158 @@ fixture asserted against real `git status --porcelain` before fixing.
   cheaper of the two to add, and B.5 already specifies `--name-only`,
   `--stat` and `--patch` for `show` as one group. Pinned by
   `textdiff.rs::log_patch_points_at_diff_patch_rather_than_at_the_feature`.
+
+## git branch / tag / worktree list — deferred (architecture.md B.7, B.9, shipped in PR 7)
+
+- **B1 — `--ahead-behind` reads both histories to their roots, rather than
+  stopping at the common part.** The cheap version of this walk pops commits
+  newest-first and stops as soon as everything queued is reachable from both
+  sides, which makes its cost proportional to the *divergence* instead of to
+  the history. It is only sound if a commit is popped after every commit that
+  reaches it — that is, if committer time increases from parent to child —
+  and it does not have to. Written that way first and caught by two fixtures:
+  `RefsRepo` pins one committer instant across its whole history, and the
+  early-stopping walk reported `behind 2` where `git rev-list --left-right
+  --count` reports 1; a fixture whose merge base is stamped seven months after
+  both tips did the same. Git makes the same assumption and softens it with a
+  slop counter (`paint_down_to_common`'s `SLOP = 5`); we do not, so the walk
+  we ship is order-independent and exact and reads
+  `|ancestors(local) ∪ ancestors(upstream)|` commits per reported branch.
+  Both properties are asserted rather than described
+  (`branch.rs::a_backwards_committer_clock_does_not_move_the_counts`,
+  `branch.rs::a_history_with_one_committer_instant_still_counts_correctly`).
+  Making it cheap again wants either commit-graph generation numbers or git's
+  slop, and neither is worth doing before a real repository makes the cost
+  hurt. Same family as **L5**, and the reason L5 does not reach this verb: L5
+  is about a *reported order*, this is about a *count*, and nothing here
+  depends on order any more.
+
+- **B2 — `refs/remotes/<remote>/HEAD` is named `origin/HEAD`, where git's
+  `%(refname:short)` says `origin`.** Git shortens that one ref to the bare
+  remote name, which reads like a branch called `origin` sitting beside
+  `origin/main`. We strip the namespace prefix uniformly instead. Deliberate,
+  and pinned in both directions by
+  `branch.rs::a_symbolic_remote_head_is_named_by_its_ref_not_by_its_remote`,
+  which asserts git's answer as well as ours. Revisit only if an embedder
+  reports a caller comparing our names against `git branch -r` output.
+
+- **B3 — a lightweight tag's `message_summary` is `null`, where git's
+  `%(contents:subject)` reports the target commit's subject.** A lightweight
+  tag has no tag object, so it has no message; git's fallback hands back a
+  line nobody wrote about the tag, which for an agent reading a tag listing
+  is worse than an absent field. Deliberate, and pinned with git's own answer
+  asserted beside ours in
+  `tag.rs::annotation_is_reported_only_where_there_is_one`.
+
+- **B4 — `--contains` and `--merged` cost history that `--limit` does not
+  bound.** Same family as **G7-G10**, and the same cause: a filter has to
+  judge every candidate before truncation, or the truncation cuts rows the
+  filter never looked at. `--contains` memoizes reachability per commit across
+  every ref asked, so N branches cost the union of their histories rather than
+  the sum; `--merged` builds one ancestor set for the named revision, so it is
+  one full-history walk however many branches are listed. Neither falls when
+  `--limit` falls, and the test that pins `--ahead-behind`'s cost *does* fall
+  asserts this half stays flat
+  (`branch.rs::the_limit_bounds_the_ahead_behind_cost_because_it_runs_first`).
+  What is different from G7-G10, and worth stealing: the cost is **reported**.
+  `commits_examined` is on every `branch`/`tag` result, it is 0 for a listing
+  that walks nothing, and a shared per-invocation budget of 100,000 commit
+  reads (`reach.rs`'s `MAX_ANCESTRY_COMMITS`) turns the unbounded case into a
+  refusal (exit 1) instead of a stall. The same treatment would suit `status`
+  and `diff`'s worktree hashing, which today have neither a counter nor a cap.
+
+- **B5 — `git branch` does not mark a branch checked out in another working
+  tree.** Git prints `+` beside it (and refuses to delete it). We have the
+  information — `git worktree list` reads every registration's private HEAD —
+  but the branch row has no field for it, and adding one means `branch`
+  reading the worktree registrations on every plain listing, which is exactly
+  the kind of cost B4 is about. `git worktree list`'s `branch` column answers
+  the same question for the price of a second call. Not scheduled.
+
+- **B6 — `worktree list` skips a registration it cannot interpret, rather than
+  reporting it.** A `gitdir` file whose contents are not an absolute path
+  ending in `.git` names no working tree we can report without inventing one,
+  so the row is left out. Three shapes reach it: a relative path (git's
+  `relativeworktrees` extension, which `repo.rs` refuses to open a repository
+  under at all), a path not ending in `.git`, and an empty file. Refusing the
+  whole listing would let one bad registration hide every good one; a row with
+  a guessed path would be worse. What is missing is a *count* of what was
+  skipped, so a caller can tell "no such worktree" from "we could not read
+  it". Pinned as unit cases in `verbs/worktree.rs`; add the count if an
+  embedder ever asks.
+
+- **B7 — a bare repository is not a row in `git worktree list`.** Git lists
+  the bare git directory as a worktree with a `bare` marker; we list only the
+  linked worktrees it owns. A bare repository has no working tree, so leaving
+  it out of a listing *of working trees* is defensible — but it is a
+  divergence, and B.9's row shape has no `bare` field to carry it if we ever
+  want parity. Pinned with git's own answer asserted beside ours in
+  `worktree.rs::a_bare_repository_lists_its_linked_worktrees_and_not_itself`.
+  The neighbouring case is worse and is not a divergence anybody has hit: a
+  repository whose git directory is named something other than `.git` *does*
+  have a working tree, and it is missing from the listing. That one needs the
+  `core.worktree` handling this build does not have.
+
+## git blame — deferred, and a good contribution-sized piece
+
+**BL1 — `git blame` is designed and unbuilt.** It was scoped into PR 7 with
+the three listing verbs and dropped before any of it was written. The reason
+is plain and worth writing down rather than dressing up: this maintainer
+almost never uses blame, so it is low value for the first embedders, and it is
+a well-shaped piece for someone who does want it. Nothing about it is blocked.
+
+**The design is already written** —
+[architecture.md B.8](design/architecture.md#b8-git-blame) — and it should be
+followed rather than redesigned:
+
+- `git blame <PATH> [--rev <REV>] [--lines <A:B>] [--limit <N>]`. `<PATH>` is
+  a required positional; `--rev` defaults to `HEAD`; `--lines` is 1-based
+  inclusive and is the **whole** range grammar — `-L`'s regex and offset forms
+  do not exist and should be a parse-time refusal naming the spelling that
+  does; `--limit` defaults to 2000 lines.
+- Rows are `{line, oid, short_oid, author, time, orig_line, text}`.
+- Three honesty requirements, in the payload rather than in prose:
+  `blamed_rev` naming the committed revision actually annotated,
+  `worktree_differs: true|false` with a stderr note when true (blame is
+  committed-content-only, and neither refusing nor quietly annotating stale
+  content is honest), and `follows_renames: false`.
+
+**It is hand-composed here.** `gix-blame` is not available to this crate:
+architecture.md A.2 explains why this build uses gitoxide's plumbing crates
+and skips the `gix` facade, and blame is one of the two verbs that costs. The
+shape is a revwalk from `--rev`, a path-limited tree diff per commit against
+its first parent, and line mapping across each commit that touched the path.
+`verbs/log.rs`'s walk and `diffcore.rs`'s `flatten_tree` / `line_hunks` are
+the pieces to build on; `reach.rs`'s `Budget` is the metering to reuse.
+
+**Two things make it harder than the row shape suggests**, and a contributor
+should know both before starting:
+
+1. **Nothing can interrupt it.** architecture.md E.3 names `ctx.patient(budget)`
+   as the answer to a slow read, and `grep -rn patient src/` finds no call
+   site anywhere in this crate (see the `git log` entry above). A slow blame
+   runs to completion.
+2. **`--limit` bounds lines; the cost is commits.** A 40-line file with two
+   thousand commits behind it is expensive, and `--limit 10` does not make it
+   cheaper — the revwalk is what costs, and it is driven by the path's
+   history, not by how many rows are wanted. Say that plainly in the flag's
+   own published description rather than letting "max lines" imply a bound it
+   does not provide. `reach.rs`'s pattern is the one to copy: meter the walk,
+   report what it spent (`commits_examined`), and refuse rather than truncate
+   when the budget runs out. This is the **G7-G10 / B4** family; add to it
+   rather than restating it.
+
+**A sub-gap, not a blocker for a first version:** rename-following across
+paths (kaish-extras#11). B.8 is explicit that this is a *different* gap from
+B.4's exact-match renames — that one is permanent under this dependency set,
+this one waits on a rename-aware primitive existing at the plumbing level at
+all. A first blame that reports `follows_renames: false` and stops at the
+rename is the right first version.
+
+**What lands with it:** an entry in `Verb`/`Verb::ALL`, a `VERB_MATRIX` entry
+in `tests/readonly_fingerprint.rs`, a mention in `docs/embedding-git.md` (the
+`the_embedding_guide_names_every_verb` guard enforces it), an `EXAMPLES`
+entry, and a differential test against `git blame --line-porcelain`.
 
 ## git — what the tool schema actually publishes (read from the schema, 2026-08-22)
 

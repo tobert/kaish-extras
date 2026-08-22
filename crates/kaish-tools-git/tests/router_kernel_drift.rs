@@ -177,8 +177,15 @@ async fn a_disabled_verb_is_absent_from_help_and_a_negative_control_verb_is_pres
         assert_eq!(result.code, 0, "help git failed: {}", result.err);
         let text = result.text_out();
 
+        // The needle is the command spelling, not the bare verb name. A bare
+        // name is a substring of other text `help git` legitimately prints —
+        // `--staged` contains "tag", which failed this test the day `Verb::Tag`
+        // landed. Every example is `git <verb> ...`, so "git tag" is present
+        // exactly when a tag example survived filtering, which is the property
+        // this asserts.
+        let spelling = |verb: &Verb| format!("git {}", verb.as_str());
         assert!(
-            !text.contains(disabled.as_str()),
+            !text.contains(&spelling(disabled)),
             "help git must not mention the disabled verb {:?}: {text}",
             disabled
         );
@@ -189,7 +196,7 @@ async fn a_disabled_verb_is_absent_from_help_and_a_negative_control_verb_is_pres
                 continue;
             }
             assert!(
-                text.contains(enabled.as_str()),
+                text.contains(&spelling(enabled)),
                 "help git dropped the still-enabled verb {:?} while {:?} was \
                  disabled: {text}",
                 enabled,

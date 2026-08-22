@@ -490,6 +490,27 @@ pub enum GitError {
     /// The repository is on disk but malformed, or a file we must read is
     /// unreadable. Exit 1 — a git-level failure about this repository, not a
     /// statement about the environment.
+    /// An ancestry question read more commits than this build will spend on
+    /// one invocation. Exit 1 — a git-level "not in this repository", the same
+    /// class as [`GitError::TreeTooDeep`].
+    ///
+    /// A refusal rather than a partial answer, because `--contains`,
+    /// `--merged` and `--ahead-behind` have no partial form: a branch dropped
+    /// because the walk gave up looking would read as a branch that does not
+    /// match.
+    #[error(
+        "git {operation}: answering this needed more than {limit} commits of \
+         history, so nothing was reported rather than part of it. Ask without \
+         --contains / --merged / --ahead-behind for the listing itself, which \
+         reads no history"
+    )]
+    AncestryBudgetExhausted {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The commit-read limit this build enforces.
+        limit: u64,
+    },
+
     #[error("git {operation}: {what} at '{path}': {source}")]
     Repository {
         /// The verb that was asked for.
@@ -534,6 +555,7 @@ impl GitError {
             | GitError::NoSuchRevision { .. }
             | GitError::AmbiguousRevision { .. }
             | GitError::NotATree { .. }
+            | GitError::AncestryBudgetExhausted { .. }
             | GitError::NoSuchPath { .. } => 1,
             GitError::Usage { .. }
             | GitError::NoVerb { .. }

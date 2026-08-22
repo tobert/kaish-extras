@@ -9,8 +9,8 @@
 use kaish_types::{OutputData, OutputNode};
 
 use crate::model::{
-    CommitInfo, DiffEndpoint, DiffFile, DiffReport, EntryStatus, LogReport, LsReport, RepoInfo,
-    ShowTag, StatusReport, TreeRow,
+    BranchReport, CommitInfo, DiffEndpoint, DiffFile, DiffReport, EntryStatus, LogReport, LsReport,
+    RepoInfo, ShowTag, StatusReport, TagKind, TagReport, TreeRow, WorktreeReport,
 };
 
 /// Render [`RepoInfo`] as a `FIELD`/`VALUE` table carrying the full object as
@@ -484,4 +484,141 @@ fn summary_line(report: &DiffReport) -> String {
     }
     line.push('\n');
     line
+}
+
+/// Render a [`BranchReport`] as one row per branch (B.7), carrying the full
+/// model as `rich_json`.
+///
+/// The text surface is `git branch -vv`'s shape: the checked-out branch is
+/// marked, the oid is shortened to scan, and the upstream carries its
+/// ahead/behind counts when they were asked for. `--json` has the full oid and
+/// each count as its own field.
+pub fn branch(report: &BranchReport) -> OutputData {
+    let rows: Vec<OutputNode> = report
+        .branches
+        .iter()
+        .map(|b| {
+            let name = if b.is_head {
+                format!("* {}", b.name)
+            } else {
+                format!("  {}", b.name)
+            };
+            let upstream = match (&b.upstream, b.upstream_gone) {
+                (Some(u), true) => format!("{u} (gone)"),
+                (Some(u), false) => match (b.ahead, b.behind) {
+                    (Some(a), Some(behind)) => format!("{u} [ahead {a}, behind {behind}]"),
+                    _ => u.clone(),
+                },
+                (None, _) => String::new(),
+            };
+            OutputNode::new(name).with_cells(vec![short(&b.oid), upstream])
+        })
+        .collect();
+
+    let table = OutputData::table(
+        vec!["BRANCH".to_string(), "OID".to_string(), "UPSTREAM".to_string()],
+        rows,
+    );
+    attach(table, report, "git branch")
+}
+
+/// Render a [`TagReport`] as one row per tag (B.7), carrying the full model as
+/// `rich_json`.
+///
+/// The text surface shows what the tag ultimately points at, because that is
+/// the oid a caller goes on to use; `--json` carries the tag object's own oid
+/// beside it, along with the tagger and the message summary.
+pub fn tag(report: &TagReport) -> OutputData {
+    let rows: Vec<OutputNode> = report
+        .tags
+        .iter()
+        .map(|t| {
+            OutputNode::new(t.name.clone()).with_cells(vec![
+                short(&t.target_oid),
+                match t.kind {
+                    TagKind::Lightweight => "lightweight".to_string(),
+                    TagKind::Annotated => "annotated".to_string(),
+                },
+                t.message_summary.clone().unwrap_or_default(),
+            ])
+        })
+        .collect();
+
+    let table = OutputData::table(
+        vec![
+            "TAG".to_string(),
+            "TARGET".to_string(),
+            "KIND".to_string(),
+            "SUMMARY".to_string(),
+        ],
+        rows,
+    );
+    attach(table, report, "git tag")
+}
+
+/// Render a [`WorktreeReport`] as one row per working tree (B.9), carrying the
+/// full model as `rich_json`.
+///
+/// The path column is the VFS path when there is one, because that is the path
+/// the caller can act on; a working tree outside every mount shows its real
+/// path with a marker saying it cannot be reached from here, rather than a
+/// blank that reads like missing data.
+pub fn worktree_list(report: &WorktreeReport) -> OutputData {
+    let rows: Vec<OutputNode> = report
+        .worktrees
+        .iter()
+        .map(|w| {
+            let path = match &w.path_vfs {
+                Some(vfs) => vfs.clone(),
+                None => format!("{} (outside every mount)", w.path_real),
+            };
+            let head = match (&w.branch, &w.head_oid) {
+                (Some(branch), _) => branch.clone(),
+                (None, Some(oid)) => format!("detached at {}", short(oid)),
+                (None, None) => "unborn".to_string(),
+            };
+            let mut state = Vec::new();
+            if w.locked {
+                state.push(match &w.lock_reason {
+                    Some(reason) => format!("locked: {reason}"),
+                    None => "locked".to_string(),
+                });
+            }
+            match w.prunable {
+                Some(true) => state.push(match &w.prunable_reason {
+                    Some(reason) => format!("prunable: {reason}"),
+                    None => "prunable".to_string(),
+                }),
+                Some(false) => {}
+                None => state.push("not examined".to_string()),
+            }
+            OutputNode::new(path).with_cells(vec![head, state.join("; ")])
+        })
+        .collect();
+
+    let table = OutputData::table(
+        vec!["PATH".to_string(), "HEAD".to_string(), "STATE".to_string()],
+        rows,
+    );
+    attach(table, report, "git worktree list")
+}
+
+/// The first 7 hex characters of an oid — the width `git log --oneline` uses.
+fn short(oid: &str) -> String {
+    oid.chars().take(7).collect()
+}
+
+/// Attach a serialized model to a table as `rich_json`.
+///
+/// A model of owned scalars cannot fail to serialize in practice; the table is
+/// still a correct answer, and losing `--json` silently would be worse than
+/// saying so.
+fn attach<T: serde::Serialize>(table: OutputData, model: &T, what: &str) -> OutputData {
+    match serde_json::to_value(model) {
+        Ok(json) => table.with_rich_json(json),
+        Err(e) => {
+            tracing::warn!(error = %e, "{what}: could not build the --json payload");
+            table
+        }
+    }
 }

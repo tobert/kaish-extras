@@ -216,6 +216,18 @@ name = "textdiff"
 path = "tests/textdiff.rs"
 
 [[test]]
+name = "branch"
+path = "tests/branch.rs"
+
+[[test]]
+name = "tag"
+path = "tests/tag.rs"
+
+[[test]]
+name = "worktree"
+path = "tests/worktree.rs"
+
+[[test]]
 name = "write_shaped_identifiers"
 path = "tests/write_shaped_identifiers.rs"
 

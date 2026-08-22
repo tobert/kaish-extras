@@ -814,6 +814,206 @@ impl GitTool {
         result.baggage.insert("git.repo".to_string(), repo_root);
         result
     }
+
+    #[tracing::instrument(
+        level = "info",
+        name = "git.verb",
+        skip_all,
+        fields(verb = "branch", repo)
+    )]
+    async fn run_branch(
+        &self,
+        args: ToolArgs,
+        consumed: usize,
+        ctx: &mut dyn ToolCtx,
+    ) -> ExecResult {
+        const OP: &str = "branch";
+        if let Err(e) = verb_enabled(&self.config, Verb::Branch, OP) {
+            return failure(e);
+        }
+
+        let parsed = match parse_leaf::<verbs::branch::BranchArgs>(&args, consumed, OP) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+
+        if let Err(e) = no_operands(OP, &operands(&args, consumed)) {
+            return failure(e);
+        }
+
+        let resolved = match resolve_repo_paths(OP, ctx, parsed.repo.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return failure(e),
+        };
+        tracing::Span::current().record("repo", tracing::field::display(resolved.real.display()));
+
+        // clap's `conflicts_with` refuses `--all --remote`, so the pair is
+        // unreachable and the default is the local namespace alone.
+        let scope = match (parsed.all, parsed.remote) {
+            (true, _) => verbs::branch::Scope::All,
+            (false, true) => verbs::branch::Scope::Remote,
+            (false, false) => verbs::branch::Scope::Local,
+        };
+        // The embedder's `max_rows` is a hard cap; `--limit` may only lower it.
+        let limit = parsed.limit.min(self.config.limits().max_rows);
+        let contains = parsed.contains.clone();
+        let merged = parsed.merged.clone();
+        let ahead_behind = parsed.ahead_behind;
+
+        let outcome = block_in_place_compat(move || {
+            let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
+            let opts = verbs::branch::BranchOptions {
+                scope,
+                contains,
+                merged,
+                ahead_behind,
+                limit,
+            };
+            let root = repo.root().display().to_string();
+            verbs::branch::run(&repo, &opts).map(|model| (model, root))
+        });
+
+        let (model, repo_root) = match outcome {
+            Ok(pair) => pair,
+            Err(e) => return failure(e),
+        };
+
+        let mut result = ExecResult::with_output(crate::render::branch(&model));
+        if model.truncated {
+            result.err = format!(
+                "git branch: output truncated at {} branches (--limit); \
+                 'truncated' is true in --json",
+                model.branches.len()
+            );
+        }
+        result.baggage.insert("git.repo".to_string(), repo_root);
+        result
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        name = "git.verb",
+        skip_all,
+        fields(verb = "tag", repo)
+    )]
+    async fn run_tag(&self, args: ToolArgs, consumed: usize, ctx: &mut dyn ToolCtx) -> ExecResult {
+        const OP: &str = "tag";
+        if let Err(e) = verb_enabled(&self.config, Verb::Tag, OP) {
+            return failure(e);
+        }
+
+        let parsed = match parse_leaf::<verbs::tag::TagArgs>(&args, consumed, OP) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+
+        if let Err(e) = no_operands(OP, &operands(&args, consumed)) {
+            return failure(e);
+        }
+
+        let resolved = match resolve_repo_paths(OP, ctx, parsed.repo.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return failure(e),
+        };
+        tracing::Span::current().record("repo", tracing::field::display(resolved.real.display()));
+
+        let limit = parsed.limit.min(self.config.limits().max_rows);
+        let contains = parsed.contains.clone();
+
+        let outcome = block_in_place_compat(move || {
+            let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
+            let opts = verbs::tag::TagOptions { contains, limit };
+            let root = repo.root().display().to_string();
+            verbs::tag::run(&repo, &opts).map(|model| (model, root))
+        });
+
+        let (model, repo_root) = match outcome {
+            Ok(pair) => pair,
+            Err(e) => return failure(e),
+        };
+
+        let mut result = ExecResult::with_output(crate::render::tag(&model));
+        if model.truncated {
+            result.err = format!(
+                "git tag: output truncated at {} tags (--limit); 'truncated' \
+                 is true in --json",
+                model.tags.len()
+            );
+        }
+        result.baggage.insert("git.repo".to_string(), repo_root);
+        result
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        name = "git.verb",
+        skip_all,
+        fields(verb = "worktree list", repo)
+    )]
+    async fn run_worktree_list(
+        &self,
+        args: ToolArgs,
+        consumed: usize,
+        ctx: &mut dyn ToolCtx,
+    ) -> ExecResult {
+        const OP: &str = "worktree list";
+        if let Err(e) = verb_enabled(&self.config, Verb::WorktreeList, OP) {
+            return failure(e);
+        }
+
+        let parsed = match parse_leaf::<verbs::worktree::WorktreeListArgs>(&args, consumed, OP) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+
+        if let Err(e) = no_operands(OP, &operands(&args, consumed)) {
+            return failure(e);
+        }
+
+        let resolved = match resolve_repo_paths(OP, ctx, parsed.repo.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return failure(e),
+        };
+        tracing::Span::current().record("repo", tracing::field::display(resolved.real.display()));
+
+        let limit = parsed.limit.min(self.config.limits().max_rows);
+        // B.9's `path_vfs`: each working tree is mapped back through the mount
+        // the caller reached this repository by, and one that falls outside it
+        // is reported with a null rather than a VFS path that resolves
+        // somewhere else.
+        let mount_real = resolved.mount_real.clone();
+        let mount_vfs = resolved.mount_vfs.clone();
+
+        let outcome = block_in_place_compat(move || {
+            let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
+            let opts = verbs::worktree::WorktreeListOptions {
+                limit,
+                mount_real,
+                mount_vfs,
+            };
+            let root = repo.root().display().to_string();
+            verbs::worktree::run(&repo, &opts).map(|model| (model, root))
+        });
+
+        let (model, repo_root) = match outcome {
+            Ok(pair) => pair,
+            Err(e) => return failure(e),
+        };
+
+        let mut result = ExecResult::with_output(crate::render::worktree_list(&model));
+        if model.truncated {
+            result.err = format!(
+                "git worktree list: output truncated at {} working trees \
+                 (--limit); 'truncated' is true in --json",
+                model.worktrees.len()
+            );
+        }
+        result.baggage.insert("git.repo".to_string(), repo_root);
+        result
+    }
 }
 
 /// The repo-relative, slash-separated directory of `real` within `root`, or
@@ -859,6 +1059,24 @@ impl Tool for GitTool {
         if self.config.has(Verb::Diff) {
             cmd = cmd.subcommand(verbs::diff::DiffArgs::command().name("diff"));
         }
+        if self.config.has(Verb::Branch) {
+            cmd = cmd.subcommand(verbs::branch::BranchArgs::command().name("branch"));
+        }
+        if self.config.has(Verb::Tag) {
+            cmd = cmd.subcommand(verbs::tag::TagArgs::command().name("tag"));
+        }
+        // `worktree` is a node, not a leaf: B.11's write profiles add
+        // `add`/`remove`/`lock`/`prune` beside `list` under the same word.
+        // The node exists only while it has a child — a bare `git worktree`
+        // advertising nothing it can run would be a promise this build cannot
+        // keep, which is the same rule `without_verb` follows for a leaf.
+        if self.config.has(Verb::WorktreeList) {
+            cmd = cmd.subcommand(
+                clap::Command::new("worktree")
+                    .about(WORKTREE_DESCRIPTION)
+                    .subcommand(verbs::worktree::WorktreeListArgs::command().name("list")),
+            );
+        }
         schema_tree_from_clap(
             &cmd,
             self.config.tool_name(),
@@ -883,6 +1101,21 @@ impl Tool for GitTool {
             "ls" => self.run_ls(args, consumed, ctx).await,
             "show" => self.run_show(args, consumed, ctx).await,
             "diff" => self.run_diff(args, consumed, ctx).await,
+            "branch" => self.run_branch(args, consumed, ctx).await,
+            "tag" => self.run_tag(args, consumed, ctx).await,
+            "worktree list" => self.run_worktree_list(args, consumed, ctx).await,
+            // A node with no subcommand word after it. Routing stops at the
+            // node, which is correct — the caller named a group, not a verb —
+            // and the answer names what the group holds rather than guessing
+            // which one was meant.
+            "worktree" => failure(GitError::Usage {
+                operation: "worktree",
+                message: "names a group of subcommands, not a verb. This \
+                          build has 'git worktree list'; create, remove, lock \
+                          and prune are write verbs the read profile does not \
+                          carry"
+                    .to_string(),
+            }),
             // Unreachable: `route` only returns names it found in the schema,
             // and the schema is built from the verbs this file dispatches.
             // Reached anyway means a verb was added to `schema()` without a
@@ -902,6 +1135,10 @@ impl Tool for GitTool {
 const DESCRIPTION: &str =
     "Read a git repository — shallow, safety-first, and read-only by construction";
 
+/// The `worktree` node's own description. It is a group rather than a verb,
+/// and the read profile carries one member of it.
+const WORKTREE_DESCRIPTION: &str = "Work with the repository's working trees";
+
 /// Examples the schema carries into `help git` and completion.
 ///
 /// Every example's command starts `git <verb>`, and [`examples_for`] filters
@@ -913,7 +1150,7 @@ const DESCRIPTION: &str =
 /// (`kaish-help`'s `tool_help`) shows only params and examples, never a bare
 /// subcommand list, so a verb with no example here would never be named in
 /// `help git` at all, enabled or not.
-const EXAMPLES: [(&str, &str); 10] = [
+const EXAMPLES: [(&str, &str); 17] = [
     ("What repository is this", "git info"),
     ("Inspect a specific repository", "git info --repo /mnt/repos/kaish"),
     ("Structured, for a script", "git info --json"),
@@ -924,6 +1161,13 @@ const EXAMPLES: [(&str, &str); 10] = [
     ("See the unstaged changes", "git diff"),
     ("See what is staged", "git diff --staged"),
     ("Compare two revisions under one directory", "git diff --from v0.1.0 --to HEAD -- src"),
+    ("List the branches", "git branch"),
+    ("Include remote-tracking branches", "git branch --all"),
+    ("Find which branches carry a fix", "git branch --contains 1a2b3c4"),
+    ("Count each branch against its upstream", "git branch --ahead-behind"),
+    ("List the tags", "git tag"),
+    ("Find which tags carry a fix", "git tag --contains 1a2b3c4"),
+    ("List every working tree", "git worktree list"),
 ];
 
 /// [`EXAMPLES`], narrowed to the ones whose verb this config still enables.
@@ -933,14 +1177,29 @@ const EXAMPLES: [(&str, &str); 10] = [
 /// later phasing PR, per the coordination rule with the sibling `git diff`
 /// PR — needs no change here to stay correct.
 fn examples_for(config: &GitConfig) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {
-    EXAMPLES.iter().copied().filter(move |(_, code)| {
-        // Every example is `git <verb> ...`; the second whitespace-separated
-        // word is the verb it demonstrates.
-        code.split_whitespace()
-            .nth(1)
-            .and_then(|word| Verb::ALL.iter().find(|v| v.as_str() == word))
-            .is_some_and(|verb| config.has(*verb))
-    })
+    EXAMPLES
+        .iter()
+        .copied()
+        .filter(move |(_, code)| verb_of(code).is_some_and(|verb| config.has(verb)))
+}
+
+/// The verb an example command demonstrates.
+///
+/// Matches on the longest verb name that starts the command, because a verb
+/// name can be two words (`worktree list`) and matching on the first word
+/// alone would credit `git worktree list` to a `worktree` verb that does not
+/// exist.
+fn verb_of(code: &str) -> Option<Verb> {
+    let rest = code.strip_prefix("git ")?;
+    Verb::ALL
+        .iter()
+        .filter(|verb| {
+            let name = verb.as_str();
+            rest.strip_prefix(name)
+                .is_some_and(|tail| tail.is_empty() || tail.starts_with(' '))
+        })
+        .max_by_key(|verb| verb.as_str().len())
+        .copied()
 }
 
 /// Wrap a [`GitError`] as an [`ExecResult`] carrying its taxonomy code.
@@ -1177,8 +1436,19 @@ fn longest_prefix_mount<'a>(mounts: &'a [MountInfo], path: &Path) -> Option<&'a 
 /// `None` when it does not fall inside the mount — an agent should be told
 /// when it cannot name a path it can see, rather than shown a VFS path that
 /// resolves to something else.
-fn to_vfs_path(real: &Path, mount_real: &Path, mount_vfs: &Path) -> Option<String> {
+///
+/// Lexical on purpose. Callers hand it paths that came out of repository
+/// content (`git worktree list`'s registrations), and canonicalizing one that
+/// points outside the mount would touch the host filesystem to answer a
+/// question about the caller's own sandbox.
+pub(crate) fn to_vfs_path(real: &Path, mount_real: &Path, mount_vfs: &Path) -> Option<String> {
     let rest = real.strip_prefix(mount_real).ok()?;
+    // `Path::join` with an empty remainder appends a separator, so the mount
+    // root itself came back as `/mnt/` rather than `/mnt` — a VFS path that
+    // reads like a different one.
+    if rest.as_os_str().is_empty() {
+        return Some(mount_vfs.display().to_string());
+    }
     Some(mount_vfs.join(rest).display().to_string())
 }
 
@@ -1219,6 +1489,33 @@ mod tests {
         Value::String(s.to_string())
     }
 
+    /// Every routable leaf of the schema, with the verb words that reach it.
+    ///
+    /// The schema is a tree: `worktree` is a node with a `list` child, so a
+    /// guard that only looked at `schema.subcommands` would check a node that
+    /// has no parameters and skip the leaf that has them all. Written as a
+    /// walk rather than a two-level special case so B.11's later worktree
+    /// verbs need no change here.
+    fn leaves(schema: &ToolSchema) -> Vec<(String, &ToolSchema)> {
+        fn walk<'a>(node: &'a ToolSchema, path: &str, out: &mut Vec<(String, &'a ToolSchema)>) {
+            for child in &node.subcommands {
+                let child_path = if path.is_empty() {
+                    child.name.clone()
+                } else {
+                    format!("{path} {}", child.name)
+                };
+                if child.subcommands.is_empty() {
+                    out.push((child_path, child));
+                } else {
+                    walk(child, &child_path, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(schema, "", &mut out);
+        out
+    }
+
     #[test]
     fn tool_rejects_an_unusable_name() {
         let err = tool(GitConfig::read_only().with_tool_name("")).expect_err("empty name");
@@ -1236,7 +1533,10 @@ mod tests {
                 .without_verb(Verb::Log)
                 .without_verb(Verb::Ls)
                 .without_verb(Verb::Show)
-                .without_verb(Verb::Diff),
+                .without_verb(Verb::Diff)
+                .without_verb(Verb::Branch)
+                .without_verb(Verb::Tag)
+                .without_verb(Verb::WorktreeList),
         )
         .expect_err("a tool with no verbs cannot run anything");
         assert_eq!(err, ConfigError::NoVerbsEnabled);
@@ -1246,7 +1546,18 @@ mod tests {
     fn schema_carries_only_the_enabled_verbs() {
         let full = tool(GitConfig::read_only()).expect("read-only config").schema();
         let names: Vec<&str> = full.subcommands.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["info", "status", "log", "ls", "show", "diff"]);
+        assert_eq!(
+            names,
+            ["info", "status", "log", "ls", "show", "diff", "branch", "tag", "worktree"],
+            "`worktree` is a node rather than a leaf; its `list` child is the verb"
+        );
+        assert_eq!(
+            full.subcommands
+                .iter()
+                .find(|s| s.name == "worktree")
+                .map(|s| s.subcommands.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()),
+            Some(vec!["list"])
+        );
 
         // Subtract one, and only the others survive — the schema is built from
         // the config, so a disabled verb is absent, not merely rejected.
@@ -1254,7 +1565,7 @@ mod tests {
             .expect("the rest is a valid config")
             .schema();
         let names: Vec<&str> = narrowed.subcommands.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["info", "log", "ls", "show", "diff"]);
+        assert_eq!(names, ["info", "log", "ls", "show", "diff", "branch", "tag", "worktree"]);
 
         // Subtract a different one, to prove the removal tracks the config
         // rather than the last verb in the list.
@@ -1262,7 +1573,15 @@ mod tests {
             .expect("the rest is a valid config")
             .schema();
         let names: Vec<&str> = narrowed.subcommands.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["info", "status", "log", "ls", "diff"]);
+        assert_eq!(names, ["info", "status", "log", "ls", "diff", "branch", "tag", "worktree"]);
+
+        // And subtracting the one verb under a node takes the node with it,
+        // so no group is left advertising a subcommand this build cannot run.
+        let narrowed = tool(GitConfig::read_only().without_verb(Verb::WorktreeList))
+            .expect("the rest is a valid config")
+            .schema();
+        let names: Vec<&str> = narrowed.subcommands.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["info", "status", "log", "ls", "show", "diff", "branch", "tag"]);
     }
 
     /// The disabled verb must vanish from the schema, because that is what
@@ -1278,7 +1597,10 @@ mod tests {
                 .without_verb(Verb::Log)
                 .without_verb(Verb::Ls)
                 .without_verb(Verb::Show)
-                .without_verb(Verb::Diff),
+                .without_verb(Verb::Diff)
+                .without_verb(Verb::Branch)
+                .without_verb(Verb::Tag)
+                .without_verb(Verb::WorktreeList),
         };
         let schema = git.schema();
         assert!(
@@ -1365,15 +1687,15 @@ mod tests {
             "clap",
             "do not read this field",
         ];
+        let leaves = leaves(&schema);
         let mut checked = 0usize;
-        for leaf in &schema.subcommands {
+        for (path, leaf) in &leaves {
             for param in &leaf.params {
                 let lowered = param.description.to_lowercase();
                 for needle in INTERNAL {
                     assert!(
                         !lowered.contains(&needle.to_lowercase()),
-                        "'git {} --{}' publishes '{}' to agents: {:?}",
-                        leaf.name,
+                        "'git {path} --{}' publishes '{}' to agents: {:?}",
                         param.name,
                         needle,
                         param.description
@@ -1386,16 +1708,21 @@ mod tests {
         // vacuously over an empty schema. The `operands` sink is the param
         // that carried the defect, so prove it is present and described.
         assert!(checked >= 6, "only {checked} params checked — schema is empty?");
-        for leaf in &schema.subcommands {
+        assert_eq!(
+            leaves.len(),
+            Verb::ALL.len(),
+            "the walk must reach every verb, nested ones included: {:?}",
+            leaves.iter().map(|(p, _)| p).collect::<Vec<_>>()
+        );
+        for (path, leaf) in &leaves {
             let operands = leaf
                 .params
                 .iter()
                 .find(|p| p.name == "operands")
-                .unwrap_or_else(|| panic!("'git {}' publishes no operands param", leaf.name));
+                .unwrap_or_else(|| panic!("'git {path}' publishes no operands param"));
             assert!(
                 operands.description.contains("git "),
-                "'git {}' operands must show the spelling an agent types: {:?}",
-                leaf.name,
+                "'git {path}' operands must show the spelling an agent types: {:?}",
                 operands.description
             );
         }
@@ -1412,10 +1739,12 @@ mod tests {
     #[test]
     fn schema_matches_the_parser() {
         let schema = tool(GitConfig::read_only()).expect("config").schema();
+        let leaves = leaves(&schema);
         assert_eq!(
-            schema.subcommands.len(),
+            leaves.len(),
             Verb::ALL.len(),
-            "the guard must see every verb this build ships"
+            "the guard must see every verb this build ships: {:?}",
+            leaves.iter().map(|(p, _)| p).collect::<Vec<_>>()
         );
 
         // The negative control. This guard is a search for one phrase in
@@ -1434,12 +1763,11 @@ mod tests {
              wording now: {planted}"
         );
 
-        for leaf in &schema.subcommands {
+        for (path, leaf) in &leaves {
             assert!(
                 !leaf.params.is_empty(),
-                "'{}' advertises no parameters — the guard would pass \
-                 vacuously over it",
-                leaf.name
+                "'{path}' advertises no parameters — the guard would pass \
+                 vacuously over it"
             );
             for param in &leaf.params {
                 // The hidden `operands` sink is the `--`-terminated tail
@@ -1448,19 +1776,24 @@ mod tests {
                 if param.name == "operands" {
                     continue;
                 }
-                let mut argv = vec![format!("git {}", leaf.name), format!("--{}", param.name)];
+                let mut argv = vec![format!("git {path}"), format!("--{}", param.name)];
                 if param.param_type != "bool" {
                     // A value every value-taking flag on this surface accepts:
                     // `--limit`/`--context` want a number, the rest a string.
                     argv.push("1".to_string());
                 }
-                let parsed = match leaf.name.as_str() {
+                let parsed = match path.as_str() {
                     "info" => verbs::info::InfoArgs::try_parse_from(&argv).map(|_| ()),
                     "status" => verbs::status::StatusArgs::try_parse_from(&argv).map(|_| ()),
                     "log" => verbs::log::LogArgs::try_parse_from(&argv).map(|_| ()),
                     "ls" => verbs::ls::LsArgs::try_parse_from(&argv).map(|_| ()),
                     "show" => verbs::show::ShowArgs::try_parse_from(&argv).map(|_| ()),
                     "diff" => verbs::diff::DiffArgs::try_parse_from(&argv).map(|_| ()),
+                    "branch" => verbs::branch::BranchArgs::try_parse_from(&argv).map(|_| ()),
+                    "tag" => verbs::tag::TagArgs::try_parse_from(&argv).map(|_| ()),
+                    "worktree list" => {
+                        verbs::worktree::WorktreeListArgs::try_parse_from(&argv).map(|_| ())
+                    }
                     other => panic!("verb '{other}' is in the schema with no parser here"),
                 };
                 if let Err(e) = parsed {
@@ -1470,9 +1803,8 @@ mod tests {
                     let text = e.to_string();
                     assert!(
                         !text.contains("unexpected argument"),
-                        "`help git {}` advertises --{}, which its parser does \
-                         not accept: {text}",
-                        leaf.name,
+                        "`help git {path}` advertises --{}, which its parser \
+                         does not accept: {text}",
                         param.name
                     );
                 }
@@ -1599,6 +1931,17 @@ mod tests {
             None,
             "a path outside the mount has no VFS name"
         );
+        // The mount root itself. `Path::join` with an empty remainder appends
+        // a separator, so this used to answer `/mnt/` — a VFS path an agent
+        // would compare unequal to the mount it was handed.
+        assert_eq!(
+            to_vfs_path(
+                Path::new("/srv/repos"),
+                Path::new("/srv/repos"),
+                Path::new("/mnt")
+            ),
+            Some("/mnt".to_string())
+        );
     }
 
     /// Both scheduling paths must run the closure exactly once and return its
@@ -1630,7 +1973,7 @@ mod tests {
         let all: Vec<&str> = examples_for(&full).map(|(_, code)| code).collect();
         for verb in Verb::ALL {
             assert!(
-                all.iter().any(|code| code.split_whitespace().nth(1) == Some(verb.as_str())),
+                all.iter().any(|code| verb_of(code) == Some(*verb)),
                 "{verb:?} has no EXAMPLES entry, so help git would never name \
                  it even when enabled"
             );
@@ -1640,9 +1983,7 @@ mod tests {
             let narrowed = GitConfig::read_only().without_verb(*verb);
             let remaining: Vec<&str> = examples_for(&narrowed).map(|(_, code)| code).collect();
             assert!(
-                !remaining
-                    .iter()
-                    .any(|code| code.split_whitespace().nth(1) == Some(verb.as_str())),
+                !remaining.iter().any(|code| verb_of(code) == Some(*verb)),
                 "an example for disabled verb {verb:?} survived filtering: {remaining:?}"
             );
             // Negative control: every other verb's examples survive.
@@ -1651,9 +1992,7 @@ mod tests {
                     continue;
                 }
                 assert!(
-                    remaining
-                        .iter()
-                        .any(|code| code.split_whitespace().nth(1) == Some(other.as_str())),
+                    remaining.iter().any(|code| verb_of(code) == Some(*other)),
                     "disabling {verb:?} dropped {other:?}'s example too: {remaining:?}"
                 );
             }

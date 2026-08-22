@@ -66,14 +66,38 @@ pub enum Verb {
     Show,
     /// `git diff` — the typed change model between two ends of the repository.
     Diff,
+    /// `git branch` — the branch listing, local and remote-tracking.
+    Branch,
+    /// `git tag` — the tag listing, lightweight and annotated.
+    Tag,
+    /// `git worktree list` — every working tree this repository has.
+    ///
+    /// The read half of `worktree`, and the only half in the read profile:
+    /// enumeration reads the registrations under `<common>/worktrees/` and
+    /// writes nothing. Create, remove, lock and prune wait on the ledger
+    /// (architecture.md B.11).
+    WorktreeList,
 }
 
 impl Verb {
     /// Every verb this build knows how to execute.
-    pub const ALL: &'static [Verb] =
-        &[Verb::Info, Verb::Status, Verb::Log, Verb::Ls, Verb::Show, Verb::Diff];
+    pub const ALL: &'static [Verb] = &[
+        Verb::Info,
+        Verb::Status,
+        Verb::Log,
+        Verb::Ls,
+        Verb::Show,
+        Verb::Diff,
+        Verb::Branch,
+        Verb::Tag,
+        Verb::WorktreeList,
+    ];
 
-    /// The verb's argv spelling — the word an agent types.
+    /// The verb's argv spelling — the words an agent types after `git`.
+    ///
+    /// Two words for `worktree list`, because `worktree` is a schema node
+    /// with subcommands rather than a leaf: the read profile has one of them
+    /// and B.11's write profiles add the rest under the same node.
     pub fn as_str(&self) -> &'static str {
         match self {
             Verb::Info => "info",
@@ -82,15 +106,24 @@ impl Verb {
             Verb::Ls => "ls",
             Verb::Show => "show",
             Verb::Diff => "diff",
+            Verb::Branch => "branch",
+            Verb::Tag => "tag",
+            Verb::WorktreeList => "worktree list",
         }
     }
 
     /// The profile that grants this verb.
     pub fn profile(&self) -> Profile {
         match self {
-            Verb::Info | Verb::Status | Verb::Log | Verb::Ls | Verb::Show | Verb::Diff => {
-                Profile::Read
-            }
+            Verb::Info
+            | Verb::Status
+            | Verb::Log
+            | Verb::Ls
+            | Verb::Show
+            | Verb::Diff
+            | Verb::Branch
+            | Verb::Tag
+            | Verb::WorktreeList => Profile::Read,
         }
     }
 }
@@ -285,6 +318,9 @@ mod tests {
             .without_verb(Verb::Ls)
             .without_verb(Verb::Show)
             .without_verb(Verb::Diff)
+            .without_verb(Verb::Branch)
+            .without_verb(Verb::Tag)
+            .without_verb(Verb::WorktreeList)
             .with_tool_name("kgit")
             .with_limits(Limits {
                 max_rows: 5,

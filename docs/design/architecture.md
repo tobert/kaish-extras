@@ -596,6 +596,16 @@ merge-base + revwalk; making the cost opt-in keeps the default listing cheap).
 
 ### B.8 `git blame`
 
+**Not built.** Scoped into PR 7 with the three listing verbs and dropped
+before any of it was written, for a reason that is not technical: it is low
+value for this maintainer's own use, and it is a well-shaped piece for a
+contributor who wants it. The design below stands as the specification to
+build against — do not redesign it — and
+[docs/issues.md](../issues.md), "git blame — deferred", carries what a
+contributor needs beyond it: that it is hand-composed here, that nothing can
+interrupt it, and that `--limit` bounds lines while the cost is commits.
+There is no `Verb::Blame`, so nothing in a build advertises it.
+
 | Flag | Type | Default | Meaning |
 |---|---|---|---|
 | positional `<PATH>` | path (required) | — | file to annotate |
@@ -1372,7 +1382,7 @@ PR runs clippy `--all-targets` clean and adds tests that can fail.
 | 4 | `git ls` + `git show` (commit/tag/tree/blob, no patch) | blob byte-cap; `show HEAD:path` round-trips binary content |
 | 5 | `git diff` structured (name/status + counts, `--staged` via F.4) | bare `diff` is index→worktree; endpoints stated in every result; `--patch` without `textdiff` exits 4 |
 | 6 | `textdiff` feature: hunks from `gix-imara-diff` + unified-patch rendering | **hostile-textconv fixture**; `git apply --check` compat test |
-| 7 | `git branch`, `git tag`, `git worktree list`, `git blame` | `worktree_differs` marker; `--ahead-behind` opt-in cost |
+| 7 | `git branch`, `git tag`, `git worktree list`. **`git blame` dropped** — deferred to a contributor ([B.8](#b8-git-blame), docs/issues.md) | `--ahead-behind`'s opt-in cost asserted (the row cap runs before the counting); `path_vfs`/`prunable` both `null` for a working tree outside the mount |
 | 8 | `GitConfig` plumbing end-to-end, `git info` capability reporting, `docs/embedding-git.md` | disabled verb absent from `tools --json` and unroutable; router-vs-`select_leaf` drift test |
 | 9 | **Publish `kaish-tools-git` 0.1.0** — read profile complete, zero kaish changes | — |
 
@@ -1441,6 +1451,50 @@ carries the real numbers below; two items were retired rather than filed.
 ---
 
 ## Changelog / provenance
+
+**2026-08-22 — PR 7: the three listing verbs, and blame deferred.**
+`git branch`, `git tag` and `git worktree list` shipped;
+[B.8](#b8-git-blame)'s `git blame` did not, and the row in [H](#h-phasing)
+now says so. What the build taught the design:
+
+- **`worktree` is a schema node, not a leaf.** [B.9](#b9-git-worktree-list)
+  spells the verb `git worktree list` and [B.11](#b11-later-profiles-sketch-only)
+  puts `add`/`remove`/`lock`/`prune` beside it, so the schema grew its first
+  two-level path. `Verb::WorktreeList` is what an embedder subtracts, and
+  subtracting it removes the node too — a group advertising nothing it can run
+  is the promise [C.1](#c1-shape) refuses to make.
+- **[B.9](#b9-git-worktree-list)'s row needed a second null.** `path_vfs` is
+  `null` for a working tree outside every mount, as specified. `prunable` had
+  to become `null` there as well, and B.9 does not say so: deciding
+  prunability means stat-ing a path the repository chose, and doing that for a
+  path outside the mount is a one-bit existence oracle per registration —
+  exactly what [D.2](#d2-layer-2--isolation-by-construction)'s containment
+  refuses everywhere else. The row names the path and says it did not look.
+  B.9 also has no way to distinguish the main working tree, which has no
+  registration; it is the row with `name: null`.
+- **Real git orders `worktree list` by path, not by registration name.** The
+  two disagree after a `git worktree move`. Confirmed with a move rather than
+  assumed.
+- **`--ahead-behind`'s opt-in is about *where the cap runs*, not only about
+  the flag.** [B.7](#b7-git-branch--git-tag) makes the counts opt-in because
+  each costs a walk; the build adds the other half, which is that the row cap
+  has to run *before* the counting. `--contains` and `--merged` are filters
+  and must run before it, so their cost does not fall with `--limit`; that
+  asymmetry is asserted in `tests/branch.rs`, not described.
+- **Exactness cost the cheap walk.** The obvious `--ahead-behind` stops as
+  soon as the queue is all common history, in committer-time order. That is
+  only sound if committer time increases from parent to child, and two
+  fixtures — one instant across a whole history, and a merge base stamped
+  after its children — made it report `behind 2` where git reports 1. The
+  shipped walk is order-independent and reads both histories to their roots
+  (docs/issues.md **B1**). [E.5](#e5-error-taxonomy)'s "never a silent
+  fallback" gained a companion: every ancestry walk is metered, and passing
+  the 100,000-commit budget is a refusal, not a shorter listing.
+- **The cost is now reported, not only bounded.** `commits_examined` on the
+  `branch` and `tag` results is 0 for a listing that walks nothing. That is a
+  shape the **G7-G10** family (docs/issues.md) asks for and `status`/`diff` do
+  not have yet.
+
 
 **2026-08-02 — co-architect notes folded into the body.** This document carried
 three appended co-architect notes (Fable, 2026-08-01, plus Amy's sign-offs).
