@@ -560,6 +560,35 @@ standalone before being written down.
   built until an embedder asks, because the shape of the ask decides whether
   it belongs on `CurlConfig` or on a transport the embedder supplies whole.
 
+  **Asked and answered, 2026-08-22 (Amy, via the kaijutsu session).** The
+  shape is now known even though the build is not scheduled:
+
+  > *"today, kaijutsu does not sit behind a proxy, but over time we will want
+  > to support that (I want to use it at work soon, but our safety features
+  > have to be A/B-grade first, I think we're still at C+ until the current
+  > workstreams tie up). kaish curl should allow an embedder to poke in those
+  > kind of configs without getting too opinionated, and make eg proxy and
+  > cert store options configurable."*
+
+  Three things that ruling settles:
+
+  - **Nothing to unblock today.** No proxy and no inspection CA on any of the
+    three machines kaijutsu runs on. No deadline.
+  - **The requirement is "configurable", not "supported".** Expose the proxy
+    and the cert store as things an embedder states, and decide no policy on
+    their behalf. This is the allowlist lesson again: kaijutsu named its own
+    egress and survived our default being wrong (see `docs/curl.md`, "Name the
+    allowlist; do not inherit it"). An API the embedder can state the answer
+    into has that same property; one that infers a default does not.
+  - **Size it against the real call site.** kaijutsu's entire curl
+    configuration is four lines in one function. Proxy and roots must not
+    change that shape — if the API needs more than a line each there, it is
+    the wrong API.
+
+  The gate is kaijutsu's own safety posture (their gate/ledger workstreams),
+  not this API. Trigger to revisit: ping kaijutsu when the git crates' surface
+  settles, by which point they will know whether the work laptop is in play.
+
 ## kaish-tools-image — a proposed third tool crate
 
 Proposed 2026-08-21 by the kaibo session, on Amy's instruction to record it
