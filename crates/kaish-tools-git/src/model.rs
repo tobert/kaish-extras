@@ -675,6 +675,170 @@ pub struct DiffReport {
     pub truncated: bool,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// `git branch` / `git tag` (architecture.md B.7)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Which namespace a branch row came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum BranchKind {
+    /// Under `refs/heads/` — a branch in this repository.
+    Local,
+    /// Under `refs/remotes/` — a remote-tracking branch, last updated by a
+    /// fetch this build cannot perform.
+    Remote,
+}
+
+/// One row of `git branch` (architecture.md B.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BranchRow {
+    /// The branch name with its namespace prefix removed: `main`,
+    /// `origin/main`.
+    pub name: String,
+    /// Which namespace it came from.
+    pub kind: BranchKind,
+    /// The commit the branch points at.
+    pub oid: String,
+    /// Whether HEAD is on this branch, in the working tree the caller asked
+    /// from. A branch checked out in a *different* worktree is not marked —
+    /// `git worktree list` is where that shows up.
+    pub is_head: bool,
+    /// The configured upstream's short name (`origin/main`), or `null` when
+    /// `branch.<name>.remote`/`.merge` name none. Reported whether or not the
+    /// upstream ref exists; [`BranchRow::upstream_gone`] says which.
+    pub upstream: Option<String>,
+    /// Whether [`BranchRow::upstream`] is configured but names a ref this
+    /// repository does not have — git renders it `[gone]`. Counts cannot be
+    /// computed against a ref that is not there.
+    pub upstream_gone: bool,
+    /// Commits on this branch that the upstream does not have, or `null`.
+    ///
+    /// `null` in exactly three cases: `--ahead-behind` was not passed, the
+    /// branch has no upstream, or the upstream is gone. Each is visible in
+    /// this row or in [`BranchReport::ahead_behind`], so a `null` is never
+    /// ambiguous.
+    pub ahead: Option<u64>,
+    /// Commits the upstream has that this branch does not, or `null` under
+    /// the same three conditions as [`BranchRow::ahead`].
+    pub behind: Option<u64>,
+}
+
+/// `git branch`'s result (architecture.md B.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BranchReport {
+    /// The branches, in full-refname order — `refs/heads/` before
+    /// `refs/remotes/`, and alphabetical within each.
+    pub branches: Vec<BranchRow>,
+    /// Whether `--ahead-behind` was passed, and therefore whether a `null`
+    /// count on a row means "not asked for" or "could not be computed".
+    pub ahead_behind: bool,
+    /// How many commits this invocation's ancestry walks read.
+    ///
+    /// Zero for a plain listing, which walks nothing. `--contains`,
+    /// `--merged` and `--ahead-behind` each cost commits rather than rows, so
+    /// this is the number `--limit` does *not* bound — the one an embedder
+    /// budgeting a long-lived server needs to see.
+    pub commits_examined: u64,
+    /// Whether `--limit` cut the listing short.
+    pub truncated: bool,
+}
+
+/// Whether a tag is a ref pointing straight at its target, or a tag object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum TagKind {
+    /// The ref names the target directly. There is no tag object, so no
+    /// tagger and no message.
+    Lightweight,
+    /// The ref names a tag object carrying a tagger and a message.
+    Annotated,
+}
+
+/// One row of `git tag` (architecture.md B.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TagRow {
+    /// The tag name with `refs/tags/` removed.
+    pub name: String,
+    /// The object the ref names: the tag object for an annotated tag, the
+    /// target itself for a lightweight one.
+    pub oid: String,
+    /// Which of the two shapes this is.
+    pub kind: TagKind,
+    /// What the tag ultimately points at, with every tag object in the chain
+    /// peeled away. Equal to [`TagRow::oid`] for a lightweight tag.
+    pub target_oid: String,
+    /// The kind of object [`TagRow::target_oid`] names — usually `commit`,
+    /// but git permits tagging a tree or a blob.
+    pub target_kind: String,
+    /// Who wrote the tag object, or `null` for a lightweight tag.
+    pub tagger: Option<Signature>,
+    /// The first line of the tag object's message, or `null` for a
+    /// lightweight tag. A lightweight tag has no message of its own; git's
+    /// `%(contents:subject)` falls back to the *target commit's* subject,
+    /// which would report a line nobody wrote about the tag.
+    pub message_summary: Option<String>,
+}
+
+/// `git tag`'s result (architecture.md B.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TagReport {
+    /// The tags, in name order.
+    pub tags: Vec<TagRow>,
+    /// How many commits `--contains`'s ancestry walk read. Zero for a plain
+    /// listing — see [`BranchReport::commits_examined`].
+    pub commits_examined: u64,
+    /// Whether `--limit` cut the listing short.
+    pub truncated: bool,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// `git worktree list` (architecture.md B.9)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// One working tree of a repository (architecture.md B.9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorktreeRow {
+    /// The registration name under `<common>/worktrees/`, or `null` for the
+    /// main working tree, which has no registration.
+    pub name: Option<String>,
+    /// The working tree's path on the host filesystem, exactly as the
+    /// repository recorded it.
+    pub path_real: String,
+    /// The same path in the VFS, or `null` when it falls outside every mount.
+    /// An agent should be told when it cannot reach a path it can see.
+    pub path_vfs: Option<String>,
+    /// The commit this working tree's HEAD resolves to, or `null` on an
+    /// unborn branch.
+    pub head_oid: Option<String>,
+    /// The branch HEAD is on, or `null` when it is detached.
+    pub branch: Option<String>,
+    /// Whether a `locked` file marks this working tree as not to be removed.
+    pub locked: bool,
+    /// The text of the `locked` file, or `null` when it is absent or empty.
+    pub lock_reason: Option<String>,
+    /// Whether the registration outlived what it points at, or `null` when
+    /// the working tree is outside the mount and was therefore never
+    /// examined. Answering it would mean stat-ing a host path the repository
+    /// chose, which is the existence oracle `repo.rs`'s containment refuses
+    /// to hand out.
+    pub prunable: Option<bool>,
+    /// Why it is prunable, when it is.
+    pub prunable_reason: Option<String>,
+}
+
+/// `git worktree list`'s result (architecture.md B.9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorktreeReport {
+    /// The main working tree first, then every registered linked worktree in
+    /// name order — git's own order.
+    pub worktrees: Vec<WorktreeRow>,
+    /// Whether `--limit` cut the listing short.
+    pub truncated: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,6 +17,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use gix_index::hash as gix_hash;
+use gix_object::bstr::ByteSlice;
 use gix_object::FindExt;
 use gix_odb::HeaderExt;
 use gix_ref::file::ReferenceExt;
@@ -916,7 +917,7 @@ impl ReadRepo {
     /// Peel an object to the commit it names, following annotated tags. A
     /// revision that resolves to a tree or blob is refused, not silently
     /// treated as a commit.
-    fn peel_to_commit(&self, start: gix_hash::ObjectId, spec: &str) -> Result<gix_hash::ObjectId, GitError> {
+    pub(crate) fn peel_to_commit(&self, start: gix_hash::ObjectId, spec: &str) -> Result<gix_hash::ObjectId, GitError> {
         let op = self.operation;
         let mut oid = start;
         let mut buf = Vec::new();
@@ -1069,6 +1070,170 @@ impl ReadRepo {
             .sections()
             .filter(|s| s.header().name().eq_ignore_ascii_case(b"submodule"))
             .count())
+    }
+
+    // ── Accessors the ref listings read through (B.7, B.9) ──────────────────
+
+    /// The ref store, for iterating `refs/heads/`, `refs/remotes/` and
+    /// `refs/tags/`.
+    ///
+    /// Lent to a sibling module the same way [`ReadRepo::objects`] is, and on
+    /// the same terms: it is read-only in practice, and the
+    /// `write_shaped_identifiers` scan (D.1) is what keeps it that way — the
+    /// transaction API this type also carries is a match that fails the build
+    /// outside `verbs/write/`.
+    pub(crate) fn refs(&self) -> &gix_ref::file::Store {
+        &self.refs
+    }
+
+    /// Resolve `parent/name` for reading, refusing a symlinked leaf whose
+    /// target leaves the mount.
+    ///
+    /// The verb-facing spelling of [`open_leaf`], so a verb that has to open a
+    /// file under the git directory goes through the same containment as
+    /// `discover` rather than joining a path of its own. `parent` MUST already
+    /// be canonical and inside the ceiling — [`ReadRepo::common_dir`] and
+    /// anything this returns both are.
+    pub(crate) fn contained_leaf(
+        &self,
+        what: &'static str,
+        parent: &Path,
+        name: &str,
+    ) -> Result<Option<PathBuf>, GitError> {
+        Ok(open_leaf(self.operation, what, parent, name, &self.ceiling)?
+            .path()
+            .map(Path::to_path_buf))
+    }
+
+    /// The repository's own `.git/config`, parsed, or `None` when there is
+    /// none — a repository with no config file just has no settings.
+    ///
+    /// Bytes we fetch ourselves through [`ReadRepo::contained_leaf`], parsed
+    /// with `from_bytes_no_includes` like every other config here (D.2): no
+    /// `include.path` is followed, and no user or system config is read.
+    /// Returned as an owned `String` keyed lookup rather than a borrowed
+    /// `gix_config::File` because the file borrows the bytes it parsed.
+    pub(crate) fn config_values(
+        &self,
+        section: &str,
+        key: &str,
+    ) -> Result<Vec<(Option<String>, String)>, GitError> {
+        let Some(path) = self.contained_leaf("config file", &self.common_dir, "config")? else {
+            return Ok(Vec::new());
+        };
+        let bytes = std::fs::read(&path)
+            .map_err(|e| GitError::repository(self.operation, "reading config", &path, e))?;
+        let file = parse_config_bytes(self.operation, &path, &bytes)?;
+        let mut out = Vec::new();
+        for s in file.sections() {
+            if !s.header().name().eq_ignore_ascii_case(section.as_bytes()) {
+                continue;
+            }
+            let subsection = s
+                .header()
+                .subsection_name()
+                .map(|n| n.to_str_lossy().into_owned());
+            for value in s.values(key) {
+                out.push((subsection.clone(), value.to_str_lossy().into_owned()));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Follow a reference's symbolic chain to the object it names, without
+    /// peeling a tag object.
+    ///
+    /// `None` when the chain ends at a ref that does not exist — an unborn
+    /// branch, or a `refs/remotes/<r>/HEAD` left behind by a deleted branch.
+    /// Bounded at 5 hops, the same depth gitoxide's own symbolic chase caps
+    /// itself at; a cycle is a malformed repository, not something to spin on.
+    pub(crate) fn ref_object(
+        &self,
+        reference: &gix_ref::Reference,
+    ) -> Result<Option<gix_hash::ObjectId>, GitError> {
+        let mut target = reference.target.clone();
+        for _ in 0..5 {
+            match target {
+                gix_ref::Target::Object(oid) => return Ok(Some(oid)),
+                gix_ref::Target::Symbolic(name) => {
+                    let found = self.refs.try_find(name.as_ref()).map_err(|e| {
+                        GitError::repository(
+                            self.operation,
+                            format!("looking up ref '{}'", name.as_bstr()),
+                            &self.common_dir,
+                            e,
+                        )
+                    })?;
+                    match found {
+                        Some(next) => target = next.target,
+                        None => return Ok(None),
+                    }
+                }
+            }
+        }
+        Err(GitError::repository(
+            self.operation,
+            "following a symbolic ref chain",
+            &self.git_dir,
+            std::io::Error::other("too many levels of symbolic indirection (over 5)"),
+        ))
+    }
+
+    /// Peel a tag chain to the first object that is not a tag, and report what
+    /// kind it turned out to be.
+    ///
+    /// Unlike [`ReadRepo::peel_to_commit`] this does not insist on a commit:
+    /// git permits tagging a tree or a blob, and `git tag` has to list such a
+    /// tag rather than refuse the whole listing over it.
+    pub(crate) fn peel_tag_chain(
+        &self,
+        start: gix_hash::ObjectId,
+        what: &str,
+    ) -> Result<(gix_hash::ObjectId, gix_object::Kind), GitError> {
+        let op = self.operation;
+        let mut oid = start;
+        let mut buf = Vec::new();
+        // Bounded for the same reason `peel_to_commit` is: a hand-built cycle
+        // must stop rather than spin.
+        for _ in 0..32 {
+            let next: Option<gix_hash::ObjectId> = {
+                let data = self.objects.find(&oid, &mut buf).map_err(|e| {
+                    GitError::repository(op, format!("reading {what}"), &self.git_dir, e)
+                })?;
+                if data.kind != gix_object::Kind::Tag {
+                    return Ok((oid, data.kind));
+                }
+                let tag = data.decode().map_err(|e| {
+                    GitError::repository(op, format!("decoding {what}"), &self.git_dir, e)
+                })?;
+                match tag {
+                    gix_object::ObjectRef::Tag(tag) => Some(tag.target()),
+                    // `kind` said Tag one line ago; a different decode is a
+                    // gix-object contradiction, not a repository we misread.
+                    other => {
+                        return Err(GitError::repository(
+                            op,
+                            format!("decoding {what}"),
+                            &self.git_dir,
+                            std::io::Error::other(format!(
+                                "object header says tag, body decodes as {}",
+                                other.kind()
+                            )),
+                        ))
+                    }
+                }
+            };
+            match next {
+                None => return Ok((oid, gix_object::Kind::Tag)),
+                Some(target) => oid = target,
+            }
+        }
+        Err(GitError::repository(
+            op,
+            format!("peeling {what}"),
+            &self.git_dir,
+            std::io::Error::other("tag chain is over 32 levels deep"),
+        ))
     }
 }
 

@@ -21,9 +21,9 @@ let git = kaish_tools_git::tool(GitConfig::read_only())?;
 
 This is `src/lib.rs`'s own module-doc example, compiled by
 `cargo test --doc -p kaish-tools-git` on every run — it cannot silently rot.
-`GitConfig::read_only()` is the *only* constructor: the read profile, all six
-implemented verbs (`info`, `status`, `log`, `ls`, `show`, `diff`), tool name
-`git`
+`GitConfig::read_only()` is the *only* constructor: the read profile, all nine
+implemented verbs (`info`, `status`, `log`, `ls`, `show`, `diff`, `branch`,
+`tag`, `worktree list`), tool name `git`
 (deliberately shadowing external `git` — kaish resolves builtins before
 `PATH`), and the default [`Limits`](#limits). `tool()` fails at registration,
 not at first use, if the config could never produce a working tool — an empty
@@ -73,7 +73,7 @@ cannot actually run.
 
 | Field | Default | Bounds |
 |---|---|---|
-| `max_rows` | 1000 | Rows any listing verb (`status`, `log`, `ls`, `show`'s tree form) returns. Not `diff` — a diff's rows are files, and they have their own cap below. |
+| `max_rows` | 1000 | Rows any listing verb (`status`, `log`, `ls`, `show`'s tree form, `branch`, `tag`, `worktree list`) returns. Not `diff` — a diff's rows are files, and they have their own cap below. |
 | `max_diff_files` | 500 | Files compared in one invocation: `git diff`'s whole result, and `log --stat`'s per-commit file list. A verb's `--limit` may lower it, never raise it. |
 | `max_blob_bytes` | 8 MiB (`8 * 1024 * 1024`) | Bytes of blob content `show` will read, and of a single working-tree file `status` will hash. Over the cap: the read is declined and reported (`git show: blob '<oid>' is <size> bytes, over this build's <cap>-byte cap`), never silently truncated. |
 | `max_hunk_bytes_per_file` | 256 KiB | Bytes of hunk text `git diff --patch` will produce for one file, under the `textdiff` feature. Measured before a hunk's lines are built and applied at whole-hunk granularity — a half-hunk is not a patch — so a file it cuts is marked `hunks_capped` with its counts still exact —
@@ -118,6 +118,16 @@ disabling a verb removes it from all three:
   one-verb-narrowed config (`info_capabilities_are_pinned_to_the_schema`,
   `tests/router_kernel_drift.rs`) — it cannot report a verb the schema does
   not also offer, or omit one the schema does.
+
+`worktree list` is the one verb spelled with two words, because `worktree` is
+a schema **node** rather than a leaf — the write profiles add `add`, `remove`,
+`lock` and `prune` beside `list` under the same word (architecture.md §B.11).
+`Verb::WorktreeList` is what `without_verb` takes, and subtracting it removes
+the whole `worktree` node: a build that cannot list working trees does not
+advertise a `worktree` group with nothing in it
+(`subtracting_the_verb_removes_the_worktree_node`, `tests/worktree.rs`). A
+bare `git worktree` is a usage error naming what the group holds, not a
+listing.
 
 ## The read-only story: five layers, stated precisely
 
@@ -414,6 +424,22 @@ Concretely, for a repository a caller chose rather than one you control:
   margin is smaller than the constant suggests — size the thread, or prefer
   the verbs that walk iteratively (**G10**).
 
+- **`git branch` and `git tag`'s ancestry flags cost commits, not rows**
+  (**B4**). A plain listing reads refs and decodes no commit at all
+  (`commits_examined` is 0). `--contains` and `--merged` are *filters*, so
+  they judge every candidate ref before `--limit` truncates, and their cost
+  does not fall when you lower the limit. `--ahead-behind` is *decoration*, so
+  it runs only on the rows that survive truncation — which is why it is
+  opt-in, and why lowering `--limit` does lower its cost
+  (`the_limit_bounds_the_ahead_behind_cost_because_it_runs_first`,
+  `tests/branch.rs`). Each `--ahead-behind` branch reads both its own history
+  and its upstream's, to the roots; the counts are exact and independent of
+  commit ordering, and that is what the full read buys (**B1**). Every one of
+  these walks is metered against a shared per-invocation budget of **100,000
+  commits**, and passing it is a **refusal** (exit 1) naming the limit, not a
+  partial listing — a filter that gave up looking would report a branch as
+  not matching. `commits_examined` in `--json` is the number to watch.
+
 None of these is a memory-safety problem and none is reachable past the
 containment boundary. They are resource cost, and the mitigation available
 today is the same one in every case: **pass `--path` to bound the flatten**,
@@ -462,6 +488,21 @@ tree-depth bounds and the entries not listed here.
   from `git show --numstat` by a handful on real-world diffs where more than
   one minimal edit script exists — confirmed against three real repositories,
   in both directions (over and under).
+- **`git branch`/`git tag` divergences from real git (B2, B3):**
+  `refs/remotes/<remote>/HEAD` is reported as `origin/HEAD`, where git's own
+  `%(refname:short)` shortens that one ref to the bare remote name (`origin`);
+  and a lightweight tag's `message_summary` is `null`, where git's
+  `%(contents:subject)` falls back to the *target commit's* subject. Both are
+  pinned against a live git oracle in `tests/branch.rs` and `tests/tag.rs`.
+- **`git worktree list` names a working tree it cannot reach, and does not
+  probe it (B5).** A worktree registered outside every mount gets
+  `path_vfs: null` **and** `prunable: null`: deciding prunability would mean
+  stat-ing a host path the repository chose, which is a one-bit existence
+  oracle for anything outside the sandbox. Its registration metadata — name,
+  branch, HEAD, lock — still comes through, because all of that lives under
+  the common dir. `git branch` also does not mark a branch as checked out in
+  another working tree the way `git branch`'s `+` does; `git worktree list`'s
+  `branch` column is where that lives.
 - **Message bodies are unbounded on the `show` path (L7):** `git show`
   always reads a commit's full message body with no cap, even though `show`
   is a single-commit read; `git log`'s per-commit body is gated behind

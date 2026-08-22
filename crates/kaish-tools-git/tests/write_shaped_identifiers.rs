@@ -90,9 +90,10 @@ fn write_shaped_plumbing_appears_only_under_verbs_write() {
     // The floor tracks the crate as it grows: a scan that silently stopped
     // walking would otherwise pass over the modules it never opened. Raise
     // it when modules are added, the way PR 5 did (worktree.rs, diffcore.rs,
-    // verbs/diff.rs).
+    // verbs/diff.rs) and PR 7 did (reach.rs, verbs/branch.rs, verbs/tag.rs,
+    // verbs/worktree.rs).
     assert!(
-        files.len() >= 17,
+        files.len() >= 21,
         "found only {} source files under {} — the scan is not seeing the \
          crate",
         files.len(),

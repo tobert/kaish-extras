@@ -597,6 +597,265 @@ impl PatchRepo {
     }
 }
 
+
+/// A repository whose **refs** are the point: branches that diverge, a
+/// remote-tracking namespace, tags of both kinds, and a mix of loose and
+/// packed storage (architecture.md B.7).
+///
+/// The history is three commits on `main` (A → B → C) plus one commit `D`
+/// made on `feature/side` off B, so every ancestry question `--contains`,
+/// `--merged` and `--ahead-behind` ask has a different answer per branch:
+///
+/// | Branch | Tip | Contains B | Merged into main | Upstream | Ahead / behind |
+/// |---|---|---|---|---|---|
+/// | `main` | C | yes | yes | `origin/main` | 1 / 1 |
+/// | `old` | A | no | yes | `origin/main` | 0 / 2 |
+/// | `feature/side` | D | yes | no | — | — |
+/// | `gone` | A | no | yes | `origin/nonesuch` (missing) | — |
+/// | `late` | C | yes | yes | — | — |
+///
+/// `refs/remotes/origin/main` is planted with `update-ref` rather than
+/// fetched: a remote-tracking ref is an ordinary ref, and writing it directly
+/// keeps the fixture offline. `origin/HEAD` is symbolic, which is the one ref
+/// shape under `refs/remotes/` that is not a direct object.
+pub struct RefsRepo {
+    fixture: Fixture,
+    /// The working tree's root.
+    pub root: PathBuf,
+    /// The three `main` commits and the side commit, oldest first.
+    pub a: String,
+    pub b: String,
+    pub c: String,
+    pub d: String,
+}
+
+impl RefsRepo {
+    /// Build the fixture. Requires real git on PATH.
+    pub fn build() -> Self {
+        require_git();
+        let fixture = Fixture::empty();
+        let root = fixture.path("repo");
+        std::fs::create_dir_all(&root).expect("create repo dir");
+
+        git(&root, &["init", "--initial-branch=main", "--quiet"]);
+        git(&root, &["config", "gc.writeCommitGraph", "false"]);
+
+        write_file(&root, "a.txt", "a\n");
+        git(&root, &["add", "a.txt"]);
+        git(&root, &["commit", "-m", "A", "--quiet"]);
+        let a = git(&root, &["rev-parse", "HEAD"]);
+
+        write_file(&root, "b.txt", "b\n");
+        git(&root, &["add", "b.txt"]);
+        git(&root, &["commit", "-m", "B", "--quiet"]);
+        let b = git(&root, &["rev-parse", "HEAD"]);
+
+        write_file(&root, "c.txt", "c\n");
+        git(&root, &["add", "c.txt"]);
+        git(&root, &["commit", "-m", "C", "--quiet"]);
+        let c = git(&root, &["rev-parse", "HEAD"]);
+
+        // A branch left behind at A, and one that carries its own commit off B.
+        git(&root, &["branch", "old", &a]);
+        git(&root, &["checkout", "--quiet", "-b", "feature/side", &b]);
+        write_file(&root, "d.txt", "d\n");
+        git(&root, &["add", "d.txt"]);
+        git(&root, &["commit", "-m", "D", "--quiet"]);
+        let d = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["checkout", "--quiet", "main"]);
+
+        // Both tag kinds, plus a tag whose target is itself a tag — the case
+        // that separates "the object the ref names" from "what it ultimately
+        // points at".
+        git(&root, &["tag", "light", &a]);
+        git(&root, &["tag", "-a", "v0.1.0", "-m", "release one", &b]);
+        git(&root, &["tag", "-a", "v0.2.0", "-m", "release two", &c]);
+        git(&root, &["tag", "-a", "nested", "-m", "tag of a tag", "v0.1.0"]);
+
+        // The remote-tracking namespace, planted directly.
+        git(&root, &["update-ref", "refs/remotes/origin/main", &d]);
+        git(&root, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+        git(&root, &["config", "remote.origin.url", "../nowhere.git"]);
+        git(
+            &root,
+            &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+        );
+        git(&root, &["config", "branch.main.remote", "origin"]);
+        git(&root, &["config", "branch.main.merge", "refs/heads/main"]);
+        git(&root, &["config", "branch.old.remote", "origin"]);
+        git(&root, &["config", "branch.old.merge", "refs/heads/main"]);
+
+        // A branch whose configured upstream does not exist — git calls it
+        // `[gone]`, and it is the case that separates "no upstream" from
+        // "an upstream nothing answers to".
+        git(&root, &["branch", "gone", &a]);
+        git(&root, &["config", "branch.gone.remote", "origin"]);
+        git(&root, &["config", "branch.gone.merge", "refs/heads/nonesuch"]);
+
+        // Pack what exists, then add one more branch so the listing has to
+        // read loose refs and `packed-refs` and merge them in name order.
+        git(&root, &["pack-refs", "--all"]);
+        git(&root, &["branch", "late", &c]);
+
+        Self {
+            fixture,
+            root,
+            a,
+            b,
+            c,
+            d,
+        }
+    }
+
+    /// The fixture's scratch root — the parent of the repository.
+    pub fn scratch(&self) -> PathBuf {
+        self.fixture.root()
+    }
+
+    /// The oid real git reports for `rev`, for oracle comparisons.
+    pub fn rev_parse(&self, rev: &str) -> String {
+        git(&self.root, &["rev-parse", rev])
+    }
+
+    /// Run real git in the repository, for oracle comparisons.
+    pub fn git(&self, args: &[&str]) -> String {
+        git(&self.root, args)
+    }
+}
+
+/// A repository with every worktree state `git worktree list --porcelain`
+/// distinguishes (architecture.md B.9): the main working tree, an ordinary
+/// linked one, a locked one with a reason, a detached one, and one whose
+/// directory has been deleted out from under its registration.
+///
+/// The linked worktrees are **siblings of the repository**, not children of
+/// it. That is deliberate: mounting the scratch root makes all of them
+/// reachable, and mounting `repo` alone leaves every linked worktree outside
+/// the mount — the two halves of B.9's `path_vfs` rule, from one fixture.
+/// `inside` is the exception, a worktree nested under the main working tree,
+/// so the "reachable" answer is available under either mount.
+pub struct WorktreeRepo {
+    fixture: Fixture,
+    /// The main working tree's root.
+    pub root: PathBuf,
+    /// An ordinary linked worktree, a sibling of the repository.
+    pub plain: PathBuf,
+    /// A linked worktree nested inside the main working tree.
+    pub inside: PathBuf,
+    /// A linked worktree locked with a reason.
+    pub locked: PathBuf,
+    /// A linked worktree checked out at a detached HEAD.
+    pub detached: PathBuf,
+    /// A linked worktree whose directory was deleted after registration.
+    pub gone: PathBuf,
+}
+
+impl WorktreeRepo {
+    /// Build the fixture. Requires real git on PATH.
+    pub fn build() -> Self {
+        require_git();
+        let fixture = Fixture::empty();
+        let root = fixture.path("repo");
+        std::fs::create_dir_all(&root).expect("create repo dir");
+
+        git(&root, &["init", "--initial-branch=main", "--quiet"]);
+        git(&root, &["config", "gc.writeCommitGraph", "false"]);
+        write_file(&root, "a.txt", "a\n");
+        git(&root, &["add", "a.txt"]);
+        git(&root, &["commit", "-m", "initial", "--quiet"]);
+
+        let add = |path: &Path, args: &[&str]| {
+            let mut argv = vec!["worktree", "add", "--quiet"];
+            argv.extend_from_slice(args);
+            let as_str = path.to_str().expect("utf-8 path").to_string();
+            argv.push(&as_str);
+            git(&root, &argv);
+        };
+
+        let plain = fixture.path("wt-plain");
+        add(&plain, &["-b", "wt-plain-branch"]);
+
+        let inside = root.join("nested/wt-inside");
+        add(&inside, &["-b", "wt-inside-branch"]);
+
+        let locked = fixture.path("wt-locked");
+        add(&locked, &["-b", "wt-locked-branch"]);
+        git(
+            &root,
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "held for review",
+                locked.to_str().expect("utf-8 path"),
+            ],
+        );
+
+        let detached = fixture.path("wt-detached");
+        // No commit-ish: `worktree add --detach <path>` detaches at HEAD.
+        add(&detached, &["--detach"]);
+
+        let gone = fixture.path("wt-gone");
+        add(&gone, &["-b", "wt-gone-branch"]);
+        // Deleting the directory without `git worktree remove` is exactly how
+        // a registration becomes prunable in the field.
+        std::fs::remove_dir_all(&gone).expect("delete the worktree directory");
+
+        Self {
+            fixture,
+            root,
+            plain,
+            inside,
+            locked,
+            detached,
+            gone,
+        }
+    }
+
+    /// The fixture's scratch root — the parent of the repository and of every
+    /// sibling worktree.
+    pub fn scratch(&self) -> PathBuf {
+        self.fixture.root()
+    }
+
+    /// The main repository's `.git` directory.
+    pub fn git_dir(&self) -> PathBuf {
+        self.root.join(".git")
+    }
+
+    /// Run real git in the main working tree, for oracle comparisons.
+    pub fn git(&self, args: &[&str]) -> String {
+        git(&self.root, args)
+    }
+
+    /// `git worktree list --porcelain`, parsed into one map per worktree in
+    /// the order git reported them.
+    ///
+    /// Each record is the porcelain's own key/value lines: `worktree`, `HEAD`,
+    /// `branch`, `bare`, `detached`, `locked`, `prunable`. A key with no value
+    /// (`detached`, a bare `locked`) maps to the empty string, which is how
+    /// the porcelain itself spells "present, no argument".
+    pub fn porcelain(&self) -> Vec<BTreeMap<String, String>> {
+        let text = git(&self.root, &["worktree", "list", "--porcelain"]);
+        let mut records = Vec::new();
+        let mut current: BTreeMap<String, String> = BTreeMap::new();
+        for line in text.lines() {
+            if line.is_empty() {
+                if !current.is_empty() {
+                    records.push(std::mem::take(&mut current));
+                }
+                continue;
+            }
+            let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+            current.insert(key.to_string(), value.to_string());
+        }
+        if !current.is_empty() {
+            records.push(current);
+        }
+        records
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // The `.git` fingerprint (architecture.md D.4)
 // ═══════════════════════════════════════════════════════════════════════════

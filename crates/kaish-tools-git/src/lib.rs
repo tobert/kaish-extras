@@ -100,6 +100,8 @@ mod model;
 #[cfg(not(target_family = "wasm"))]
 mod pathfilter;
 #[cfg(not(target_family = "wasm"))]
+mod reach;
+#[cfg(not(target_family = "wasm"))]
 mod render;
 #[cfg(not(target_family = "wasm"))]
 mod repo;
@@ -122,9 +124,10 @@ pub use config::{ConfigError, GitConfig, Limits, Profile, Verb};
 pub use error::GitError;
 #[cfg(not(target_family = "wasm"))]
 pub use model::{
-    Capabilities, CommitInfo, DiffEndpoint, DiffFile, DiffReport, DiffTotals, EntryKind,
-    EntryStatus, Head, LimitsReport, LogReport, LsReport, RefBackend, RepoInfo, ShowTag,
-    ShowTarget, Signature, StatSummary, StatusEntry, StatusReport, StatusTotals, TreeRow,
+    BranchKind, BranchReport, BranchRow, Capabilities, CommitInfo, DiffEndpoint, DiffFile,
+    DiffReport, DiffTotals, EntryKind, EntryStatus, Head, LimitsReport, LogReport, LsReport,
+    RefBackend, RepoInfo, ShowTag, ShowTarget, Signature, StatSummary, StatusEntry, StatusReport,
+    StatusTotals, TagKind, TagReport, TagRow, TreeRow, WorktreeReport, WorktreeRow,
 };
 #[cfg(all(not(target_family = "wasm"), feature = "textdiff"))]
 pub use model::{DiffHunk, DiffLine, DiffOp};
@@ -247,3 +250,4 @@ mod tests {
         assert_eq!(pins.len(), GIX_PINS.len());
     }
 }
+
