@@ -106,8 +106,12 @@ fixture asserted against real `git status --porcelain` before fixing.
   oid-reappearance pass run against every commit walked. Git's own default
   (`git log --stat` without `-M`) also does not detect renames, so this matches
   the tool an agent is comparing against — but it is a divergence from `status`
-  within our own surface, which is the part worth closing. Revisit when PR 5
-  (`diff`) factors the rename pairing out of `status`.
+  within our own surface, which is the part worth closing. PR 5 did factor the
+  pairing out — it is `diffcore::pair_exact_renames`, shared by `status` and
+  `diff` — so what remains is deciding whether `log --stat` should run it per
+  commit at all, which costs an add/delete pass over every commit walked and
+  diverges from git's own default (`git log --stat` without `-M` does not
+  detect renames either).
 
 - **L2 — a filtered `log` walks history rather than stopping at `--limit`.**
   No filter (`--author`, `--path`, a date window) is sorted along ancestry, so
@@ -190,6 +194,70 @@ fixture asserted against real `git status --porcelain` before fixing.
   equivalent) field to `CommitInfo`, and update both call sites and their
   tests together so `log --body` and `show` cannot silently disagree on the
   cap.
+
+- **L8 — `--stat` misses a mode-only change that git counts.** The tree
+  comparison behind `--stat` compares blob oids, and a `chmod +x` changes the
+  tree entry's mode without changing the blob — so a commit that only flips
+  the executable bit reports `files: 0`. Git counts it as one file changed
+  with zero lines on both sides (`0\t0\trun.sh` in `--numstat`). Found while
+  PR 5 factored the comparison core out; pinned by
+  `log.rs::stat_misses_a_mode_only_change_that_git_counts`, which asserts our
+  behavior and git's separately. `git diff` matches git here — its comparison
+  carries the class alongside the oid — so the fix is to have `--stat` do the
+  same, which means `changes_against` reporting a class-only difference. Not
+  done in PR 5: `--stat`'s counts are covered by their own oracle tests and
+  changing what it reports is a behavior change outside a diff PR.
+
+- **L9 — `--stat` counts no lines for a submodule move that git counts as
+  one each side.** A gitlink has no blob to read, so `--stat` reports the file
+  with zero additions and deletions. Git renders the patch as `-Subproject
+  commit <old>` / `+Subproject commit <new>` and counts `1\t1`. Pinned by
+  `log.rs::stat_counts_no_lines_for_a_submodule_move_that_git_counts_as_one`.
+  `git diff` matches git (one line per present side, no blob read to know it),
+  so this is a one-line change in `commit_stat` whenever `--stat`'s counts are
+  next touched. **The related crash is fixed**, not deferred: `read_blob` used
+  to decide gitlink-ness by asking the object store for the oid's header, and
+  a gitlink's oid is a commit in *another* repository — so `git log --stat`
+  failed outright, exit 1, on any commit that moved a submodule pointer. The
+  class the caller already has names it now (`diffcore::Side::Gitlink`).
+
+## git diff — deferred (architecture.md B.4, shipped in PR 5)
+
+- **D1 — a modified-and-moved file is a delete plus an add.** Rename detection
+  is exact-match only: a blob oid reappearing at a new path. A file that was
+  edited *and* moved has a different oid and never pairs, where git scores the
+  pair (`R087`) and folds it. **Permanent under this dependency set** —
+  `gix-diff`'s rename tracker is behind its `blob` feature and `blob` pulls
+  `gix-command` — so this is reported rather than fixed: `similarity` is only
+  ever `100` or `null`, and copy detection is absent entirely. Pinned by
+  `diff.rs::a_modified_and_moved_file_is_a_delete_plus_an_add`, which asserts
+  both behaviors. Revisiting means a line-similarity scorer of our own over
+  `gix-imara-diff`, which is a real design question (what threshold, and how
+  many candidate pairs may it consider) and not a gap to close quietly.
+
+- **D2 — an unmerged path is omitted rather than reported.** A conflicted path
+  has no stage 0, so it is dropped from *both* sides of the comparison,
+  counted in `unmerged`, and named on stderr. Dropping it from one side only
+  would report a conflicted file as `deleted`, which is a wrong answer wearing
+  a normal status. Git reports a `U` row instead. Giving one here means a
+  model change: B.4's `DiffFile` has no `conflicted` field where B.2's
+  `StatusEntry` does, and `EntryStatus` has no unmerged word by an explicit
+  B.2 decision. Pinned by
+  `diff.rs::unmerged_paths_are_declared_not_silently_dropped`.
+
+- **D3 — `--path` filters the candidate set before renames are paired.** The
+  filter is applied early on purpose: it is what keeps `--path src` from
+  hashing the whole working tree. The cost is that a rename whose *source* is
+  outside the filter reports as an addition rather than as a rename. Closing
+  it means pairing on the unfiltered sets and filtering the rows afterwards,
+  which gives back the bound. Not decided; nobody has hit it.
+
+- **D4 — `--patch` and `--context` exit 4 with no cargo feature to name.**
+  The error names `textdiff`, which is PR 6's feature and does not exist yet.
+  No empty `textdiff` feature was added to carry the name: `lib.rs`'s
+  `enabled_features()` rule is that an axis arrives with the code it gates,
+  and an embedder who could enable `textdiff` today would get nothing for it.
+  The feature and the flags start working in the same PR.
 
 ## kaish boundaries — for the write profiles
 
@@ -330,7 +398,9 @@ fixture asserted against real `git status --porcelain` before fixing.
 
 ## git — two tree-depth bounds, not one (not planned to converge)
 
-`verbs::log::MAX_STAT_TREE_DEPTH` (64) and `verbs::status::MAX_STATUS_TREE_DEPTH`
+`diffcore::MAX_FLAT_TREE_DEPTH` (64, named `verbs::log::MAX_STAT_TREE_DEPTH`
+until PR 5 moved the walk it bounds into the shared comparison core) and
+`verbs::status::MAX_STATUS_TREE_DEPTH`
 (256, also reused by `index_depth_guard` for the index's cache-tree) used to
 share the bare name `MAX_TREE_DEPTH` — harmless while each was private to its
 own module, noticed and renamed when the R4 fix made `status`'s constant
@@ -341,8 +411,8 @@ Not unified into one constant, and not expected to be: `status`'s
 `flatten_subtree` is genuinely self-recursive (calls itself once per subtree
 on the real call stack), which is what makes 256 a hard stack-safety bound,
 empirically anchored to the depth a debug build measurably overflows at
-(700–800 levels on a 2 MiB thread). `log`'s `flatten_tree` walks with an
-explicit `Vec`-based stack instead — no call-stack recursion at all — so its
+(700–800 levels on a 2 MiB thread). `diffcore`'s `flatten_tree` — the walk
+`log --stat` and `diff` share — uses an explicit `Vec`-based stack instead — no call-stack recursion at all — so its
 64 is a generous sanity cap on a mechanism that does not carry the same
 overflow risk in the first place, not a value measured against the same
 failure mode. Two different mechanisms with two different appropriate
@@ -377,7 +447,8 @@ untouched here (out of scope for a padding-guard PR, and neither has a
   a real change to a load-bearing function with its own extensive test
   coverage — worth its own PR, not a drive-by alongside an unrelated index
   fix.
-- `verbs::log.rs`'s `flatten_tree` does *not* share the pre-collect-`Vec` step
+- `verbs::log.rs`'s `flatten_tree` moved to `diffcore.rs` in PR 5 and is now
+  shared with `diff`. It does *not* share the pre-collect-`Vec` step
   — it already processes each `find_tree_iter` entry directly in its `for`
   loop, pushing to its explicit stack or its output map as it goes, with no
   intermediate buffer to remove. Its width is still unbounded in total (no

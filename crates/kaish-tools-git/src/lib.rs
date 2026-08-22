@@ -37,6 +37,11 @@
 //! tree and blob forms — no `--patch` yet, that is a later phase): a shared
 //! tree walk in `treewalk.rs`, the `<rev>:<path>` colon grammar `show` and
 //! `ls` accept and `log` still refuses, and `@` as an alias for `HEAD`.
+//! PR 5 adds `git diff` — the typed change model over five endpoint pairs,
+//! every result stating which one it used — and lifts the comparison
+//! machinery `status`, `log --stat` and `diff` all needed into
+//! `diffcore.rs`. No patch text: `--patch` and `--context` exit 4 naming the
+//! `textdiff` feature a later phase adds.
 
 #[cfg(target_family = "wasm")]
 compile_error!(

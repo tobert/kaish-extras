@@ -6,14 +6,17 @@ autopsy, and design intent live in [`../../docs/git.md`](../../docs/git.md);
 the crate layout, verb surface, and read-only enforcement argument are in
 [`../../docs/design/architecture.md`](../../docs/design/architecture.md).
 
-Three verbs so far — `info`, `status`, `log` — all read-only; the write
-profiles above are not built yet.
+Six verbs so far — `info`, `status`, `log`, `ls`, `show`, `diff` — all
+read-only; the write profiles are not built yet.
 
 ```sh
 kaish> git info
 kaish> git info --repo /mnt/repos/kaish --json
 kaish> git status --json
 kaish> git log --since 2026-08-01 --stat
+kaish> git show v0.1.0:src/lib.rs
+kaish> git ls HEAD src
+kaish> git diff --staged --json
 ```
 
 Register it in an embedder's `configure_tools` closure:

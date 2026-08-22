@@ -1467,3 +1467,55 @@ landed as written: the revspec grammar's colon split happens in the caller
 `@` resolves to `HEAD` (closing the L4 backlog entry); and the blob form's
 cap declines the whole blob rather than serving a truncated prefix, matching
 `log --stat`'s existing blob-cap discipline in `verbs/log.rs`.
+
+**2026-08-22 — PR 5 (`git diff`, structured) landed; three deviations from the
+literal text above, each deliberate.**
+
+- **§B.4's `similarity` open question is closed as `100`, not `null`.** An
+  exact rename's two sides are byte-identical, so 100 is *measured* rather
+  than assumed, and it is the number git's own `R100` carries for the same
+  pair. `null` would say "unscored", which is false here and
+  indistinguishable from the `null` every non-rename row carries — an agent
+  could not tell "we did not score it" from "this is not a rename". The field
+  still never carries a computed score: it is `100` or `null` and nothing
+  between, which is itself the honest statement of the exact-match limit.
+  Pinned by `diff.rs::an_exact_rename_carries_similarity_100`.
+
+- **`--staged` does not build a temporary index ([F.4](#f4-treeindex-diff-for-staged)).**
+  F.4's premise is right — gix has no tree↔index diff — but the conclusion is
+  not needed: the flatten-and-compare `status`'s staged half has used since
+  PR 2 answers HEAD↔index directly, and `git diff --staged --name-status` and
+  `--numstat` are its oracle. Building a tree's index in memory to then diff
+  tree↔tree would be strictly more work for the same answer. kaish-extras#10
+  can be closed as retired rather than done.
+
+- **The per-file `truncated` in §B.4's JSON example is `lines_capped`
+  instead.** `truncated` there means "this file's hunks were cut", and this
+  build has no hunks, so the field would carry `false` on every row forever —
+  a placeholder shaped like a fact. `lines_capped` is the fact this build
+  does have: a side was over `max_blob_bytes`, so the counts were declined.
+  `additions`, `deletions` and `binary` are `Option` for the same reason:
+  under `--name-only`, or past the cap, `null` says "not counted" where zero
+  would claim the file changed no lines. `totals` gains `lines_capped`, and
+  the report gains `unmerged` — a count of conflicted paths left out of the
+  comparison, which git reports as a `U` row and this surface has no row
+  shape for (docs/issues.md, D2).
+
+Everything else in B.4 landed as written: the five endpoint pairs, bare
+`diff` as index→worktree, every result stating its endpoints in both
+surfaces, `A..B` refused, exact-match renames with no copy detection, `op` as
+a word, and `--patch` exiting 4. `--context` exits 4 as well — B.4 lists it
+without gating it, but it can only shape output this build does not produce,
+and a flag that is accepted and does nothing is the defect the curl work
+spent a day removing. No empty `textdiff` cargo feature was added to carry
+the name the error uses: `lib.rs`'s rule is that a feature axis arrives with
+the code it gates.
+
+**Found while building it, and reported rather than absorbed:** `git log
+--stat` failed outright, exit 1, on any commit that moved a submodule pointer
+— it decided gitlink-ness by asking the object store for the oid's header,
+and a gitlink's oid is a commit in another repository. Fixed at the shared
+root (the class the caller already has names it). Two `--stat` divergences
+from git are left standing with characterization tests: a mode-only change it
+misses, and a submodule move it counts as zero lines where git counts one
+each side (docs/issues.md, L8 and L9).
