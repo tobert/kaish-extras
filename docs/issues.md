@@ -252,6 +252,18 @@ fixture asserted against real `git status --porcelain` before fixing.
   it means pairing on the unfiltered sets and filtering the rows afterwards,
   which gives back the bound. Not decided; nobody has hit it.
 
+- **D5 — the worktree endpoints hash every tracked file the filter kept.**
+  `--limit` bounds the *reported* files and, deliberately, the blob reads
+  behind their line counts — truncation happens before `finish` reads
+  anything, so a small `--limit` bounds the reading and not only the output.
+  What it cannot bound is the pass that decides *which* files changed:
+  index→worktree and rev→worktree hash every tracked file, because content
+  hashing is the only honest way to tell — git uses the index's stat cache
+  for this and we do not, since refreshing it is a `.git` write and the
+  fingerprint test (D.4) exists to catch those. `--path` is applied to the
+  candidate set before that pass, which is the lever a caller has. Same cost
+  `git status` already pays, and accepted for the same reason.
+
 - **D4 — `--patch` and `--context` exit 4 with no cargo feature to name.**
   The error names `textdiff`, which is PR 6's feature and does not exist yet.
   No empty `textdiff` feature was added to carry the name: `lib.rs`'s
