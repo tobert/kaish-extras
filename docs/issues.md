@@ -778,15 +778,6 @@ bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
   already visits every directory itself, so a `symlink_metadata` pre-screen is
   available without touching gix.
 
-- **P6 — a symlinked start path walks discovery outside the ceiling.**
-  `screen_gitdir_file` returns `Ok(())` when the start path canonicalizes
-  outside the ceiling, on the comment's reasoning that "discovery will report
-  the missing path". It does not — it walks from there, and the ceiling's
-  lexical prefix match drops. The *result* is still refused with no content
-  read, but gix's ownership check fires on outside candidates, so
-  `NoTrustedGitRepository` (exit 4) versus nothing-there (exit 1) is one bit:
-  "is there a repo I do not own above my symlink's target".
-
 - **P7 — a repo-relative `include.path` hides the format and extension
   gates.** `check_include_paths` refuses only *escaping* includes, and includes
   are never followed (`from_bytes_no_includes`) — so a repository can put
@@ -913,7 +904,7 @@ repository size, not result size.
 - **G6 — "mount the common dir" may be a wider grant than the git verbs need.**
   Raised by kaibo on 2026-08-22 from a measured case, not a hypothetical. A
   linked worktree whose main repository is outside the allowed set is refused
-  with exit 4 at `screen_gitdir_file` (`repo.rs:138`), and the fix we tell the
+  with exit 4 at `screen_discovery_start` in `repo.rs`, and the fix we tell the
   embedder is to mount the common git dir too. For an embedder whose allowed
   set doubles as its **kaish mount table** — kaibo's does — that single grant
   also makes `.git` readable to the model-facing shell: `cat`, `grep`,

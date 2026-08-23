@@ -1489,3 +1489,124 @@ async fn a_registrations_gitdir_symlink_cannot_report_whether_its_target_exists(
          mount -- the worktree count is a one-bit host oracle"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The start path — the fourth path a repository can name
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The start path is repository-controlled too, and it was an existence
+/// oracle for any directory on the host.
+///
+/// `resolve_real_path` is a backend method. kaish's own `LocalFs` implements
+/// it by canonicalizing and refusing an escape, but the trait does not require
+/// that, and a backend that joins lexically (this suite's `StrictBackend`, and
+/// any embedder that writes the obvious three-line version) hands this crate a
+/// path that is inside the mount as a string and a symlink out of it to
+/// `openat`. Discovery then walks from the symlink's *target*.
+///
+/// One bit came back per invocation, and it was the plain existence of any
+/// directory on the host: with the target present, discovery found the
+/// target's own `.git` — or, absent that, still stopped there — and the call
+/// answered about the repository at the mount root (exit 0); with the target
+/// missing, `dir.metadata()` failed inside gix-discover and the call was "no
+/// repository" (exit 1). Symlink at `/etc/ssl/private`, read the exit code.
+///
+/// The fix is in `screen_discovery_start`: a start path that resolves outside
+/// the mount is refused with the same `NotARepository` a start path that does
+/// not resolve at all produces, field for field.
+#[tokio::test]
+async fn a_symlinked_start_path_cannot_report_whether_its_target_exists() {
+    require_git();
+
+    /// Build a mount whose root is a repository, plant `link` in it pointing
+    /// at `<scratch>/outside/probed`, and run `git info` from the link.
+    ///
+    /// The repository at the mount root is what makes the oracle visible:
+    /// without it both probes end in "no repository" for their own reasons
+    /// and the difference has nowhere to show up.
+    async fn probe(target_exists: bool) -> (i64, String) {
+        let fixture = Fixture::empty();
+        let mount = fixture.path("mount");
+        let outside = fixture.path("outside");
+        std::fs::create_dir_all(&mount).expect("create mount");
+        std::fs::create_dir_all(&outside).expect("create outside");
+
+        git(&mount, &["init", "--initial-branch=main", "--quiet"]);
+        write_file(&mount, "README.md", "inside the mount\n");
+        git(&mount, &["add", "."]);
+        git(&mount, &["commit", "-m", "inside", "--quiet"]);
+
+        let target = outside.join("probed");
+        if target_exists {
+            std::fs::create_dir_all(&target).expect("create the probe target");
+        }
+        std::os::unix::fs::symlink(&target, mount.join("link")).expect("plant the symlink");
+
+        let result = info_at(mount.clone(), "/mnt/link").await;
+        // Normalize the fixture's own temp root out of the message: each probe
+        // builds its own, and that difference is ours, not the repository's.
+        let err = result
+            .err
+            .replace(&mount.display().to_string(), "<MOUNT>")
+            .replace(&fixture.root().display().to_string(), "<FIXTURE>");
+        (result.code, err)
+    }
+
+    let (code_present, err_present) = probe(true).await;
+    let (code_absent, err_absent) = probe(false).await;
+
+    assert_eq!(
+        code_present, code_absent,
+        "the exit code must not depend on whether the symlink's target exists \
+         — it did (present={code_present}, absent={code_absent}), which is a \
+         1-bit read of any path on the host"
+    );
+    assert_eq!(
+        code_present, 1,
+        "and both are 'no repository': from inside the mount there is none at \
+         this path either way: {err_present}"
+    );
+    assert_eq!(
+        err_present, err_absent,
+        "the refusals must be indistinguishable in wording too"
+    );
+    for err in [&err_present, &err_absent] {
+        assert!(
+            !err.contains("probed"),
+            "the refusal must not echo where the symlink aimed: {err}"
+        );
+    }
+}
+
+/// The negative control the test above needs: the same fixture, with the
+/// symlink pointing at a directory *inside* the mount, answers.
+///
+/// Without this, "both probes exit 1" would pass just as well if this crate
+/// refused every start path, or if the fixture never built a repository at
+/// all. Exit 0 here is what says the refusal above is about leaving the mount
+/// and nothing else.
+#[tokio::test]
+async fn a_symlink_to_a_directory_inside_the_mount_is_followed() {
+    require_git();
+    let fixture = Fixture::empty();
+    let mount = fixture.path("mount");
+    std::fs::create_dir_all(mount.join("sub")).expect("create mount and sub");
+
+    git(&mount, &["init", "--initial-branch=main", "--quiet"]);
+    write_file(&mount, "README.md", "inside the mount\n");
+    git(&mount, &["add", "."]);
+    git(&mount, &["commit", "-m", "inside", "--quiet"]);
+    std::os::unix::fs::symlink(mount.join("sub"), mount.join("link")).expect("symlink");
+
+    let result = info_at(mount.clone(), "/mnt/link").await;
+    assert_eq!(
+        result.code, 0,
+        "a symlink that stays inside the mount must still resolve: {}",
+        result.err
+    );
+    let json = result
+        .output()
+        .and_then(|o| o.rich_json.clone())
+        .expect("structured output");
+    assert_eq!(json["repo_root_vfs"], "/mnt");
+}

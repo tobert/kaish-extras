@@ -85,7 +85,7 @@ pub enum GitError {
     /// linked worktree's `gitdir:` target always nests under
     /// `<common-dir>/worktrees/<name>`, so mounting what the command reports
     /// satisfies both the `gitdir:`-line gate ([`crate::repo`]'s
-    /// `screen_gitdir_file`) and the `commondir`-content gate below it. That
+    /// `screen_discovery_start`) and the `commondir`-content gate below it. That
     /// closes the round trip for the common, legitimate case (a linked
     /// worktree mounted without its main repository — the sibling-worktree
     /// layout kaibo's own PR flow uses) without this crate ever repeating

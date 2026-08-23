@@ -136,7 +136,15 @@ impl ReadRepo {
         //
         // Screening here refuses an escaping `gitdir:` on the strength of
         // where it points, never on whether it is there.
-        screen_gitdir_file(operation, real_path, &real_dir(operation, "mount root", ceiling)?)?;
+        //
+        // The ceiling is canonicalized once, here, and the same value is used
+        // by the screen, by the refusal below and by every check after it. Two
+        // canonicalizations were two values — the raw one the caller passed
+        // and the resolved one — and a refusal that named the raw one while
+        // its twin named the resolved one is a wording difference a caller can
+        // read as an answer.
+        let ceiling = real_dir(operation, "mount root", ceiling)?;
+        screen_discovery_start(operation, real_path, &ceiling)?;
 
         let (path, _trust) = gix_discover::upwards_opts(real_path, options).map_err(|e| {
             use gix_discover::upwards::Error;
@@ -193,7 +201,7 @@ impl ReadRepo {
         // ceiling and every directory are resolved with `canonicalize` before
         // they are compared (here), and every file and probe underneath goes
         // through `open_leaf`, which refuses a symlinked leaf that escapes.
-        let ceiling = real_dir(operation, "mount root", ceiling)?;
+        // The ceiling was resolved once, above the discovery call.
 
         // The working tree first, because whether it is inside the mount is
         // what decides how a bad `git_dir` may be reported. It is discovery's
@@ -1569,19 +1577,26 @@ impl Leaf {
 /// terabyte.
 const MAX_DOT_GIT_FILE_BYTES: u64 = 4096;
 
-/// Refuse a `.git` *file* whose `gitdir:` line leaves the mount, before
-/// discovery ever resolves it.
+/// Refuse the two discovery inputs that can leave the mount, before
+/// `gix_discover::upwards_opts` ever resolves either of them.
 ///
-/// Walks from `start` up to `ceiling` looking for the `.git` entry discovery
-/// would find. A directory is an ordinary repository and needs no screening. A
-/// file is the one discovery input a repository fully controls — its
-/// `gitdir:` line can name any absolute path on the host — so its target goes
-/// through [`contain`], which answers "outside the mount" and "does not
-/// resolve" with the *same* refusal.
+/// The first is `start` itself. A lexical `resolve_real_path` — the shape
+/// kaish's own `LocalFs` does *not* have, and an embedder's backend may —
+/// hands back a path that is inside the mount as a string and a symlink out
+/// of it to `openat`. Discovery walks from what the symlink points at, so the
+/// walk's answer depends on what is over there.
+///
+/// The second is a `.git` *file*'s `gitdir:` line. This walks from `start` up
+/// to `ceiling` looking for the `.git` entry discovery would find. A directory
+/// is an ordinary repository and needs no screening. A file is the discovery
+/// input a repository fully controls — its `gitdir:` line can name any
+/// absolute path on the host — so its target goes through [`contain`], which
+/// answers "outside the mount" and "does not resolve" with the *same*
+/// refusal.
 ///
 /// A `.git` that is itself a symlink is handled by [`open_leaf`], on the same
 /// terms.
-fn screen_gitdir_file(
+fn screen_discovery_start(
     operation: &'static str,
     start: &Path,
     ceiling: &Path,
@@ -1591,11 +1606,33 @@ fn screen_gitdir_file(
     // Start from a canonical directory so `open_leaf`'s "real leaf under a
     // canonical parent is contained by construction" reasoning holds.
     let Ok(mut dir) = std::fs::canonicalize(start) else {
-        // Nothing we can screen; discovery will report the missing path.
+        // The start path does not resolve at all. Discovery answers that with
+        // `NotARepository` against the same `start` and the same `ceiling`
+        // this function would name, so letting it through costs nothing and
+        // keeps one code path for "there is nothing here".
         return Ok(());
     };
     if !dir.starts_with(ceiling) {
-        return Ok(());
+        // The start path resolves *outside* the mount — a symlink inside the
+        // mount pointing out of it, since a lexical `resolve_real_path` hands
+        // us the symlink's own path. Returning `Ok(())` here let discovery
+        // walk from that target, and its first candidate is the target's own
+        // `.git`: a directory there stopped the walk and we refused (exit 1),
+        // an absent one let the walk fall back inside the mount and answer
+        // about the mount's own repository (exit 0). That difference is a
+        // one-bit read of any path on the host — symlink at it and look at
+        // the code. `a_symlinked_start_path_cannot_report_whether_its_target_exists`
+        // in tests/hostile_repo.rs is the fixture.
+        //
+        // The refusal is the same `NotARepository` the branch above leads to,
+        // field for field, so "resolves outside the mount" and "does not
+        // resolve" stay indistinguishable — from inside the mount there is no
+        // repository at this path either way, and that is all we say.
+        return Err(GitError::NotARepository {
+            operation,
+            start: start.to_path_buf(),
+            ceiling: ceiling.to_path_buf(),
+        });
     }
 
     loop {

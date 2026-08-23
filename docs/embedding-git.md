@@ -225,6 +225,18 @@ is the fixture suite that proves each one; see architecture.md §D.5's
 "containment invariant" write-up for the full primitive-by-primitive
 breakdown.
 
+The **start path** is checked the same way, and it is the one an embedder can
+hand over by accident. If your `resolve_real_path` joins lexically rather
+than canonicalizing — kaish's own `LocalFs` canonicalizes and refuses an
+escape, but the trait does not require it — then a symlinked directory inside
+the mount is a path this crate is given as inside and the kernel resolves as
+outside, and discovery would walk from the target. A start path that resolves
+outside the mount is refused with the same "no repository", exit 1, that a
+start path which does not resolve at all produces
+(`a_symlinked_start_path_cannot_report_whether_its_target_exists`,
+`tests/hostile_repo.rs`). The two are byte-identical on purpose: the
+difference between them is one bit about whatever the symlink points at.
+
 ### Several allowed trees, and linked worktrees as the sharp case
 
 An embedder's allowed set is rarely one mount. kaibo's own read scope, for
