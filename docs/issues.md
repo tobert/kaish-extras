@@ -851,6 +851,31 @@ bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
   common, and real `git status` handles it fine. **Decide** whether whole-call
   failure is right, then make the guide say what the code does.
 
+  **Decided 2026-08-23 (Amy): per-file decline, the report continues.** The
+  oversized file is marked as not compared and the rest of the report arrives.
+  Three reasons it went that way rather than keeping the refusal:
+
+  - **The vocabulary already exists.** `lines_capped` and `hunks_capped` both
+    mean "we declined to read this, and nothing else". A third member of that
+    family is the shape this crate already teaches an agent to read, and it
+    keeps one term with one meaning.
+  - **The refusal was the odd one out, not the rule.** `show` declines a single
+    over-cap blob; `diff --patch` caps hunks per file and keeps going. Only
+    `status` escalated a per-file limit to the whole call.
+  - **It is what the message and the guide already said.** `BlobTooLarge` reads
+    "it will not read this one. Raise the cap to include it", and the Limits
+    table reads "the read is declined and reported". Both describe the behavior
+    being adopted here, which is why the mismatch was reported as a doc bug
+    rather than noticed as a behavior one.
+
+  Not free, and the cost is the reason the original refusal was defensible: a
+  partial report can be mistaken for a complete one. So the decline must be
+  **visible in the report itself**, not only on stderr — an agent reading
+  `--json` has to be able to tell that a path was skipped without parsing prose.
+  `a_tracked_file_over_the_blob_cap_is_refused` inverts into a test that the
+  report arrives *and* names the skipped file, and it needs a negative control
+  proving an under-cap file in the same repository is still compared normally.
+
 ## git — cost shapes `--limit` does not bound
 
 Found by the 2026-08-22 cross-model review (kaibo default cast, whole files,
