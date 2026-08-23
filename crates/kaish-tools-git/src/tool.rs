@@ -1666,7 +1666,7 @@ mod tests {
     /// The rule was broken on all six verbs at once and nobody saw it, because
     /// the offending text was a doc comment on a field marked `hide = true` —
     /// and `hide` does not mean hidden here. `params_from_clap` deliberately
-    /// keeps hidden *positionals* (kaish-tool-api 0.15's `clap_schema.rs`
+    /// keeps hidden *positionals* (kaish-tool-api 0.16's `clap_schema.rs`
     /// documents why: for most tools they ARE the public surface, `cat
     /// paths…`), dropping only hidden *flags*. So six descriptions reading
     /// "do not read this field" and naming `ToolArgs::to_argv` shipped to
