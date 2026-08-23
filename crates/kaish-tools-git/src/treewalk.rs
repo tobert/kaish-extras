@@ -15,12 +15,13 @@ use crate::repo::ReadRepo;
 
 /// How deep the `ls`/`show` listing walk may recurse before it is refused.
 ///
-/// The same value `git log`'s `--stat` tree comparison bounds itself to
-/// ([`crate::verbs::log`]'s `MAX_STAT_TREE_DEPTH`) — a second constant with
-/// the same number rather than a shared one, because the two walks read
-/// different data (this one builds rows with mode/oid/size; log's flattens to
-/// a path→oid map for a diff) and sharing a number is not the same as sharing
-/// a walk. `verbs::status`'s `MAX_STATUS_TREE_DEPTH` is a third, at 256; each
+/// The same value the shared tree comparison bounds itself to
+/// ([`crate::diffcore`]'s `MAX_FLAT_TREE_DEPTH`, which carried the name
+/// `verbs::log::MAX_STAT_TREE_DEPTH` until PR 5 moved that walk) — a second
+/// constant with the same number rather than a shared one, because the two
+/// walks read different data (this one builds rows with mode/oid/size; that
+/// one flattens to a path→oid map for a diff) and sharing a number is not the
+/// same as sharing a walk. `verbs::status`'s `MAX_STATUS_TREE_DEPTH` is a third, at 256; each
 /// bound names the walk it governs so the bare name cannot be read as one
 /// shared limit.
 ///
@@ -51,10 +52,18 @@ fn kind_of(mode: TreeEntryKind) -> EntryKind {
 
 /// The six-digit octal mode string `git ls-tree` prints.
 ///
-/// A tree's raw on-disk mode is five octal digits (`40000`) — one of git's
-/// own on-disk quirks — while every display of it (`ls-tree`, `diff --raw`)
-/// pads it to six (`040000`). Padding here is what makes our `mode` agree
-/// with `git ls-tree`'s, byte for byte (D8 in the PR4 design notes).
+/// Two normalizations, both of which `git ls-tree` also applies, so our
+/// `mode` agrees with its column byte for byte (D8 in the PR4 design notes):
+///
+/// - A tree's raw on-disk mode is five octal digits (`40000`) — one of git's
+///   own on-disk quirks — while every display of it (`ls-tree`, `diff --raw`)
+///   pads it to six (`040000`).
+/// - `kind()` discards the permission bits git does not record, so a tree
+///   entry written as `100664` prints `100644`. This is not a divergence:
+///   git's own tree reader canonicalizes the same way (`canon_mode` in
+///   `tree-walk.c`), and `git ls-tree` prints `100644` for that entry too.
+///   Pinned against a live `git ls-tree` oracle by
+///   `ls.rs::a_noncanonical_tree_mode_prints_the_mode_git_ls_tree_prints`.
 fn mode_of(mode: gix_object::tree::EntryMode) -> String {
     // `as_octal_str()` returns a `BStr`, whose `Display` writes its chunks
     // directly and ignores formatter width/fill flags — `{:0>6}` on the BStr

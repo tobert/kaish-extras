@@ -520,6 +520,15 @@ tree-depth bounds and the entries not listed here.
   levels, genuinely self-recursive, empirically anchored to a measured
   overflow point) are different mechanisms with different appropriate
   values — not an oversight, and not planned to converge.
+- **A sparse index is refused, not expanded.** A repository whose index holds
+  sparse-directory entries — `git sparse-checkout init --cone --sparse-index`
+  writes them, one per collapsed subtree — is refused by `git status` and
+  `git diff --staged` with **exit 4**, naming the mode (`040000`) and the way
+  out: `git sparse-checkout disable` expands the index, after which the
+  repository reads normally. Expanding the entry ourselves is a read this
+  build does not do, and skipping it reported every path under the collapsed
+  directory as `deleted`. A sparse *checkout* without `--sparse-index` is not
+  affected: its entries are ordinary ones.
 - **A fail-closed guard can refuse a legitimate repository.** The
   `.git/index` depth guard walks the entries itself before handing them to
   gitoxide, and an index shape it cannot fully account for is refused as

@@ -1,8 +1,8 @@
 //! The comparison machinery `status`, `log --stat` and `diff` all need
 //! (architecture.md B.2, B.3, B.4).
 //!
-//! Three things live here, each because two or more verbs would otherwise
-//! carry their own copy of it:
+//! What lives here, each because two or more verbs would otherwise carry
+//! their own copy of it:
 //!
 //! - [`Class`] — a tree entry, an index entry and a working-tree file
 //!   normalized onto one axis, so the three can be compared at all. The
@@ -62,12 +62,37 @@ impl Class {
         })
     }
 
+    /// The class of an index entry, read the way git reads a mode: the
+    /// file-type bits (`0o170000`) pick the class, and for a regular file the
+    /// owner-execute bit (`0o100`) picks `File` or `Exec`. Every other
+    /// permission bit is noise git does not record — `100664` and `100600`
+    /// are both `File`, and `git status` reports nothing for either
+    /// (`status.rs::an_index_mode_git_reads_as_a_file_is_not_reported_deleted`).
+    ///
+    /// `None` where git has no answer either: `040000` is a sparse-directory
+    /// entry, which needs an index expansion this build does not do, and any
+    /// other file-type bits abort real git's own index reader
+    /// (`BUG: unsupported ce_mode`). The callers refuse — see
+    /// [`class_of_index_mode`], which is what both of them actually call.
+    ///
+    /// One mode cannot be seen here at all: `gix_index`'s decoder builds the
+    /// mode with `Mode::from_bits_truncate`, which drops every bit outside
+    /// the union of its five named modes (`0o160755`) before this function
+    /// runs. A file-type bit of `0o010000` is among them, so an entry written
+    /// as `110644` arrives as `100644` and reads as a plain file, where real
+    /// git aborts on it. Pinned in
+    /// `status.rs::an_index_mode_gix_truncates_reads_as_a_file_where_git_aborts`.
     pub(crate) fn from_index(mode: IndexMode) -> Option<Class> {
-        Some(match mode {
-            IndexMode::FILE => Class::File,
-            IndexMode::FILE_EXECUTABLE => Class::Exec,
-            IndexMode::SYMLINK => Class::Symlink,
-            IndexMode::COMMIT => Class::Commit,
+        /// The file-type bits of a mode, git's `S_IFMT`.
+        const IFMT: u32 = 0o170000;
+        /// The owner-execute bit, the only permission bit git records.
+        const EXEC: u32 = 0o100;
+        let bits = mode.bits();
+        Some(match bits & IFMT {
+            0o100000 if bits & EXEC == EXEC => Class::Exec,
+            0o100000 => Class::File,
+            0o120000 => Class::Symlink,
+            0o160000 => Class::Commit,
             _ => return None,
         })
     }
@@ -122,6 +147,28 @@ impl Class {
         }
         family(self) != family(other)
     }
+}
+
+/// The class of an index entry, or the refusal for a mode this build cannot
+/// place — the form both `status` and `diff` use.
+///
+/// Skipping the entry instead is the bug this replaced: a skipped entry is
+/// absent from the stage-0 map, and a path present in HEAD but absent from
+/// that map is reported `deleted`. A file that is still on disk, still
+/// tracked, and reported deleted is a wrong answer wearing a normal status,
+/// which is worse than a refusal that names what it could not read.
+pub(crate) fn class_of_index_mode(
+    op: &'static str,
+    repo: &std::path::Path,
+    mode: IndexMode,
+) -> Result<Class, GitError> {
+    Class::from_index(mode).ok_or_else(|| GitError::UnsupportedIndexMode {
+        operation: op,
+        repo: repo.to_path_buf(),
+        // Six digits, the width `git ls-files -s` prints — `040000` and
+        // `100644` line up in a report that carries both.
+        mode: format!("{:06o}", mode.bits()),
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
