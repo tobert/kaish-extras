@@ -832,7 +832,7 @@ Repo-local `.git/config` still has to be read — `core.repositoryformatversion`
 ```rust
 // bytes we fetched ourselves; includes are NOT followed by gix-config
 let cfg = gix_config::File::from_bytes_no_includes(&bytes, meta, opts)?;
-// any `include.path` / `includeIf` is resolved by us, or refused (see D.3)
+// any `include.path` / `includeIf` is refused, never resolved (see D.3)
 ```
 
 `gix-config`'s only `std::fs` sites are the path-based comfort constructors and
@@ -1040,9 +1040,16 @@ over three primitives, not the one comparison above:
   itself: `std::fs::canonicalize` then `starts_with(ceiling)`.
 - **Fixed-name leaves** under an already-canonical, already-checked parent
   (`commondir`, `config`, `shallow`, `refs`, `reftable`, `objects`,
-  `worktrees`, `.gitmodules`): `lstat`, no follow; a symlinked leaf is
-  resolved, ceiling-checked, and refused *before* it is read if it escapes
-  (the `open_leaf` helper).
+  `worktrees`, `.gitmodules`, and the ref leaves gitoxide opens by name —
+  `HEAD`, `packed-refs`, `refs/heads`, `refs/tags`, `refs/remotes`): `lstat`,
+  no follow; a symlinked leaf is resolved, ceiling-checked, and refused
+  *before* it is read if it escapes (the `open_leaf` helper).
+- **The start path** — the path discovery is asked to walk up from. A
+  `resolve_real_path` that joins lexically hands over a symlink inside the
+  mount whose target is outside it, and discovery walks from the target: a
+  start path that resolves outside the ceiling is refused with the same
+  `NotARepository` an unresolvable one produces, field for field, because the
+  difference between them is one bit about the target.
 - **Content-named paths** — the `commondir` file's own contents, and each
   `objects/info/alternates` entry: `canonicalize` then ceiling-check, with
   "escapes" and "does not resolve" made indistinguishable on purpose, so the
@@ -1073,10 +1080,15 @@ over three primitives, not the one comparison above:
   inside the working tree is legitimate and is followed.
 
 The residual carve-out, stated honestly: a symlinked leaf that gitoxide opens
-*internally* — loose objects, individual ref files, `HEAD`, packs, and the
-per-directory `.gitignore` files `gix-worktree`'s ignore `Stack` reads as
-`git status` descends the working tree — is not intercepted by any of the
-above, because nothing here wraps every `open` gitoxide makes. The
+*internally* — loose objects, packs, individual ref files under a
+repository-named path in `refs/`, and the per-directory `.gitignore` files
+`gix-worktree`'s ignore `Stack` reads as `git status` descends the working
+tree — is not intercepted by any of the above, because nothing here wraps
+every `open` gitoxide makes. The ref half of that is a **content** read and
+not a one-bit probe: a loose ref is 40 hex characters, and `.git/HEAD` naming
+a symlinked one makes `git info` return the target file's first 40 characters
+inside a "could not be found" message (`docs/issues.md`'s P13,
+`hostile_repo.rs::a_symlinked_loose_ref_still_reaches_a_host_file`). The
 `.gitignore` reads belong in that list and not in a footnote: they are the one
 carve-out path that reaches into the *working tree* rather than `.git`, the
 `Stack` consults them on every descent (`--untracked no` does not avoid them,

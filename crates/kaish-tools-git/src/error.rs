@@ -85,7 +85,7 @@ pub enum GitError {
     /// linked worktree's `gitdir:` target always nests under
     /// `<common-dir>/worktrees/<name>`, so mounting what the command reports
     /// satisfies both the `gitdir:`-line gate ([`crate::repo`]'s
-    /// `screen_gitdir_file`) and the `commondir`-content gate below it. That
+    /// `screen_discovery_start`) and the `commondir`-content gate below it. That
     /// closes the round trip for the common, legitimate case (a linked
     /// worktree mounted without its main repository — the sibling-worktree
     /// layout kaibo's own PR flow uses) without this crate ever repeating
@@ -174,16 +174,31 @@ pub enum GitError {
         extension: String,
     },
 
-    /// Repo-local config asks us to include a file outside the repository.
-    /// Exit 4. Nothing follows the include — this is the refusal, not a
-    /// report of one that happened (architecture.md D.3).
+    /// Repo-local config declares an include. Exit 4. Nothing follows it —
+    /// this is the refusal, not a report of one that happened
+    /// (architecture.md D.3).
+    ///
+    /// Every include is refused, not only one that escapes the repository.
+    /// This crate parses config with `from_bytes_no_includes` and resolves no
+    /// include at all, so the config it read is not the config the file's
+    /// author wrote, and answering from it is the silent fallback E.5
+    /// forbids. Real git agrees about the keys this crate actually consults —
+    /// its own `core.repositoryformatversion` and `extensions.*` gates ignore
+    /// includes too — so the refusal costs nothing today and cannot become a
+    /// wrong answer the day a verb reads one more key.
+    ///
+    /// The value is echoed. It is repo-local config text the caller can read
+    /// with the shell, written by whoever wrote the include, and it says
+    /// nothing about the host — unlike the paths [`GitError::EscapesMount`]
+    /// withholds, which are answers to a question about the host filesystem.
     #[error(
         "git {operation}: config in repository '{repo}' declares \
-         '{key} = {value}', which escapes the repository — kaish-git resolves \
-         includes itself and follows only repo-relative ones. The include was \
-         not read"
+         '{key} = {value}' — kaish-git follows no include, so it would be \
+         answering from a config that is missing whatever that file sets. \
+         Inline the included settings into the repository's own config and \
+         retry. The include was not read"
     )]
-    EscapingInclude {
+    UnsupportedInclude {
         /// The verb that was asked for.
         operation: &'static str,
         /// The repository the refusal is about.
@@ -565,7 +580,7 @@ impl GitError {
             | GitError::UnsupportedRefBackend { .. }
             | GitError::UnsupportedRepositoryFormat { .. }
             | GitError::UnknownExtension { .. }
-            | GitError::EscapingInclude { .. }
+            | GitError::UnsupportedInclude { .. }
             | GitError::EscapesMount { .. }
             | GitError::NoContainingMount { .. }
             | GitError::UntrustedRepository { .. }
@@ -635,7 +650,7 @@ mod tests {
                 repo: repo.clone(),
                 extension: "worktreeconfig".into(),
             },
-            GitError::EscapingInclude {
+            GitError::UnsupportedInclude {
                 operation: "info",
                 repo: repo.clone(),
                 key: "include.path".into(),

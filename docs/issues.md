@@ -737,7 +737,7 @@ Four reviews before 0.9.0, framed as *"what tests are missing"* rather than
 bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
 0`); the stale module docs are fixed. What is left, ranked:
 
-- **P13 — two guards now check the same invariant, and one of them is the weak
+- **P14 — two guards now check the same invariant, and one of them is the weak
   one P9 was about.** Closing P9 added `tests/config_needle_guard.rs`, whose
   `the_real_crate_src_does_not_read_core_worktree` scans for both the literal
   `"core.worktree"` and the two-argument `config_values("core", "worktree")`
@@ -747,7 +747,9 @@ bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
   old one goes; what it uniquely carries (the comment explaining why the
   work_dir ceiling check is merely defensive) moves with it rather than being
   deleted. It survived the P9 fix only because `hostile_repo.rs` was owned by a
-  concurrent branch at the time — a scheduling artifact, not a decision.
+  concurrent branch at the time — a scheduling artifact, not a decision. Filed
+  as P13 in `840fed0` and renumbered here: the containment branch landed its
+  own P13, and that one is cited from `repo.rs`, `embedding-git.md` and a test.
 
 - **P2 — a non-canonical index mode is silently dropped, and the comment
   misattributes the skip.** `Class::from_index` returns `None` for anything
@@ -760,17 +762,31 @@ bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
   `treewalk` normalizes raw modes through `mode.kind().as_octal_str()`, so
   `ls` prints `100644` where `git ls-tree` prints `100664`.
 
-- **P4 — the gix open-by-name carve-out reaches further for refs than the doc
-  admits.** `repo.rs` documents that gix opens objects, packs, `HEAD` and ref
-  files by name after discovery, and characterizes the consequence as a read
-  that "almost always fails to parse as a git object". True for objects, false
-  for refs: a loose ref is 40 hex chars and `packed-refs` is `<40hex> <name>`
-  lines — shapes real host files have. A symlinked `refs/heads/pwn` pointing at
-  a host file whose first line is 40 hex characters would surface those 160
-  bits as a branch oid in `branch --json`; non-hex content fails the parse,
-  which is still a one-bit content probe. `HEAD` and `packed-refs` are fixed
-  names and *are* interceptable the way `open_leaf` intercepts other fixed
-  leaves. Decide: intercept, or state the leak louder than "almost always".
+- **P13 — a symlinked loose ref is an open content read of the host, and the
+  close is platform-level.** What is left of P4 after the fixed names were
+  screened (2026-08-23). `HEAD`, `packed-refs` and the `refs/heads`,
+  `refs/tags`, `refs/remotes` hierarchies now go through `open_leaf` and are
+  refused with exit 4; a symlink at a path *inside* `refs/` that the
+  repository names is not, because gix opens it by name. Measured, not
+  reasoned: `.git/refs/heads/pwn` symlinked at a host file whose first line is
+  40 hex characters, plus `.git/HEAD` reading `ref: refs/heads/pwn`, makes
+  `git info` alone return "Object <those 40 characters> as referred to by
+  refs/heads/pwn could not be found" — 160 bits per invocation, no caller
+  cooperation. Non-hex content fails the parse, which is still a one-bit
+  content probe. gix's ref *iteration* does not follow a symlink (a symlinked
+  hierarchy lists as empty, and so does a symlinked loose ref), so this is the
+  by-name path only.
+
+  Pinned by `hostile_repo.rs::a_symlinked_loose_ref_still_reaches_a_host_file`,
+  which asserts the leak and goes red the day it closes — update it and
+  `docs/embedding-git.md`'s "What is not closed" paragraph together.
+
+  The cheap close is not available: walking `refs/` at open time costs every
+  verb an lstat per loose ref, on a tree the repository sizes, to protect a
+  lookup most verbs never make. The honest close is
+  `openat2(RESOLVE_BENEATH)` or a kaish VFS boundary that gix opens through,
+  which is the same close the object and pack halves of this carve-out need.
+  Same shape as **G6**: do not build it on the strength of this entry alone.
 
 - **P5 — a `.gitignore` symlinked out of the mount is a content oracle.**
   `gix-worktree` reads per-directory `.gitignore` itself during the untracked
@@ -781,24 +797,6 @@ bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
   already visits every directory itself, so a `symlink_metadata` pre-screen is
   available without touching gix.
 
-- **P6 — a symlinked start path walks discovery outside the ceiling.**
-  `screen_gitdir_file` returns `Ok(())` when the start path canonicalizes
-  outside the ceiling, on the comment's reasoning that "discovery will report
-  the missing path". It does not — it walks from there, and the ceiling's
-  lexical prefix match drops. The *result* is still refused with no content
-  read, but gix's ownership check fires on outside candidates, so
-  `NoTrustedGitRepository` (exit 4) versus nothing-there (exit 1) is one bit:
-  "is there a repo I do not own above my symlink's target".
-
-- **P7 — a repo-relative `include.path` hides the format and extension
-  gates.** `check_include_paths` refuses only *escaping* includes, and includes
-  are never followed (`from_bytes_no_includes`) — so a repository can put
-  `core.repositoryformatversion = 2` or `extensions.objectFormat = sha256` in
-  an included file and `check_format_version`/`check_extensions` never see it.
-  The bare config reads as format 0, the gates are skipped. Blast radius is
-  bounded today (nothing honors `core.worktree`, and a `reftable/` directory is
-  caught by an on-disk probe regardless of config), but this is the refusal
-  layer's own bypass.
 
 - **P10 — untested semantic inputs, each a characterization test.** Shallow
   clones (the `refuse_shallow` gate exists, nothing exercises it); replace refs
@@ -923,7 +921,7 @@ repository size, not result size.
 - **G6 — "mount the common dir" may be a wider grant than the git verbs need.**
   Raised by kaibo on 2026-08-22 from a measured case, not a hypothetical. A
   linked worktree whose main repository is outside the allowed set is refused
-  with exit 4 at `screen_gitdir_file` (`repo.rs:138`), and the fix we tell the
+  with exit 4 at `screen_discovery_start` in `repo.rs`, and the fix we tell the
   embedder is to mount the common git dir too. For an embedder whose allowed
   set doubles as its **kaish mount table** — kaibo's does — that single grant
   also makes `.git` readable to the model-facing shell: `cat`, `grep`,

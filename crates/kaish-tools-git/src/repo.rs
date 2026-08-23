@@ -11,8 +11,9 @@
 //! choose to load. No system config, no user config, no `GIT_*` environment
 //! reading, no attributes stack, no credential helpers. Repo-local config is
 //! parsed from bytes we read ourselves with `from_bytes_no_includes`, so no
-//! library code path can follow an `include.path` — we resolve includes, or
-//! refuse them.
+//! library code path can follow an `include.path`. Nothing here resolves one
+//! either: a config that declares an include is refused, because the config
+//! we parsed is not the config its author wrote.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -136,7 +137,15 @@ impl ReadRepo {
         //
         // Screening here refuses an escaping `gitdir:` on the strength of
         // where it points, never on whether it is there.
-        screen_gitdir_file(operation, real_path, &real_dir(operation, "mount root", ceiling)?)?;
+        //
+        // The ceiling is canonicalized once, here, and the same value is used
+        // by the screen, by the refusal below and by every check after it. Two
+        // canonicalizations were two values — the raw one the caller passed
+        // and the resolved one — and a refusal that named the raw one while
+        // its twin named the resolved one is a wording difference a caller can
+        // read as an answer.
+        let ceiling = real_dir(operation, "mount root", ceiling)?;
+        screen_discovery_start(operation, real_path, &ceiling)?;
 
         let (path, _trust) = gix_discover::upwards_opts(real_path, options).map_err(|e| {
             use gix_discover::upwards::Error;
@@ -193,7 +202,7 @@ impl ReadRepo {
         // ceiling and every directory are resolved with `canonicalize` before
         // they are compared (here), and every file and probe underneath goes
         // through `open_leaf`, which refuses a symlinked leaf that escapes.
-        let ceiling = real_dir(operation, "mount root", ceiling)?;
+        // The ceiling was resolved once, above the discovery call.
 
         // The working tree first, because whether it is inside the mount is
         // what decides how a bad `git_dir` may be reported. It is discovery's
@@ -318,7 +327,7 @@ impl ReadRepo {
         // a repository could symlink out of the mount.
         let config_leaf = open_leaf(operation, "repository config", &common_dir, "config", &ceiling)?;
         let config = read_repo_config(operation, config_leaf.path())?;
-        check_include_paths(operation, &common_dir, &config)?;
+        refuse_includes(operation, &common_dir, &config)?;
         let format_version = check_format_version(operation, &common_dir, &config)?;
         if format_version >= 1 {
             check_extensions(operation, &common_dir, &config)?;
@@ -331,10 +340,34 @@ impl ReadRepo {
         let has_reftable = open_leaf(operation, "reftable directory", &common_dir, "reftable", &ceiling)?
             .path()
             .is_some_and(Path::is_dir);
-        let has_refs = open_leaf(operation, "refs directory", &common_dir, "refs", &ceiling)?
-            .path()
-            .is_some_and(Path::is_dir);
+        let refs_leaf = open_leaf(operation, "refs directory", &common_dir, "refs", &ceiling)?;
+        let has_refs = refs_leaf.path().is_some_and(Path::is_dir);
         check_ref_backend(operation, &common_dir, &config, has_reftable, has_refs)?;
+
+        // The ref leaves gix opens by name, screened on the same terms as
+        // every other fixed leaf here.
+        //
+        // These are not hypothetical. A `packed-refs` symlinked at a host file
+        // whose lines are `<40 hex> <name>` hands those lines back as branches:
+        // `branch --json` reported a branch named out of the file's own bytes,
+        // carrying an oid out of them too. A symlinked `HEAD` is read as a
+        // detached oid, and the 40 characters come back inside the "object …
+        // could not be found" message. Both are content, not one bit, and both
+        // are fixed names under a directory this crate has already checked —
+        // so both are interceptable, and now are.
+        //
+        // `refs/heads`, `refs/tags` and `refs/remotes` are here for the same
+        // reason one level down. gix's ref *iteration* does not follow a
+        // symlink (measured: a symlinked hierarchy lists as empty, and so does
+        // a symlinked loose ref), but a lookup **by name** does, and every verb
+        // that resolves a revision does lookups by name.
+        open_leaf(operation, "HEAD", &git_dir, "HEAD", &ceiling)?;
+        open_leaf(operation, "packed refs (packed-refs)", &common_dir, "packed-refs", &ceiling)?;
+        if let Some(refs_dir) = refs_leaf.path() {
+            for hierarchy in ["heads", "tags", "remotes"] {
+                open_leaf(operation, "ref hierarchy under refs/", refs_dir, hierarchy, &ceiling)?;
+            }
+        }
 
         // The object store, and its alternates. `open_leaf` catches an
         // `objects` directory symlinked out of the mount (a legitimate
@@ -354,14 +387,39 @@ impl ReadRepo {
 
         // The containment boundary, stated where it actually ends. Everything
         // above ceiling-checks a path *this crate* opens. From here, gix opens
-        // objects, packs, `HEAD` and individual ref files itself, by name, and
-        // a symlink among those leaves (`objects/ab/cd…` linking out of the
-        // mount) is not interceptable without wrapping every gix open. The
-        // honest close is platform-level — `openat2(RESOLVE_BENEATH)` or a
-        // kaish VFS seam — and it is a threat-model decision, not a code change
-        // this PR makes. For the read verbs the residual is a read that lands
-        // outside and almost always fails to parse as a git object, not a
-        // general file-exfiltration primitive. Tracked as design input.
+        // objects, packs and ref files itself, by name, and a symlink among
+        // those leaves is not interceptable without wrapping every gix open.
+        // The honest close is platform-level — `openat2(RESOLVE_BENEATH)` or a
+        // kaish VFS boundary — and it is a threat-model decision, not a code
+        // change this PR makes.
+        //
+        // What the residual is, exactly, because a loose description of it was
+        // wrong for two years' worth of readers. It said the read "almost
+        // always fails to parse as a git object". That is true of an object:
+        // a loose object is zlib-compressed and a host file is not. It is
+        // **false of a ref**, and refs are the larger half of what gix opens
+        // by name. A loose ref is 40 hex characters — a shape real host files
+        // have — and content that parses is content that comes back:
+        //
+        //   `.git/refs/heads/pwn` symlinked at a host file whose first line is
+        //   40 hex characters surfaces those 160 bits, and a `.git/HEAD`
+        //   naming that ref reaches it with no help from the caller: `info`
+        //   alone returns "Object <those 40 characters> as referred to by
+        //   refs/heads/pwn could not be found". Non-hex content fails the
+        //   parse, which is still a one-bit content probe.
+        //
+        // The fixed names in that family — `HEAD`, `packed-refs`, and the
+        // `refs/heads`, `refs/tags`, `refs/remotes` hierarchies — are screened
+        // above, so what is left is a symlink at a path *inside* `refs/` that
+        // the repository names, reached by a lookup by name. `docs/issues.md`
+        // (P13) carries the close; the fixture that pins the leak while it is
+        // open is `a_symlinked_loose_ref_still_reaches_a_host_file` in
+        // tests/hostile_repo.rs, and it goes red the day the close lands,
+        // which is when this comment and the guide have to change with it.
+        //
+        // Walking `refs/` eagerly at open time is not that close: it would
+        // cost every verb an lstat per loose ref, on a tree the repository
+        // controls the size of, to protect a lookup most verbs never make.
         //
         // `git status` widens this residual by exactly one shape, named so it
         // is not silent: `gix-worktree` reads per-directory `.gitignore` files
@@ -1353,13 +1411,30 @@ fn read_repo_config(
     parse_config_bytes(operation, path, &bytes)
 }
 
-/// Refuse an `include.path` / `includeIf.*.path` that leaves the repository.
+/// Refuse an `include.path` / `includeIf.*.path`, wherever it points.
 ///
 /// D.3: the escape is retired by construction — nothing follows an include,
 /// because we parse with `from_bytes_no_includes`. What remains is to say so
 /// out loud rather than answer from a config whose author expected the
 /// include to have been applied.
-fn check_include_paths(
+///
+/// Saying it out loud used to mean only for an include that *escaped* the
+/// repository — an absolute path, a `..`, or git's `~/…` home form. A
+/// repo-relative one was waved through, and the config we then answered from
+/// was missing whatever the included file set. `docs/issues.md`'s P7 found it
+/// through the gates: `core.repositoryformatversion = 2` and
+/// `extensions.objectFormat = sha256` in an included file are invisible to
+/// [`check_format_version`] and [`check_extensions`], which read the bare
+/// file. Real git behaves identically — measured against git 2.55.0, not
+/// assumed: with the same repository `git status` exits 0 through an include
+/// and 128 with the same keys written directly, because git's own setup-time
+/// format read does not follow includes either. So the bypass changed no
+/// answer *today*, which is exactly the shape that stops being true the first
+/// time a verb reads one more key.
+///
+/// The refusal names the file, not the key: the parse is what is incomplete,
+/// not any single value.
+fn refuse_includes(
     operation: &'static str,
     common_dir: &Path,
     config: &gix_config::File,
@@ -1376,22 +1451,13 @@ fn check_include_paths(
         } else {
             "include.path"
         };
-        for value in section.values("path") {
-            let text = value.to_string();
-            let path = Path::new(&text);
-            let escapes = path.is_absolute()
-                || path.components().any(|c| c == Component::ParentDir)
-                // `~/…` is git's home-directory form; expanding it would read
-                // host state the kernel never exposes to a tool.
-                || text.starts_with('~');
-            if escapes {
-                return Err(GitError::EscapingInclude {
-                    operation,
-                    repo: common_dir.to_path_buf(),
-                    key: key.to_string(),
-                    value: text,
-                });
-            }
+        if let Some(value) = section.values("path").first() {
+            return Err(GitError::UnsupportedInclude {
+                operation,
+                repo: common_dir.to_path_buf(),
+                key: key.to_string(),
+                value: value.to_string(),
+            });
         }
     }
     Ok(())
@@ -1569,19 +1635,26 @@ impl Leaf {
 /// terabyte.
 const MAX_DOT_GIT_FILE_BYTES: u64 = 4096;
 
-/// Refuse a `.git` *file* whose `gitdir:` line leaves the mount, before
-/// discovery ever resolves it.
+/// Refuse the two discovery inputs that can leave the mount, before
+/// `gix_discover::upwards_opts` ever resolves either of them.
 ///
-/// Walks from `start` up to `ceiling` looking for the `.git` entry discovery
-/// would find. A directory is an ordinary repository and needs no screening. A
-/// file is the one discovery input a repository fully controls — its
-/// `gitdir:` line can name any absolute path on the host — so its target goes
-/// through [`contain`], which answers "outside the mount" and "does not
-/// resolve" with the *same* refusal.
+/// The first is `start` itself. A lexical `resolve_real_path` — the shape
+/// kaish's own `LocalFs` does *not* have, and an embedder's backend may —
+/// hands back a path that is inside the mount as a string and a symlink out
+/// of it to `openat`. Discovery walks from what the symlink points at, so the
+/// walk's answer depends on what is over there.
+///
+/// The second is a `.git` *file*'s `gitdir:` line. This walks from `start` up
+/// to `ceiling` looking for the `.git` entry discovery would find. A directory
+/// is an ordinary repository and needs no screening. A file is the discovery
+/// input a repository fully controls — its `gitdir:` line can name any
+/// absolute path on the host — so its target goes through [`contain`], which
+/// answers "outside the mount" and "does not resolve" with the *same*
+/// refusal.
 ///
 /// A `.git` that is itself a symlink is handled by [`open_leaf`], on the same
 /// terms.
-fn screen_gitdir_file(
+fn screen_discovery_start(
     operation: &'static str,
     start: &Path,
     ceiling: &Path,
@@ -1591,11 +1664,33 @@ fn screen_gitdir_file(
     // Start from a canonical directory so `open_leaf`'s "real leaf under a
     // canonical parent is contained by construction" reasoning holds.
     let Ok(mut dir) = std::fs::canonicalize(start) else {
-        // Nothing we can screen; discovery will report the missing path.
+        // The start path does not resolve at all. Discovery answers that with
+        // `NotARepository` against the same `start` and the same `ceiling`
+        // this function would name, so letting it through costs nothing and
+        // keeps one code path for "there is nothing here".
         return Ok(());
     };
     if !dir.starts_with(ceiling) {
-        return Ok(());
+        // The start path resolves *outside* the mount — a symlink inside the
+        // mount pointing out of it, since a lexical `resolve_real_path` hands
+        // us the symlink's own path. Returning `Ok(())` here let discovery
+        // walk from that target, and its first candidate is the target's own
+        // `.git`: a directory there stopped the walk and we refused (exit 1),
+        // an absent one let the walk fall back inside the mount and answer
+        // about the mount's own repository (exit 0). That difference is a
+        // one-bit read of any path on the host — symlink at it and look at
+        // the code. `a_symlinked_start_path_cannot_report_whether_its_target_exists`
+        // in tests/hostile_repo.rs is the fixture.
+        //
+        // The refusal is the same `NotARepository` the branch above leads to,
+        // field for field, so "resolves outside the mount" and "does not
+        // resolve" stay indistinguishable — from inside the mount there is no
+        // repository at this path either way, and that is all we say.
+        return Err(GitError::NotARepository {
+            operation,
+            start: start.to_path_buf(),
+            ceiling: ceiling.to_path_buf(),
+        });
     }
 
     loop {
@@ -1998,7 +2093,7 @@ mod tests {
     #[test]
     fn absolute_include_path_is_refused() {
         let cfg = config("[include]\n\tpath = /etc/passwd\n");
-        let err = check_include_paths("info", Path::new("/repo/.git"), &cfg)
+        let err = refuse_includes("info", Path::new("/repo/.git"), &cfg)
             .expect_err("an absolute include must be refused");
         assert_eq!(err.exit_code(), 4);
         assert!(err.to_string().contains("/etc/passwd"), "{err}");
@@ -2007,7 +2102,7 @@ mod tests {
     #[test]
     fn parent_relative_include_path_is_refused() {
         let cfg = config("[include]\n\tpath = ../../../etc/gitconfig\n");
-        let err = check_include_paths("info", Path::new("/repo/.git"), &cfg)
+        let err = refuse_includes("info", Path::new("/repo/.git"), &cfg)
             .expect_err("a `..`-bearing include must be refused");
         assert_eq!(err.exit_code(), 4);
     }
@@ -2015,7 +2110,7 @@ mod tests {
     #[test]
     fn home_relative_include_path_is_refused() {
         let cfg = config("[include]\n\tpath = ~/.gitconfig\n");
-        let err = check_include_paths("info", Path::new("/repo/.git"), &cfg)
+        let err = refuse_includes("info", Path::new("/repo/.git"), &cfg)
             .expect_err("a `~`-rooted include must be refused");
         assert_eq!(err.exit_code(), 4);
     }
@@ -2023,16 +2118,31 @@ mod tests {
     #[test]
     fn include_if_path_is_checked_too() {
         let cfg = config("[includeIf \"gitdir:/srv/\"]\n\tpath = /etc/evil\n");
-        let err = check_include_paths("info", Path::new("/repo/.git"), &cfg)
+        let err = refuse_includes("info", Path::new("/repo/.git"), &cfg)
             .expect_err("includeIf must be checked like include");
         assert!(err.to_string().contains("includeIf.path"), "{err}");
     }
 
+    /// The one this crate used to wave through. It never escapes the
+    /// repository and it is still refused: nothing follows it, so the config
+    /// we parsed is missing whatever `extra-config` sets.
     #[test]
-    fn repo_relative_include_path_is_allowed() {
+    fn repo_relative_include_path_is_refused_too() {
         let cfg = config("[include]\n\tpath = extra-config\n");
-        check_include_paths("info", Path::new("/repo/.git"), &cfg)
-            .expect("a repo-relative include is not an escape");
+        let err = refuse_includes("info", Path::new("/repo/.git"), &cfg)
+            .expect_err("an include we do not follow must be refused");
+        assert_eq!(err.exit_code(), 4);
+        assert!(err.to_string().contains("extra-config"), "{err}");
+    }
+
+    /// The negative control for the four refusals above: a config with no
+    /// include at all passes. Without it, `refuse_includes` returning `Err`
+    /// unconditionally would satisfy every one of them.
+    #[test]
+    fn a_config_declaring_no_include_is_accepted() {
+        let cfg = config("[core]\n\tbare = false\n[remote \"origin\"]\n\turl = /srv/x\n");
+        refuse_includes("info", Path::new("/repo/.git"), &cfg)
+            .expect("a config with no include has nothing to refuse");
     }
 
     #[test]
