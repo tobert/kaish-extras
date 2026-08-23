@@ -1,13 +1,10 @@
 //! `CurlError` and the exit-code taxonomy from docs/curl.md's "Exit codes"
 //! table.
 //!
-//! Stub, like the rest of this crate: the HTTP surface (argument parsing,
-//! the ureq backend, and the URL/DNS/TLS failures that would actually
-//! construct these variants) is not built yet — it waits on the review
-//! docs/curl.md's "Status" section calls for. The variants and the exit-code
-//! mapping below are the settled part: docs/curl.md's exit-code table names
-//! every one of these codes already, so wiring them up is future work, not
-//! future design.
+//! Every variant is constructed somewhere in this crate: argument parsing
+//! (`args.rs`) produces `MalformedUrl` and `Transport`, and the ureq backend
+//! (`backend/ureq.rs`) maps every transport, DNS, and TLS failure it can see
+//! onto the rest. The exit-code mapping below is what an agent branches on.
 
 /// Everything this crate can fail with, carrying its own curl-shaped exit
 /// code (docs/curl.md "Exit codes").

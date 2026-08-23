@@ -1130,12 +1130,22 @@ we owe other people, or things they do better than us.
   compiled clean with 25 test binaries green while its changelog carried a
   dozen behavior changes no compiler could see.
 
-  **Still open**, and mostly curl's, since that is where the argv surface is:
-  argv binding order under `with_raw_argv`, `GlobalFlags` handling, and
-  `ToolCtx::resolve_path` refusal shapes. Curl has no harness for it yet — no
-  `kaish-kernel` dev-dependency, which is what the git canary needs to build a
-  real `Kernel`. Adding one is the first step and the same trade git already
-  made: dev-only, out of the published graph.
+  **Closed, on the curl side.**
+  `crates/kaish-tools-curl/tests/kaish_behavior_canary.rs` pins the two
+  behaviors kaijutsu — the live embedder — named when asked directly what it
+  depends on, rather than the guessed surface this entry used to carry: the
+  egress allowlist refuses a non-allowlisted host before any connection is
+  attempted (exit 7, message contains "egress allowlist"), and
+  `-k`/`--insecure` is refused at parse time, before egress is even consulted
+  (message contains "is not permitted here"). Each case carries a negative
+  control proving the *other* answer is reachable through the same kernel.
+  `kaish-kernel` is now a dev-dependency of `kaish-tools-curl`, the same
+  dev-only trade the git canary made — `cargo tree` on the published crate
+  still shows no `kaish-kernel` edge. The originally guessed surface (argv
+  binding order under `with_raw_argv`, `GlobalFlags` handling,
+  `ToolCtx::resolve_path` refusal shapes) was not what a real embedder named
+  as depended-upon; revisit only if kaijutsu or another embedder says
+  otherwise.
 
 - **X4 — tell kaijutsu when kaish #385/#386 lands in a published release.**
   An `if` condition's stderr reaching the enclosing statement. kaijutsu's gate

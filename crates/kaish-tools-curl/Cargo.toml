@@ -77,7 +77,22 @@ base64 = "0.23"
 
 # Dev-dependencies are not target-scoped: `cargo test` only ever runs on a
 # native target, where the crate compiles.
+#
+# `kaish-kernel` here is deliberately dev-only, the same trade
+# `kaish-tools-git`'s Cargo.toml already made and documents at its own
+# `kaish-kernel` dev-dependency line. The production dependency set above
+# stops at `kaish-tool-api` + `kaish-types`, and a dev-dependency does not
+# enter that graph — `cargo tree` on the published crate shows no
+# `kaish-kernel` edge. It exists for one test that must drive a real kernel
+# rather than a belief about one:
+#
+# - `tests/kaish_behavior_canary.rs`, X3. Pins the kernel behaviors this
+#   crate's callers (kaijutsu) depend on but a compiler cannot check — that
+#   the egress allowlist refuses a host before any connection is attempted,
+#   and that `-k`/`--insecure` is refused at parse time, before egress is
+#   even consulted.
 [dev-dependencies]
+kaish-kernel = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 tempfile = "3"
 
@@ -92,3 +107,7 @@ path = "tests/unix_socket.rs"
 [[test]]
 name = "errors"
 path = "tests/errors.rs"
+
+[[test]]
+name = "kaish_behavior_canary"
+path = "tests/kaish_behavior_canary.rs"
