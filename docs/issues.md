@@ -748,15 +748,6 @@ bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
   `treewalk` normalizes raw modes through `mode.kind().as_octal_str()`, so
   `ls` prints `100644` where `git ls-tree` prints `100664`.
 
-- **P3 — refs are the one attacker-controlled parser surface with no hostile
-  fixture.** `embedding-git.md` names `.git/index`, packfiles, refs and config
-  as the risk axis for a long-lived server; index has many fixtures, config has
-  the escaping-include set, refs have none. Missing: `packed-refs` as binary
-  garbage / a half line / one 10 MB line; a loose ref containing `zzz`; `HEAD`
-  containing garbage; a detached `HEAD` naming a valid-shaped but absent oid.
-  Run each against every ref-reading verb and assert a stable exit — in-process
-  tests, so the test *is* the no-panic assertion.
-
 - **P4 — the gix open-by-name carve-out reaches further for refs than the doc
   admits.** `repo.rs` documents that gix opens objects, packs, `HEAD` and ref
   files by name after discovery, and characterizes the consequence as a read
@@ -796,24 +787,6 @@ bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
   bounded today (nothing honors `core.worktree`, and a `reftable/` directory is
   caught by an on-disk probe regardless of config), but this is the refusal
   layer's own bypass.
-
-- **P8 — the fingerprint samples `.git` and the linked worktree, never the
-  main working tree or the scratch root.** Pointing `Fingerprint::take` at
-  `RichRepo::scratch()` subsumes both existing fingerprint tests and catches
-  two classes they structurally cannot see: a write to a main-worktree file,
-  and a temp file created outside `.git`. One line of test change, and it
-  widens the falsification surface of the flagship claim. Also worth: a pack
-  with its `.idx` deleted (does gix-odb write one on open? reasoning will not
-  answer it, the fingerprint will), and a positive control for transient
-  create-then-remove detection, which `support.rs` asserts works and no test
-  exercises.
-
-- **P9 — `work_dir_is_bounded_by_discovery` can pass vacuously.** Its needle is
-  the literal string `"core.worktree"`, but this crate's config accessor takes
-  section and key separately — a future `config_values("core", "worktree")`
-  contains no such literal, and the guard stays green while the invariant it
-  protects is false. Needs a positive control over a planted string and a
-  second needle for the two-argument form.
 
 - **P10 — untested semantic inputs, each a characterization test.** Shallow
   clones (the `refuse_shallow` gate exists, nothing exercises it); replace refs

@@ -194,6 +194,20 @@ path = "tests/discovery_ceiling.rs"
 name = "hostile_repo"
 path = "tests/hostile_repo.rs"
 
+# docs/issues.md P3: hostile ref content — packed-refs and HEAD, the one
+# attacker-controlled parser surface hostile_repo.rs's fixtures never touched.
+[[test]]
+name = "hostile_refs"
+path = "tests/hostile_refs.rs"
+
+# docs/issues.md P9: `work_dir_is_bounded_by_discovery` (tests/hostile_repo.rs)
+# guards against a `core.worktree` read with a single-string needle that a
+# two-argument `config_values("core", "worktree")` call would not trip. This
+# file adds the missing needle and proves it with planted fixtures.
+[[test]]
+name = "config_needle_guard"
+path = "tests/config_needle_guard.rs"
+
 [[test]]
 name = "status"
 path = "tests/status.rs"
