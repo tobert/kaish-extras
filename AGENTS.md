@@ -34,16 +34,22 @@ has caught real broken deploys.
 ## kaish dependency pinning
 
 `[workspace.dependencies]` in the root `Cargo.toml` pins all four kaish crates
-to **published crates.io versions** (`"0.15"` as of 2026-08-20). Rules:
+to **published crates.io versions** (`"0.16"` as of 2026-08-23). Rules:
 
 - **All four must pin the SAME version** — mixing them puts two copies of a
   kaish crate in the dependency graph.
-- **The pin is a caret range, and downstream depends on that.** `"0.15"` is
-  `^0.15`: any 0.15.x patch resolves, so an embedder that consumes both a tool
-  crate from here and kaish directly (kaijutsu) can move to 0.15.1 and still
-  unify on one copy of each kaish crate. 0.16 cannot ride along — pre-1.0 a
+- **The pin is a caret range, and downstream depends on that.** `"0.16"` is
+  `^0.16`: any 0.16.x patch resolves, so an embedder that consumes both a tool
+  crate from here and kaish directly (kaijutsu) can move to 0.16.1 and still
+  unify on one copy of each kaish crate. 0.17 cannot ride along — pre-1.0 a
   minor carries breaking changes — so a kaish minor is a bump here that has to
   build and pass the checks. Do not widen the range to buy the illusion.
+- **A kaish minor can change behavior without failing to compile.** 0.16 built
+  clean here on the first try, 25 test binaries green, and its changelog still
+  carried a dozen **Changed** entries no compiler could have caught. Read them
+  and decide each one against this workspace; check the answer at the source
+  rather than reasoning from the entry. The 0.16 entry that looked like it
+  moved `$(git …)` turned out not to — see "Command substitution binds text".
 - `kaish-kernel` is `default-features = false`. Keep it that way: a sibling
   crate enabling kernel default features tramples the no-default choice
   (`localfs` etc. must not leak into the browser build).
@@ -56,6 +62,35 @@ to **published crates.io versions** (`"0.15"` as of 2026-08-20). Rules:
   four here to the PR branch head to develop against it, then move back to the
   published version once the release carrying it lands — not to the merged main
   sha, unless the wait is genuinely blocking.
+
+### Command substitution binds text
+
+`x=$(git status)` binds the **text** git printed, not its typed model, and the
+same holds for curl. Two independent things make that true, and a change to
+either one flips it:
+
+- **Neither crate sets `ExecResult.data`.** Both build results with
+  `with_output`/`with_output_and_text`, which take an `OutputData` and leave
+  `data: None`. A substitution binds `.data`, so there is nothing for it to
+  bind. Switching a verb to `success_with_data` — a reasonable thing to want
+  for the pipeline sideband — would change that.
+- **Both leave `ToolSchema::typed_substitution` at its default `false`.** kaish
+  0.16 stopped inferring the answer from "does the tool set `.data`" (an
+  inference that bound a list for `cut -f2 f` and text for `awk '{print $2}'
+  f`, the same job). The rule now: declare `with_typed_substitution()` when the
+  structured thing IS the answer (`fromjson`, `jq`, `keys`); leave it off when
+  `.data` is a structured view of text the tool already printed. Both crates
+  are the second kind — `git` and `curl` name real programs, and an agent that
+  wants the model asks with `--json`.
+
+**The 0.16 bump did not move this**, though it reads like it should have: with
+`.data` never set, these crates bound text under 0.15 too. That was checked at
+the source rather than reasoned from the changelog, after the first version of
+this section asserted a behavior change that had not happened.
+
+`tests/kaish_behavior_canary.rs` pins the observable half. It goes red on the
+two-part mutation above — the schema flag alone is inert, which is itself the
+thing worth knowing.
 
 ## Cross-model review with kaibo
 

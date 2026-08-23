@@ -165,13 +165,17 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 # above stops at `kaish-tool-api` + `kaish-types` (architecture.md G.2's "the
 # public API is sufficient for a non-trivial plugin"), and a dev-dependency
 # does not enter that graph — `cargo tree` on the published crate shows no
-# `kaish-kernel` edge. It exists for exactly one thing: `tests/
-# router_kernel_drift.rs`, the E.1 router drift test, which builds a real
-# `kaish_kernel::Kernel`, registers this crate's `Tool`, and drives it
-# through `Kernel::execute` — the kernel's own dispatch (`select_leaf`
-# included) is `pub(crate)` there and cannot be called directly, so this is
-# the honest way to check `route()` against it rather than against our own
-# belief about it.
+# `kaish-kernel` edge. It exists for the two tests that must drive a real
+# kernel rather than a belief about one, both of which build a
+# `kaish_kernel::Kernel`, register this crate's `Tool` as an embedder does,
+# and go through `Kernel::execute`:
+#
+# - `tests/router_kernel_drift.rs`, the E.1 router drift test. The kernel's own
+#   dispatch (`select_leaf` included) is `pub(crate)` there and cannot be
+#   called directly, so this is the honest way to check `route()` against it.
+# - `tests/kaish_behavior_canary.rs`, X3. Pins the kernel behaviors an embedder
+#   of this crate depends on but a compiler cannot check — what `$(git …)`
+#   binds, and what it carries.
 [dev-dependencies]
 kaish-kernel = { workspace = true }
 sha2 = "0.10"
@@ -238,6 +242,10 @@ path = "tests/operands.rs"
 [[test]]
 name = "router_kernel_drift"
 path = "tests/router_kernel_drift.rs"
+
+[[test]]
+name = "kaish_behavior_canary"
+path = "tests/kaish_behavior_canary.rs"
 
 # Gated on KAISH_GIT_BIG_REPO (unset: prints why it is skipping and passes).
 # See tests/big_repo.rs's module doc.

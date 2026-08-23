@@ -474,7 +474,7 @@ cross-verb, so neither is a PR 5 fix:
 
   The first reading was that `schema_from_clap` fails to honor clap's `hide`
   and the fix is a kaish PR. **Checked at the source, and kaish is right.**
-  `kaish-tool-api` 0.15's `clap_schema.rs:104-125` skips hidden *flags* and
+  `kaish-tool-api` 0.16's `clap_schema.rs:100-125` skips hidden *flags* and
   deliberately keeps hidden *positionals*, documenting why: for most tools
   the hidden positional IS the public surface (`cat paths…`). That is true
   here too — `git show HEAD:src/lib.rs` and `git ls HEAD src` are positional,
@@ -1122,12 +1122,23 @@ we owe other people, or things they do better than us.
   plumbing (asserting `gix-command`/`gix-transport`/`gix-filter` never enter
   the graph) and an e2e stage asserting the MOTD version matches
   `kaish-version` — but nothing that pins a kaish *behavior* we rely on.
-  A silent behavior regression across a 0.15.x patch would reach us as a
+  A silent behavior regression across a 0.16.x patch would reach us as a
   mystery, not a failure. Pick the behaviors the tool crates actually depend
-  on (argv binding order under `with_raw_argv`, `GlobalFlags` handling,
-  `ToolCtx::resolve_path` refusal shapes) and pin one test each. Cheap, and it
-  is exactly the shape that would have caught the 0.15.0 undeclared breaking
-  changes early.
+  on and pin one test each. Cheap, and it is exactly the shape that would have
+  caught the 0.15.0 undeclared breaking changes early.
+
+  **Started, on the git side.**
+  `crates/kaish-tools-git/tests/kaish_behavior_canary.rs` pins what `$(git …)`
+  binds. The 0.16 bump motivated it and is also the argument for the rest: it
+  compiled clean with 25 test binaries green while its changelog carried a
+  dozen behavior changes no compiler could see.
+
+  **Still open**, and mostly curl's, since that is where the argv surface is:
+  argv binding order under `with_raw_argv`, `GlobalFlags` handling, and
+  `ToolCtx::resolve_path` refusal shapes. Curl has no harness for it yet — no
+  `kaish-kernel` dev-dependency, which is what the git canary needs to build a
+  real `Kernel`. Adding one is the first step and the same trade git already
+  made: dev-only, out of the published graph.
 
 - **X4 — tell kaijutsu when kaish #385/#386 lands in a published release.**
   An `if` condition's stderr reaching the enclosing statement. kaijutsu's gate
@@ -1220,11 +1231,14 @@ unification.** This workspace pins the kaish crates to one minor, and pre-1.0
 a kaish minor is a breaking release, so a caret range cannot span two of them.
 Any bundle built here is therefore mountable by an embedder only while both
 sit on the **same kaish minor** — otherwise the graph carries two copies of
-every kaish crate and the `Tool` trait does not match. kaibo is on
-`kaish-kernel` 0.14.1 heading for 0.16 while this workspace is on 0.15, so
-today the answer is no on arithmetic alone, before any VFS question is
-reached. Whoever picks this up should check the minor first and discover it
-here rather than at link time.
+every kaish crate and the `Tool` trait does not match. Whoever picks this up
+should check the minor first and discover it here rather than at link time.
+
+**As of 2026-08-23 the arithmetic stopped being the blocker.** This workspace
+is on 0.16 and kaibo was heading there from 0.14.1; if they have landed it,
+the two unify and the remaining questions are the VFS ones above rather than
+the version. Confirm kaibo's actual pin before relying on this — it is their
+state, not ours, and this note is a report of what they said they were doing.
 
 The kaibo session has an endpoint-by-endpoint input-shape table pulled from
 the live OpenAPI spec; ask for it when this starts.
