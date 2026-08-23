@@ -1137,13 +1137,20 @@ we owe other people, or things they do better than us.
   real `Kernel`. Adding one is the first step and the same trade git already
   made: dev-only, out of the published graph.
 
-- **X4 — tell kaijutsu when kaish #385/#386 lands in a published release.**
-  An `if` condition's stderr reaching the enclosing statement. kaijutsu's gate
-  guard bodies are `if`-shaped and their deny reasons arrive empty without it.
-  **Published release, not merged to main** — a merged sha is not something
-  they can consume. We track the 0.16 bump for our own reasons and talk to
-  kaish-lead directly, so this costs us one message at a moment we are already
-  paying attention.
+- **X4 — done 2026-08-23: kaijutsu told that #385/#386 are in a published
+  release.** Both halves are in the `v0.16.0` tag — #385 (`94605b43`, a
+  condition's stderr) and #386 (`d8ccd35a`, its stdout) — confirmed with
+  `git tag --contains` rather than read off the changelog, since the obligation
+  was specifically *published, not merged*.
+
+  **The fix is unexercised, and that is the status to carry.** kaijutsu's gate
+  guards are rc scripts, and an rc shell differs from an interactive one there;
+  verifying one means creating a context against a live kernel running the new
+  build, which is their operator's call. They have been bitten twice by scripts
+  that passed in a shell and failed at context create, silently both times. So
+  nobody should read "0.16 shipped it" as "deny reasons arrive now" — they will
+  report either way once it runs. Kept here rather than deleted because the
+  obligation was discharged and the outcome is still open.
 
 - **X5 — ping kaijutsu when the git crates' surface settles**, as the trigger
   to look at CU46b (proxy and cert store) together. Agreed with them in place
