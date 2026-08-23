@@ -1224,7 +1224,14 @@ color; `--word-diff`; whitespace-config-driven rendering
 (`diff.*.whitespace`, `core.autocrlf`); git's binary patch encoding (we emit
 `Binary files a/x and b/x differ` and set `binary: true`); and **rename
 detection**, which is not a heuristic divergence but an absence — exact-match
-only, no similarity scoring, no copy detection ([B.4](#b4-git-diff)).
+only, no similarity scoring, no copy detection ([B.4](#b4-git-diff)). Three
+more were measured after PR 6 and are pinned rather than closed: a
+`.gitattributes` diff driver moves git's section heading and not ours
+(`docs/issues.md`, T3); the seven-character abbreviated oid is not grown when
+seven is ambiguous, which costs `git apply -3` (T4); and a path that is not
+valid UTF-8 reaches the renderer already lossy, the same shape as T1's hunk
+text, because `flatten_tree` builds it with `to_str_lossy` and this renderer
+takes a `&str`.
 
 Test strategy, as built (PR 6): the patch is compared line-for-line against
 `git diff --patch` for both object-backed endpoint pairs, `--context <N>`
@@ -1234,6 +1241,17 @@ apply to (`textdiff.rs::git_apply_check_accepts_our_patch`). No opt-in
 `compat-tests` feature: this suite already treats real git as a hard
 requirement rather than an optional extra, so gating one test on its presence
 would be a second, weaker rule.
+
+**The claim is only as wide as the fixtures.** PR 6 proved byte-identity over
+one fixture and the prose read as a claim about `git diff --patch` in general
+(`docs/issues.md`, P11, now closed). A second fixture — `QuirkRepo` — carries
+the header and body forms the first one did not: paths holding a double
+quote, a tab and non-ASCII bytes, a combined mode-and-content change, both
+empty-file transitions, a file born empty, and a trailing newline lost on one
+side only. All of them agree with git. Two inputs from the same list do not,
+and are the T3 and T4 pins above; a third, `quote_c_style`, had been checked
+only against a unit test asserting our belief about git, and now has real git
+behind it (`c_quoted_paths_are_rendered_the_way_git_renders_them`).
 
 → kaish-extras#7.
 
@@ -1709,14 +1727,18 @@ text, and the D.3 fixture that this document said already existed.**
   `git_apply_check_accepts_our_patch` runs unconditionally under the
   `textdiff` feature.
 
-- **Four non-fidelities, each measured rather than assumed** (F.1's list, as
+- **Six non-fidelities, each measured rather than assumed** (F.1's list, as
   built): no `index` line when a side is the working tree, because there is
   no oid in the model to name and inventing one would send `git apply -3`
   after an object that is not in the store; no binary patch encoding, which
   makes such a patch unappliable — and real `git diff`'s own output is
   unappliable the same way, pinned by
   `a_binary_patch_is_unappliable_from_git_as_much_as_from_us`; lossy
-  rendering of content that is not valid UTF-8 (`docs/issues.md`, T1); and
-  seven-character abbreviated oids that are not grown for uniqueness.
-  Everything else in F.1's emitted list landed as written, and the patch is
-  byte-identical to `git diff --patch` for both object-backed endpoint pairs.
+  rendering of content that is not valid UTF-8 (`docs/issues.md`, T1) and of
+  a path that is not valid UTF-8, which is the same conversion one step
+  earlier; git's default section-heading rule where a `.gitattributes` diff
+  driver would move it (T3); and seven-character abbreviated oids that are
+  not grown for uniqueness, which costs `git apply -3` (T4). Everything else
+  in F.1's emitted list landed as written, and the patch is byte-identical to
+  `git diff --patch` for both object-backed endpoint pairs over the inputs
+  the tests compare.

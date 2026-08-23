@@ -14,6 +14,16 @@
 //! line-for-line where we claim fidelity, and `git diff -U<N>` pins the
 //! context arithmetic at four widths. Where we diverge on purpose the test
 //! asserts *both* answers separately rather than being weakened to pass.
+//!
+//! Two fixtures carry the comparisons. `PatchRepo` (in `support.rs`) is the
+//! flagship one PR 6 built. `QuirkRepo`, below, carries the header and body
+//! forms it does not: paths holding a double quote, a tab and non-ASCII
+//! bytes, a combined mode-and-content change, both empty-file transitions, a
+//! file born empty, and a trailing newline lost on one side only. Those were
+//! the inputs `docs/issues.md` P11 named as untested; every one of them
+//! agrees with git, and the two from that list that do not — a
+//! `.gitattributes` diff driver's section heading, and an ambiguous
+//! seven-character oid — are pinned at the bottom of this file (T3, T4).
 
 #![cfg(feature = "textdiff")]
 
@@ -28,7 +38,7 @@ use kaish_types::{ExecResult, ToolArgs, Value};
 
 use kaish_tools_git::{GitConfig, Limits};
 
-use support::{git, PatchRepo, StrictBackend, TestCtx};
+use support::{git, require_git, Fixture, PatchRepo, StrictBackend, TestCtx};
 
 const MOUNT: &str = "/mnt";
 
@@ -104,11 +114,39 @@ fn json(result: &ExecResult) -> serde_json::Value {
 
 /// Our patch text for `argv`, and real git's for `git_argv`, ready to compare.
 async fn both(repo: &PatchRepo, argv: &[&str], git_argv: &[&str]) -> (String, String) {
-    let result = run("diff", &repo.scratch(), "/mnt/repo", argv).await;
+    both_in(&repo.root, &repo.scratch(), argv, git_argv).await
+}
+
+/// [`both`] for a fixture that is not [`PatchRepo`]: `root` is the working
+/// tree real git runs in, `scratch` is the mount the tool sees.
+async fn both_in(
+    root: &Path,
+    scratch: &Path,
+    argv: &[&str],
+    git_argv: &[&str],
+) -> (String, String) {
+    let result = run("diff", scratch, "/mnt/repo", argv).await;
     assert_eq!(result.code, 0, "git diff {argv:?}: {}", result.err);
     let ours = result.text_out().to_string();
-    let theirs = format!("{}\n", git(&repo.root, git_argv));
+    let theirs = format!("{}\n", git(root, git_argv));
+    assert!(
+        theirs.len() > 1,
+        "the oracle printed nothing for {git_argv:?}; there is no patch to compare"
+    );
     (ours, theirs)
+}
+
+/// A fixture repository at `<fixture>/repo`, configured the way every oracle
+/// comparison in this file needs: no commit-graph write, and CRLF left alone
+/// so a checkout filter cannot make real git disagree with itself.
+fn seed_repo(fixture: &Fixture) -> PathBuf {
+    require_git();
+    let root = fixture.path("repo");
+    std::fs::create_dir_all(&root).expect("create repo dir");
+    git(&root, &["init", "--initial-branch=main", "--quiet"]);
+    git(&root, &["config", "gc.writeCommitGraph", "false"]);
+    git(&root, &["config", "core.autocrlf", "false"]);
+    root
 }
 
 /// Only the fragments for `paths`, in the order they appear — for comparing a
@@ -349,6 +387,233 @@ async fn a_binary_patch_is_unappliable_from_git_as_much_as_from_us() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The inputs the flagship fixture does not carry (docs/issues.md P11)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A path git prints C-quoted: a double quote, a tab, and non-ASCII bytes.
+///
+/// These are `&str`, and that is the boundary: the renderer takes `&str`, so
+/// a path that is not valid UTF-8 cannot reach it at all. `src/patch.rs`
+/// states that; it is not testable from here.
+const QUOTED_PATHS: &[&str] = &["quo\"te.txt", "tab\there.txt", "ünïcode.txt"];
+
+/// The paths whose *body* is the edge case, each with the transition it
+/// carries: an empty side, a lost newline on one side only, and a mode change
+/// that also changed content.
+const EMPTY_PATHS: &[&str] = &[
+    "empty-to-content.txt",
+    "content-to-empty.txt",
+    "born-empty.txt",
+];
+
+/// The fixture for the header and body forms `PatchRepo` does not carry.
+///
+/// `HEAD~1 → HEAD` holds all of them at once — the three C-quoted paths, a
+/// combined mode-and-content change, both empty-file transitions, a file born
+/// empty, and a trailing newline lost on the new side only — so one
+/// comparison against `git diff --patch` covers the set while each case also
+/// has a `--path` comparison that names it when it breaks.
+struct QuirkRepo {
+    fixture: Fixture,
+    root: PathBuf,
+}
+
+impl QuirkRepo {
+    fn build() -> Self {
+        let fixture = Fixture::empty();
+        let root = seed_repo(&fixture);
+
+        for path in QUOTED_PATHS {
+            std::fs::write(root.join(path), b"plain\n").expect("write a C-quoted path");
+        }
+        std::fs::write(root.join("modecontent.sh"), b"#!/bin/sh\necho a\n").expect("write");
+        std::fs::write(root.join("empty-to-content.txt"), b"").expect("write");
+        std::fs::write(root.join("content-to-empty.txt"), b"x\ny\n").expect("write");
+        std::fs::write(root.join("one-sided-nl.txt"), b"a\nb\n").expect("write");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-m", "base", "--quiet"]);
+
+        for path in QUOTED_PATHS {
+            std::fs::write(root.join(path), b"changed\n").expect("write a C-quoted path");
+        }
+        std::fs::write(root.join("modecontent.sh"), b"#!/bin/sh\necho b\n").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = root.join("modecontent.sh");
+            let mut perms = std::fs::metadata(&path).expect("stat modecontent.sh").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod modecontent.sh");
+        }
+        std::fs::write(root.join("empty-to-content.txt"), b"one\ntwo\n").expect("write");
+        std::fs::write(root.join("content-to-empty.txt"), b"").expect("write");
+        // The old side keeps its newline and the new side loses it, so exactly
+        // one `\ No newline at end of file` belongs in the patch, under the
+        // `+` line. Two of them is the case `PatchRepo`'s `nonl.txt` covers.
+        std::fs::write(root.join("one-sided-nl.txt"), b"a\nb").expect("write");
+        std::fs::write(root.join("born-empty.txt"), b"").expect("write");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-m", "quirks", "--quiet"]);
+
+        Self { fixture, root }
+    }
+
+    /// The fixture's scratch root — the mount the tool sees.
+    fn scratch(&self) -> PathBuf {
+        self.fixture.root()
+    }
+
+    /// A clean checkout of `rev`, for feeding a patch to real `git apply`.
+    fn checkout_of(&self, rev: &str) -> PathBuf {
+        let dir = self.fixture.path(format!("apply-{}", rev.replace(['~', '^', '/'], "_")));
+        git(
+            &self.root,
+            &["worktree", "add", "--detach", "--quiet", dir.to_str().expect("utf-8 path"), rev],
+        );
+        dir
+    }
+
+    /// Our patch and git's for one path of this fixture's `HEAD~1 → HEAD`.
+    async fn patch_for(&self, path: &str) -> (String, String) {
+        both_in(
+            &self.root,
+            &self.scratch(),
+            &["--patch", "--from", "HEAD~1", "--to", "HEAD", "--path", path],
+            &["diff", "--patch", "HEAD~1", "HEAD", "--", path],
+        )
+        .await
+    }
+}
+
+/// A path holding a byte git refuses to print raw is C-quoted by git in three
+/// places — the `diff --git` line and both of `---`/`+++` — and this compares
+/// all three against git itself rather than against a belief about it. Until
+/// this test existed, `quote_c_style` was checked only by a unit test that
+/// asserted what we thought git does (docs/issues.md P11).
+#[tokio::test]
+async fn c_quoted_paths_are_rendered_the_way_git_renders_them() {
+    let repo = QuirkRepo::build();
+    for path in QUOTED_PATHS {
+        let (ours, theirs) = repo.patch_for(path).await;
+        assert!(
+            theirs.starts_with("diff --git \"a/"),
+            "git must C-quote {path:?}, or this case proves nothing:\n{theirs}"
+        );
+        assert_eq!(
+            theirs
+                .lines()
+                .filter(|l| l.starts_with("--- \"") || l.starts_with("+++ \""))
+                .count(),
+            2,
+            "both the `---` and `+++` lines must be quoted too:\n{theirs}"
+        );
+        assert_eq!(ours, theirs, "the patch for {path:?} is not git's");
+    }
+}
+
+/// A mode change and a content change in one file: git states the mode with
+/// the `old mode` / `new mode` pair, drops the mode from the `index` line
+/// because it is no longer the same on both sides, and prints an ordinary
+/// body under it.
+#[tokio::test]
+async fn a_combined_mode_and_content_change_matches_git() {
+    let repo = QuirkRepo::build();
+    let (ours, theirs) = repo.patch_for("modecontent.sh").await;
+    assert!(
+        theirs.contains("old mode 100644\nnew mode 100755\n") && theirs.contains("@@ "),
+        "the oracle must carry both a mode change and a body:\n{theirs}"
+    );
+    assert!(
+        !theirs.lines().any(|l| l.starts_with("index ") && l.ends_with("100755")),
+        "git drops the mode from the index line when the two sides differ:\n{theirs}"
+    );
+    assert_eq!(ours, theirs);
+}
+
+/// The three empty-file transitions: empty → content is `@@ -0,0 +1,2 @@`,
+/// content → empty is `@@ -1,2 +0,0 @@`, and a file born empty has a header
+/// and no body at all — no `---`/`+++` pair, because there is no hunk under
+/// it for `git apply` to read.
+#[tokio::test]
+async fn empty_file_transitions_match_git() {
+    let repo = QuirkRepo::build();
+    let mut born = String::new();
+    for path in EMPTY_PATHS {
+        let (ours, theirs) = repo.patch_for(path).await;
+        assert_eq!(ours, theirs, "the patch for {path} is not git's");
+        if *path == "born-empty.txt" {
+            born = theirs;
+        }
+    }
+    assert_eq!(
+        born,
+        "diff --git a/born-empty.txt b/born-empty.txt\n\
+         new file mode 100644\n\
+         index 0000000..e69de29\n",
+        "a file born empty has no body; if git grew one, the loop above is \
+         comparing a different shape than this test claims"
+    );
+}
+
+/// A trailing newline lost on one side only: exactly one
+/// `\ No newline at end of file`, and it follows the `+` line rather than
+/// closing the hunk.
+#[tokio::test]
+async fn a_one_sided_missing_newline_matches_git() {
+    let repo = QuirkRepo::build();
+    let (ours, theirs) = repo.patch_for("one-sided-nl.txt").await;
+    assert_eq!(
+        theirs.matches("\\ No newline at end of file").count(),
+        1,
+        "one side kept its newline, so the oracle must say so once:\n{theirs}"
+    );
+    assert!(
+        theirs.contains("+b\n\\ No newline at end of file\n"),
+        "the marker belongs under the `+` line:\n{theirs}"
+    );
+    assert_eq!(ours, theirs);
+}
+
+/// The whole fixture in one comparison, which is the part the per-path tests
+/// above cannot make: file order, and that no fragment carries a line the
+/// oracle does not. Then real `git apply --check` takes our patch, so the
+/// C-quoted paths are proven to round-trip through git's own parser and not
+/// only through its printer.
+#[tokio::test]
+async fn the_quirk_fixture_patch_is_byte_identical_to_git() {
+    let repo = QuirkRepo::build();
+    let (ours, theirs) = both_in(
+        &repo.root,
+        &repo.scratch(),
+        &["--patch", "--from", "HEAD~1", "--to", "HEAD"],
+        &["diff", "--patch", "HEAD~1", "HEAD"],
+    )
+    .await;
+    for needle in ["diff --git \"a/", "old mode ", "@@ -0,0", "@@ -1,2 +0,0 @@", "\\ No newline"] {
+        assert!(
+            theirs.contains(needle),
+            "the oracle must carry '{needle}', or this test covers less than it claims:\n{theirs}"
+        );
+    }
+    assert_eq!(ours, theirs);
+
+    let checkout = repo.checkout_of("HEAD~1");
+    let patch_file = checkout.join("..").join("quirks.patch");
+    std::fs::write(&patch_file, &ours).expect("write patch");
+    let out = std::process::Command::new("git")
+        .args(["apply", "--check", "-v", patch_file.to_str().expect("utf-8")])
+        .current_dir(&checkout)
+        .output()
+        .expect("run git apply");
+    assert!(
+        out.status.success(),
+        "real git refused our patch ({}):\n{}\n--- the patch ---\n{ours}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -873,5 +1138,213 @@ async fn a_mode_only_change_is_a_header_with_no_body() {
     assert_eq!(
         ours,
         "diff --git a/mode.sh b/mode.sh\nold mode 100644\nnew mode 100755\n"
+    );
+}
+
+/// The section headings a patch carries, one per `@@` line, in order.
+fn sections(patch: &str) -> Vec<String> {
+    patch
+        .lines()
+        .filter_map(|l| l.strip_prefix("@@ "))
+        .filter_map(|rest| rest.split_once("@@ ").map(|(_, s)| s.to_string()))
+        .collect()
+}
+
+/// `.gitattributes` can name a diff driver, and a driver brings its own rule
+/// for the function name git prints after `@@`. Nothing here reads
+/// `.gitattributes` (D.3), so this build always applies git's *default* rule:
+/// the nearest preceding line starting with a letter, `_` or `$`.
+///
+/// Both answers are asserted separately. On `mod.py`, which `.gitattributes`
+/// gives `diff=python`, git prints the enclosing `def` and we print the
+/// enclosing `class`. On `plain.py` — the same content under no attribute —
+/// git prints the `class` too and the whole patch is byte-identical, which is
+/// what makes this a missing driver rather than a broken default rule.
+/// Characterization, not a fix (docs/issues.md, T3).
+#[tokio::test]
+async fn a_gitattributes_diff_driver_moves_gits_section_heading_and_not_ours() {
+    const SOURCE: &str = "class Widget:\n\
+        \x20   def alpha(self):\n\
+        \x20       a1 = 1\n\
+        \x20       a2 = 2\n\
+        \x20       a3 = 3\n\
+        \x20       a4 = 4\n\
+        \x20       a5 = 5\n\
+        \x20       a6 = 6\n\
+        \x20       return a1\n\
+        \n\
+        \x20   def beta(self):\n\
+        \x20       b1 = 1\n\
+        \x20       b2 = 2\n\
+        \x20       b3 = {}\n\
+        \x20       b4 = 4\n\
+        \x20       b5 = 5\n\
+        \x20       b6 = 6\n\
+        \x20       return b1\n";
+
+    let fixture = Fixture::empty();
+    let root = seed_repo(&fixture);
+    for name in ["mod.py", "plain.py"] {
+        std::fs::write(root.join(name), SOURCE.replace("{}", "3")).expect("write source");
+    }
+    // The attribute names one path, not `*.py`, so `plain.py` is the negative
+    // control: same content, same edit, git's default rule.
+    std::fs::write(root.join(".gitattributes"), b"mod.py diff=python\n").expect("write attributes");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-m", "base", "--quiet"]);
+    for name in ["mod.py", "plain.py"] {
+        std::fs::write(root.join(name), SOURCE.replace("{}", "33")).expect("write source");
+    }
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-m", "edit inside beta", "--quiet"]);
+
+    let scratch = fixture.root();
+
+    // The negative control first: with no attribute on it, we are git.
+    let (ours, theirs) = both_in(
+        &root,
+        &scratch,
+        &["--patch", "--from", "HEAD~1", "--to", "HEAD", "--path", "plain.py"],
+        &["diff", "--patch", "HEAD~1", "HEAD", "--", "plain.py"],
+    )
+    .await;
+    assert_eq!(sections(&theirs), vec!["class Widget:".to_string()]);
+    assert_eq!(ours, theirs, "the default rule must agree with git");
+
+    // And with one, git follows the python driver's rule and we do not.
+    let (ours, theirs) = both_in(
+        &root,
+        &scratch,
+        &["--patch", "--from", "HEAD~1", "--to", "HEAD", "--path", "mod.py"],
+        &["diff", "--patch", "HEAD~1", "HEAD", "--", "mod.py"],
+    )
+    .await;
+    assert_eq!(
+        sections(&theirs),
+        vec!["def alpha(self):".to_string()],
+        "the oracle must be reading the driver, or this divergence is not real"
+    );
+    assert_eq!(
+        sections(&ours),
+        vec!["class Widget:".to_string()],
+        "we apply git's default rule and nothing else"
+    );
+    // Nothing else moved: the heading is the whole divergence.
+    let strip = |patch: &str| -> String {
+        patch
+            .lines()
+            .map(|l| match l.strip_prefix("@@ ") {
+                Some(rest) => format!("@@ {}@@\n", rest.split_once("@@ ").expect("heading").0),
+                None => format!("{l}\n"),
+            })
+            .collect()
+    };
+    assert_eq!(strip(&ours), strip(&theirs));
+}
+
+/// git widens the abbreviated oid in the `index` line until it is unambiguous
+/// in the repository; this build always writes seven characters (`short` in
+/// `src/patch.rs`).
+///
+/// The fixture plants a real collision rather than describing one. The blobs
+/// `4827\n` and `11742\n` hash to `51d27384…` and `51d2738e…`, which share
+/// exactly seven hex characters — found by scanning `sha1("blob <len>\0<n>\n")`
+/// for `n` in `0..400000`, so the pair is fixed, not searched for at test time.
+/// With both in the repository, git prints eight characters for that side and
+/// we print seven.
+///
+/// The consequence is `git apply -3`: it resolves the `index` oids, and a
+/// seven-character prefix it cannot resolve costs the three-way merge. Plain
+/// `git apply` reads no oid and takes our patch either way. Characterization,
+/// not a fix (docs/issues.md, T4).
+#[tokio::test]
+async fn an_ambiguous_short_oid_is_not_widened_the_way_git_widens_it() {
+    let fixture = Fixture::empty();
+    let root = seed_repo(&fixture);
+    std::fs::write(root.join("collide.txt"), b"4827\n").expect("write collide.txt");
+    std::fs::write(root.join("twin.txt"), b"11742\n").expect("write twin.txt");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-m", "two blobs sharing seven hex characters", "--quiet"]);
+    std::fs::write(root.join("collide.txt"), b"changed\n").expect("write collide.txt");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-m", "change one of them", "--quiet"]);
+
+    // The fixture's premise, checked against git rather than asserted: the two
+    // blobs agree for seven characters and disagree at the eighth.
+    let planted = git(&root, &["rev-parse", "HEAD~1:collide.txt", "HEAD~1:twin.txt"]);
+    let (a, b) = planted.split_once('\n').expect("two oids");
+    assert_eq!(a[..7], b[..7], "the planted blobs no longer collide: {planted}");
+    assert_ne!(a[..8], b[..8], "they must differ at the eighth: {planted}");
+
+    let (ours, theirs) = both_in(
+        &root,
+        &fixture.root(),
+        &["--patch", "--from", "HEAD~1", "--to", "HEAD", "--path", "collide.txt"],
+        &["diff", "--patch", "HEAD~1", "HEAD", "--", "collide.txt"],
+    )
+    .await;
+    // The old side of the `index` line — the one whose blob is ambiguous.
+    let old_oid = |patch: &str| -> String {
+        patch
+            .lines()
+            .find_map(|l| l.strip_prefix("index "))
+            .expect("an index line")
+            .split_once("..")
+            .expect("two oids")
+            .0
+            .to_string()
+    };
+    let theirs_old = old_oid(&theirs);
+    let ours_old = old_oid(&ours);
+    assert_eq!(theirs_old.len(), 8, "git must widen the ambiguous side: {theirs}");
+    assert_eq!(ours_old.len(), 7, "we write seven and do not grow it: {ours}");
+    assert_eq!(theirs_old[..7], ours_old, "ours is git's answer, cut short");
+    // Only the `index` line moved.
+    let strip = |patch: &str| -> String {
+        patch
+            .lines()
+            .filter(|l| !l.starts_with("index "))
+            .map(|l| format!("{l}\n"))
+            .collect()
+    };
+    assert_eq!(strip(&ours), strip(&theirs));
+
+    // The consequence, from real git: `-3` cannot resolve our prefix.
+    let checkout = {
+        let dir = fixture.path("apply-HEAD_1");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                "--quiet",
+                dir.to_str().expect("utf-8 path"),
+                "HEAD~1",
+            ],
+        );
+        dir
+    };
+    let three_way = |name: &str, patch: &str| -> String {
+        let file = checkout.join("..").join(name);
+        std::fs::write(&file, patch).expect("write patch");
+        let out = std::process::Command::new("git")
+            .args(["apply", "--check", "-3", file.to_str().expect("utf-8")])
+            .current_dir(&checkout)
+            .output()
+            .expect("run git apply");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let git_says = three_way("widened.patch", &theirs);
+    let we_say = three_way("short.patch", &ours);
+    assert!(
+        !git_says.contains("ambiguous"),
+        "git's own eight-character prefix must resolve, or the comparison below \
+         is not about our seven: {git_says}"
+    );
+    assert!(
+        we_say.contains("ambiguous"),
+        "`git apply -3` resolved our seven-character prefix; if the ambiguity is \
+         gone this test should become a fidelity claim: {we_say}"
     );
 }

@@ -329,10 +329,13 @@ The field is absent, not `false`, everywhere else.
 
 **How close to `git diff --patch` it is.** For `--staged` and for
 `--from A --to B` — the pairs where both sides are objects — the patch is
-byte-identical to git's, exercised over an add, a delete, an exact rename, a
-mode flip, a binary file, a lost trailing newline, a path with a space, CRLF
-content, and a two-hunk source file. `git apply --check` accepts it. Four
-things it does not do:
+byte-identical to git's over the inputs the tests compare: an add, a delete,
+an exact rename, a mode flip, a mode and content change in one file, a binary
+file, both empty-file transitions, a file born empty, a trailing newline lost
+on one side and on both, CRLF content, a two-hunk source file, and paths
+holding a space, a double quote, a tab, and non-ASCII bytes. `--context <N>`
+is compared to `git diff -U<N>` at five widths, and `git apply --check`
+accepts the result. Six things it does not do:
 
 - **No `index` line for a working-tree side.** Working-tree content has no oid
   in the model, so the line `git apply -3` reads is omitted rather than
@@ -344,9 +347,18 @@ things it does not do:
 - **Content that is not valid UTF-8** but holds no NUL byte is text to git and
   to this build, and its hunks carry U+FFFD where the invalid bytes were, so
   that patch will not apply.
+- **A path that is not valid UTF-8** carries U+FFFD the same way. The tree
+  walk builds every path lossily and the renderer takes a `&str`, so the bytes
+  git would have C-quoted are gone before the patch is written. A path whose
+  bytes *are* UTF-8 is C-quoted exactly as git quotes it, non-ASCII included.
 - **Section headings use git's default rule** — the nearest preceding line
   starting with a letter, `_` or `$` — never a `diff.<driver>.xfuncname`
-  pattern, which lives in `.gitattributes` and nothing here reads.
+  pattern, which lives in `.gitattributes` and nothing here reads. Where a
+  driver applies, git's heading names a different line than ours.
+- **Abbreviated oids are seven characters** and are not grown when seven is
+  ambiguous in the repository, where git widens them. `git apply -3` cannot
+  resolve such a prefix and falls back to a direct apply; plain `git apply`
+  reads no oid.
 
 **`git log --patch` is not this.** It exits 4 in both builds, naming
 `git diff --patch --from <commit>~1 --to <commit>` as the spelling for one

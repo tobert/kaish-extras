@@ -306,6 +306,76 @@ fixture asserted against real `git status --porcelain` before fixing.
   `--stat` and `--patch` for `show` as one group. Pinned by
   `textdiff.rs::log_patch_points_at_diff_patch_rather_than_at_the_feature`.
 
+- **T3 — a `.gitattributes` diff driver moves git's section heading and not
+  ours.** The name git prints after `@@` comes from a per-path funcname
+  pattern, and `.gitattributes` can name a driver that changes it —
+  `mod.py diff=python` makes git print the enclosing `def` where its default
+  rule prints the enclosing `class`. Nothing here reads `.gitattributes`
+  (D.3), so this build always applies the default rule: the nearest preceding
+  line starting with a letter, `_` or `$`. Closing it means an attributes
+  stack (`gix-attributes`, which `gix-worktree` is taken without on purpose)
+  plus git's built-in driver table, for a heading that is decoration in the
+  patch and carried separately in the model. Pinned both ways by
+  `textdiff.rs::a_gitattributes_diff_driver_moves_gits_section_heading_and_not_ours`,
+  whose negative control is the same file under no attribute, where the whole
+  patch is byte-identical.
+
+- **T4 — the abbreviated oid in the `index` line is seven characters and is
+  not grown when seven is ambiguous.** git's `find_unique_abbrev` widens the
+  prefix until it names one object in the repository; `patch.rs`'s `short`
+  takes seven characters and stops. The cost is `git apply -3`: it resolves
+  the `index` oids, and an ambiguous prefix makes it print "short object ID
+  ... is ambiguous" and fall back to a direct apply, so the three-way merge is
+  lost. Plain `git apply` reads no oid and is unaffected. Closing it means
+  asking the odb for the shortest unambiguous prefix per oid, which is a real
+  read against the whole object database on a line that is decoration for
+  every caller not using `-3` — cost that scales with the repository rather
+  than with the answer, the same family this crate already discloses as
+  G7-G10, so declining it follows a stated posture rather than saving work.
+  Pinned by
+  `textdiff.rs::an_ambiguous_short_oid_is_not_widened_the_way_git_widens_it`,
+  whose fixture plants two blobs that share exactly seven hex characters.
+
+- **T5 — a path marked `-diff` in `.gitattributes` is treated as text here,
+  where git prints `Binary files … differ`.** Same cause as T3 — nothing here
+  reads `.gitattributes` (D.3) — but a wider consequence, because the
+  attribute changes what git *discloses* rather than which line it labels a
+  hunk with. Measured, not read out of the attributes documentation: on a
+  two-line text file whose only change is `beta` → `BETA`, with
+  `marked.txt -diff` committed, real git prints
+
+  ```
+  diff --git a/marked.txt b/marked.txt
+  index fbbee86..cd964df 100644
+  Binary files a/marked.txt and b/marked.txt differ
+  ```
+
+  and this build prints the same header with a real `@@ -1,2 +1,2 @@` hunk
+  carrying both lines. It is not confined to `--patch`: git reports `-`/`-`
+  for the path in `--numstat` and `Bin 11 -> 11 bytes` in `--stat`, while this
+  build reports `binary: false`, `additions: 1`, `deletions: 1` — so plain
+  `git diff` and `git log --stat` disagree with git for such a path too.
+  Nothing is disclosed that the repository does not already hold, and the
+  read is bounded by `max_blob_bytes` either way, so this is a fidelity gap
+  and not a containment hole; but a repository marking a path `-diff` is
+  asking for the short form, and it does not get it. Our binary decision is
+  content-based (a NUL byte) and always has been, which is why the paths that
+  *are* binary agree with git.
+
+  **`-diff` and `diff=<driver>` do not compose**: they are one attribute, so
+  the later matching line wins — measured both ways round. With `both.py
+  -diff` above `both.py diff=python`, `git check-attr diff -- both.py`
+  reports `python` and git renders an ordinary patch with the driver's
+  heading; swap the two lines and it reports `unset` and git renders
+  `Binary files … differ`. So it is line order, not "a driver beats unset",
+  and there is no combined state to honor — whichever wins, T3 or this entry
+  covers it.
+
+  Closing it means the same attributes stack T3 needs, plus honoring `unset`
+  as a binary marker in `diffcore`'s classification rather than in the
+  renderer, since the counts move with it. Not tested — the two fixtures
+  above are playground measurements, not a case in `textdiff.rs`.
+
 ## git branch / tag / worktree list — deferred (architecture.md B.7, B.9, shipped in PR 7)
 
 - **B1 — `--ahead-behind` reads both histories to their roots, rather than
@@ -808,19 +878,6 @@ bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
   `git ls-tree` C-quotes, and silently skipped in the untracked walk);
   `--path ""` (silently matches everything, git errors); and `core.autocrlf`,
   whose divergence C5 records in prose while every fixture sets it false.
-
-- **P11 — narrow the "byte-identical to `git diff --patch`" claim, or test it
-  to the claim.** Both deep reviewers flagged it. Verified since: our
-  `quote_c_style` is correct, including that a space is *not* quoted (git
-  disambiguates it with a trailing tab instead) — so the reviewers' specific
-  charge was wrong. But the quoting is unit-tested against our belief about
-  git rather than against git itself, in a crate whose whole discipline is
-  real-git-as-oracle. Untested inputs that would settle it: paths containing a
-  quote, a tab, or non-ASCII bytes; combined mode-and-content change; empty-file
-  transitions; one-sided missing-newline; `.gitattributes` function context;
-  and oid-abbreviation growth on collision. Note non-UTF-8 *paths* cannot reach
-  the renderer at all — it takes `&str` — which is a boundary to document
-  rather than test.
 
 - **P12 — `status` fails the whole call on one over-cap tracked file, and the
   guide implies otherwise.** `read_worktree_blob` returns `BlobTooLarge` and

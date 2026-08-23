@@ -3,8 +3,19 @@
 //!
 //! **The target is `git apply` compatibility, not byte-identity with
 //! `git diff`.** The model is primary and this is a rendering of it, so the
-//! patch says only what the model already knows. What that costs is written
-//! down here rather than discovered later:
+//! patch says only what the model already knows.
+//!
+//! Byte-identity is what the tests measure anyway, and they measure it over a
+//! named set rather than in general: for the two object-backed endpoint pairs
+//! — `--staged` and `--from A --to B` — `tests/textdiff.rs` compares our
+//! patch to `git diff --patch` over an add, a delete, an exact rename, a mode
+//! flip, a combined mode-and-content change, a binary file, both empty-file
+//! transitions, a file born empty, a trailing newline lost on one side and on
+//! both, CRLF content, a two-hunk source file, and paths holding a space, a
+//! double quote, a tab, and non-ASCII bytes. `--context <N>` is compared to
+//! `git diff -U<N>` at five widths, and real `git apply --check` takes the
+//! result. The list below is where byte-identity does not hold, written down
+//! here rather than discovered later:
 //!
 //! - **No binary patch encoding.** A binary file renders as
 //!   `Binary files a/x and b/x differ`, which is also what `git diff` prints
@@ -15,11 +26,24 @@
 //!   content has no oid in the model ([`DiffFile::old_oid`]), so the line
 //!   `git apply -3` reads is omitted rather than invented. An ordinary
 //!   `git apply` does not need it.
-//! - **Abbreviated oids are seven characters**, git's default, and are not
-//!   grown to stay unique in a repository where seven is ambiguous.
-//! - **Hunk text is UTF-8.** Content that holds no NUL byte but is not valid
-//!   UTF-8 is text to git and to this build, and its patch carries U+FFFD
-//!   where the invalid bytes were — so that patch will not apply.
+//! - **Abbreviated oids are seven characters**, git's default. git grows the
+//!   abbreviation until it is unambiguous in the repository and this does
+//!   not, so where seven is ambiguous the `index` line names a prefix
+//!   `git apply -3` refuses ("short object ID ... is ambiguous") before
+//!   falling back to a direct apply. Pinned by
+//!   `textdiff.rs::an_ambiguous_short_oid_is_not_widened_the_way_git_widens_it`
+//!   (docs/issues.md, T4).
+//! - **Hunk text is UTF-8, and so is every path.** Content that holds no NUL
+//!   byte but is not valid UTF-8 is text to git and to this build, and its
+//!   patch carries U+FFFD where the invalid bytes were — so that patch will
+//!   not apply. A path is the same shape: `diffcore::flatten_tree` builds it
+//!   with `to_str_lossy`, so a path whose bytes are not UTF-8 reaches this
+//!   renderer already carrying U+FFFD, and a renderer that takes `&str`
+//!   cannot recover the bytes git would have C-quoted. Both need the same
+//!   fix — a model that carries bytes (docs/issues.md, T1).
+//! - **Section headings use git's default rule**: the nearest preceding line
+//!   starting with a letter, `_` or `$`. A `.gitattributes` diff driver moves
+//!   git's heading and not ours (docs/issues.md, T3).
 //! - **No color, no `--word-diff`, and no whitespace-config rendering**
 //!   (`diff.*.whitespace`, `core.autocrlf`): nothing here reads repository
 //!   config for presentation (D.3).
@@ -150,7 +174,9 @@ fn push_index(out: &mut String, file: &DiffFile) {
     }
 }
 
-/// git's default seven-character abbreviation. Not grown for uniqueness.
+/// git's default seven-character abbreviation. Not grown for uniqueness the
+/// way git's `find_unique_abbrev` grows it — see this module's doc for what
+/// that costs.
 fn short(oid: &str) -> String {
     oid.chars().take(7).collect()
 }
@@ -272,6 +298,13 @@ mod tests {
     /// prints the whole thing C-quoted with octal escapes for everything
     /// above ASCII. Both halves are load-bearing: quoting a plain path would
     /// make every ordinary patch differ from git's.
+    ///
+    /// These three quoted forms are checked against real git by
+    /// `textdiff.rs::c_quoted_paths_are_rendered_the_way_git_renders_them`,
+    /// which is what makes them git's answer rather than ours. This unit test
+    /// is the cheap one that names the byte when it breaks: drop the `\t` arm
+    /// and both go red, but this one says which escape moved (git writes
+    /// `\t`; the octal fallback under it would write `\011`).
     #[test]
     fn paths_are_quoted_exactly_where_git_quotes_them() {
         assert_eq!(quote_c_style("a/", "plain.txt"), None);
@@ -291,7 +324,8 @@ mod tests {
     }
 
     /// A space in an unquoted path is ambiguous in a `---` line, and git
-    /// closes it with a trailing tab rather than by quoting.
+    /// closes it with a trailing tab rather than by quoting. `PatchRepo`'s
+    /// `with space.txt` is the same rule against real git.
     #[test]
     fn an_unquoted_space_gets_the_trailing_tab() {
         assert_eq!(Label::new("a/", "with space.txt").file_line(), "a/with space.txt\t");
