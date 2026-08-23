@@ -737,6 +737,18 @@ Four reviews before 0.9.0, framed as *"what tests are missing"* rather than
 bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
 0`); the stale module docs are fixed. What is left, ranked:
 
+- **P13 — two guards now check the same invariant, and one of them is the weak
+  one P9 was about.** Closing P9 added `tests/config_needle_guard.rs`, whose
+  `the_real_crate_src_does_not_read_core_worktree` scans for both the literal
+  `"core.worktree"` and the two-argument `config_values("core", "worktree")`
+  form. `tests/hostile_repo.rs`'s `work_dir_is_bounded_by_discovery` still
+  carries the single-needle version — **superseded, and superseded by the very
+  defect it was cited for**. AGENTS.md forbids parallel old/new paths, so the
+  old one goes; what it uniquely carries (the comment explaining why the
+  work_dir ceiling check is merely defensive) moves with it rather than being
+  deleted. It survived the P9 fix only because `hostile_repo.rs` was owned by a
+  concurrent branch at the time — a scheduling artifact, not a decision.
+
 - **P2 — a non-canonical index mode is silently dropped, and the comment
   misattributes the skip.** `Class::from_index` returns `None` for anything
   outside the four canonical modes, and both call sites skip it with a comment
