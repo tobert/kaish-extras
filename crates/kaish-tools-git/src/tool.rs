@@ -1659,6 +1659,76 @@ mod tests {
         );
     }
 
+    /// The guide's `Verb` section enumerates the verb set for a reader, and
+    /// prose cannot iterate `Verb::ALL`. That enumeration went stale when
+    /// `branch`, `tag` and `worktree list` landed — it said six while the same
+    /// page said nine forty lines above.
+    ///
+    /// What makes this different from the drift `the_embedding_guide_names_
+    /// every_verb` already catches: that one asks whether a verb is named
+    /// *anywhere in the file*, which the three new verbs were, in the `Limits`
+    /// table. The guide's own prose claimed it pinned "this list", and it never
+    /// did. So the sentence was describing a guarantee no test provided — the
+    /// same defect as a doc claiming a property the code lacks, one level up.
+    ///
+    /// The markers are what make the claim true rather than aspirational: a
+    /// region small enough that "every name is in here" is a real assertion.
+    #[test]
+    fn the_verb_list_in_the_guide_is_the_verb_enum() {
+        let guide = include_str!("../../../docs/embedding-git.md");
+        let begin = "<!-- verb-list:begin";
+        let start = guide.find(begin).expect(
+            "docs/embedding-git.md has no `<!-- verb-list:begin` marker — the \
+             enumeration this test pins was renamed or deleted, and with it \
+             the only thing keeping that list honest",
+        );
+        let after_marker = guide[start..]
+            .find("-->")
+            .map(|i| start + i + 3)
+            .expect("the verb-list:begin marker is unterminated");
+        let end = guide[after_marker..]
+            .find("<!-- verb-list:end -->")
+            .map(|i| after_marker + i)
+            .expect("docs/embedding-git.md has no `<!-- verb-list:end -->` marker");
+        let region = &guide[after_marker..end];
+
+        for verb in Verb::ALL {
+            let quoted = format!("`{}`", verb.as_str());
+            assert!(
+                region.contains(&quoted),
+                "the guide's verb list does not name {:?}. It reads:\n{}\n\
+                 A verb landed without reaching the list an embedder reads to \
+                 learn what this tool can do",
+                verb,
+                region.trim()
+            );
+        }
+
+        // Negative control, and a real one: `blame` is designed in
+        // architecture.md B.8 and deliberately unbuilt, so it is named
+        // elsewhere in this guide and in docs/issues.md. Naming it *here*
+        // would promise an embedder a verb that does not exist — which is the
+        // exact failure `Verb::Blame` was kept out of the enum to avoid.
+        // `commit` covers the other direction: a write verb in a read profile.
+        for absent in ["blame", "commit"] {
+            assert!(
+                !region.contains(&format!("`{absent}`")),
+                "the guide's verb list names `{absent}`, which is not in \
+                 `Verb::ALL` — the list promises a verb that cannot run:\n{}",
+                region.trim()
+            );
+        }
+
+        // And prove the region was actually found and is not empty, so the
+        // loop above cannot pass by searching nothing.
+        assert!(
+            region.trim().len() > 32,
+            "the verb-list region is {} bytes — too small to hold the list, \
+             so every assertion above passed against nothing",
+            region.trim().len()
+        );
+    }
+
     /// AGENTS.md, "Published text is published": a `///` on a clap argument is
     /// copied into `ParamSchema.description` and reaches agents through the
     /// tool schema. Behavior goes there; mechanism goes in a `//` comment.

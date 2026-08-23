@@ -60,14 +60,29 @@ chain of calls, however long, can widen a build's surface past what
 | `.with_tool_name(name)` | `"git"` | Registering as anything else means external `git` on `PATH` is not shadowed — a caller who types `git` gets whichever one kaish's own PATH-vs-builtin resolution picks, not necessarily this tool. An empty or whitespace-containing name is rejected at registration (`UnusableToolName`). |
 | `.with_limits(Limits)` | see below | Every field is a **hard cap** — a verb's own `--limit` flag may only lower it, never raise it. Raising a limit raises real cost: `max_blob_bytes` and `max_diff_files` bound single-allocation and single-invocation work respectively (see [L3](#known-limitations) for where "per-blob bounded, not per-commit bounded" still bites). |
 
-`Verb` is `#[non_exhaustive]` and today carries exactly the six implemented
-verbs — `info`, `status`, `log`, `ls`, `show`, `diff`
-(`read_only_enables_every_implemented_verb`, `src/config.rs`, and
-`the_embedding_guide_names_every_verb` pins this list against `Verb::ALL` so
-the two cannot drift again). A verb is added to the enum in the same PR that
-implements it, never ahead of
-its implementation, so there is never a schema entry for something that
-cannot actually run.
+`Verb` is `#[non_exhaustive]` and today carries exactly the implemented verbs:
+
+<!-- verb-list:begin — `the_verb_list_in_the_guide_is_the_verb_enum` asserts
+     every `Verb::ALL` name appears between these markers. Prose cannot
+     iterate the enum, so the markers are what makes the claim below true.
+     Keep every verb name inside them. -->
+`info`, `status`, `log`, `ls`, `show`, `diff`, `branch`, `tag`,
+`worktree list`
+<!-- verb-list:end -->
+
+`read_only_enables_every_implemented_verb` (`src/config.rs`) pins the config
+side, and `the_verb_list_in_the_guide_is_the_verb_enum` (`src/tool.rs`) pins
+this list against `Verb::ALL`. A verb is added to the enum in the same PR that
+implements it, never ahead of its implementation, so there is never a schema
+entry for something that cannot actually run.
+
+This list is written out because the guard that used to be cited here did not
+cover it. `the_embedding_guide_names_every_verb` checks that each verb is named
+*somewhere in this file* — deliberately, since the failure it was built for is a
+verb landing with no mention at all — but the sentence here claimed it pinned
+"this list", and the list went stale anyway when `branch`, `tag` and
+`worktree list` landed. It said six verbs while the page said nine forty lines
+above.
 
 ### `Limits`
 
