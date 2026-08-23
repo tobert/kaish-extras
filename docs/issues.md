@@ -778,16 +778,6 @@ bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
   already visits every directory itself, so a `symlink_metadata` pre-screen is
   available without touching gix.
 
-- **P7 — a repo-relative `include.path` hides the format and extension
-  gates.** `check_include_paths` refuses only *escaping* includes, and includes
-  are never followed (`from_bytes_no_includes`) — so a repository can put
-  `core.repositoryformatversion = 2` or `extensions.objectFormat = sha256` in
-  an included file and `check_format_version`/`check_extensions` never see it.
-  The bare config reads as format 0, the gates are skipped. Blast radius is
-  bounded today (nothing honors `core.worktree`, and a `reftable/` directory is
-  caught by an on-disk probe regardless of config), but this is the refusal
-  layer's own bypass.
-
 - **P8 — the fingerprint samples `.git` and the linked worktree, never the
   main working tree or the scratch root.** Pointing `Fingerprint::take` at
   `RichRepo::scratch()` subsumes both existing fingerprint tests and catches

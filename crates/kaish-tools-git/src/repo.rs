@@ -11,8 +11,9 @@
 //! choose to load. No system config, no user config, no `GIT_*` environment
 //! reading, no attributes stack, no credential helpers. Repo-local config is
 //! parsed from bytes we read ourselves with `from_bytes_no_includes`, so no
-//! library code path can follow an `include.path` — we resolve includes, or
-//! refuse them.
+//! library code path can follow an `include.path`. Nothing here resolves one
+//! either: a config that declares an include is refused, because the config
+//! we parsed is not the config its author wrote.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -326,7 +327,7 @@ impl ReadRepo {
         // a repository could symlink out of the mount.
         let config_leaf = open_leaf(operation, "repository config", &common_dir, "config", &ceiling)?;
         let config = read_repo_config(operation, config_leaf.path())?;
-        check_include_paths(operation, &common_dir, &config)?;
+        refuse_includes(operation, &common_dir, &config)?;
         let format_version = check_format_version(operation, &common_dir, &config)?;
         if format_version >= 1 {
             check_extensions(operation, &common_dir, &config)?;
@@ -1361,13 +1362,30 @@ fn read_repo_config(
     parse_config_bytes(operation, path, &bytes)
 }
 
-/// Refuse an `include.path` / `includeIf.*.path` that leaves the repository.
+/// Refuse an `include.path` / `includeIf.*.path`, wherever it points.
 ///
 /// D.3: the escape is retired by construction — nothing follows an include,
 /// because we parse with `from_bytes_no_includes`. What remains is to say so
 /// out loud rather than answer from a config whose author expected the
 /// include to have been applied.
-fn check_include_paths(
+///
+/// Saying it out loud used to mean only for an include that *escaped* the
+/// repository — an absolute path, a `..`, or git's `~/…` home form. A
+/// repo-relative one was waved through, and the config we then answered from
+/// was missing whatever the included file set. `docs/issues.md`'s P7 found it
+/// through the gates: `core.repositoryformatversion = 2` and
+/// `extensions.objectFormat = sha256` in an included file are invisible to
+/// [`check_format_version`] and [`check_extensions`], which read the bare
+/// file. Real git behaves identically — measured against git 2.55.0, not
+/// assumed: with the same repository `git status` exits 0 through an include
+/// and 128 with the same keys written directly, because git's own setup-time
+/// format read does not follow includes either. So the bypass changed no
+/// answer *today*, which is exactly the shape that stops being true the first
+/// time a verb reads one more key.
+///
+/// The refusal names the file, not the key: the parse is what is incomplete,
+/// not any single value.
+fn refuse_includes(
     operation: &'static str,
     common_dir: &Path,
     config: &gix_config::File,
@@ -1384,22 +1402,13 @@ fn check_include_paths(
         } else {
             "include.path"
         };
-        for value in section.values("path") {
-            let text = value.to_string();
-            let path = Path::new(&text);
-            let escapes = path.is_absolute()
-                || path.components().any(|c| c == Component::ParentDir)
-                // `~/…` is git's home-directory form; expanding it would read
-                // host state the kernel never exposes to a tool.
-                || text.starts_with('~');
-            if escapes {
-                return Err(GitError::EscapingInclude {
-                    operation,
-                    repo: common_dir.to_path_buf(),
-                    key: key.to_string(),
-                    value: text,
-                });
-            }
+        if let Some(value) = section.values("path").first() {
+            return Err(GitError::UnsupportedInclude {
+                operation,
+                repo: common_dir.to_path_buf(),
+                key: key.to_string(),
+                value: value.to_string(),
+            });
         }
     }
     Ok(())
@@ -2035,7 +2044,7 @@ mod tests {
     #[test]
     fn absolute_include_path_is_refused() {
         let cfg = config("[include]\n\tpath = /etc/passwd\n");
-        let err = check_include_paths("info", Path::new("/repo/.git"), &cfg)
+        let err = refuse_includes("info", Path::new("/repo/.git"), &cfg)
             .expect_err("an absolute include must be refused");
         assert_eq!(err.exit_code(), 4);
         assert!(err.to_string().contains("/etc/passwd"), "{err}");
@@ -2044,7 +2053,7 @@ mod tests {
     #[test]
     fn parent_relative_include_path_is_refused() {
         let cfg = config("[include]\n\tpath = ../../../etc/gitconfig\n");
-        let err = check_include_paths("info", Path::new("/repo/.git"), &cfg)
+        let err = refuse_includes("info", Path::new("/repo/.git"), &cfg)
             .expect_err("a `..`-bearing include must be refused");
         assert_eq!(err.exit_code(), 4);
     }
@@ -2052,7 +2061,7 @@ mod tests {
     #[test]
     fn home_relative_include_path_is_refused() {
         let cfg = config("[include]\n\tpath = ~/.gitconfig\n");
-        let err = check_include_paths("info", Path::new("/repo/.git"), &cfg)
+        let err = refuse_includes("info", Path::new("/repo/.git"), &cfg)
             .expect_err("a `~`-rooted include must be refused");
         assert_eq!(err.exit_code(), 4);
     }
@@ -2060,16 +2069,31 @@ mod tests {
     #[test]
     fn include_if_path_is_checked_too() {
         let cfg = config("[includeIf \"gitdir:/srv/\"]\n\tpath = /etc/evil\n");
-        let err = check_include_paths("info", Path::new("/repo/.git"), &cfg)
+        let err = refuse_includes("info", Path::new("/repo/.git"), &cfg)
             .expect_err("includeIf must be checked like include");
         assert!(err.to_string().contains("includeIf.path"), "{err}");
     }
 
+    /// The one this crate used to wave through. It never escapes the
+    /// repository and it is still refused: nothing follows it, so the config
+    /// we parsed is missing whatever `extra-config` sets.
     #[test]
-    fn repo_relative_include_path_is_allowed() {
+    fn repo_relative_include_path_is_refused_too() {
         let cfg = config("[include]\n\tpath = extra-config\n");
-        check_include_paths("info", Path::new("/repo/.git"), &cfg)
-            .expect("a repo-relative include is not an escape");
+        let err = refuse_includes("info", Path::new("/repo/.git"), &cfg)
+            .expect_err("an include we do not follow must be refused");
+        assert_eq!(err.exit_code(), 4);
+        assert!(err.to_string().contains("extra-config"), "{err}");
+    }
+
+    /// The negative control for the four refusals above: a config with no
+    /// include at all passes. Without it, `refuse_includes` returning `Err`
+    /// unconditionally would satisfy every one of them.
+    #[test]
+    fn a_config_declaring_no_include_is_accepted() {
+        let cfg = config("[core]\n\tbare = false\n[remote \"origin\"]\n\turl = /srv/x\n");
+        refuse_includes("info", Path::new("/repo/.git"), &cfg)
+            .expect("a config with no include has nothing to refuse");
     }
 
     #[test]

@@ -147,9 +147,13 @@ keep that from being a false sense of safety.
 2. **Isolation by construction.** Nothing is loaded that this crate did not
    choose to load — no system config, no user config, no `GIT_*`
    environment reads, no credential helpers. Repo-local `.git/config` is
-   read with `gix_config::File::from_bytes_no_includes`, so `include.path`
-   is resolved by this crate or refused (exit 4), never followed by library
-   code on our behalf.
+   read with `gix_config::File::from_bytes_no_includes`, so no library code
+   path can follow an `include.path` on our behalf. This crate does not
+   resolve one either: a repo-local config that declares any include —
+   `include.path` or `includeIf.*.path`, escaping or repo-relative — is
+   refused with exit 4, because the config that was parsed is not the config
+   its author wrote. Real git reads such a repository; inline the included
+   settings into the repository's own config if you need this crate to.
 3. **No spawn machinery, anywhere.** `gix-command`, `gix-transport`, and
    `gix-filter` are absent from the dependency tree — verified empirically
    in CI's `git-tool-dependency-tripwires` job (`.github/workflows/ci.yml`),
@@ -359,10 +363,11 @@ account for — a truncated record, an unrecognized structure — is refused as
 unreadable, not waved through on the assumption that gitoxide's own decode
 would also stop. This is `docs/issues.md`'s **R4** entry, in full.
 
-**What is guarded by construction:** `include.path` resolution is done by
-this crate (`from_bytes_no_includes`), not by `gix-config`'s own include
-machinery, so there is no library code path that could follow an escaping
-include even if a parsing bug existed elsewhere in that crate. `gix-diff`
+**What is guarded by construction:** no `include.path` is resolved at all.
+`from_bytes_no_includes` keeps `gix-config`'s own include machinery out of
+reach, so no library code path could follow one even if a parsing bug existed
+elsewhere in that crate, and a config that declares an include is refused
+rather than answered from. `gix-diff`
 is taken without its `blob` feature specifically because that feature pulls
 `gix-command`, closing an entire spawn-capable code path rather than
 patching around it.

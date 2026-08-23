@@ -1610,3 +1610,88 @@ async fn a_symlink_to_a_directory_inside_the_mount_is_followed() {
         .expect("structured output");
     assert_eq!(json["repo_root_vfs"], "/mnt");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The config gates, and what an include hid from them
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Build a repository inside the mount whose `.git/config` optionally
+/// declares `include.path = extra`, with `extra` setting the two keys the
+/// format and extension gates exist to catch.
+///
+/// `included` false is the negative control: the same fixture, same file
+/// written, no include line — which must answer, so that the refusal below is
+/// about the include and not about the fixture.
+fn included_config_fixture(included: bool) -> (Fixture, PathBuf) {
+    require_git();
+    let fixture = Fixture::empty();
+    let mount = fixture.path("mount");
+    let repo = mount.join("repo");
+    std::fs::create_dir_all(&repo).expect("create the repository directory");
+    git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+    write_file(&repo, "README.md", "inside the mount\n");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "inside", "--quiet"]);
+
+    let git_dir = repo.join(".git");
+    std::fs::write(
+        git_dir.join("extra"),
+        "[core]\n\trepositoryformatversion = 2\n[extensions]\n\tobjectFormat = sha256\n",
+    )
+    .expect("write the included file");
+    if included {
+        let mut config = std::fs::read_to_string(git_dir.join("config")).expect("read config");
+        config.push_str("[include]\n\tpath = extra\n");
+        std::fs::write(git_dir.join("config"), config).expect("write config");
+    }
+    (fixture, mount)
+}
+
+/// An include is refused even when it stays inside the repository.
+///
+/// The two keys in the included file are exactly the ones
+/// `check_format_version` and `check_extensions` refuse a repository over,
+/// and both gates read the bare config: the include hid them. Real git hides
+/// them from its own gates the same way — measured against git 2.55.0, `git
+/// status` exits 0 here and 128 with the same keys written directly — so the
+/// old behavior was not a wrong answer yet. It was a config we answered from
+/// knowing it was incomplete, which is the silent fallback this crate does
+/// not do.
+#[tokio::test]
+async fn a_repo_relative_include_is_refused_rather_than_answered_around() {
+    let (_fixture, mount) = included_config_fixture(true);
+
+    let result = info_at(mount, "/mnt/repo").await;
+    assert_eq!(
+        result.code, 4,
+        "a config this crate cannot fully read must be refused: {:?}",
+        result.output()
+    );
+    assert!(
+        result.err.contains("include.path = extra"),
+        "the refusal must name the declaration it is about: {}",
+        result.err
+    );
+    assert!(
+        result.err.contains("was not read"),
+        "the refusal must say the include was not followed: {}",
+        result.err
+    );
+}
+
+/// The negative control: the same repository, the same `extra` file, no
+/// include line — and it answers.
+///
+/// Without this the refusal above would pass just as well if this crate
+/// refused every repository, or if `extra` alone were what triggered it.
+#[tokio::test]
+async fn a_config_with_no_include_still_answers() {
+    let (_fixture, mount) = included_config_fixture(false);
+
+    let result = info_at(mount, "/mnt/repo").await;
+    assert_eq!(
+        result.code, 0,
+        "an ordinary repository must still answer: {}",
+        result.err
+    );
+}

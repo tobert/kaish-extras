@@ -832,7 +832,7 @@ Repo-local `.git/config` still has to be read — `core.repositoryformatversion`
 ```rust
 // bytes we fetched ourselves; includes are NOT followed by gix-config
 let cfg = gix_config::File::from_bytes_no_includes(&bytes, meta, opts)?;
-// any `include.path` / `includeIf` is resolved by us, or refused (see D.3)
+// any `include.path` / `includeIf` is refused, never resolved (see D.3)
 ```
 
 `gix-config`'s only `std::fs` sites are the path-based comfort constructors and
