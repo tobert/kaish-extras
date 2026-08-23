@@ -45,9 +45,9 @@ to **published crates.io versions** (`"0.16"` as of 2026-08-23). Rules:
   minor carries breaking changes — so a kaish minor is a bump here that has to
   build and pass the checks. Do not widen the range to buy the illusion.
 - **A kaish minor can change behavior without failing to compile.** 0.16 built
-  clean here on the first try, 25 test binaries green, and its changelog still
-  carried a dozen **Changed** entries no compiler could have caught. Read them
-  and decide each one against this workspace; check the answer at the source
+  clean here on the first try with every test binary green, and its changelog
+  still carried a dozen **Changed** entries no compiler could have caught. Read
+  them and decide each one against this workspace; check the answer at the source
   rather than reasoning from the entry. The 0.16 entry that looked like it
   moved `$(git …)` turned out not to — see "Command substitution binds text".
 - `kaish-kernel` is `default-features = false`. Keep it that way: a sibling
