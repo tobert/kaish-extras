@@ -306,6 +306,33 @@ fixture asserted against real `git status --porcelain` before fixing.
   `--stat` and `--patch` for `show` as one group. Pinned by
   `textdiff.rs::log_patch_points_at_diff_patch_rather_than_at_the_feature`.
 
+- **T3 — a `.gitattributes` diff driver moves git's section heading and not
+  ours.** The name git prints after `@@` comes from a per-path funcname
+  pattern, and `.gitattributes` can name a driver that changes it —
+  `mod.py diff=python` makes git print the enclosing `def` where its default
+  rule prints the enclosing `class`. Nothing here reads `.gitattributes`
+  (D.3), so this build always applies the default rule: the nearest preceding
+  line starting with a letter, `_` or `$`. Closing it means an attributes
+  stack (`gix-attributes`, which `gix-worktree` is taken without on purpose)
+  plus git's built-in driver table, for a heading that is decoration in the
+  patch and carried separately in the model. Pinned both ways by
+  `textdiff.rs::a_gitattributes_diff_driver_moves_gits_section_heading_and_not_ours`,
+  whose negative control is the same file under no attribute, where the whole
+  patch is byte-identical.
+
+- **T4 — the abbreviated oid in the `index` line is seven characters and is
+  not grown when seven is ambiguous.** git's `find_unique_abbrev` widens the
+  prefix until it names one object in the repository; `patch.rs`'s `short`
+  takes seven characters and stops. The cost is `git apply -3`: it resolves
+  the `index` oids, and an ambiguous prefix makes it print "short object ID
+  ... is ambiguous" and fall back to a direct apply, so the three-way merge is
+  lost. Plain `git apply` reads no oid and is unaffected. Closing it means
+  asking the odb for the shortest unambiguous prefix per oid, which is a real
+  read against the whole object database on a line that is decoration for
+  every caller not using `-3`. Pinned by
+  `textdiff.rs::an_ambiguous_short_oid_is_not_widened_the_way_git_widens_it`,
+  whose fixture plants two blobs that share exactly seven hex characters.
+
 ## git branch / tag / worktree list — deferred (architecture.md B.7, B.9, shipped in PR 7)
 
 - **B1 — `--ahead-behind` reads both histories to their roots, rather than
@@ -825,19 +852,6 @@ bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
   `git ls-tree` C-quotes, and silently skipped in the untracked walk);
   `--path ""` (silently matches everything, git errors); and `core.autocrlf`,
   whose divergence C5 records in prose while every fixture sets it false.
-
-- **P11 — narrow the "byte-identical to `git diff --patch`" claim, or test it
-  to the claim.** Both deep reviewers flagged it. Verified since: our
-  `quote_c_style` is correct, including that a space is *not* quoted (git
-  disambiguates it with a trailing tab instead) — so the reviewers' specific
-  charge was wrong. But the quoting is unit-tested against our belief about
-  git rather than against git itself, in a crate whose whole discipline is
-  real-git-as-oracle. Untested inputs that would settle it: paths containing a
-  quote, a tab, or non-ASCII bytes; combined mode-and-content change; empty-file
-  transitions; one-sided missing-newline; `.gitattributes` function context;
-  and oid-abbreviation growth on collision. Note non-UTF-8 *paths* cannot reach
-  the renderer at all — it takes `&str` — which is a boundary to document
-  rather than test.
 
 - **P12 — `status` fails the whole call on one over-cap tracked file, and the
   guide implies otherwise.** `read_worktree_blob` returns `BlobTooLarge` and

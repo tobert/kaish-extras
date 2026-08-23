@@ -557,11 +557,14 @@ tree-depth bounds and the entries not listed here.
   lists it under `capabilities.features` so an agent can tell. Without it,
   `git diff --patch` and `--context` refuse with exit 4 naming the feature.
   With it, `git diff --patch` renders the patch — byte-identical to
-  `git diff --patch` for the two object-backed endpoint pairs, and accepted
-  by `git apply --check` — with four stated non-fidelities: no `index` line
-  for a working-tree side, no binary patch encoding, lossy rendering of
-  content that is not valid UTF-8, and git's default section-heading rule
-  rather than a `.gitattributes` `xfuncname` pattern. `git log --patch`
+  `git diff --patch` for the two object-backed endpoint pairs over the inputs
+  the tests compare, and accepted by `git apply --check` — with six stated
+  non-fidelities: no `index` line for a working-tree side, no binary patch
+  encoding, lossy rendering of content that is not valid UTF-8, lossy
+  rendering of a path that is not valid UTF-8, git's default section-heading
+  rule rather than a `.gitattributes` `xfuncname` pattern, and a
+  seven-character abbreviated oid that is not grown when seven is ambiguous.
+  `git log --patch`
   refuses in both builds: bounding a patch per commit needs a cap `Limits`
   does not have. See `docs/git.md`, "`--patch`".
 
