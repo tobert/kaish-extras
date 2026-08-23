@@ -329,9 +329,52 @@ fixture asserted against real `git status --porcelain` before fixing.
   lost. Plain `git apply` reads no oid and is unaffected. Closing it means
   asking the odb for the shortest unambiguous prefix per oid, which is a real
   read against the whole object database on a line that is decoration for
-  every caller not using `-3`. Pinned by
+  every caller not using `-3` — cost that scales with the repository rather
+  than with the answer, the same family this crate already discloses as
+  G7-G10, so declining it follows a stated posture rather than saving work.
+  Pinned by
   `textdiff.rs::an_ambiguous_short_oid_is_not_widened_the_way_git_widens_it`,
   whose fixture plants two blobs that share exactly seven hex characters.
+
+- **T5 — a path marked `-diff` in `.gitattributes` is treated as text here,
+  where git prints `Binary files … differ`.** Same cause as T3 — nothing here
+  reads `.gitattributes` (D.3) — but a wider consequence, because the
+  attribute changes what git *discloses* rather than which line it labels a
+  hunk with. Measured, not read out of the attributes documentation: on a
+  two-line text file whose only change is `beta` → `BETA`, with
+  `marked.txt -diff` committed, real git prints
+
+  ```
+  diff --git a/marked.txt b/marked.txt
+  index fbbee86..cd964df 100644
+  Binary files a/marked.txt and b/marked.txt differ
+  ```
+
+  and this build prints the same header with a real `@@ -1,2 +1,2 @@` hunk
+  carrying both lines. It is not confined to `--patch`: git reports `-`/`-`
+  for the path in `--numstat` and `Bin 11 -> 11 bytes` in `--stat`, while this
+  build reports `binary: false`, `additions: 1`, `deletions: 1` — so plain
+  `git diff` and `git log --stat` disagree with git for such a path too.
+  Nothing is disclosed that the repository does not already hold, and the
+  read is bounded by `max_blob_bytes` either way, so this is a fidelity gap
+  and not a containment hole; but a repository marking a path `-diff` is
+  asking for the short form, and it does not get it. Our binary decision is
+  content-based (a NUL byte) and always has been, which is why the paths that
+  *are* binary agree with git.
+
+  **`-diff` and `diff=<driver>` do not compose**: they are one attribute, so
+  the later matching line wins — measured both ways round. With `both.py
+  -diff` above `both.py diff=python`, `git check-attr diff -- both.py`
+  reports `python` and git renders an ordinary patch with the driver's
+  heading; swap the two lines and it reports `unset` and git renders
+  `Binary files … differ`. So it is line order, not "a driver beats unset",
+  and there is no combined state to honor — whichever wins, T3 or this entry
+  covers it.
+
+  Closing it means the same attributes stack T3 needs, plus honoring `unset`
+  as a binary marker in `diffcore`'s classification rather than in the
+  renderer, since the counts move with it. Not tested — the two fixtures
+  above are playground measurements, not a case in `textdiff.rs`.
 
 ## git branch / tag / worktree list — deferred (architecture.md B.7, B.9, shipped in PR 7)
 
