@@ -94,7 +94,10 @@ deno run --allow-net --allow-run scripts/e2e.ts
 
 ## kaish dependency
 
-kaish crates are pinned by git rev while this repo finds its feet; before
-any release of these crates the pins move to the published crates.io
-versions, keeping kaish-extras an honest external embedder of the same API
-everyone else gets.
+All four kaish crates are pinned to **published crates.io versions** — `"0.16"`
+as of 2026-08-23 — which keeps kaish-extras an honest external embedder of the
+same API everyone else gets. A git rev is an affordance no real embedder has,
+so it is used only while developing against an unreleased kaish boundary.
+
+The rules for changing the pin, and what a kaish minor costs here, are in
+[AGENTS.md](AGENTS.md), "kaish dependency pinning".
