@@ -1695,3 +1695,216 @@ async fn a_config_with_no_include_still_answers() {
         result.err
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The refs gix opens by name
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Forty hex characters and a ref name — the shape a host file only has to
+/// *look* like for a ref parser to hand its bytes back.
+const HOST_OID: &str = "0123456789abcdef0123456789abcdef01234567";
+const HOST_REF_NAME: &str = "leaked-from-the-host";
+
+/// A repository inside the mount with one ref leaf symlinked at a file
+/// outside it.
+///
+/// `leaf` is the path under `.git`, and its content is written to match what
+/// that leaf's parser wants: a `packed-refs` line for `packed-refs`, a bare
+/// oid for anything read as a single ref.
+fn ref_leaf_fixture(leaf: &str) -> (Fixture, PathBuf) {
+    require_git();
+    let fixture = Fixture::empty();
+    let mount = fixture.path("mount");
+    let repo = mount.join("repo");
+    let outside = fixture.path("outside");
+    std::fs::create_dir_all(&repo).expect("create the repository directory");
+    std::fs::create_dir_all(&outside).expect("create the outside directory");
+    git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+    write_file(&repo, "README.md", "inside the mount\n");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "inside", "--quiet"]);
+
+    let host_file = outside.join("hostfile");
+    let body = if leaf == "packed-refs" {
+        format!("{HOST_OID} refs/heads/{HOST_REF_NAME}\n")
+    } else {
+        format!("{HOST_OID}\n")
+    };
+    std::fs::write(&host_file, body).expect("write the host file");
+
+    let target = repo.join(".git").join(leaf);
+    let _ = std::fs::remove_file(&target);
+    std::os::unix::fs::symlink(&host_file, &target).expect("plant the symlinked ref leaf");
+    (fixture, mount)
+}
+
+/// Run `git show <rev>` with `mount_real` mounted at `/mnt` — the lookup
+/// **by name**, which is the path a symlinked ref is reached through.
+async fn show_at(mount_real: PathBuf, cwd: &str, rev: &str) -> ExecResult {
+    let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), mount_real));
+    let mut ctx = TestCtx::new(backend, cwd);
+    let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
+    let mut args = ToolArgs::new();
+    args.positional.push(Value::String("show".to_string()));
+    args.positional.push(Value::String(rev.to_string()));
+    tool.execute(args, &mut ctx).await
+}
+
+/// Run `git branch --json` with `mount_real` mounted at `/mnt`.
+async fn branch_at(mount_real: PathBuf, cwd: &str) -> ExecResult {
+    let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), mount_real));
+    let mut ctx = TestCtx::new(backend, cwd);
+    let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
+    let mut args = ToolArgs::new();
+    args.positional.push(Value::String("branch".to_string()));
+    args.flags.insert("json".to_string());
+    tool.execute(args, &mut ctx).await
+}
+
+/// Assert a refusal that named nothing out of the host file.
+fn assert_refused_without_the_host_bytes(result: &ExecResult) {
+    assert_eq!(
+        result.code, 4,
+        "a ref leaf pointing outside the mount must be refused: {} {:?}",
+        result.err,
+        result.output()
+    );
+    let rendered = format!("{} {:?}", result.err, result.output());
+    assert!(
+        !rendered.contains(HOST_OID),
+        "the host file's bytes reached the caller: {rendered}"
+    );
+    assert!(
+        !rendered.contains(HOST_REF_NAME),
+        "the host file's bytes reached the caller: {rendered}"
+    );
+}
+
+/// `packed-refs` was a whole-file read, not a one-bit probe.
+///
+/// Every line of `<40 hex> <name>` in the target became a branch: with the
+/// screen removed, `branch --json` returns a row named out of the host file's
+/// own bytes, carrying an oid out of them too.
+#[tokio::test]
+async fn a_symlinked_packed_refs_is_refused_before_it_is_read() {
+    let (_fixture, mount) = ref_leaf_fixture("packed-refs");
+    let result = branch_at(mount, "/mnt/repo").await;
+    assert_refused_without_the_host_bytes(&result);
+}
+
+/// `HEAD` gave up its target's first 40 characters through the error message.
+///
+/// Read as a detached HEAD, the oid goes straight to object lookup and comes
+/// back inside "Object <40 characters> as referred to by HEAD could not be
+/// found" — 160 bits of any host file, per invocation, from `info` alone.
+#[tokio::test]
+async fn a_symlinked_head_is_refused_before_it_is_read() {
+    let (_fixture, mount) = ref_leaf_fixture("HEAD");
+    let result = info_at(mount, "/mnt/repo").await;
+    assert_refused_without_the_host_bytes(&result);
+}
+
+/// A whole ref hierarchy is a directory, and the same leaf screen covers it.
+///
+/// gix's iteration does not follow the symlink — the listing comes back empty
+/// rather than full of the outside directory — but a lookup by name does, and
+/// every verb that resolves a revision does lookups by name.
+#[tokio::test]
+async fn a_symlinked_refs_hierarchy_is_refused() {
+    require_git();
+    let fixture = Fixture::empty();
+    let mount = fixture.path("mount");
+    let repo = mount.join("repo");
+    let outside = fixture.path("outside/heads");
+    std::fs::create_dir_all(&repo).expect("create the repository directory");
+    std::fs::create_dir_all(&outside).expect("create the outside hierarchy");
+    git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+    write_file(&repo, "README.md", "inside the mount\n");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "inside", "--quiet"]);
+    std::fs::write(outside.join(HOST_REF_NAME), format!("{HOST_OID}\n")).expect("write outside ref");
+
+    let heads = repo.join(".git/refs/heads");
+    std::fs::remove_dir_all(&heads).expect("remove the real hierarchy");
+    std::os::unix::fs::symlink(&outside, &heads).expect("plant the symlinked hierarchy");
+
+    let listed = branch_at(mount.clone(), "/mnt/repo").await;
+    assert_refused_without_the_host_bytes(&listed);
+
+    // The lookup by name is the leak the listing does not show: without the
+    // screen this resolves the outside ref and returns its oid in the error.
+    let named = show_at(mount, "/mnt/repo", HOST_REF_NAME).await;
+    assert_refused_without_the_host_bytes(&named);
+}
+
+/// The negative control for the three refusals above: the same repository
+/// with every ref leaf real still answers, and lists its own branch.
+///
+/// Without it, "exit 4 and no host bytes" would pass just as well against a
+/// crate that refused every repository.
+#[tokio::test]
+async fn a_repository_whose_ref_leaves_are_real_still_answers() {
+    require_git();
+    let fixture = Fixture::empty();
+    let mount = fixture.path("mount");
+    let repo = mount.join("repo");
+    std::fs::create_dir_all(&repo).expect("create the repository directory");
+    git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+    write_file(&repo, "README.md", "inside the mount\n");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "inside", "--quiet"]);
+    // Pack the refs, so `packed-refs` is a real file this run actually reads
+    // rather than a leaf that happens to be absent.
+    git(&repo, &["pack-refs", "--all"]);
+
+    let result = branch_at(mount, "/mnt/repo").await;
+    assert_eq!(result.code, 0, "an ordinary repository must answer: {}", result.err);
+    let json = result
+        .output()
+        .and_then(|o| o.rich_json.clone())
+        .expect("--json carries the typed model");
+    let names: Vec<String> = json["branches"]
+        .as_array()
+        .expect("branches array")
+        .iter()
+        .map(|b| b["name"].as_str().expect("name").to_string())
+        .collect();
+    assert_eq!(names, vec!["main".to_string()]);
+}
+
+/// The residual, pinned: a symlinked **loose ref** still reaches a host file,
+/// and `HEAD` naming it needs no help from the caller.
+///
+/// This asserts the leak, deliberately. `HEAD`, `packed-refs` and the three
+/// `refs/` hierarchies are fixed names and are screened; a path the
+/// *repository* names under `refs/` is not, because gix opens it by name and
+/// intercepting that means wrapping every gix open. Closing it eagerly would
+/// cost every verb an lstat per loose ref on a tree the repository sizes.
+///
+/// So the honest state is: this is open, `docs/embedding-git.md` says so, and
+/// `docs/issues.md`'s P13 carries the close. When that lands, this test goes
+/// red — which is the point. Update it and both documents together; do not
+/// weaken it in place.
+#[tokio::test]
+async fn a_symlinked_loose_ref_still_reaches_a_host_file() {
+    let (_fixture, mount) = ref_leaf_fixture("refs/heads/pwn");
+    std::fs::write(
+        mount.join("repo/.git/HEAD"),
+        "ref: refs/heads/pwn\n",
+    )
+    .expect("point HEAD at the symlinked ref");
+
+    let result = info_at(mount, "/mnt/repo").await;
+    assert_eq!(
+        result.code, 1,
+        "the documented residual is a failed object lookup, not a refusal: {}",
+        result.err
+    );
+    assert!(
+        result.err.contains(HOST_OID),
+        "the residual documented in embedding-git.md is that the host file's \
+         first 40 characters come back — if they no longer do, the leak is \
+         closed and the docs and this test must say so: {}",
+        result.err
+    );
+}

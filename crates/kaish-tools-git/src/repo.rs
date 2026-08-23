@@ -340,10 +340,34 @@ impl ReadRepo {
         let has_reftable = open_leaf(operation, "reftable directory", &common_dir, "reftable", &ceiling)?
             .path()
             .is_some_and(Path::is_dir);
-        let has_refs = open_leaf(operation, "refs directory", &common_dir, "refs", &ceiling)?
-            .path()
-            .is_some_and(Path::is_dir);
+        let refs_leaf = open_leaf(operation, "refs directory", &common_dir, "refs", &ceiling)?;
+        let has_refs = refs_leaf.path().is_some_and(Path::is_dir);
         check_ref_backend(operation, &common_dir, &config, has_reftable, has_refs)?;
+
+        // The ref leaves gix opens by name, screened on the same terms as
+        // every other fixed leaf here.
+        //
+        // These are not hypothetical. A `packed-refs` symlinked at a host file
+        // whose lines are `<40 hex> <name>` hands those lines back as branches:
+        // `branch --json` reported a branch named out of the file's own bytes,
+        // carrying an oid out of them too. A symlinked `HEAD` is read as a
+        // detached oid, and the 40 characters come back inside the "object …
+        // could not be found" message. Both are content, not one bit, and both
+        // are fixed names under a directory this crate has already checked —
+        // so both are interceptable, and now are.
+        //
+        // `refs/heads`, `refs/tags` and `refs/remotes` are here for the same
+        // reason one level down. gix's ref *iteration* does not follow a
+        // symlink (measured: a symlinked hierarchy lists as empty, and so does
+        // a symlinked loose ref), but a lookup **by name** does, and every verb
+        // that resolves a revision does lookups by name.
+        open_leaf(operation, "HEAD", &git_dir, "HEAD", &ceiling)?;
+        open_leaf(operation, "packed refs (packed-refs)", &common_dir, "packed-refs", &ceiling)?;
+        if let Some(refs_dir) = refs_leaf.path() {
+            for hierarchy in ["heads", "tags", "remotes"] {
+                open_leaf(operation, "ref hierarchy under refs/", refs_dir, hierarchy, &ceiling)?;
+            }
+        }
 
         // The object store, and its alternates. `open_leaf` catches an
         // `objects` directory symlinked out of the mount (a legitimate
@@ -363,14 +387,39 @@ impl ReadRepo {
 
         // The containment boundary, stated where it actually ends. Everything
         // above ceiling-checks a path *this crate* opens. From here, gix opens
-        // objects, packs, `HEAD` and individual ref files itself, by name, and
-        // a symlink among those leaves (`objects/ab/cd…` linking out of the
-        // mount) is not interceptable without wrapping every gix open. The
-        // honest close is platform-level — `openat2(RESOLVE_BENEATH)` or a
-        // kaish VFS seam — and it is a threat-model decision, not a code change
-        // this PR makes. For the read verbs the residual is a read that lands
-        // outside and almost always fails to parse as a git object, not a
-        // general file-exfiltration primitive. Tracked as design input.
+        // objects, packs and ref files itself, by name, and a symlink among
+        // those leaves is not interceptable without wrapping every gix open.
+        // The honest close is platform-level — `openat2(RESOLVE_BENEATH)` or a
+        // kaish VFS boundary — and it is a threat-model decision, not a code
+        // change this PR makes.
+        //
+        // What the residual is, exactly, because a loose description of it was
+        // wrong for two years' worth of readers. It said the read "almost
+        // always fails to parse as a git object". That is true of an object:
+        // a loose object is zlib-compressed and a host file is not. It is
+        // **false of a ref**, and refs are the larger half of what gix opens
+        // by name. A loose ref is 40 hex characters — a shape real host files
+        // have — and content that parses is content that comes back:
+        //
+        //   `.git/refs/heads/pwn` symlinked at a host file whose first line is
+        //   40 hex characters surfaces those 160 bits, and a `.git/HEAD`
+        //   naming that ref reaches it with no help from the caller: `info`
+        //   alone returns "Object <those 40 characters> as referred to by
+        //   refs/heads/pwn could not be found". Non-hex content fails the
+        //   parse, which is still a one-bit content probe.
+        //
+        // The fixed names in that family — `HEAD`, `packed-refs`, and the
+        // `refs/heads`, `refs/tags`, `refs/remotes` hierarchies — are screened
+        // above, so what is left is a symlink at a path *inside* `refs/` that
+        // the repository names, reached by a lookup by name. `docs/issues.md`
+        // (P13) carries the close; the fixture that pins the leak while it is
+        // open is `a_symlinked_loose_ref_still_reaches_a_host_file` in
+        // tests/hostile_repo.rs, and it goes red the day the close lands,
+        // which is when this comment and the guide have to change with it.
+        //
+        // Walking `refs/` eagerly at open time is not that close: it would
+        // cost every verb an lstat per loose ref, on a tree the repository
+        // controls the size of, to protect a lookup most verbs never make.
         //
         // `git status` widens this residual by exactly one shape, named so it
         // is not silent: `gix-worktree` reads per-directory `.gitignore` files

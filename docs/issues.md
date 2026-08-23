@@ -757,17 +757,31 @@ bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
   Run each against every ref-reading verb and assert a stable exit — in-process
   tests, so the test *is* the no-panic assertion.
 
-- **P4 — the gix open-by-name carve-out reaches further for refs than the doc
-  admits.** `repo.rs` documents that gix opens objects, packs, `HEAD` and ref
-  files by name after discovery, and characterizes the consequence as a read
-  that "almost always fails to parse as a git object". True for objects, false
-  for refs: a loose ref is 40 hex chars and `packed-refs` is `<40hex> <name>`
-  lines — shapes real host files have. A symlinked `refs/heads/pwn` pointing at
-  a host file whose first line is 40 hex characters would surface those 160
-  bits as a branch oid in `branch --json`; non-hex content fails the parse,
-  which is still a one-bit content probe. `HEAD` and `packed-refs` are fixed
-  names and *are* interceptable the way `open_leaf` intercepts other fixed
-  leaves. Decide: intercept, or state the leak louder than "almost always".
+- **P13 — a symlinked loose ref is an open content read of the host, and the
+  close is platform-level.** What is left of P4 after the fixed names were
+  screened (2026-08-23). `HEAD`, `packed-refs` and the `refs/heads`,
+  `refs/tags`, `refs/remotes` hierarchies now go through `open_leaf` and are
+  refused with exit 4; a symlink at a path *inside* `refs/` that the
+  repository names is not, because gix opens it by name. Measured, not
+  reasoned: `.git/refs/heads/pwn` symlinked at a host file whose first line is
+  40 hex characters, plus `.git/HEAD` reading `ref: refs/heads/pwn`, makes
+  `git info` alone return "Object <those 40 characters> as referred to by
+  refs/heads/pwn could not be found" — 160 bits per invocation, no caller
+  cooperation. Non-hex content fails the parse, which is still a one-bit
+  content probe. gix's ref *iteration* does not follow a symlink (a symlinked
+  hierarchy lists as empty, and so does a symlinked loose ref), so this is the
+  by-name path only.
+
+  Pinned by `hostile_repo.rs::a_symlinked_loose_ref_still_reaches_a_host_file`,
+  which asserts the leak and goes red the day it closes — update it and
+  `docs/embedding-git.md`'s "What is not closed" paragraph together.
+
+  The cheap close is not available: walking `refs/` at open time costs every
+  verb an lstat per loose ref, on a tree the repository sizes, to protect a
+  lookup most verbs never make. The honest close is
+  `openat2(RESOLVE_BENEATH)` or a kaish VFS boundary that gix opens through,
+  which is the same close the object and pack halves of this carve-out need.
+  Same shape as **G6**: do not build it on the strength of this entry alone.
 
 - **P5 — a `.gitignore` symlinked out of the mount is a content oracle.**
   `gix-worktree` reads per-directory `.gitignore` itself during the untracked

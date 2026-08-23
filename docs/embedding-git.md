@@ -372,6 +372,39 @@ is taken without its `blob` feature specifically because that feature pulls
 `gix-command`, closing an entire spawn-capable code path rather than
 patching around it.
 
+**What is not closed, stated as content rather than as one bit:** gitoxide
+opens objects, packs and ref files by name, under directories this crate has
+already ceiling-checked, and a symlink at one of those leaves is not
+interceptable without wrapping every gix open. For an *object* that residual
+is small — a loose object is zlib-compressed and a host file is not, so the
+read lands outside and fails to parse. For a *ref* it is not small, and this
+document said otherwise until 2026-08-23. A loose ref is 40 hex characters
+and `packed-refs` is `<40 hex> <name>` lines; those are shapes real host
+files have, and content that parses is content that comes back.
+
+The fixed names in that family are screened, with exit 4 and no read:
+`HEAD`, `packed-refs`, and the `refs/heads`, `refs/tags`, `refs/remotes`
+hierarchies (`a_symlinked_packed_refs_is_refused_before_it_is_read`,
+`a_symlinked_head_is_refused_before_it_is_read`,
+`a_symlinked_refs_hierarchy_is_refused`, `tests/hostile_repo.rs`). Before
+that screen, a `packed-refs` symlinked at a host file returned a branch named
+out of the file's own bytes, with an oid out of them too.
+
+What remains open is a symlink at a path *inside* `refs/` that the repository
+names — `refs/heads/pwn` pointing at a host file. gix's ref iteration does
+not follow one, so it never appears in a listing, but a lookup by name does,
+and a `.git/HEAD` reading `ref: refs/heads/pwn` makes `git info` alone do
+that lookup: the host file's first 40 characters come back inside "Object …
+could not be found". 160 bits per invocation, of any host file that is
+40-hex-shaped; non-hex content fails the parse, which is still a one-bit
+content probe. It is pinned by
+`a_symlinked_loose_ref_still_reaches_a_host_file` and tracked as
+`docs/issues.md`'s **P13**. Closing it eagerly — walking `refs/` at open
+time — would cost every verb an lstat per loose ref on a tree the repository
+sizes, so the close is the platform-level one (`openat2(RESOLVE_BENEATH)` or
+a kaish VFS boundary), not a cheaper check. If your embedder points this tool
+at repositories from an untrusted source, that is the residual to weigh.
+
 **What is not fuzzed at all, and this is stated plainly rather than
 implied otherwise:** there is no fuzz corpus, no `cargo-fuzz` target, and no
 fuzzing infrastructure anywhere in this repository today. R4 was found by
