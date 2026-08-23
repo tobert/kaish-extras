@@ -4,16 +4,31 @@
 //! The flagship claim is "true read-only git, which command-line git cannot
 //! offer". This is the test that can falsify it: build a fixture repository
 //! with packed objects, multiple branches, a dirty working tree and a linked
-//! worktree; take a recursive fingerprint of `.git` (every path, its size, its
-//! mtime, its content hash); run every read verb across a representative flag
-//! matrix; take the fingerprint again; assert byte-identical, mtime-identical,
-//! and no new paths.
+//! worktree; take a recursive fingerprint of the fixture's **scratch root**
+//! (every path under it, its size, its mtime, its content hash); run every
+//! read verb across a representative flag matrix; take the fingerprint
+//! again; assert byte-identical, mtime-identical, and no new paths.
 //!
 //! What it catches is the whole class the design intent names: index
 //! stat-cache refreshes, reflog appends, `gc --auto`, pack-index rebuilds,
 //! `commit-graph` writes. Real git does several of those on a plain
 //! `git status` — `real_git_status_writes_to_dot_git` keeps that contrast
 //! honest.
+//!
+//! **Why the scratch root, not just `.git` (docs/issues.md P8).** The
+//! fingerprint used to sample `.git` and the linked worktree separately, and
+//! nothing else. That misses two classes of write by construction, not by
+//! bad luck: a write to a file in the *main* working tree (nothing sampled
+//! it), and a stray file created directly under the scratch root, outside
+//! every worktree and outside `.git` (nothing sampled that either, since it
+//! is not under any of the roots the two separate fingerprints took).
+//! `RichRepo::scratch()` is the parent directory of both the main working
+//! tree and the linked worktree, so one fingerprint of it subsumes both of
+//! the old ones and closes both blind spots at once —
+//! `the_scratch_root_fingerprint_catches_what_dot_git_alone_cannot` proves
+//! the blind spots were real before this file closed them, by taking both
+//! fingerprints across the same write and showing the narrower one reports
+//! nothing.
 
 #[path = "support.rs"]
 mod support;
@@ -387,38 +402,29 @@ fn assert_unchanged(before: &Fingerprint, after: &Fingerprint, what: &str) {
     );
 }
 
-/// D.4 itself: the whole read surface, then nothing moved.
+/// D.4 itself: the whole read surface, then nothing moved anywhere under the
+/// fixture's scratch root — `.git`, the main working tree, and the linked
+/// worktree at once (docs/issues.md P8; see the module doc for why sampling
+/// only `.git` would miss two classes of write). This test subsumes what used
+/// to be two separate tests, one fingerprinting `.git` alone and one
+/// fingerprinting the linked worktree alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn read_verbs_do_not_touch_dot_git() {
+async fn read_verbs_do_not_touch_the_scratch_root() {
     let repo = RichRepo::build();
-    let git_dir = repo.git_dir();
+    let scratch = repo.scratch();
 
-    let before = Fingerprint::take(&git_dir);
+    let before = Fingerprint::take(&scratch);
     assert!(
         before.entries.len() > 10,
-        "the fixture's .git has only {} entries — it is not rich enough to \
-         prove anything",
+        "the fixture's scratch root has only {} entries — it is not rich \
+         enough to prove anything",
         before.entries.len()
     );
 
     run_the_whole_matrix(&repo).await;
 
-    let after = Fingerprint::take(&git_dir);
-    assert_unchanged(&before, &after, ".git");
-}
-
-/// The linked worktree's private git dir lives under the main `.git`, but its
-/// `.git` *file* and working tree are separate — a second place a
-/// worktree-aware verb could write.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn read_verbs_do_not_touch_the_linked_worktree() {
-    let repo = RichRepo::build();
-    let before = Fingerprint::take(&repo.linked_worktree);
-
-    run_the_whole_matrix(&repo).await;
-
-    let after = Fingerprint::take(&repo.linked_worktree);
-    assert_unchanged(&before, &after, "the linked worktree");
+    let after = Fingerprint::take(&scratch);
+    assert_unchanged(&before, &after, "the scratch root");
 }
 
 /// The same surface on a current-thread runtime, which is what an embedder
@@ -427,22 +433,97 @@ async fn read_verbs_do_not_touch_the_linked_worktree() {
 #[tokio::test]
 async fn read_verbs_are_read_only_on_a_current_thread_runtime() {
     let repo = RichRepo::build();
-    let git_dir = repo.git_dir();
-    let before = Fingerprint::take(&git_dir);
+    let scratch = repo.scratch();
+    let before = Fingerprint::take(&scratch);
 
     run_the_whole_matrix(&repo).await;
 
-    let after = Fingerprint::take(&git_dir);
-    assert_unchanged(&before, &after, ".git");
+    let after = Fingerprint::take(&scratch);
+    assert_unchanged(&before, &after, "the scratch root");
+}
+
+/// The blind spots the module doc describes, demonstrated rather than
+/// asserted from prose (docs/issues.md P8): a fingerprint of `.git` alone
+/// cannot see a write to the main working tree, and cannot see a stray file
+/// created directly under the scratch root outside every worktree. The
+/// scratch-root fingerprint catches both.
+///
+/// This does not call into kaish-tools-git at all — it is a fixture-level
+/// proof that the *old* narrower sampling was structurally blind, using the
+/// exact same [`Fingerprint`] machinery [`read_verbs_do_not_touch_the_scratch_root`]
+/// runs, over a write nothing in this crate performed.
+#[test]
+fn the_scratch_root_fingerprint_catches_what_dot_git_alone_cannot() {
+    let repo = RichRepo::build();
+    let git_dir = repo.git_dir();
+    let scratch = repo.scratch();
+
+    // Class 1: a write to a file in the main working tree, outside `.git`.
+    {
+        let before_git = Fingerprint::take(&git_dir);
+        let before_scratch = Fingerprint::take(&scratch);
+
+        let target = repo.root.join("README.md");
+        let original = std::fs::read(&target).expect("read README.md");
+        let mut tampered = original.clone();
+        tampered.extend_from_slice(b"\nmain-worktree write\n");
+        std::fs::write(&target, &tampered).expect("write to main working tree");
+
+        let after_git = Fingerprint::take(&git_dir);
+        let after_scratch = Fingerprint::take(&scratch);
+        std::fs::write(&target, &original).expect("restore README.md");
+
+        assert!(
+            after_git.differences_from(&before_git).is_empty(),
+            "a `.git`-only fingerprint unexpectedly saw a main-worktree write \
+             — the blind spot this test demonstrates no longer exists, and \
+             the module doc's P8 rationale is stale"
+        );
+        let diffs = after_scratch.differences_from(&before_scratch);
+        assert!(
+            !diffs.is_empty(),
+            "the scratch-root fingerprint must catch a main-worktree write: {diffs:?}"
+        );
+    }
+
+    // Class 2: a stray file created directly under the scratch root, outside
+    // both the main working tree and the linked worktree — the shape a
+    // rogue temp file or lock left in the wrong place would take.
+    {
+        let before_git = Fingerprint::take(&git_dir);
+        let before_scratch = Fingerprint::take(&scratch);
+
+        let stray = scratch.join("kaish-git-stray-outside-any-worktree.tmp");
+        std::fs::write(&stray, b"should never exist").expect("write stray file");
+
+        let after_git = Fingerprint::take(&git_dir);
+        let after_scratch = Fingerprint::take(&scratch);
+        std::fs::remove_file(&stray).expect("remove stray file");
+
+        assert!(
+            after_git.differences_from(&before_git).is_empty(),
+            "a `.git`-only fingerprint unexpectedly saw a stray file created \
+             outside .git and outside every worktree"
+        );
+        let diffs = after_scratch.differences_from(&before_scratch);
+        assert!(
+            diffs.iter().any(|d| d.contains("NEW path")),
+            "the scratch-root fingerprint must catch a stray file created \
+             outside every worktree: {diffs:?}"
+        );
+    }
 }
 
 /// The fingerprint must be able to fail, or the tests above prove nothing.
 ///
 /// Each of the three signals is exercised separately: a new path, a content
 /// change, and an mtime-only change. Directory mtimes are recorded too, but
-/// they are not asserted here — whether a create-then-remove inside one
-/// timestamp tick leaves a trace is the filesystem's granularity to decide,
-/// and a test that depends on it would be flaky rather than strict.
+/// whether a *real* create-then-remove inside one timestamp tick leaves a
+/// trace is the filesystem's granularity to decide, and a test that depended
+/// on that would be flaky rather than strict — the mechanism itself
+/// (recording and diffing a directory's own mtime) is what
+/// [`the_fingerprint_detects_a_transient_create_then_remove`] proves instead,
+/// deterministically.
 #[test]
 fn the_fingerprint_detects_a_write() {
     let repo = RichRepo::build();
@@ -484,6 +565,106 @@ fn the_fingerprint_detects_a_write() {
     assert!(
         diffs.iter().any(|d| d.contains("mtime changed")),
         "an mtime move with unchanged content must be reported: {diffs:?}"
+    );
+}
+
+/// A positive control for transient create-then-remove detection
+/// (docs/issues.md P8): `support.rs`'s [`Fingerprint`] doc claims a lock file
+/// created and then removed "leaves no file behind but does move its
+/// directory's mtime, and that is a write" — a claim no test exercised before
+/// this one.
+///
+/// A real create-then-remove races the filesystem's timestamp granularity
+/// (coarse on some hosts, so the natural mtime bump can land within one
+/// tick and vanish — the flakiness `the_fingerprint_detects_a_write`'s doc
+/// warns about). This test still performs the create-then-remove, to match
+/// the real event, but then bumps the directory's mtime explicitly forward —
+/// the same technique `the_fingerprint_detects_a_write`'s case 3 uses for a
+/// file — so what is asserted is deterministic: the walker's directory-mtime
+/// channel actually gets compared, not merely recorded.
+#[test]
+fn the_fingerprint_detects_a_transient_create_then_remove() {
+    let repo = RichRepo::build();
+    let git_dir = repo.git_dir();
+    let before = Fingerprint::take(&git_dir);
+
+    let dir = git_dir.join("refs").join("heads");
+    let lock = dir.join("kaish-git-test-transient.lock");
+    std::fs::write(&lock, b"lock").expect("create transient file");
+    std::fs::remove_file(&lock).expect("remove transient file");
+
+    let dir_handle = std::fs::File::open(&dir).expect("open refs/heads for set_times");
+    let bumped = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+    dir_handle
+        .set_times(std::fs::FileTimes::new().set_modified(bumped))
+        .expect("bump refs/heads' mtime");
+    drop(dir_handle);
+
+    let diffs = Fingerprint::take(&git_dir).differences_from(&before);
+    assert!(
+        diffs.iter().any(|d| d.contains("refs/heads") && d.contains("mtime changed")),
+        "a directory's mtime move, with no surviving file to point at, must \
+         still be reported: {diffs:?}"
+    );
+}
+
+/// The `.idx` question (docs/issues.md P8): does gix-odb write a pack index
+/// back to disk when it opens a pack that has none? Reasoning about
+/// gix-odb's internals cannot answer this from outside the crate — running
+/// the fingerprint across a read that must open the pack does.
+///
+/// `RichRepo::build` already runs `git gc --aggressive`, so the fixture has
+/// exactly one pack. This test deletes that pack's `.idx`, runs `git log`
+/// (which walks commit history through the object store and must open the
+/// pack to read packed commits), and reports — via the fingerprint, not a
+/// guess — whether anything under `.git` moved.
+#[tokio::test]
+async fn a_pack_without_its_idx_is_read_only_or_reported_as_not() {
+    let repo = RichRepo::build();
+    let git_dir = repo.git_dir();
+    let pack_dir = git_dir.join("objects").join("pack");
+
+    let idx_path = std::fs::read_dir(&pack_dir)
+        .expect("read objects/pack")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "idx"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no .idx found under {} — RichRepo::build must gc before this test runs",
+                pack_dir.display()
+            )
+        });
+    std::fs::remove_file(&idx_path).expect("delete the .idx");
+
+    let before = Fingerprint::take(&git_dir);
+
+    let backend = Arc::new(StrictBackend::single(PathBuf::from(MOUNT), repo.scratch()));
+    let mut ctx = TestCtx::new(backend, "/mnt/main");
+    let git = kaish_tools_git::tool(GitConfig::read_only()).expect("read-only config builds");
+    let result = git.execute(tool_args("log", &[]), &mut ctx).await;
+
+    let after = Fingerprint::take(&git_dir);
+    let diffs = after.differences_from(&before);
+
+    // Report the observed answer rather than assert one direction: whichever
+    // way gix-odb behaves, it must be self-consistent with what it reports.
+    // If it silently regenerated the `.idx` (or wrote anything else under
+    // `.git`), that is real .git-write activity a read-only claim did not
+    // predict, and the assertion below fails loudly rather than passing on
+    // an assumption.
+    eprintln!(
+        "a_pack_without_its_idx: git log exited {} ({:?}); .git diffs: {:?}; \
+         .idx recreated: {}",
+        result.code,
+        result.err,
+        diffs,
+        idx_path.exists()
+    );
+    assert!(
+        diffs.is_empty(),
+        "opening a pack with no .idx wrote to .git — kaish-tools-git is not \
+         read-only in this case: {diffs:?}"
     );
 }
 
