@@ -859,6 +859,41 @@ was, and the defect it describes is reached by other modes — see "git index
 modes — divergences from git" above for what the fix left behind. What is
 left, ranked:
 
+- **P15 — the extension gate does not run at format 0, and git puts an
+  extension there.** `check_extensions` and `check_object_format` are called
+  only when `check_format_version` returns `>= 1` (`repo.rs:331-335`). That
+  follows git's own rule for *honoring* extensions, but not for refusing them.
+
+  Measured against real git 2.55, not read out of the documentation. In a fresh
+  repository, `git sparse-checkout init --cone` writes:
+
+  ```
+  [core]
+      repositoryformatversion = 0
+  [extensions]
+      worktreeConfig = true
+  ```
+
+  and creates `.git/config.worktree` holding `core.sparseCheckout` and
+  `core.sparseCheckoutCone`. Format stays **0**, so our gate never looks.
+
+  `worktreeconfig` is on the deliberately-unsupported list, and `repo.rs:38`
+  states the harm precisely: it *"moves `core.*` into `config.worktree`, which
+  we do not read, so `bare` and the worktree root could both be wrong."* That
+  harm is live in exactly the case git creates by itself, and the refusal
+  written to prevent it never fires. `read_repo_config` reads `.git/config`
+  and nothing else, so every gate downstream is reading a config it knows is
+  incomplete.
+
+  **This is P7's shape a second time** — a refusal layer bypassed by a
+  condition upstream of it — and P7's resolution is the precedent: the fix was
+  to refuse rather than to narrow the claim, because answering from a config
+  known to be partial is the one thing the layer exists to stop. The likely fix
+  is to run the extension gate regardless of format version, which needs a check
+  that git itself does not write some *other* extension at format 0 that we
+  would then start refusing wrongly. Found while fixing P2, in a file that
+  branch did not own.
+
 - **P14 — two guards now check the same invariant, and one of them is the weak
   one P9 was about.** Closing P9 added `tests/config_needle_guard.rs`, whose
   `the_real_crate_src_does_not_read_core_worktree` scans for both the literal
