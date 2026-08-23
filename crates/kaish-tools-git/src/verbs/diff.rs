@@ -377,6 +377,10 @@ fn index_side(
     };
     let work_dir = repo.work_dir().unwrap_or_else(|| repo.git_dir());
     for entry in index.entries() {
+        // The same two screens `status` applies, in the same order and for
+        // the same reasons: the mode first, so a sparse-directory entry is
+        // named as one rather than as an escaping path.
+        let class = crate::diffcore::class_of_index_mode(OP, work_dir, entry.mode)?;
         let path = entry.path(&index).to_string();
         // The same lexical screen `status` applies, for the same reason: a
         // path this build may join onto the working tree must be one git
@@ -392,11 +396,6 @@ fn index_side(
         if !filter.matches(&path) {
             continue;
         }
-        let Some(class) = Class::from_index(entry.mode) else {
-            // A sparse-directory entry (cone mode). This build does not model
-            // sparse indexes; skip it rather than mis-report it.
-            continue;
-        };
         match entry.stage_raw() {
             0 => {
                 out.insert(path, (entry.id, class));

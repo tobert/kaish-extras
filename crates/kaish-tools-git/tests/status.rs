@@ -1477,21 +1477,30 @@ async fn a_deleted_symlink_does_not_pair_with_an_added_file() {
 // docs/issues.md C1, C2, C3 — the fixtures the divergences asked for
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Hand-write a version-2 index whose entries carry the given real blob oids,
-/// bypassing git's own path-uniqueness enforcement (the C1 fixture below
-/// needs it). This produces a shape ordinary `git add`/`update-index` refuses
-/// to write (both auto-remove the conflicting sibling; confirmed by probe),
-/// but that real git reads back the same as we do, since nothing on the read
-/// path rejects it as a malformed file.
-fn write_raw_index_with_oids(git_dir: &Path, entries: &[(&str, [u8; 20])]) {
+/// Hand-write a version-2 index whose entries carry the given modes and real
+/// blob oids, bypassing the canonicalization and the path-uniqueness rule
+/// git's own writers apply. Both fixture families below need it:
+///
+/// - C1 needs two entries ordinary `git add`/`update-index` refuse to write
+///   as a pair (both auto-remove the conflicting sibling; confirmed by
+///   probe).
+/// - The index-mode fixtures need a mode git will not write at all:
+///   `git update-index --cacheinfo 100664,<oid>,<path>` stores `100644`, and
+///   every other non-canonical mode is folded the same way (probed against
+///   git 2.55 across `100600`, `100444`, `100000`, `100775`, `120644`).
+///
+/// Real git reads both shapes back: nothing on its read path rejects the file
+/// as malformed, and the trailing 20 zero bytes stand in for the checksum
+/// without complaint.
+fn write_raw_index_with_modes(git_dir: &Path, entries: &[(&str, u32, [u8; 20])]) {
     let mut out = Vec::new();
     out.extend_from_slice(b"DIRC");
     out.extend_from_slice(&2u32.to_be_bytes());
     out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
-    for (path, oid) in entries {
+    for (path, mode, oid) in entries {
         let start = out.len();
         out.extend_from_slice(&[0u8; 24]);
-        out.extend_from_slice(&0o100644u32.to_be_bytes());
+        out.extend_from_slice(&mode.to_be_bytes());
         out.extend_from_slice(&[0u8; 12]);
         out.extend_from_slice(oid);
         let flags = (path.len() as u16).min(0x0fff);
@@ -1577,7 +1586,10 @@ async fn c1_a_staged_sibling_index_does_not_make_git_report_typechange() {
     // Sibling entries "foo" and "foo/a.txt" in one index — real git will not
     // write this (both `git add` and `git update-index --index-info` drop the
     // conflicting sibling instead, confirmed by probe), but it does read it.
-    write_raw_index_with_oids(&repo.root.join(".git"), &[("foo", foo_oid), ("foo/a.txt", a_oid)]);
+    write_raw_index_with_modes(
+        &repo.root.join(".git"),
+        &[("foo", 0o100644, foo_oid), ("foo/a.txt", 0o100644, a_oid)],
+    );
 
     // Sanity check on the oracle itself: git really does read this index and
     // really does fold it to one `AD foo` line, not a `T`.
@@ -1806,5 +1818,227 @@ async fn c8_a_directory_wholly_ignored_by_its_own_nested_gitignore_is_reported_u
         ours,
         BTreeSet::from([("??".to_string(), "sub".to_string())]),
         "our behavior today (C8)"
+    );
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Index modes (docs/issues.md P2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A repository with `kept.txt` and `moved.txt` committed, `moved.txt`
+/// edited on disk and its new blob written, ready for a hand-written index.
+/// Returns the two oids: HEAD's `kept.txt`, and the new `moved.txt`.
+fn two_file_repo() -> (Repo, [u8; 20], [u8; 20]) {
+    let repo = Repo::init("repo");
+    repo.write("kept.txt", "kept\n");
+    repo.write("moved.txt", "one\n");
+    repo.git(&["add", "kept.txt", "moved.txt"]);
+    repo.git(&["commit", "-m", "init", "--quiet"]);
+    let kept = hex_to_oid(repo.git(&["rev-parse", "HEAD:kept.txt"]).trim());
+    // A staged modification, so every assertion below has something present
+    // to hold onto: an empty report would satisfy "the file is not reported
+    // deleted" without proving the index was read at all.
+    repo.write("moved.txt", "two\n");
+    let moved = hex_to_oid(repo.git(&["hash-object", "-w", "moved.txt"]).trim());
+    (repo, kept, moved)
+}
+
+/// A file mode with permission bits git does not record (`100600`) is a
+/// regular file, exactly as git reads it — not a file that vanished.
+///
+/// Git canonicalizes on the way in, so no git command writes this mode:
+/// `git update-index --cacheinfo 100600,<oid>,<path>` stores `100644`. Only a
+/// hand-written index carries it, and real git reads that index and reports
+/// nothing for the path. We used to report it `D` (deleted), because
+/// `Class::from_index` compared the mode against four exact values and the
+/// caller skipped what it could not place (docs/issues.md P2).
+#[tokio::test]
+async fn an_index_mode_git_reads_as_a_file_is_not_reported_deleted() {
+    let (repo, kept, moved) = two_file_repo();
+    write_raw_index_with_modes(
+        &repo.root.join(".git"),
+        &[("kept.txt", 0o100600, kept), ("moved.txt", 0o100644, moved)],
+    );
+    // The fixture is only a fixture while the mode survives: assert it before
+    // reading anything, so a git that started canonicalizing on read turns
+    // this red rather than passing vacuously.
+    let listed = git(&repo.root, &["ls-files", "-s"]);
+    assert!(listed.contains("100600 "), "the index must hold mode 100600: {listed}");
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    assert_eq!(result.code, 0, "must answer, not refuse: {}", result.err);
+    let ours = our_oracle(&result);
+    assert_eq!(
+        ours,
+        porcelain_oracle(&repo.root),
+        "a mode git reads as a plain file must read as one here too"
+    );
+    assert!(
+        ours.iter().any(|(_, path)| path == "moved.txt"),
+        "the staged modification must still be reported, or this test proves \
+         nothing about kept.txt: {ours:?}"
+    );
+    assert!(
+        !ours.iter().any(|(_, path)| path == "kept.txt"),
+        "kept.txt is unchanged and must not be reported at all: {ours:?}"
+    );
+}
+
+/// A symlink mode carrying permission bits (`120644`) is a symlink, so the
+/// path is a typechange against a HEAD blob — the `TT` real git reports.
+#[tokio::test]
+async fn an_index_mode_git_reads_as_a_symlink_is_a_typechange_like_git() {
+    let (repo, kept, moved) = two_file_repo();
+    write_raw_index_with_modes(
+        &repo.root.join(".git"),
+        &[("kept.txt", 0o120644, kept), ("moved.txt", 0o100644, moved)],
+    );
+    let listed = git(&repo.root, &["ls-files", "-s"]);
+    assert!(listed.contains("120644 "), "the index must hold mode 120644: {listed}");
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    assert_eq!(result.code, 0, "must answer, not refuse: {}", result.err);
+    let ours = our_oracle(&result);
+    assert_eq!(
+        ours,
+        porcelain_oracle(&repo.root),
+        "an index symlink over a HEAD blob is a typechange on both halves"
+    );
+    assert!(
+        ours.contains(&("TT".to_string(), "kept.txt".to_string())),
+        "git reports TT for this pair: {ours:?}"
+    );
+}
+
+/// A directory-mode index entry is refused, naming the mode — not skipped,
+/// which reported the path as deleted.
+///
+/// `040755` rather than `040000`: git reads `040000` as a sparse-directory
+/// entry and expands it (the fixture for that is the sparse-checkout test
+/// below), while any other directory mode aborts git's own index reader
+/// (`BUG: unsupported ce_mode`, read-cache.c). Git's answer is asserted here
+/// beside ours, so a git that grew one turns this red.
+#[tokio::test]
+async fn a_directory_mode_index_entry_is_refused_rather_than_reported_deleted() {
+    let (repo, kept, moved) = two_file_repo();
+    write_raw_index_with_modes(
+        &repo.root.join(".git"),
+        &[("kept.txt", 0o040755, kept), ("moved.txt", 0o100644, moved)],
+    );
+    let theirs = git_allow_fail(&repo.root, &["status", "--porcelain=v1"]);
+    assert!(
+        !theirs.status.success(),
+        "git's own reader aborts on this index; if it stopped doing so, our \
+         refusal needs re-deciding against its new answer: {:?}",
+        String::from_utf8_lossy(&theirs.stderr)
+    );
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    assert_eq!(result.code, 4, "must refuse, not answer: {}", result.err);
+    assert!(result.err.contains("040755"), "must name the mode: {}", result.err);
+    assert!(
+        result.err.contains("sparse-checkout"),
+        "must name the shape git writes this mode for, and the way out: {}",
+        result.err
+    );
+
+    // The negative control: the same index, the same two paths, one canonical
+    // mode. A refusal that fired on every hand-written index would prove
+    // nothing about the mode.
+    write_raw_index_with_modes(
+        &repo.root.join(".git"),
+        &[("kept.txt", 0o100644, kept), ("moved.txt", 0o100644, moved)],
+    );
+    let ok = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    assert_eq!(ok.code, 0, "the canonical mode must read: {}", ok.err);
+    assert_eq!(
+        our_oracle(&ok),
+        porcelain_oracle(&repo.root),
+        "and must agree with git"
+    );
+}
+
+/// A cone-mode sparse index is refused by the mode screen, which names the
+/// sparse entry — not by the index-path screen, which would blame the mount.
+///
+/// `git sparse-checkout --sparse-index` writes its directory entries with a
+/// trailing `/` (`b/`), whose empty final segment `is_repo_relative` reads as
+/// an escaping path. Both screens refuse, so the order decides which error a
+/// caller meets: "this repository points a path outside the mount" would send
+/// an operator hunting a containment bug that is not there.
+#[tokio::test]
+async fn a_cone_mode_sparse_index_is_refused_naming_its_directory_entry() {
+    let repo = Repo::init("repo");
+    repo.write("a/x", "x\n");
+    repo.write("b/y", "y\n");
+    repo.write("r.txt", "r\n");
+    repo.git(&["add", "a/x", "b/y", "r.txt"]);
+    repo.git(&["commit", "-m", "init", "--quiet"]);
+
+    // The negative control: the same repository, one command earlier, reads
+    // to completion and agrees with git.
+    let before = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    assert_eq!(before.code, 0, "a plain checkout must read: {}", before.err);
+    assert_eq!(our_oracle(&before), porcelain_oracle(&repo.root));
+
+    repo.git(&["sparse-checkout", "init", "--cone", "--sparse-index"]);
+    repo.git(&["sparse-checkout", "set", "a"]);
+    let listed = git(&repo.root, &["ls-files", "--sparse", "-s"]);
+    assert!(
+        listed.contains("040000 "),
+        "the fixture must really be a sparse index: {listed}"
+    );
+    assert!(
+        porcelain_oracle(&repo.root).is_empty(),
+        "git reads a sparse index and reports a clean tree"
+    );
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    assert_eq!(result.code, 4, "must refuse, not answer: {}", result.err);
+    assert!(result.err.contains("040000"), "must name the mode: {}", result.err);
+    assert!(
+        result.err.contains("sparse-checkout"),
+        "must name the way out: {}",
+        result.err
+    );
+    assert!(
+        !result.err.contains("outside the mount"),
+        "must not blame the mount for a sparse entry: {}",
+        result.err
+    );
+}
+
+/// A divergence we cannot close from here: `gix_index`'s decoder truncates a
+/// mode to the bits of its five named modes (`0o160755`) before this crate
+/// sees it, so an entry written `110644` arrives as `100644` and reads as a
+/// plain file. Real git aborts on that mode instead.
+///
+/// Pinned rather than fixed — closing it means gitoxide keeping the raw mode.
+/// See docs/issues.md, "git status — divergences from git".
+#[tokio::test]
+async fn an_index_mode_gix_truncates_reads_as_a_file_where_git_aborts() {
+    let (repo, kept, moved) = two_file_repo();
+    write_raw_index_with_modes(
+        &repo.root.join(".git"),
+        &[("kept.txt", 0o110644, kept), ("moved.txt", 0o100644, moved)],
+    );
+    let theirs = git_allow_fail(&repo.root, &["status", "--porcelain=v1"]);
+    assert!(
+        !theirs.status.success(),
+        "git's own answer: it aborts on this mode: {:?}",
+        String::from_utf8_lossy(&theirs.stderr)
+    );
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    assert_eq!(result.code, 0, "ours: the truncated mode reads as a file: {}", result.err);
+    let ours = our_oracle(&result);
+    assert!(
+        !ours.iter().any(|(_, path)| path == "kept.txt"),
+        "kept.txt reads as an unchanged plain file here: {ours:?}"
+    );
+    assert!(
+        ours.iter().any(|(_, path)| path == "moved.txt"),
+        "and the rest of the index is still read: {ours:?}"
     );
 }

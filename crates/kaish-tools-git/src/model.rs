@@ -364,7 +364,9 @@ pub struct TreeRow {
     /// The git tree mode, six-digit octal (`100644`, `100755`, `120000`,
     /// `160000`, `040000`) — the same string `git ls-tree` prints. A tree's
     /// raw on-disk mode is five digits (`40000`); this pads it to six so the
-    /// two agree byte for byte.
+    /// two agree byte for byte. Those five values are the whole vocabulary:
+    /// a tree entry recorded as `100664` reports `100644`, which is what
+    /// `git ls-tree` prints for it as well.
     pub mode: String,
     /// The object id this entry names.
     pub oid: String,

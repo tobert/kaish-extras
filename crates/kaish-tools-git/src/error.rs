@@ -358,6 +358,39 @@ pub enum GitError {
         operation: &'static str,
     },
 
+    /// An index entry's mode names neither a regular file, a symlink, nor a
+    /// submodule, so there is no class to compare it on. Exit 4 — the same
+    /// class as the other "this build does not model this repository shape"
+    /// refusals.
+    ///
+    /// Refused rather than skipped. A skipped index entry is absent from the
+    /// stage-0 map, and a path in HEAD but absent from that map is reported
+    /// `deleted` — a confidently wrong answer about a file that is still
+    /// there. Mode `040000` is the shape git itself writes here (a
+    /// sparse-directory entry in a sparse index); every other mode that
+    /// reaches this variant is one git's own `read-cache.c` aborts on
+    /// (`BUG: unsupported ce_mode`), so there is no git answer to match.
+    ///
+    /// The mode is named because it is six octal digits from a fixed
+    /// vocabulary, the same thing `git ls-files -s` prints; the path is not,
+    /// for the reason the index-path screen gives.
+    #[error(
+        "git {operation}: repository '{repo}' has an index entry with mode \
+         {mode}, which names neither a regular file, a symlink, nor a \
+         submodule — kaish-git refuses rather than skip it, because a skipped \
+         index entry is reported as a deleted file. Mode 040000 is a \
+         sparse-directory entry: run `git sparse-checkout disable` in that \
+         repository to expand its index, then retry"
+    )]
+    UnsupportedIndexMode {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The repository the refusal is about.
+        repo: PathBuf,
+        /// The entry's mode, six octal digits as `git ls-files -s` prints it.
+        mode: String,
+    },
+
     /// A `--path` argument used git pathspec magic this crate does not
     /// implement. Exit 2 — usage, and it names the unsupported syntax rather
     /// than silently matching nothing (B, "no git pathspec magic").
@@ -585,7 +618,8 @@ impl GitError {
             | GitError::NoContainingMount { .. }
             | GitError::UntrustedRepository { .. }
             | GitError::PatchNeedsTextdiff { .. }
-            | GitError::PatchNotInThisVerb { .. } => 4,
+            | GitError::PatchNotInThisVerb { .. }
+            | GitError::UnsupportedIndexMode { .. } => 4,
             GitError::VerbNotEnabled { .. } => 5,
         }
     }
@@ -732,6 +766,11 @@ mod tests {
                 operation: "log",
                 flag: "--patch",
                 instead: "Use git diff --patch.",
+            },
+            GitError::UnsupportedIndexMode {
+                operation: "status",
+                repo: repo.clone(),
+                mode: "040000".into(),
             },
         ];
         for e in &variants {

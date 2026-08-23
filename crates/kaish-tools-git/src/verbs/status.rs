@@ -6,8 +6,10 @@
 //!
 //! - **Staged** — the HEAD tree against the index (stage 0). gix has no
 //!   tree↔index diff and `gix-diff`'s rename tracker is `blob`-gated (→
-//!   `gix-command`), so the two sides are flattened to `path → (oid, mode)`
-//!   maps and compared directly. Renames are **exact-match only** (a blob oid
+//!   `gix-command`), so the two sides are flattened to `path → (oid, class)`
+//!   maps and compared directly ([`crate::diffcore::Class`] is the mode
+//!   normalized to the axis a tree entry, an index entry and a worktree file
+//!   can be compared on). Renames are **exact-match only** (a blob oid
 //!   reappearing at a new path); a modified-then-moved file has a new oid and
 //!   is reported honestly as a delete plus an add, never as a scored rename.
 //! - **Unstaged** — the index against the working tree, by hashing worktree
@@ -37,7 +39,7 @@ use gix_object::{FindExt, TreeRefIter};
 
 use kaish_tool_api::GlobalFlags;
 
-use crate::diffcore::Class;
+use crate::diffcore::{self, Class};
 use crate::error::GitError;
 use crate::model::{EntryKind, EntryStatus, StatusEntry, StatusReport, StatusTotals};
 use crate::pathfilter::PathFilter;
@@ -242,10 +244,6 @@ impl Building {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Normalized item classes, for comparing tree modes to index modes
-// ═══════════════════════════════════════════════════════════════════════════
-
-// ═══════════════════════════════════════════════════════════════════════════
 // The composition
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -271,6 +269,11 @@ pub(crate) fn run(repo: &ReadRepo, opts: &StatusOptions) -> Result<StatusReport,
     let mut tracked: BTreeSet<String> = BTreeSet::new();
     if let Some(index) = &index {
         for entry in index.entries() {
+            // The mode screen runs before the path screen, because a
+            // sparse-directory entry fails both and only this one names the
+            // real cause: git writes such an entry as `b/`, whose empty final
+            // segment the path screen reads as an escaping path.
+            let class = diffcore::class_of_index_mode(OP, &work_dir, entry.mode)?;
             let path = entry.path(index).to_string();
             // The lexical half of the index-path screen (E.2). Every path here
             // is about to be joined onto the working tree, and the join is a
@@ -290,11 +293,6 @@ pub(crate) fn run(repo: &ReadRepo, opts: &StatusOptions) -> Result<StatusReport,
                 });
             }
             tracked.insert(path.clone());
-            let Some(class) = Class::from_index(entry.mode) else {
-                // A sparse-directory entry (cone mode). This build does not
-                // model sparse indexes; skip it rather than mis-report it.
-                continue;
-            };
             match entry.stage_raw() {
                 0 => {
                     idx0.insert(path, (entry.id, class));
@@ -808,15 +806,17 @@ enum FlattenError {
 /// one measured number is easier to keep honest than two that are supposed to
 /// agree.
 ///
-/// Named `_STATUS_` rather than a bare `MAX_TREE_DEPTH`: `verbs::log` has its
-/// own tree-depth bound (`MAX_STAT_TREE_DEPTH`, 64) for a different call site
-/// with different frame sizes, and the two used to share this exact name —
-/// harmless while each stayed private to its own module, but this constant
-/// is now `pub(crate)` and imported by name from a third module, which makes
-/// a same-named, different-valued sibling much easier to misread as "the"
-/// bound. Not unified with log's: changing either value is a behavior change
-/// outside what a naming cleanup should do (docs/issues.md tracks whether
-/// they should ever converge).
+/// Named `_STATUS_` rather than a bare `MAX_TREE_DEPTH`: the shared
+/// comparison core has its own tree-depth bound
+/// (`diffcore::MAX_FLAT_TREE_DEPTH`, 64 — named
+/// `verbs::log::MAX_STAT_TREE_DEPTH` until PR 5 moved the walk it bounds)
+/// for a different call site with different frame sizes, and the two used to
+/// share this exact name — harmless while each stayed private to its own
+/// module, but this constant is now `pub(crate)` and imported by name from a
+/// third module, which makes a same-named, different-valued sibling much
+/// easier to misread as "the" bound. Not unified with that one: changing
+/// either value is a behavior change outside what a naming cleanup should do
+/// (docs/issues.md tracks whether they should ever converge).
 pub(crate) const MAX_STATUS_TREE_DEPTH: usize = 256;
 
 fn flatten_subtree(

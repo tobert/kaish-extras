@@ -980,3 +980,128 @@ async fn a_submodule_pointer_move_counts_one_line_each_side() {
         git_lines(&root, &["diff", "--staged", "--numstat"])
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Index modes (docs/issues.md P2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Hand-write a version-2 index carrying the given modes and real blob oids.
+///
+/// The only way to get a non-canonical mode into an index: git canonicalizes
+/// every mode it writes, so `git update-index --cacheinfo 100600,<oid>,<path>`
+/// stores `100644`. Real git reads the result back without complaint. The
+/// same writer, and the same fixtures, live in `status.rs` — the two verbs
+/// share the classification and must not drift apart on it.
+fn write_raw_index_with_modes(git_dir: &Path, entries: &[(&str, u32, [u8; 20])]) {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"DIRC");
+    out.extend_from_slice(&2u32.to_be_bytes());
+    out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    for (path, mode, oid) in entries {
+        let start = out.len();
+        out.extend_from_slice(&[0u8; 24]);
+        out.extend_from_slice(&mode.to_be_bytes());
+        out.extend_from_slice(&[0u8; 12]);
+        out.extend_from_slice(oid);
+        let flags = (path.len() as u16).min(0x0fff);
+        out.extend_from_slice(&flags.to_be_bytes());
+        out.extend_from_slice(path.as_bytes());
+        let padded = (out.len() - start + 8) & !7;
+        out.resize(start + padded, 0);
+    }
+    out.extend_from_slice(&[0u8; 20]);
+    std::fs::write(git_dir.join("index"), out).expect("write raw index");
+}
+
+fn hex_to_oid(hex: &str) -> [u8; 20] {
+    let mut oid = [0u8; 20];
+    for (i, byte) in oid.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect("hex byte");
+    }
+    oid
+}
+
+/// A two-file repository ready for a hand-written index: `kept.txt` as HEAD
+/// has it, and `moved.txt` edited on disk with its new blob written.
+fn mode_fixture() -> (support::Fixture, PathBuf, [u8; 20], [u8; 20]) {
+    support::require_git();
+    let fixture = support::Fixture::empty();
+    let root = fixture.path("repo");
+    std::fs::create_dir_all(&root).expect("create repo dir");
+    git(&root, &["init", "--initial-branch=main", "--quiet"]);
+    git(&root, &["config", "gc.writeCommitGraph", "false"]);
+    support::write_file(&root, "kept.txt", "kept\n");
+    support::write_file(&root, "moved.txt", "one\n");
+    git(&root, &["add", "kept.txt", "moved.txt"]);
+    git(&root, &["commit", "-m", "init", "--quiet"]);
+    let kept = hex_to_oid(git(&root, &["rev-parse", "HEAD:kept.txt"]).trim());
+    // A staged modification, so no assertion below can pass on an empty
+    // report that never read the index at all.
+    support::write_file(&root, "moved.txt", "two\n");
+    let moved = hex_to_oid(git(&root, &["hash-object", "-w", "moved.txt"]).trim());
+    (fixture, root, kept, moved)
+}
+
+/// `--staged` reads a file mode git does not record (`100600`) as a plain
+/// file, the way git does — not as a deleted file.
+///
+/// The same defect `status` had (docs/issues.md P2): the mode was compared
+/// against four exact values, and an entry that matched none of them was
+/// skipped, which drops it from the index side of the comparison and reports
+/// the HEAD side as a deletion.
+#[tokio::test]
+async fn staged_diff_reads_a_noncanonical_file_mode_the_way_git_does() {
+    let (fixture, root, kept, moved) = mode_fixture();
+    write_raw_index_with_modes(
+        &root.join(".git"),
+        &[("kept.txt", 0o100600, kept), ("moved.txt", 0o100644, moved)],
+    );
+    let listed = git(&root, &["ls-files", "-s"]);
+    assert!(listed.contains("100600 "), "the index must hold mode 100600: {listed}");
+
+    let result = diff(&fixture.root(), "/mnt/repo", &["--staged", "--json"]).await;
+    assert_eq!(result.code, 0, "must answer, not refuse: {}", result.err);
+    let ours = sorted(our_name_status(&json(&result)));
+    assert_eq!(
+        ours,
+        git_lines(&root, &["diff", "--staged", "--name-status"]),
+        "a mode git reads as a plain file must read as one here too"
+    );
+    assert_eq!(
+        ours,
+        vec!["M\tmoved.txt".to_string()],
+        "the staged modification is present and kept.txt is not: {ours:?}"
+    );
+}
+
+/// `--staged` refuses a directory-mode index entry rather than reporting the
+/// path deleted. Same refusal `status` gives, from the same screen.
+#[tokio::test]
+async fn staged_diff_refuses_a_directory_mode_index_entry() {
+    let (fixture, root, kept, moved) = mode_fixture();
+    write_raw_index_with_modes(
+        &root.join(".git"),
+        &[("kept.txt", 0o040755, kept), ("moved.txt", 0o100644, moved)],
+    );
+    let result = diff(&fixture.root(), "/mnt/repo", &["--staged", "--json"]).await;
+    assert_eq!(result.code, 4, "must refuse, not answer: {}", result.err);
+    assert!(result.err.contains("040755"), "must name the mode: {}", result.err);
+    assert!(
+        result.err.contains("sparse-checkout"),
+        "must name the shape git writes a directory mode for: {}",
+        result.err
+    );
+
+    // The negative control: the same hand-written index with one canonical
+    // mode is read, and agrees with git.
+    write_raw_index_with_modes(
+        &root.join(".git"),
+        &[("kept.txt", 0o100644, kept), ("moved.txt", 0o100644, moved)],
+    );
+    let ok = diff(&fixture.root(), "/mnt/repo", &["--staged", "--json"]).await;
+    assert_eq!(ok.code, 0, "the canonical mode must read: {}", ok.err);
+    assert_eq!(
+        sorted(our_name_status(&json(&ok))),
+        git_lines(&root, &["diff", "--staged", "--name-status"])
+    );
+}

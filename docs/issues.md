@@ -234,6 +234,54 @@ fixture asserted against real `git status --porcelain` before fixing.
   failed outright, exit 1, on any commit that moved a submodule pointer. The
   class the caller already has names it now (`diffcore::Side::Gitlink`).
 
+## git index modes — divergences from git
+
+What the P2 fix left behind. `Class::from_index` now reads an index mode the
+way git reads one — the file-type bits pick the class, and for a regular file
+the owner-execute bit picks `File` or `Exec` — and both call sites refuse a
+mode that names no file instead of skipping the entry. Skipping it was the
+bug: a skipped entry is absent from the stage-0 map, and a path in HEAD but
+absent from that map is reported `deleted`, so `status` and `diff --staged`
+called a present file deleted where git reported nothing (`100600`) or a
+typechange (`120644`). Both are pinned against a live git oracle in
+`status.rs` and `diff.rs`.
+
+- **M1 — a sparse index is refused, where git reads it.** `git sparse-checkout
+  init --cone --sparse-index` writes directory entries (`b/`, mode `040000`)
+  that stand in for whole subtrees. Expanding one means reading the tree it
+  names and materializing its leaves, which this build does not do, so
+  `status` and `diff --staged` refuse (exit 4,
+  `GitError::UnsupportedIndexMode`, naming the mode and
+  `git sparse-checkout disable`). Git reads the same repository and reports a
+  clean tree. Pinned with git's own answer beside ours by
+  `status.rs::a_cone_mode_sparse_index_is_refused_naming_its_directory_entry`.
+  Closing it means expanding the entry against its tree —
+  `diffcore::flatten_tree` already does that walk — plus a decision about the
+  other half: an expanded entry names files deliberately absent from the
+  working tree, which the unstaged comparison would report deleted for real.
+  One ordering detail is load-bearing and is asserted by that test: the mode
+  screen runs **before** the index-path screen, because `b/`'s empty final
+  segment reads as an escaping path and that refusal would send an operator
+  hunting a containment bug that is not there. Note this is the sparse
+  *index*, not the sparse *checkout*: a cone-mode checkout without
+  `--sparse-index` holds ordinary entries and reads normally (**R3** is the
+  open question about the ignore `Stack` under skip-worktree).
+
+- **M2 — a mode gitoxide truncates before we see it reads as a plain file,
+  where git aborts.** `gix_index`'s decoder builds every entry mode with
+  `Mode::from_bits_truncate`, dropping each bit outside the union of its five
+  named modes (`0o160755`). The file-type bit `0o010000` is one of them, so an
+  entry written `110644` arrives as `100644` and reads as an ordinary file;
+  real git's own index reader aborts on that mode
+  (`BUG: read-cache.c:341: unsupported ce_mode: 110644`). Only a hand-written
+  index can carry it — git canonicalizes every mode it writes, confirmed
+  against git 2.55 across `100664`, `100600`, `100444`, `100000`, `100775` and
+  `120644`, all of which `git update-index --cacheinfo` stores as `100644`,
+  `100755` or `120000`. Pinned with both answers by
+  `status.rs::an_index_mode_gix_truncates_reads_as_a_file_where_git_aborts`.
+  Closing it needs gitoxide to keep the raw mode; not worth an upstream ask
+  until a real repository hits it.
+
 ## git diff — deferred (architecture.md B.4, shipped in PR 5)
 
 - **D1 — a modified-and-moved file is a delete plus an add.** Rename detection
@@ -805,7 +853,11 @@ Four reviews before 0.9.0, framed as *"what tests are missing"* rather than
 *"find bugs"*: `crusoe-ds4` and `qwen38` for breadth on different families,
 `gemini-pro` and `gpt-5.6-sol` deliberating over one shared dossier. Two live
 bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
-0`); the stale module docs are fixed. What is left, ranked:
+0`); the stale module docs are fixed. **P2 is fixed too, but not as it was
+written**: the mode it named (`100664`) is classified correctly and always
+was, and the defect it describes is reached by other modes — see "git index
+modes — divergences from git" above for what the fix left behind. What is
+left, ranked:
 
 - **P14 — two guards now check the same invariant, and one of them is the weak
   one P9 was about.** Closing P9 added `tests/config_needle_guard.rs`, whose
@@ -820,17 +872,6 @@ bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
   concurrent branch at the time — a scheduling artifact, not a decision. Filed
   as P13 in `840fed0` and renumbered here: the containment branch landed its
   own P13, and that one is cited from `repo.rs`, `embedding-git.md` and a test.
-
-- **P2 — a non-canonical index mode is silently dropped, and the comment
-  misattributes the skip.** `Class::from_index` returns `None` for anything
-  outside the four canonical modes, and both call sites skip it with a comment
-  saying "a sparse-directory entry (cone mode)". A sparse entry is `040000`; a
-  `100664` entry — which `git update-index --cacheinfo 100664,...` writes
-  happily — is dropped too. The tree side *does* classify it, so `status` and
-  `diff --staged` report the file **deleted** where git reports a mode change.
-  The comment would send the next reader at the wrong fix. Separately,
-  `treewalk` normalizes raw modes through `mode.kind().as_octal_str()`, so
-  `ls` prints `100644` where `git ls-tree` prints `100664`.
 
 - **P13 — a symlinked loose ref is an open content read of the host, and the
   close is platform-level.** What is left of P4 after the fixed names were

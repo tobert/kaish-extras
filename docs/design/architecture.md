@@ -1166,7 +1166,7 @@ Exit codes, chosen to sit inside kaish's existing contract (2 = POSIX usage,
 | 1 | git-level failure | no such revision; path not tracked; ambiguous oid prefix; not a repository |
 | 2 | usage | clap parse failure; unknown verb; unsupported revspec form; pathspec magic; bad `--lines` range |
 | 3 | *(reserved by kaish for output spill — never produced by us)* | |
-| 4 | environment unsupported | path is not on a real filesystem; **reftable ref backend**; unknown `extensions.*`; `--patch` on a build without `textdiff`; repo config declares an escaping `include.path`; submodule beyond depth cap |
+| 4 | environment unsupported | path is not on a real filesystem; **reftable ref backend**; unknown `extensions.*`; `--patch` on a build without `textdiff`; repo config declares an escaping `include.path`; submodule beyond depth cap; **an index mode naming no file** (a sparse index) |
 | 5 | verb not enabled by profile | belt-and-braces; unreachable through the schema |
 | 124 / 130 | timeout / cancel | produced by the kernel, never manufactured by us |
 
