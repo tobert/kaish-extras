@@ -248,6 +248,12 @@ fn main_worktree_path(repo: &ReadRepo) -> Option<PathBuf> {
 /// Read from the given git directory's own `HEAD`, because a linked
 /// worktree's HEAD is private to it. A HEAD naming a branch that does not
 /// exist yet is an unborn worktree, which is a state, not an error.
+///
+/// Deliberately `ref_object`, not `ref_commit`: this is display, the same as
+/// `BranchRow::oid`, and real `git worktree list` prints the branch tip's own
+/// oid unpeeled when it is a tag object rather than the commit the tag
+/// names — verified empirically. Peeling here would make this row disagree
+/// with git's own listing, not agree with it.
 fn head_of(repo: &ReadRepo, git_dir: &Path) -> Result<(Option<String>, Option<String>), GitError> {
     let Some(head_file) = repo.contained_leaf("HEAD", git_dir, "HEAD")? else {
         return Ok((None, None));
