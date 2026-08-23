@@ -737,19 +737,6 @@ Four reviews before 0.9.0, framed as *"what tests are missing"* rather than
 bugs came out and are **fixed** (`info`'s worktree-count oracle, `log --limit
 0`); the stale module docs are fixed. What is left, ranked:
 
-- **P1 — a branch whose tip is an annotated tag makes `--merged` silently
-  wrong.** `git update-ref refs/heads/foo <tag-oid>` is legal and git peels for
-  ancestry questions; `ref_object` follows symbolic chains only, so the tag's
-  own oid reaches the ancestry machinery. `--contains` and `--ahead-behind`
-  exit 1 ("reading a commit"), which is at least loud. **`--merged` compares
-  the tag oid against a set of commit oids and reports the branch as not
-  merged** — a confidently wrong answer, the shape this crate is organized
-  against. No oracle test caught it because every fixture branch points at a
-  commit. Fix is to peel through tag objects in `ref_object` before handing an
-  oid to `reach`; the test asserts all three flags against
-  `git branch --contains/--merged` and `git rev-list --left-right --count`.
-  **Worth fixing before publish.**
-
 - **P2 — a non-canonical index mode is silently dropped, and the comment
   misattributes the skip.** `Class::from_index` returns `None` for anything
   outside the four canonical modes, and both call sites skip it with a comment

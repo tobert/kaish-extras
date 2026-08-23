@@ -170,14 +170,23 @@ pub(crate) fn run(repo: &ReadRepo, opts: &BranchOptions) -> Result<BranchReport,
             continue;
         };
 
-        if let Some(reaches) = reaches.as_mut() {
-            if !reaches.from(repo, &mut budget, oid)? {
-                continue;
+        // `--contains`/`--merged` ask an ancestry question, which only knows
+        // how to walk commit history: `oid` is peeled through any tag chain
+        // here, on demand, rather than in `ref_object` itself — `oid` still
+        // feeds `row.oid` below unpeeled, matching what `git branch -v`
+        // itself prints for a tag-tipped branch (the tag's own oid, not the
+        // commit it names).
+        if reaches.is_some() || merged_history.is_some() {
+            let commit_oid = repo.peel_ref_to_commit(oid, &full)?;
+            if let Some(reaches) = reaches.as_mut() {
+                if !reaches.from(repo, &mut budget, commit_oid)? {
+                    continue;
+                }
             }
-        }
-        if let Some(history) = &merged_history {
-            if !history.contains(&oid) {
-                continue;
+            if let Some(history) = &merged_history {
+                if !history.contains(&commit_oid) {
+                    continue;
+                }
             }
         }
 
@@ -232,13 +241,16 @@ pub(crate) fn run(repo: &ReadRepo, opts: &BranchOptions) -> Result<BranchReport,
                 .try_find(refname.as_str())
                 .map_err(|e| GitError::repository(OP, "looking up an upstream ref", repo.git_dir(), e))?
                 .as_ref()
-                .map(|r| repo.ref_object(r))
+                .map(|r| repo.ref_commit(r))
                 .transpose()?
                 .flatten()
             else {
                 continue;
             };
-            let (ahead, behind) = ahead_behind(repo, &mut budget, *oid, upstream_oid)?;
+            // `--ahead-behind` is the same ancestry question as `--contains`/
+            // `--merged`, so the branch's own tip is peeled here too.
+            let commit_oid = repo.peel_ref_to_commit(*oid, &row.name)?;
+            let (ahead, behind) = ahead_behind(repo, &mut budget, commit_oid, upstream_oid)?;
             row.ahead = Some(ahead);
             row.behind = Some(behind);
         }

@@ -1162,6 +1162,14 @@ impl ReadRepo {
     /// branch, or a `refs/remotes/<r>/HEAD` left behind by a deleted branch.
     /// Bounded at 5 hops, the same depth gitoxide's own symbolic chase caps
     /// itself at; a cycle is a malformed repository, not something to spin on.
+    ///
+    /// Deliberately does not peel: `git update-ref` refuses it, but a branch
+    /// (or a worktree's HEAD) can still end up tipped at a tag object — a
+    /// hand-written ref file, or an old repository — and `git branch -v`
+    /// itself prints that tag's own oid, not the commit it names. A caller
+    /// asking an ancestry question (`--contains`, `--merged`,
+    /// `--ahead-behind`) wants the commit instead; that is
+    /// [`ReadRepo::ref_commit`], not this.
     pub(crate) fn ref_object(
         &self,
         reference: &gix_ref::Reference,
@@ -1249,6 +1257,56 @@ impl ReadRepo {
             &self.git_dir,
             std::io::Error::other("tag chain is over 32 levels deep"),
         ))
+    }
+
+    /// Peel `oid` through any tag chain and insist the result is a commit —
+    /// for an ancestry question, which only knows how to walk commit history.
+    ///
+    /// `git update-ref` refuses to point a branch at anything but a commit,
+    /// but that check lives in the porcelain, not in anything this crate
+    /// reads: a hand-written ref file, or a repository from before that
+    /// refusal existed, can still leave a branch tip pointing at a tag, a
+    /// tree or a blob. Distinct from [`ReadRepo::peel_to_commit`], which
+    /// resolves a caller's own `--rev` spec and reports a bad one as
+    /// [`GitError::NoSuchRevision`] ("no such ref, and no object with that
+    /// id") — that message would be false here, since a ref *did* find this
+    /// object. The refusal instead names what the ref actually is, rather
+    /// than claiming nothing was found.
+    pub(crate) fn peel_ref_to_commit(
+        &self,
+        oid: gix_hash::ObjectId,
+        refname: &str,
+    ) -> Result<gix_hash::ObjectId, GitError> {
+        let (peeled, kind) = self.peel_tag_chain(oid, refname)?;
+        if kind == gix_object::Kind::Commit {
+            return Ok(peeled);
+        }
+        Err(GitError::repository(
+            self.operation,
+            format!("reading '{refname}' for an ancestry question"),
+            &self.git_dir,
+            std::io::Error::other(format!(
+                "'{refname}' names a {kind}, not a commit — a {kind} has no \
+                 commit history to compare"
+            )),
+        ))
+    }
+
+    /// [`ReadRepo::ref_object`] followed by [`ReadRepo::peel_ref_to_commit`]:
+    /// the commit a reference names for an ancestry question, peeling
+    /// through any tag chain along the way.
+    ///
+    /// `None` only when `ref_object` itself would return `None` — a symbolic
+    /// chain ending at a ref that does not exist.
+    pub(crate) fn ref_commit(
+        &self,
+        reference: &gix_ref::Reference,
+    ) -> Result<Option<gix_hash::ObjectId>, GitError> {
+        let Some(oid) = self.ref_object(reference)? else {
+            return Ok(None);
+        };
+        let refname = reference.name.as_bstr().to_str_lossy();
+        self.peel_ref_to_commit(oid, &refname).map(Some)
     }
 }
 

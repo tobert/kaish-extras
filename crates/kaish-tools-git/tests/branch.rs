@@ -487,3 +487,176 @@ async fn a_history_with_one_committer_instant_still_counts_correctly() {
         assert_eq!(rows[branch]["behind"], behind, "behind of {branch}");
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P1: a branch tip that is itself a tag object, or something worse
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// `git update-ref` refuses to point a branch at anything but a commit (git
+// 2.55: "trying to write non-commit object ... to branch"), but that check
+// lives in the porcelain. Nothing stops a hand-written ref file, an older
+// git, or repository corruption from leaving `refs/heads/<name>` at a tag, a
+// tree or a blob, and real git still answers ancestry questions about it —
+// peeling a tag automatically, and refusing (loudly, or by silently omitting
+// the row, depending on the command) anything that peels to neither a tag
+// nor a commit. Both fixtures below plant such a ref by writing the loose
+// ref file directly, which is the only way to reach this state at all now
+// that `update-ref` itself checks.
+
+/// A repository whose `main` is two commits (`A` then `B`), and whose
+/// `refs/heads/tagbranch` is planted directly at an annotated tag on `A` —
+/// real git peels that tag for every ancestry question, and `tagbranch`
+/// tracks `main` so `--ahead-behind` has something to compare it against.
+fn tag_tipped_repo() -> Fixture {
+    require_git();
+    let fixture = Fixture::empty();
+    let root = fixture.path("repo");
+    std::fs::create_dir_all(&root).expect("create repo dir");
+
+    git(&root, &["init", "--initial-branch=main", "--quiet"]);
+    git(&root, &["config", "gc.writeCommitGraph", "false"]);
+
+    write_file(&root, "a.txt", "a\n");
+    git(&root, &["add", "a.txt"]);
+    git(&root, &["commit", "-m", "A", "--quiet"]);
+    let a = git(&root, &["rev-parse", "HEAD"]);
+
+    write_file(&root, "b.txt", "b\n");
+    git(&root, &["add", "b.txt"]);
+    git(&root, &["commit", "-m", "B", "--quiet"]);
+    // main is now B, one commit ahead of A.
+
+    git(&root, &["tag", "-a", "at-a", "-m", "tag on A", &a]);
+    let tag_oid = git(&root, &["rev-parse", "at-a"]);
+    write_file(&root, ".git/refs/heads/tagbranch", &format!("{tag_oid}\n"));
+
+    // Tracks `main` the way `git branch --track` records a same-repository
+    // upstream (`remote = .`), so `--ahead-behind` computes something.
+    git(&root, &["config", "branch.tagbranch.remote", "."]);
+    git(&root, &["config", "branch.tagbranch.merge", "refs/heads/main"]);
+
+    fixture
+}
+
+/// A repository whose `main` is two commits, and whose
+/// `refs/heads/blobbranch` is planted directly at a blob — neither a commit
+/// nor a tag, so peeling stops at something an ancestry question cannot use
+/// at all. Also tracks `main`, so `--ahead-behind` reaches the same branch
+/// tip `--contains`/`--merged` do.
+fn blob_tipped_repo() -> Fixture {
+    require_git();
+    let fixture = Fixture::empty();
+    let root = fixture.path("repo");
+    std::fs::create_dir_all(&root).expect("create repo dir");
+
+    git(&root, &["init", "--initial-branch=main", "--quiet"]);
+    git(&root, &["config", "gc.writeCommitGraph", "false"]);
+
+    write_file(&root, "a.txt", "a\n");
+    git(&root, &["add", "a.txt"]);
+    git(&root, &["commit", "-m", "A", "--quiet"]);
+
+    write_file(&root, "b.txt", "b\n");
+    git(&root, &["add", "b.txt"]);
+    git(&root, &["commit", "-m", "B", "--quiet"]);
+
+    write_file(&root, "blob-content.txt", "not a commit, not a tag\n");
+    let blob_oid = git(&root, &["hash-object", "-w", "blob-content.txt"]);
+    write_file(&root, ".git/refs/heads/blobbranch", &format!("{blob_oid}\n"));
+
+    git(&root, &["config", "branch.blobbranch.remote", "."]);
+    git(&root, &["config", "branch.blobbranch.merge", "refs/heads/main"]);
+
+    fixture
+}
+
+/// **The P1 fix.** A branch tipped at an annotated tag is peeled before its
+/// history is asked about, for all three flags that ask — matched against
+/// real git, not our belief about what real git does.
+///
+/// Before the fix: `--contains`/`--merged` fed the tag's own oid straight to
+/// `reach.rs`, which only reads commits, so `--contains`/`--ahead-behind`
+/// exited 1 ("reading a commit") and `--merged` silently reported the branch
+/// as not merged — a confidently wrong answer, not a refusal.
+#[tokio::test]
+async fn a_tag_tipped_branch_is_peeled_for_merged_contains_and_ahead_behind() {
+    let fixture = tag_tipped_repo();
+    let root = fixture.path("repo");
+
+    // --merged: real git peels the tag to judge ancestry.
+    let ours = names(&json(&run_at(&fixture.root(), "/mnt/repo", &["--json", "--merged", "main"]).await));
+    let theirs: Vec<String> = git(&root, &["branch", "--merged", "main", "--format=%(refname:short)"])
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(ours, theirs, "--merged main");
+    assert!(
+        ours.contains(&"tagbranch".to_string()),
+        "tagbranch's tag peels to A, an ancestor of main: {ours:?}"
+    );
+
+    // --contains: the tag's own target is A (main~1).
+    let ours = names(&json(
+        &run_at(&fixture.root(), "/mnt/repo", &["--json", "--contains", "main~1"]).await,
+    ));
+    let theirs: Vec<String> = git(&root, &["branch", "--contains", "main~1", "--format=%(refname:short)"])
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(ours, theirs, "--contains main~1");
+    assert!(ours.contains(&"tagbranch".to_string()), "{ours:?}");
+
+    // --ahead-behind: tagbranch's peeled tip (A) is one commit behind main
+    // (B), and zero ahead.
+    let model = json(&run_at(&fixture.root(), "/mnt/repo", &["--json", "--ahead-behind"]).await);
+    let rows = rows_by_name(&model);
+    let counts = git(&root, &["rev-list", "--left-right", "--count", "tagbranch...main"]);
+    let mut parts = counts.split_whitespace();
+    let ahead: u64 = parts.next().expect("ahead").parse().expect("a number");
+    let behind: u64 = parts.next().expect("behind").parse().expect("a number");
+    assert_eq!(rows["tagbranch"]["ahead"], ahead, "{}", rows["tagbranch"]);
+    assert_eq!(rows["tagbranch"]["behind"], behind, "{}", rows["tagbranch"]);
+    // The fixture's teeth: prove the counts are not trivially (0, 0).
+    assert_eq!((ahead, behind), (0, 1), "A is one commit behind B: {counts}");
+
+    // Display is unaffected: `row.oid` still reports the tag's own oid, the
+    // same as `git branch -v` does for a tag-tipped branch (verified against
+    // real git empirically — peeling here would make this crate disagree
+    // with git's own listing, not agree with it).
+    let plain = json(&run_at(&fixture.root(), "/mnt/repo", &["--json"]).await);
+    let plain_rows = rows_by_name(&plain);
+    let tag_oid = git(&root, &["rev-parse", "at-a"]);
+    assert_eq!(plain_rows["tagbranch"]["oid"], tag_oid, "{}", plain_rows["tagbranch"]);
+}
+
+/// **The negative control.** A branch tipped at a blob — neither a commit
+/// nor a tag — must fail the whole call loudly, for every flag that asks an
+/// ancestry question about it, rather than silently answering wrong (or, for
+/// `--merged`/`--contains`, silently dropping the row the way real git
+/// itself does — a deliberate divergence, and the stricter side of it: a row
+/// dropped because it could not be judged reads exactly like a row judged
+/// and found not to match).
+#[tokio::test]
+async fn a_non_commit_non_tag_branch_tip_is_refused_not_silently_answered() {
+    let fixture = blob_tipped_repo();
+
+    for argv in [
+        vec!["--json", "--merged", "main"],
+        vec!["--json", "--contains", "main~1"],
+        vec!["--json", "--ahead-behind"],
+    ] {
+        let result = run_at(&fixture.root(), "/mnt/repo", &argv).await;
+        assert_eq!(result.code, 1, "{argv:?}: {}", result.err);
+        assert!(
+            result.err.contains("blobbranch"),
+            "{argv:?}: names the offending ref: {}",
+            result.err
+        );
+        assert!(
+            result.err.contains("blob"),
+            "{argv:?}: names the kind it actually is, not just that something \
+             failed: {}",
+            result.err
+        );
+    }
+}
