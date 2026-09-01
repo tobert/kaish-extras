@@ -44,14 +44,35 @@ to **published crates.io versions** (`"0.17"` as of 2026-09-01). Rules:
   unify on one copy of each kaish crate. 0.18 cannot ride along — pre-1.0 a
   minor carries breaking changes — so a kaish minor is a bump here that has to
   build and pass the checks. Do not widen the range to buy the illusion.
-- **A two-minor range is an open question, not a closed one.** Both tool crates
-  built against 0.16 and 0.17 with no source change — they use no API a minor
-  has moved — so `">=0.17, <0.19"` on `kaish-tool-api` + `kaish-types` is a
-  claim that could be made true. It would help only the crates someone else
-  links (nothing downstream links `kaish-web`), and neither tool crate is
-  published yet, so it buys nothing until the publish PR. The price of making
-  it honest is a CI job that resolves and tests the **low** end. Amy's call on
-  2026-09-01: revisit at publish, stay on `^0.17` until then.
+- **A two-minor range makes the two-copies failure MORE reachable, not less.**
+  Measured with cargo and the real crates on 2026-09-01, three resolutions of
+  one graph where an embedder depends on a tool crate from here:
+
+  | tool crate asks | embedder asks | cargo resolves |
+  |---|---|---|
+  | `">=0.16, <0.18"` | `^0.16` | **0.16.0 and 0.17.0 — two copies** |
+  | `">=0.16, <0.18"` | `^0.17` | 0.17.0, one copy |
+  | `"0.16"` | `^0.16` | 0.16.0, one copy (the control) |
+
+  Cargo does not unify across compatibility groups: pre-1.0 it treats 0.16.x
+  and 0.17.x as incompatible, so a requirement spanning both is satisfied
+  inside *either* group and the resolver takes the newest. The range therefore
+  splits the graph exactly when the embedder is on the **lower** minor — which
+  is the embedder widening was supposed to help. The one it does help is
+  already on the newer minor and needed nothing. `kaish-types` splitting is
+  fatal rather than wasteful: our `Tool` impl stops satisfying the embedder's
+  kernel `Tool`, which is a trait mismatch, not a duplicate-symbol warning.
+
+  So the reason to keep a tight pin is not caution about untested versions —
+  it is that a tight pin **forces both sides onto one version together**, and
+  that coordinated move is the thing that actually fixes the embedder.
+  kaijutsu-lead named this from downstream before it was measured here, having
+  just been broken by the 0.16→0.17 skew.
+
+  Amy's call on 2026-09-01 was to revisit at publish; the measurement above is
+  what that revisit should start from. If a range is ever wanted anyway, the CI
+  job that resolves and tests the **low** end is not garnish — the bad state
+  compiles clean in this repo and only fails in the embedder's.
 - **A kaish minor can change behavior without failing to compile.** 0.16 built
   clean here on the first try with every test binary green, and its changelog
   still carried a dozen **Changed** entries no compiler could have caught. 0.17
