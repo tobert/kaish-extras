@@ -98,7 +98,11 @@ to **published crates.io versions** (`"0.17"` as of 2026-09-01). Rules:
   agent reading `help git` sees `worktree — Work with the repository's working
   trees` and never learns that `list` is the verb under it. Every one-word verb
   is named with its flags; `worktree list` is reachable only from the
-  `Examples:` block. Tracked as K1 in [docs/issues.md](docs/issues.md).
+  `Examples:` block. Fixed in kaish for 0.17.1, which makes the rendered shape
+  a contract — full path at a fixed two-space indent at every depth, ` — `
+  between path and description. **`router_kernel_drift` will go red on that
+  bump and the fix is a deliberate three-line edit, not a permissive parser**:
+  K1 in [docs/issues.md](docs/issues.md) spells it out.
 - `kaish-kernel` is `default-features = false`. Keep it that way: a sibling
   crate enabling kernel default features tramples the no-default choice
   (`localfs` etc. must not leak into the browser build).
