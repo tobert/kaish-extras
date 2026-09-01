@@ -162,6 +162,19 @@ async fn a_disabled_verb_is_refused_by_the_kernel_before_reaching_our_own_guard(
 /// `schema_carries_only_the_enabled_verbs` (src/tool.rs) already proves at
 /// the schema level: a disabled verb is absent from what an agent is told
 /// exists, not merely rejected once asked for by name.
+///
+/// Read what each half proves, because they are not the same claim. The
+/// roster names schema **nodes**, so for the eight one-word verbs it proves
+/// verb-level absence directly, and for `worktree list` it proves only that
+/// the node went with its last child. The examples half is what carries the
+/// leaf. Neither can see a disabled leaf left under a node a sibling keeps
+/// alive — the examples are filtered by the config, not by the schema, so
+/// they would drop the verb either way. That case is
+/// `schema_leaves_are_exactly_the_enabled_verbs` (src/tool.rs), which walks
+/// the schema itself; this gate is about the rendered surface an agent
+/// reads. Named by the kaibo review of the 0.17 bump, which found the
+/// original wording of this comment claiming more than the assertions below
+/// deliver.
 #[tokio::test]
 async fn a_disabled_verb_is_absent_from_help_and_a_negative_control_verb_is_present() {
     let (_fixture, root) = simple_repo();
