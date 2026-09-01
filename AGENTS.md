@@ -73,6 +73,17 @@ to **published crates.io versions** (`"0.17"` as of 2026-09-01). Rules:
   what that revisit should start from. If a range is ever wanted anyway, the CI
   job that resolves and tests the **low** end is not garnish — the bad state
   compiles clean in this repo and only fails in the embedder's.
+- **A cross-boundary break is invisible from the repo that causes it, so "our
+  tests pass" is not evidence about it.** A split-capable range resolves to one
+  copy here and to two in the embedder's graph; our whole suite stays green
+  either way, because the second copy only exists once someone links both us
+  and kaish. The same shape bit kaijutsu on 0.17's leading-zero refusal: their
+  script was green in CI at 14:00 and a hard error at 03:00, because
+  `date '+%H'` pads and `[[ "$hour" -lt 6 ]]` then refuses the padded number.
+  What catches this class is a check that runs *where the failure lands* — the
+  low-end resolution job for the range, the embedder's own build for the pin —
+  never a greener suite on this side. kaijutsu-lead's generalization, from
+  having been on the receiving end of both in one day.
 - **A kaish minor can change behavior without failing to compile.** 0.16 built
   clean here on the first try with every test binary green, and its changelog
   still carried a dozen **Changed** entries no compiler could have caught. 0.17
