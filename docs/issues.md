@@ -1387,3 +1387,34 @@ state, not ours, and this note is a report of what they said they were doing.
 
 The kaibo session has an endpoint-by-endpoint input-shape table pulled from
 the live OpenAPI spec; ask for it when this starts.
+
+## kaish — found by the 0.17 bump (2026-09-01)
+
+- **K1 — `help <tool>` renders one level of subcommands, so `worktree list` is
+  never named.** kaish 0.17's `topic::tool_help` grew a `Subcommands:` roster
+  that prints each subcommand and its flags (`kaish-help/src/topic.rs`), but it
+  does not recurse: it walks `schema.subcommands` and then only `sub.params`.
+  `git worktree` is a node with `list` under it, so `help git` prints
+  `worktree — Work with the repository's working trees` and stops. An agent
+  reading help learns the node exists and cannot learn the verb. The
+  `Examples:` block carries `git worktree list`, which is the only reason the
+  verb is discoverable at all — and B.11's write profiles add three more verbs
+  under that same node, each of which would land equally unnamed. Fix belongs
+  in kaish (recurse, or render the full path), not here. Our own gate reads
+  both surfaces since the bump: `router_kernel_drift`'s roster assertion covers
+  the node, its examples assertion covers the leaf.
+- **K2 — 0.17's leading-zero rule stops at kaish's own shell; our argv is
+  unchanged, and still agrees with git.** 0.17 makes a leading zero an error
+  everywhere kaish itself needs a number, and classifies `007` as the string
+  `007` rather than the number 7. Measured through a real kernel on both
+  minors rather than reasoned from the entry: `git log -n 007` binds 7 and
+  `git log -n -0` binds 0 under 0.16 and 0.17 alike, because our numeric flags
+  are ordinary clap `usize`/`u32`/`f64` fields and `str::parse` reads `007` as
+  7 either way. Real git 2.55 answers the same for all three probes
+  (`007` and `08` cap at that many commits, `-0` prints nothing, all exit 0),
+  so there is no divergence here to converge and nothing to fix.
+
+  What did move is the shell an agent writes *around* our tools: `break 007`
+  exits 0 under 0.16 and is a parse error under 0.17. Nothing in this
+  workspace pins that, and it is kaish's behavior rather than ours — noted so
+  the next reader does not re-derive it.
