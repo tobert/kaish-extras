@@ -1584,6 +1584,50 @@ mod tests {
         assert_eq!(names, ["info", "status", "log", "ls", "show", "diff", "branch", "tag"]);
     }
 
+    /// The same rule one level down: the schema's **leaves** are exactly the
+    /// enabled verbs, spelled as an agent types them.
+    ///
+    /// `schema_carries_only_the_enabled_verbs` reads the top-level names and
+    /// then names `worktree`'s children by hand, which is exact only while
+    /// `worktree` has one child. With a second verb under that node (B.11's
+    /// `add`, `remove`, `lock`, `prune`), disabling `worktree list` would
+    /// leave the node standing — correctly, since a sibling still needs it —
+    /// and every node-level check would pass with the disabled leaf still
+    /// routable underneath. `help git` cannot catch that either: kaish 0.17's
+    /// renderer stops at the node (K1 in docs/issues.md), and the examples it
+    /// prints are filtered by the config rather than by the schema, so they
+    /// would drop the verb whether or not the leaf survived.
+    ///
+    /// So the leaf-level property is asserted here, from the walk that
+    /// already recurses, rather than left to the coincidence that today's
+    /// only node has a single child.
+    #[test]
+    fn schema_leaves_are_exactly_the_enabled_verbs() {
+        for disabled in std::iter::once(None).chain(Verb::ALL.iter().copied().map(Some)) {
+            let config = match disabled {
+                Some(verb) => GitConfig::read_only().without_verb(verb),
+                None => GitConfig::read_only(),
+            };
+            let schema = tool(config).expect("the rest is a valid config").schema();
+
+            let mut found: Vec<String> =
+                leaves(&schema).into_iter().map(|(path, _)| path).collect();
+            found.sort();
+            let mut want: Vec<String> = Verb::ALL
+                .iter()
+                .filter(|verb| Some(**verb) != disabled)
+                .map(|verb| verb.as_str().to_string())
+                .collect();
+            want.sort();
+
+            assert_eq!(
+                found, want,
+                "the schema's routable leaves disagree with the enabled verbs \
+                 while {disabled:?} was disabled"
+            );
+        }
+    }
+
     /// The disabled verb must vanish from the schema, because that is what
     /// makes it unroutable rather than merely rejected (E.1).
     #[test]
