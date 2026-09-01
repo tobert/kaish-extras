@@ -17,22 +17,32 @@ repository = "https://github.com/tobert/kaish-extras"
 # embedder depends on kaish the way any other embedder would, and a git rev is
 # a development affordance no real embedder has.
 #
-# `"0.16"` is `^0.16` — every 0.16.x patch resolves, nothing higher. That is
+# `"0.17"` is `^0.17` — every 0.17.x patch resolves, nothing higher. That is
 # the range downstream embedders unify against: a host crate (kaijutsu) that
-# asks for kaish-types 0.16.1 gets one copy shared with the tools here, no
-# change needed in this workspace. 0.17 is a different story — pre-1.0, a minor
+# asks for kaish-types 0.17.1 gets one copy shared with the tools here, no
+# change needed in this workspace. 0.18 is a different story — pre-1.0, a minor
 # is a breaking release (0.15 turned `Pipeline::commands` into `stages`; 0.16
-# made `Stmt`, `Token`, `IssueCode` and 27 more `#[non_exhaustive]`), so it
-# lands here as a deliberate bump that has to build, not as a widened range
+# made `Stmt`, `Token`, `IssueCode` and 27 more `#[non_exhaustive]`; 0.17 made
+# `ExecContext` `#[non_exhaustive]` and removed the plan-side redaction API), so
+# it lands here as a deliberate bump that has to build, not as a widened range
 # claiming a compatibility nobody verified.
-kaish-kernel = { version = "0.16", default-features = false }
-kaish-client = "0.16"
+#
+# A **two-minor range** (`">=0.17, <0.19"`) is the open question, deferred to
+# the publish PR rather than settled here. It would only ever help the two tool
+# crates, since nothing downstream links `kaish-web`, and neither tool crate is
+# published yet — so today it buys nothing. What makes it thinkable is measured:
+# both tool crates built against 0.16 and 0.17 with no source change, because
+# neither touches an API a minor has moved. What it would cost is a CI job that
+# resolves and tests the **low** end; without one, a range is a claim CI never
+# checks.
+kaish-kernel = { version = "0.17", default-features = false }
+kaish-client = "0.17"
 # The out-of-tree tool surface: `kaish-tools-git` implements `Tool` against
 # these two and never touches `kaish-kernel`, which is the whole point of the
 # honest-external-embedder posture — `kaish-tools-host` (kaish's own
 # out-of-tree bundle) depends on exactly this pair and nothing more.
-kaish-tool-api = "0.16"
-kaish-types = "0.16"
+kaish-tool-api = "0.17"
+kaish-types = "0.17"
 
 [profile.release]
 # The wasm bundle ships over the network — favor size.

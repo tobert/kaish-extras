@@ -34,22 +34,39 @@ has caught real broken deploys.
 ## kaish dependency pinning
 
 `[workspace.dependencies]` in the root `Cargo.toml` pins all four kaish crates
-to **published crates.io versions** (`"0.16"` as of 2026-08-23). Rules:
+to **published crates.io versions** (`"0.17"` as of 2026-09-01). Rules:
 
 - **All four must pin the SAME version** — mixing them puts two copies of a
   kaish crate in the dependency graph.
-- **The pin is a caret range, and downstream depends on that.** `"0.16"` is
-  `^0.16`: any 0.16.x patch resolves, so an embedder that consumes both a tool
-  crate from here and kaish directly (kaijutsu) can move to 0.16.1 and still
-  unify on one copy of each kaish crate. 0.17 cannot ride along — pre-1.0 a
+- **The pin is a caret range, and downstream depends on that.** `"0.17"` is
+  `^0.17`: any 0.17.x patch resolves, so an embedder that consumes both a tool
+  crate from here and kaish directly (kaijutsu) can move to 0.17.1 and still
+  unify on one copy of each kaish crate. 0.18 cannot ride along — pre-1.0 a
   minor carries breaking changes — so a kaish minor is a bump here that has to
   build and pass the checks. Do not widen the range to buy the illusion.
+- **A two-minor range is an open question, not a closed one.** Both tool crates
+  built against 0.16 and 0.17 with no source change — they use no API a minor
+  has moved — so `">=0.17, <0.19"` on `kaish-tool-api` + `kaish-types` is a
+  claim that could be made true. It would help only the crates someone else
+  links (nothing downstream links `kaish-web`), and neither tool crate is
+  published yet, so it buys nothing until the publish PR. The price of making
+  it honest is a CI job that resolves and tests the **low** end. Amy's call on
+  2026-09-01: revisit at publish, stay on `^0.17` until then.
 - **A kaish minor can change behavior without failing to compile.** 0.16 built
   clean here on the first try with every test binary green, and its changelog
-  still carried a dozen **Changed** entries no compiler could have caught. Read
-  them and decide each one against this workspace; check the answer at the source
-  rather than reasoning from the entry. The 0.16 entry that looked like it
-  moved `$(git …)` turned out not to — see "Command substitution binds text".
+  still carried a dozen **Changed** entries no compiler could have caught. 0.17
+  compiled clean too and broke one test — `help <tool>` grew a `Subcommands:`
+  roster with every flag's description under it, so `router_kernel_drift`'s
+  whole-document substring needle started matching `git info` inside `git diff
+  --patch`'s prose. Read the entries and decide each one against this
+  workspace; check the answer at the source rather than reasoning from the
+  entry. The 0.16 entry that looked like it moved `$(git …)` turned out not to
+  — see "Command substitution binds text".
+- **`help <tool>` renders one level of subcommands, not two.** Since 0.17 an
+  agent reading `help git` sees `worktree — Work with the repository's working
+  trees` and never learns that `list` is the verb under it. Every one-word verb
+  is named with its flags; `worktree list` is reachable only from the
+  `Examples:` block. Tracked as K1 in [docs/issues.md](docs/issues.md).
 - `kaish-kernel` is `default-features = false`. Keep it that way: a sibling
   crate enabling kernel default features tramples the no-default choice
   (`localfs` etc. must not leak into the browser build).

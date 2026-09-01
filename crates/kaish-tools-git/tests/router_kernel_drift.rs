@@ -177,33 +177,135 @@ async fn a_disabled_verb_is_absent_from_help_and_a_negative_control_verb_is_pres
         assert_eq!(result.code, 0, "help git failed: {}", result.err);
         let text = result.text_out();
 
-        // The needle is the command spelling, not the bare verb name. A bare
-        // name is a substring of other text `help git` legitimately prints —
-        // `--staged` contains "tag", which failed this test the day `Verb::Tag`
-        // landed. Every example is `git <verb> ...`, so "git tag" is present
-        // exactly when a tag example survived filtering, which is the property
-        // this asserts.
-        let spelling = |verb: &Verb| format!("git {}", verb.as_str());
+        // Both needles read a structured region of the document, never the
+        // whole text. A substring search over the whole of `help git` answers
+        // yes for prose as readily as for an offer: `git diff --patch`'s
+        // description names `git info` while explaining the `textdiff`
+        // feature, so `text.contains("git info")` is true in a build where
+        // `info` is not offered at all.
+        let mut roster = subcommand_roster(&text);
+        roster.sort();
+        let examples = example_commands(&text);
+
+        // The roster names schema nodes, so a two-word verb contributes its
+        // first word: `worktree list` is reachable through the `worktree`
+        // node, which stands exactly as long as one verb under it is enabled.
+        // Equality rather than a pair of contains loops — it fails on a verb
+        // the roster invents as well as one it drops.
+        let mut expected: Vec<String> = Verb::ALL
+            .iter()
+            .filter(|verb| *verb != disabled)
+            .map(|verb| node_of(verb).to_string())
+            .collect();
+        expected.sort();
+        expected.dedup();
+        assert_eq!(
+            roster, expected,
+            "help git's subcommand roster disagrees with the schema while \
+             {disabled:?} was disabled"
+        );
+
         assert!(
-            !text.contains(&spelling(disabled)),
-            "help git must not mention the disabled verb {:?}: {text}",
+            !demonstrates(&examples, disabled),
+            "help git still shows an example for the disabled verb {:?}: \
+             {examples:?}",
             disabled
         );
 
-        // Negative control: every other verb must still be named.
+        // Negative control: every other verb must still be demonstrated. The
+        // examples reach a leaf the roster cannot name — `worktree list` is
+        // one level below what kaish 0.17's `help <tool>` renders — so this
+        // is the only surface here that distinguishes the two-word verbs.
         for enabled in Verb::ALL {
             if enabled == disabled {
                 continue;
             }
             assert!(
-                text.contains(&spelling(enabled)),
-                "help git dropped the still-enabled verb {:?} while {:?} was \
-                 disabled: {text}",
+                demonstrates(&examples, enabled),
+                "help git dropped every example for the still-enabled verb \
+                 {:?} while {:?} was disabled: {examples:?}",
                 enabled,
                 disabled
             );
         }
     }
+}
+
+/// The body of one `help git` section: every line after the `header` line,
+/// stopping at the next line that starts in column 0.
+///
+/// kaish renders the document as unindented section headers with indented
+/// bodies (`kaish-help`'s `topic::tool_help`), which is what makes a section
+/// addressable at all. A missing header is an assertion failure rather than
+/// an empty result — a needle that reads an absent region finds nothing and
+/// would report every verb as correctly absent.
+fn section(text: &str, header: &str) -> String {
+    let mut body = String::new();
+    let mut found = false;
+    for line in text.lines() {
+        if !found {
+            found = line.trim_end() == header;
+            continue;
+        }
+        if !line.is_empty() && !line.starts_with(' ') {
+            break;
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    assert!(found, "help git has no `{header}` section: {text}");
+    body
+}
+
+/// The verbs named in `help git`'s `Subcommands:` roster — one line each,
+/// `  <verb> — <about>`, at exactly two spaces of indent.
+///
+/// This is the roster kaish 0.17 added (`help <tool>` renders a tool's
+/// subcommands and their flags). It is the surface the gate is about: what an
+/// agent is told exists. The flag lines it nests four and six spaces deeper
+/// carry free prose, and are exactly what a whole-document substring search
+/// cannot tell apart from an offer.
+fn subcommand_roster(text: &str) -> Vec<String> {
+    section(text, "Subcommands:")
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("  ")?;
+            if rest.starts_with(' ') {
+                return None;
+            }
+            // A subcommand with an empty description renders as the bare name.
+            Some(rest.split_once(" — ").map_or(rest, |(name, _)| name).to_string())
+        })
+        .collect()
+}
+
+/// The schema node a verb hangs from: its first argv word. `worktree list`
+/// lives under `worktree`; every other verb is a node of its own.
+fn node_of(verb: &Verb) -> &'static str {
+    verb.as_str().split(' ').next().expect("a verb spelling is not empty")
+}
+
+/// Every command `help git`'s `Examples:` block demonstrates, as the words
+/// after `git `.
+///
+/// This was the whole surface `help git` had before 0.17, and it stays
+/// asserted: examples are filtered by the same enabled-verb set the roster
+/// is, so the two agreeing is a second reading of one rule.
+fn example_commands(text: &str) -> Vec<String> {
+    section(text, "Examples:")
+        .lines()
+        .filter_map(|line| Some(line.trim_start().strip_prefix("git ")?.to_string()))
+        .collect()
+}
+
+/// Whether any example runs this verb — its full spelling, alone or followed
+/// by arguments. The spelling is matched as whole words, so `git diff --staged`
+/// demonstrates `diff` and nothing demonstrates a verb only named in prose.
+fn demonstrates(examples: &[String], verb: &Verb) -> bool {
+    let spelling = verb.as_str();
+    examples
+        .iter()
+        .any(|cmd| cmd == spelling || cmd.starts_with(&format!("{spelling} ")))
 }
 
 /// `git info`'s `capabilities.verbs` (architecture.md B.1) is what an agent
