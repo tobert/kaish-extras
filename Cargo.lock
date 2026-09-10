@@ -458,7 +458,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1522,9 +1522,9 @@ dependencies = [
 
 [[package]]
 name = "kaish-client"
-version = "0.17.0"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dac8beda9d7b6b5b08b7a8d9308ebd4a5cf9748c9bcaf4714e4c8c6bbdedb31f"
+checksum = "ad9473092492eb9238df6cbb63b8d2b88e1aa0de4d6cdeb5d68d217373c840fc"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1537,9 +1537,9 @@ dependencies = [
 
 [[package]]
 name = "kaish-glob"
-version = "0.17.0"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c827be08f68998d484f1f8ab75bc9286d5af73914e68922e3307df172b70c5f"
+checksum = "6a8f0120878d1b18b3608cb0eacfcb55db97fd6b7a8374ee1fd44b507780985f"
 dependencies = [
  "async-trait",
  "ignore",
@@ -1549,18 +1549,18 @@ dependencies = [
 
 [[package]]
 name = "kaish-help"
-version = "0.17.0"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66429f16e23a1cde9d3f31576ee7f5c8702cde9ffe61dcba8d764293fae43141"
+checksum = "1181e0536c6114d2a3395e089aec38f2526ff25bbda16224f3b995e4815dfa5b"
 dependencies = [
  "kaish-types",
 ]
 
 [[package]]
 name = "kaish-kernel"
-version = "0.17.0"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "272ad77a8b76a4421f0825f6a3f933e03565c2cd5695220d94f1393faf17376c"
+checksum = "198f122a3f1238e1bdad93f7893360f6968e8895c77aacc490e7a38536688dd8"
 dependencies = [
  "anyhow",
  "ariadne",
@@ -1609,9 +1609,9 @@ dependencies = [
 
 [[package]]
 name = "kaish-tool-api"
-version = "0.17.0"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "456b91321479390b3fadc10f5973aa969fec0aa89abb513d671e2218bbd0c4b2"
+checksum = "9a5bc69b72b8673b23e88ef1cfd0c10eec1c64f62fcea8c3a2fcebc721316924"
 dependencies = [
  "async-trait",
  "clap",
@@ -1678,9 +1678,9 @@ dependencies = [
 
 [[package]]
 name = "kaish-types"
-version = "0.17.0"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "303b23573cb6e586fa3e1207ecb6d0e8778f575b0be180d11298704db34fe592"
+checksum = "093211624f8fc7dd646c1e4240ad2f77a092c2208e304a7a096c2c4e245d1cc1"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -1692,9 +1692,9 @@ dependencies = [
 
 [[package]]
 name = "kaish-vfs"
-version = "0.17.0"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36d977d0d38ca7707d88dc8514319403b364517ebf7afb76251432962a67a93b"
+checksum = "8fc0e3aa081885961267f10b36b19e06611b8560ec7c57b3f8bf84c64d3391e0"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -2147,7 +2147,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2413,7 +2413,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2826,7 +2826,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

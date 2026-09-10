@@ -163,13 +163,18 @@ async fn a_disabled_verb_is_refused_by_the_kernel_before_reaching_our_own_guard(
 /// the schema level: a disabled verb is absent from what an agent is told
 /// exists, not merely rejected once asked for by name.
 ///
-/// Read what each half proves, because they are not the same claim. The
-/// roster names schema **nodes**, so for the eight one-word verbs it proves
-/// verb-level absence directly, and for `worktree list` it proves only that
-/// the node went with its last child. The examples half is what carries the
-/// leaf. Neither can see a disabled leaf left under a node a sibling keeps
-/// alive — the examples are filtered by the config, not by the schema, so
-/// they would drop the verb either way. That case is
+/// Read what each half proves, because they are not quite the same claim.
+/// Since kaish 0.17.1, `push_subcommand_roster` (kaish-help's `topic.rs`)
+/// emits one row per schema node at any depth: an intermediate node like
+/// `worktree` gets its own row alongside its child `worktree list`, so the
+/// roster names every node on the path to an enabled leaf, not the leaf
+/// alone (`path_prefixes` below reconstructs exactly that set). For the
+/// eight one-word verbs a prefix is the whole verb, so the roster proves
+/// verb-level absence directly there; for `worktree list` it proves the leaf
+/// gone too, once nothing enabled still needs the `worktree` node. Neither
+/// half can see a disabled leaf left under a node a sibling keeps alive —
+/// the examples are filtered by the config, not by the schema, so they would
+/// drop the verb either way. That case is
 /// `schema_leaves_are_exactly_the_enabled_verbs` (src/tool.rs), which walks
 /// the schema itself; this gate is about the rendered surface an agent
 /// reads. Named by the kaibo review of the 0.17 bump, which found the
@@ -200,15 +205,12 @@ async fn a_disabled_verb_is_absent_from_help_and_a_negative_control_verb_is_pres
         roster.sort();
         let examples = example_commands(&text);
 
-        // The roster names schema nodes, so a two-word verb contributes its
-        // first word: `worktree list` is reachable through the `worktree`
-        // node, which stands exactly as long as one verb under it is enabled.
         // Equality rather than a pair of contains loops — it fails on a verb
         // the roster invents as well as one it drops.
         let mut expected: Vec<String> = Verb::ALL
             .iter()
             .filter(|verb| *verb != disabled)
-            .map(|verb| node_of(verb).to_string())
+            .flat_map(path_prefixes)
             .collect();
         expected.sort();
         expected.dedup();
@@ -225,10 +227,7 @@ async fn a_disabled_verb_is_absent_from_help_and_a_negative_control_verb_is_pres
             disabled
         );
 
-        // Negative control: every other verb must still be demonstrated. The
-        // examples reach a leaf the roster cannot name — `worktree list` is
-        // one level below what kaish 0.17's `help <tool>` renders — so this
-        // is the only surface here that distinguishes the two-word verbs.
+        // Negative control: every other verb must still be demonstrated.
         for enabled in Verb::ALL {
             if enabled == disabled {
                 continue;
@@ -292,10 +291,14 @@ fn subcommand_roster(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The schema node a verb hangs from: its first argv word. `worktree list`
-/// lives under `worktree`; every other verb is a node of its own.
-fn node_of(verb: &Verb) -> &'static str {
-    verb.as_str().split(' ').next().expect("a verb spelling is not empty")
+/// Every node on the path to `verb`, root first: `["worktree", "worktree
+/// list"]` for the nested verb, `["branch"]` for a one-word one. kaish's
+/// roster emits one row per schema node rather than one row per leaf, so
+/// this is what a leaf's presence in the schema actually implies the roster
+/// will show.
+fn path_prefixes(verb: &Verb) -> Vec<String> {
+    let words: Vec<&str> = verb.as_str().split(' ').collect();
+    (1..=words.len()).map(|n| words[..n].join(" ")).collect()
 }
 
 /// Every command `help git`'s `Examples:` block demonstrates, as the words

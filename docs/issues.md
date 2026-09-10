@@ -1390,42 +1390,6 @@ the live OpenAPI spec; ask for it when this starts.
 
 ## kaish — found by the 0.17 bump (2026-09-01)
 
-- **K1 — `help <tool>` renders one level of subcommands, so `worktree list` is
-  never named.** kaish 0.17's `topic::tool_help` grew a `Subcommands:` roster
-  that prints each subcommand and its flags (`kaish-help/src/topic.rs`), but it
-  does not recurse: it walks `schema.subcommands` and then only `sub.params`.
-  `git worktree` is a node with `list` under it, so `help git` prints
-  `worktree — Work with the repository's working trees` and stops. An agent
-  reading help learns the node exists and cannot learn the verb. The
-  `Examples:` block carries `git worktree list`, which is the only reason the
-  verb is discoverable at all — and B.11's write profiles add three more verbs
-  under that same node, each of which would land equally unnamed. Fix belongs
-  in kaish (recurse, or render the full path), not here. Our own gate reads
-  both surfaces since the bump: `router_kernel_drift`'s roster assertion covers
-  the node, its examples assertion covers the leaf.
-
-  **Fixed in kaish for 0.17.1 — and the fix will turn our gate red, on
-  purpose.** kaish-lead took the flat full-path shape and made it a written
-  contract: the full path at a **fixed two-space indent at every depth**, ` — `
-  between path and description, params indented under their line, asserted by a
-  kaish test at depth 2 and depth 3. So `help git` will print `worktree list —
-  …` where it prints `worktree — …` today.
-
-  `subcommand_roster` reads exactly that shape and will start returning
-  `"worktree list"`, while `expected` is built from `node_of(verb)` — the first
-  argv word. The equality fails, correctly, because the surface changed. The
-  edit at that bump is small and should be made deliberately rather than by
-  making the assertion permissive: drop `node_of`, build `expected` from
-  `verb.as_str()` directly, and delete the comment explaining why the roster
-  names nodes. The gate then covers leaves on both surfaces, which is stronger
-  than what we have — and `schema_leaves_are_exactly_the_enabled_verbs` in
-  src/tool.rs stops being the only leaf-level assertion. Do **not** teach the
-  parser to accept either dialect; one of them will be wrong.
-
-  The same fix extends to `kaish-tools <name>`, which was worse — `introspect.rs`
-  renders no subcommands at any depth — so both surfaces will publish the same
-  roster shape. Our gate reads only `help git` today; if it ever reads the other,
-  it will find the same structure rather than a second dialect.
 - **K2 — 0.17's leading-zero rule stops at kaish's own shell; our argv is
   unchanged, and still agrees with git.** 0.17 makes a leading zero an error
   everywhere kaish itself needs a number, and classifies `007` as the string

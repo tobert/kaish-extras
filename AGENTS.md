@@ -94,15 +94,19 @@ to **published crates.io versions** (`"0.17"` as of 2026-09-01). Rules:
   workspace; check the answer at the source rather than reasoning from the
   entry. The 0.16 entry that looked like it moved `$(git …)` turned out not to
   — see "Command substitution binds text".
-- **`help <tool>` renders one level of subcommands, not two.** Since 0.17 an
-  agent reading `help git` sees `worktree — Work with the repository's working
-  trees` and never learns that `list` is the verb under it. Every one-word verb
-  is named with its flags; `worktree list` is reachable only from the
-  `Examples:` block. Fixed in kaish for 0.17.1, which makes the rendered shape
-  a contract — full path at a fixed two-space indent at every depth, ` — `
-  between path and description. **`router_kernel_drift` will go red on that
-  bump and the fix is a deliberate three-line edit, not a permissive parser**:
-  K1 in [docs/issues.md](docs/issues.md) spells it out.
+- **`help <tool>` rendered one level of subcommands, not two, through 0.17.0** —
+  an agent reading `help git` saw `worktree — Work with the repository's
+  working trees` and never learned that `list` was the verb under it. Fixed in
+  kaish 0.17.1: `kaish-help`'s `push_subcommand_roster` now recurses to any
+  depth, one flat two-space line per full path (`worktree list — …`). The
+  0.17.2 bump here landed that fix and turned `router_kernel_drift` red as
+  planned, but not quite as planned: the roster emits one row **per schema
+  node**, so `worktree` kept its own row alongside the new `worktree list`
+  row, rather than the leaf replacing the node as the pre-bump plan assumed.
+  `expected` in `router_kernel_drift.rs` is now built from every prefix of
+  each enabled verb's path (`path_prefixes`), not the verb alone — checked
+  against the actual roster output and against `kaish-help`'s renderer
+  (`push_subcommand_roster` in `topic.rs`), not reasoned from the changelog.
 - `kaish-kernel` is `default-features = false`. Keep it that way: a sibling
   crate enabling kernel default features tramples the no-default choice
   (`localfs` etc. must not leak into the browser build).
