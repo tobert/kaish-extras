@@ -20,6 +20,10 @@ live here:
   precisely in [docs/embedding-git.md](docs/embedding-git.md).
 - *(planned)* further tool bundles kept out of kaish core the same way: jq and
   ripgrep as add-ons.
+- *(planned)* **`python/`** — the kernel behind a thin pyo3 layer, a `kaish`
+  package on PyPI. `plan()` first, for the analysis scripts that shell out
+  today; `execute()` second, for a Python agent's `run_kaish` tool. The plan
+  and the decisions already made are in [docs/python.md](docs/python.md).
 
 ## How the playground works
 
