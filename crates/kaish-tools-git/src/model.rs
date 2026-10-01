@@ -266,8 +266,9 @@ pub struct StatusReport {
     /// fact about the repository, not about how many rows fit under `--limit`.
     pub totals: StatusTotals,
     /// Whether the working tree is clean: no staged, unstaged, untracked or
-    /// conflicted changes, **and** every tracked path was compared. Ignored
-    /// entries do not make a tree dirty.
+    /// conflicted changes, **and** every tracked path in the report was
+    /// compared. Ignored entries do not make a tree dirty. Like every total,
+    /// it covers the paths `--path` selects and no others.
     ///
     /// An uncompared path (`totals.blob_capped` above zero) makes this
     /// `false`. A file this build declined to read is one it cannot call

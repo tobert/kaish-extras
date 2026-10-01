@@ -378,7 +378,8 @@ In JSON, `index`/`worktree` each take one of
 `worktree` is additionally `null` on a path `status` did not compare: its
 working-tree file is over `max_blob_bytes`, so `blob_capped` is `true`, the
 entry claims no unstaged state, `totals.blob_capped` counts it and `clean` is
-`false`. The report continues — one over-cap file costs that path, not the
+`false` — over the paths `--path` selects, like every other total. The report
+continues — one over-cap file costs that path, not the
 call.
 
 **Porcelain letters in the text surface, self-describing words in JSON**
@@ -1510,14 +1511,16 @@ exit 1 and no report. It now declines that path and reports the rest.
   it does not. `null` is the same answer `additions` gives past the same cap.
   The staged column stays exact — HEAD against the index reads no working-tree
   file.
-- **`clean` now means *verified* clean.** It is `false` while any path went
-  uncompared. A partial report that says `clean: true` is the failure mode the
+- **`clean` now means *verified* clean.** It is `false` while any path in the
+  report went uncompared. Like every total it is scoped to the paths `--path`
+  selects, so `--path src` beside an over-cap file outside `src` reports
+  `clean: true`: the question was about `src`. A partial report that says `clean: true` is the failure mode the
   old whole-call refusal was defending against, and the flag alone does not
   close it: `clean` is the field a caller reads first.
 - **`show` was left alone, and `diff` was left alone.** `show`'s one blob is
   the whole answer: it withholds the content, says so on stderr and exits 0,
   which is the same decline one row at a time. `diff`'s comparison *is* its
-  answer, so it still fails the call — now the only producer of
+  answer, so it still fails the call — now the only verb that propagates
   `BlobTooLarge` (docs/issues.md **P16**).
 
 **2026-08-22 — PR 7: the three listing verbs, and blame deferred.**

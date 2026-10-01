@@ -961,9 +961,12 @@ left, ranked:
   `verbs/diff.rs:461` and `:766` propagate `BlobTooLarge`, so a `git diff`
   against the working tree exits 1 and reports nothing when any compared file
   is over `max_blob_bytes` (8 MiB default). That may well be right: a diff's
-  result *is* the comparison, and `--limit` bounds the file set before any blob
-  is read. But `diff` is now the only producer of `BlobTooLarge`, and the
-  behavior has no test — `an_oversize_blob_is_declined_and_declared` covers the
+  result *is* the comparison. `--limit` is no help with it: `worktree_side`
+  hashes every tracked file the `--path` filter kept (`verbs/diff.rs:437-465`)
+  before the limit applies (`:599-607`), so one over-cap file exits 1 even
+  when the limit would have dropped it from the report. `--path` is the
+  mitigation that works. `diff` is now the only verb that propagates
+  `BlobTooLarge`, and the behavior has no test — `an_oversize_blob_is_declined_and_declared` covers the
   commit-to-commit path, which sets `lines_capped` and keeps going. Decide
   whether `diff` follows `status` here or keeps the refusal, then pin whichever
   it is.
