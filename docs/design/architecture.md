@@ -1098,11 +1098,16 @@ The residual carve-out, stated honestly: a symlinked leaf that gitoxide opens
 repository-named path in `refs/`, and the per-directory `.gitignore` files
 `gix-worktree`'s ignore `Stack` reads as `git status` descends the working
 tree — is not intercepted by any of the above, because nothing here wraps
-every `open` gitoxide makes. The ref half of that is a **content** read and
-not a one-bit probe: a loose ref is 40 hex characters, and `.git/HEAD` naming
-a symlinked one makes `git info` return the target file's first 40 characters
-inside a "could not be found" message (`docs/issues.md`'s P13,
-`hostile_repo.rs::a_symlinked_loose_ref_still_reaches_a_host_file`). The
+every `open` gitoxide makes. Both halves of that are **content** reads, not
+one-bit probes. The object half is a cross-project read: another repository's
+loose object, fan-out directory or `objects/pack` symlinked into this one
+returns that repository's blobs, commit metadata and history, whole and at
+exit 0. The ref half returns 40 characters at a time: a loose ref is 40 hex
+characters, and `.git/HEAD` naming a symlinked one makes every verb that
+resolves HEAD return the target file's first 40 characters inside a "could not
+be found" message (`docs/issues.md`'s P13,
+`hostile_repo.rs::a_symlinked_loose_object_reads_another_repositorys_object`
+and `::a_symlinked_loose_ref_still_reaches_a_host_file`). The
 `.gitignore` reads belong in that list and not in a footnote: they are the one
 carve-out path that reaches into the *working tree* rather than `.git`, the
 `Stack` consults them on every descent (`--untracked no` does not avoid them,

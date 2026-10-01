@@ -1705,6 +1705,15 @@ async fn a_config_with_no_include_still_answers() {
 const HOST_OID: &str = "0123456789abcdef0123456789abcdef01234567";
 const HOST_REF_NAME: &str = "leaked-from-the-host";
 
+/// Bytes that follow a 40-hex prefix in a host file. Distinctive so that
+/// "only the first 40 characters came back" is an assertion about content
+/// rather than about length.
+const TRAILING_SENTINEL: &str = "TRAILING-SENTINEL-4b7e";
+
+/// A host file that is not a ref at all. Shaped like something worth stealing
+/// so a test asserting its absence is asserting about this file and no other.
+const NON_HEX_SENTINEL: &str = "NON-HEX-SENTINEL-9d2c-private-key-material";
+
 /// A repository inside the mount with one ref leaf symlinked at a file
 /// outside it.
 ///
@@ -1712,6 +1721,18 @@ const HOST_REF_NAME: &str = "leaked-from-the-host";
 /// that leaf's parser wants: a `packed-refs` line for `packed-refs`, a bare
 /// oid for anything read as a single ref.
 fn ref_leaf_fixture(leaf: &str) -> (Fixture, PathBuf) {
+    let body = if leaf == "packed-refs" {
+        format!("{HOST_OID} refs/heads/{HOST_REF_NAME}\n")
+    } else {
+        format!("{HOST_OID}\n")
+    };
+    ref_leaf_fixture_with_body(leaf, &body)
+}
+
+/// The same fixture with the host file's bytes chosen by the caller — what
+/// says whether the parse wants the whole file or only its first 40
+/// characters.
+fn ref_leaf_fixture_with_body(leaf: &str, body: &str) -> (Fixture, PathBuf) {
     require_git();
     let fixture = Fixture::empty();
     let mount = fixture.path("mount");
@@ -1725,11 +1746,6 @@ fn ref_leaf_fixture(leaf: &str) -> (Fixture, PathBuf) {
     git(&repo, &["commit", "-m", "inside", "--quiet"]);
 
     let host_file = outside.join("hostfile");
-    let body = if leaf == "packed-refs" {
-        format!("{HOST_OID} refs/heads/{HOST_REF_NAME}\n")
-    } else {
-        format!("{HOST_OID}\n")
-    };
     std::fs::write(&host_file, body).expect("write the host file");
 
     let target = repo.join(".git").join(leaf);
@@ -1906,5 +1922,429 @@ async fn a_symlinked_loose_ref_still_reaches_a_host_file() {
          first 40 characters come back — if they no longer do, the leak is \
          closed and the docs and this test must say so: {}",
         result.err
+    );
+}
+
+/// The residual is a 40-hex **prefix**, not a host file that is exactly an oid.
+///
+/// `ref_leaf_fixture` writes `<40 hex>\n` — a file that *is* an oid — which
+/// left open whether gix's loose-ref parse demands the whole file or takes
+/// what it can from the front. It takes the front: all three shapes below
+/// return the same 160 bits, so `docs/embedding-git.md`'s "any host file that
+/// is 40-hex-shaped" is the right description and "a host file that is an
+/// oid" would have been too narrow.
+///
+/// The trailing bytes do **not** come back, and that is asserted too — the
+/// leak is 160 bits per invocation, not the whole file.
+#[tokio::test]
+async fn a_host_file_that_only_begins_with_40_hex_leaks_those_40() {
+    for (label, body) in [
+        ("a space and more text", format!("{HOST_OID} {TRAILING_SENTINEL}\n")),
+        ("more text with no separator", format!("{HOST_OID}{TRAILING_SENTINEL}\n")),
+        ("a second line", format!("{HOST_OID}\n{TRAILING_SENTINEL}\n")),
+    ] {
+        let (_fixture, mount) = ref_leaf_fixture_with_body("refs/heads/pwn", &body);
+        std::fs::write(mount.join("repo/.git/HEAD"), "ref: refs/heads/pwn\n")
+            .expect("point HEAD at the symlinked ref");
+
+        let result = info_at(mount, "/mnt/repo").await;
+        assert_eq!(
+            result.code, 1,
+            "{label}: the documented residual is a failed object lookup: {}",
+            result.err
+        );
+        assert!(
+            result.err.contains(HOST_OID),
+            "{label}: a 40-hex prefix must still leak its 40 characters — if it \
+             no longer does, the leak narrowed and the docs must say so: {}",
+            result.err
+        );
+        assert!(
+            !result.err.contains(TRAILING_SENTINEL),
+            "{label}: only the first 40 characters are documented as leaking, \
+             and more came back: {}",
+            result.err
+        );
+    }
+}
+
+/// Non-hex content is one bit, and this is what makes that true: the parse
+/// failure names the ref the repository named and nothing out of the file.
+///
+/// "Still a one-bit content probe" is a claim about the **error text**. A
+/// parse error that quoted the bytes it choked on would be more than one bit,
+/// so the absence of those bytes is the assertion, and the presence of
+/// `refs/heads/pwn` is the negative control that says the symlinked leaf was
+/// actually reached rather than the fixture never running.
+#[tokio::test]
+async fn a_non_hex_host_file_is_refused_without_echoing_its_bytes() {
+    let (_fixture, mount) = ref_leaf_fixture_with_body(
+        "refs/heads/pwn",
+        &format!("{NON_HEX_SENTINEL}\nsecond line\n"),
+    );
+    std::fs::write(mount.join("repo/.git/HEAD"), "ref: refs/heads/pwn\n")
+        .expect("point HEAD at the symlinked ref");
+
+    let result = info_at(mount, "/mnt/repo").await;
+    let rendered = format!("{} {:?}", result.err, result.output());
+    assert_eq!(
+        result.code, 1,
+        "a host file that does not parse as a ref fails the read: {rendered}"
+    );
+    assert!(
+        result.err.contains("refs/heads/pwn"),
+        "the symlinked leaf must actually have been read for this to say \
+         anything: {rendered}"
+    );
+    assert!(
+        !rendered.contains(NON_HEX_SENTINEL),
+        "the parse failure echoed the host file's bytes, which makes the \
+         residual more than one bit: {rendered}"
+    );
+}
+
+/// A symlinked loose ref is invisible to `branch`, which is what makes the
+/// residual a by-name read rather than a listing.
+///
+/// This was a doc comment on `a_symlinked_refs_hierarchy_is_refused` with
+/// nothing asserting it once that listing became a refusal. `refs/heads/pwn`
+/// is not a fixed name and is not screened, so the listing path can still be
+/// exercised directly — and it must go red the day gix's iteration starts
+/// following a symlink, because `docs/embedding-git.md` says it does not.
+#[tokio::test]
+async fn a_symlinked_loose_ref_does_not_appear_in_a_listing() {
+    let (_fixture, mount) = ref_leaf_fixture("refs/heads/pwn");
+
+    let result = branch_at(mount, "/mnt/repo").await;
+    assert_eq!(result.code, 0, "an ordinary listing must answer: {}", result.err);
+    let json = result
+        .output()
+        .and_then(|o| o.rich_json.clone())
+        .expect("--json carries the typed model");
+    let names: Vec<String> = json["branches"]
+        .as_array()
+        .expect("branches array")
+        .iter()
+        .map(|b| b["name"].as_str().expect("name").to_string())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["main".to_string()],
+        "gix's ref iteration followed a symlink: {names:?}"
+    );
+}
+
+/// The negative control: the same ref as a real file **is** listed.
+///
+/// Without it, "the listing holds only `main`" would pass just as well against
+/// a `branch` that never listed anything the fixture put under `refs/heads`.
+#[tokio::test]
+async fn a_real_loose_ref_at_the_same_path_does_appear_in_the_listing() {
+    let (_fixture, mount) = ref_leaf_fixture("refs/heads/pwn");
+    let repo = mount.join("repo");
+    let leaf = repo.join(".git/refs/heads/pwn");
+    std::fs::remove_file(&leaf).expect("remove the symlink");
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    std::fs::write(&leaf, format!("{head}\n")).expect("write a real loose ref");
+
+    let result = branch_at(mount, "/mnt/repo").await;
+    assert_eq!(result.code, 0, "an ordinary listing must answer: {}", result.err);
+    let json = result
+        .output()
+        .and_then(|o| o.rich_json.clone())
+        .expect("--json carries the typed model");
+    let names: Vec<String> = json["branches"]
+        .as_array()
+        .expect("branches array")
+        .iter()
+        .map(|b| b["name"].as_str().expect("name").to_string())
+        .collect();
+    assert_eq!(names, vec!["main".to_string(), "pwn".to_string()]);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The objects gix opens by name — and the host's other repositories
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The bytes that exist only in the repository outside the mount.
+///
+/// Distinctive on purpose: the two outcomes here — "the pack opened and read
+/// nothing interesting" and "the pack never opened" — both exit non-zero, so
+/// only content tells them apart. An exit code would have proven nothing.
+const HOST_BLOB_TEXT: &str = "SENTINEL-cross-project-object-read-8f3a2c1d\n";
+
+/// Build the cross-project fixture: a donor repository **outside** the mount
+/// holding [`HOST_BLOB_TEXT`], and an ordinary repository inside it.
+///
+/// `packed` decides where the donor keeps its objects — loose, or repacked
+/// into `objects/pack/pack-<hash>.{pack,idx}`. Returns the mount root, the
+/// donor's path, and the donor's blob and commit oids.
+fn cross_project_fixture(packed: bool) -> (Fixture, PathBuf, PathBuf, String, String) {
+    require_git();
+    let fixture = Fixture::empty();
+    let mount = fixture.path("mount");
+    let donor = fixture.path("outside/donor");
+
+    std::fs::create_dir_all(&donor).expect("create the donor directory");
+    git(&donor, &["init", "--initial-branch=main", "--quiet"]);
+    write_file(&donor, "secret.txt", HOST_BLOB_TEXT);
+    git(&donor, &["add", "."]);
+    git(&donor, &["commit", "-m", "the host repository's own commit", "--quiet"]);
+    if packed {
+        git(&donor, &["repack", "-ad", "--quiet"]);
+    }
+    let blob = git(&donor, &["rev-parse", "HEAD:secret.txt"]);
+    let commit = git(&donor, &["rev-parse", "HEAD"]);
+
+    let repo = mount.join("repo");
+    std::fs::create_dir_all(&repo).expect("create the repository directory");
+    git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+    write_file(&repo, "README.md", "inside the mount\n");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "inside", "--quiet"]);
+
+    assert_the_mount_does_not_hold_the_sentinel(&mount);
+    (fixture, mount, donor, blob, commit)
+}
+
+/// A read that returns [`HOST_BLOB_TEXT`] can only have come from outside the
+/// mount — checked rather than assumed, before any symlink is planted.
+fn assert_the_mount_does_not_hold_the_sentinel(dir: &Path) {
+    for entry in std::fs::read_dir(dir).expect("read the mount") {
+        let path = entry.expect("entry").path();
+        if path.is_symlink() {
+            continue;
+        }
+        if path.is_dir() {
+            assert_the_mount_does_not_hold_the_sentinel(&path);
+        } else if let Ok(bytes) = std::fs::read(&path) {
+            let needle = HOST_BLOB_TEXT.trim_end().as_bytes();
+            assert!(
+                !bytes.windows(needle.len()).any(|w| w == needle),
+                "the sentinel is already inside the mount at {} — a positive \
+                 result would prove nothing",
+                path.display()
+            );
+        }
+    }
+}
+
+/// Run `git log <rev>` with `mount_real` mounted at `/mnt`.
+async fn log_at(mount_real: PathBuf, cwd: &str, rev: &str) -> ExecResult {
+    let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), mount_real));
+    let mut ctx = TestCtx::new(backend, cwd);
+    let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
+    let mut args = ToolArgs::new();
+    args.positional.push(Value::String("log".to_string()));
+    args.positional.push(Value::String(rev.to_string()));
+    tool.execute(args, &mut ctx).await
+}
+
+/// The residual, pinned: a symlinked **loose object** reads another
+/// repository's object store.
+///
+/// This asserts the leak, deliberately, the way
+/// `a_symlinked_loose_ref_still_reaches_a_host_file` does. `objects` is a
+/// fixed name and is screened; `objects/<ab>/<rest>` is named by the oid, and
+/// gix opens it by name. The host files a hostile repository most wants are
+/// every **other** repository's objects — already zlib, already exactly the
+/// shape gix reads — and for a blob whose oid is public the attacker names the
+/// path exactly.
+///
+/// `docs/issues.md`'s P13 carries the close. When it lands this test goes red,
+/// which is the point. Update it, `docs/embedding-git.md` and P13 together; do
+/// not weaken it in place.
+#[tokio::test]
+async fn a_symlinked_loose_object_reads_another_repositorys_object() {
+    let (_fixture, mount, donor, blob, _commit) = cross_project_fixture(false);
+
+    let (fan_out, rest) = blob.split_at(2);
+    let donor_object = donor.join(".git/objects").join(fan_out).join(rest);
+    assert!(donor_object.is_file(), "the donor keeps its blob loose");
+    let dir = mount.join("repo/.git/objects").join(fan_out);
+    std::fs::create_dir_all(&dir).expect("create the fan-out directory");
+    std::os::unix::fs::symlink(&donor_object, dir.join(rest))
+        .expect("plant the loose-object symlink");
+
+    let result = show_at(mount, "/mnt/repo", &blob).await;
+    assert_eq!(
+        result.code, 0,
+        "the documented residual is that this read succeeds: {}",
+        result.err
+    );
+    assert_eq!(
+        result.text_out(),
+        HOST_BLOB_TEXT,
+        "the residual documented in embedding-git.md is that another \
+         repository's object comes back whole — if it no longer does, the \
+         leak is closed and the docs and this test must say so"
+    );
+}
+
+/// The same residual one level up, and worse: a symlinked `objects/pack`
+/// directory reads another repository's whole pack.
+///
+/// `objects/pack` is a fixed name under a directory this crate has already
+/// ceiling-checked, so unlike the loose case it *is* screenable — see P13.
+/// Until it is screened, the donor's blob, its commit metadata and its history
+/// all come back.
+#[tokio::test]
+async fn a_symlinked_objects_pack_directory_reads_another_repositorys_pack() {
+    let (_fixture, mount, donor, blob, commit) = cross_project_fixture(true);
+
+    let pack_dir = mount.join("repo/.git/objects/pack");
+    let _ = std::fs::remove_dir_all(&pack_dir);
+    std::os::unix::fs::symlink(donor.join(".git/objects/pack"), &pack_dir)
+        .expect("plant the pack-directory symlink");
+
+    let by_blob = show_at(mount.clone(), "/mnt/repo", &blob).await;
+    assert_eq!(by_blob.code, 0, "the residual is that this succeeds: {}", by_blob.err);
+    assert_eq!(by_blob.text_out(), HOST_BLOB_TEXT, "the donor's blob came back whole");
+
+    let by_commit = show_at(mount.clone(), "/mnt/repo", &commit).await;
+    assert_eq!(by_commit.code, 0, "the residual is that this succeeds: {}", by_commit.err);
+    assert!(
+        by_commit.text_out().contains("the host repository's own commit"),
+        "the donor's commit message came back: {}",
+        by_commit.text_out()
+    );
+
+    let walked = log_at(mount, "/mnt/repo", &commit).await;
+    assert_eq!(walked.code, 0, "the residual is that this succeeds: {}", walked.err);
+    assert!(
+        walked.text_out().contains("the host repository's own commit"),
+        "the donor's history walked: {}",
+        walked.text_out()
+    );
+}
+
+/// A symlinked `.idx` is **not** read, and the reason is gix's own scan, not
+/// anything this crate does.
+///
+/// `gix_odb`'s pack scan filters entries on `DirEntry::metadata()`, which is
+/// an lstat — `file_type().is_file()` is false for a symlink, so a symlinked
+/// index is skipped before it is opened
+/// (`gix-odb-0.83.0/src/store_impls/dynamic/load_index.rs:486`). That is an
+/// accident of gix's implementation this crate does not control, so it is
+/// pinned here: if gix moves to `fs::metadata`, this goes red and the pack
+/// half of the residual widens by one shape.
+#[tokio::test]
+async fn a_symlinked_pack_index_is_skipped_by_gixs_pack_scan() {
+    let (_fixture, mount, donor, blob, _commit) = cross_project_fixture(true);
+
+    let pack_dir = mount.join("repo/.git/objects/pack");
+    std::fs::create_dir_all(&pack_dir).expect("create the pack directory");
+    let mut planted = 0;
+    for entry in std::fs::read_dir(donor.join(".git/objects/pack")).expect("read the donor's packs")
+    {
+        let entry = entry.expect("entry");
+        std::os::unix::fs::symlink(entry.path(), pack_dir.join(entry.file_name()))
+            .expect("plant a pack-file symlink");
+        planted += 1;
+    }
+    assert!(planted >= 2, "the donor must have a pack and an index, got {planted}");
+
+    // The mechanism, asserted rather than described: what the scan's filter
+    // sees for a planted entry.
+    for entry in std::fs::read_dir(&pack_dir).expect("read the planted packs") {
+        let entry = entry.expect("entry");
+        let lstat = entry.metadata().expect("DirEntry::metadata");
+        assert!(
+            !lstat.file_type().is_file() && lstat.file_type().is_symlink(),
+            "DirEntry::metadata stopped being an lstat, which is the only \
+             thing keeping a symlinked pack out"
+        );
+    }
+
+    let result = show_at(mount, "/mnt/repo", &blob).await;
+    assert!(
+        !result.text_out().contains("SENTINEL"),
+        "a symlinked pack index was read: {}",
+        result.text_out()
+    );
+    assert_eq!(
+        result.code, 1,
+        "the oid resolves to nothing, so the lookup fails: {}",
+        result.err
+    );
+}
+
+/// The negative control for the scan: the **same** pack, copied in rather than
+/// symlinked, is read.
+///
+/// Without it, "the symlinked pack returned nothing" would pass just as well
+/// against a fixture whose pack was malformed, whose oid was wrong, or that
+/// never reached the pack path at all.
+#[tokio::test]
+async fn the_same_pack_copied_in_is_read() {
+    let (_fixture, mount, donor, blob, _commit) = cross_project_fixture(true);
+
+    let pack_dir = mount.join("repo/.git/objects/pack");
+    std::fs::create_dir_all(&pack_dir).expect("create the pack directory");
+    for entry in std::fs::read_dir(donor.join(".git/objects/pack")).expect("read the donor's packs")
+    {
+        let entry = entry.expect("entry");
+        std::fs::copy(entry.path(), pack_dir.join(entry.file_name())).expect("copy a pack file");
+    }
+
+    let result = show_at(mount, "/mnt/repo", &blob).await;
+    assert_eq!(result.code, 0, "a real pack file is read: {}", result.err);
+    assert_eq!(result.text_out(), HOST_BLOB_TEXT);
+}
+
+/// The same read one level up: a symlinked **fan-out directory**.
+///
+/// `objects/<ab>` is one of 256 fixed names under a directory this crate has
+/// already ceiling-checked, so unlike the object file below it this shape *is*
+/// screenable — see P13. Until it is screened it reads the donor's objects
+/// without the repository naming an object file at all.
+#[tokio::test]
+async fn a_symlinked_object_fan_out_directory_reads_another_repositorys_object() {
+    let (_fixture, mount, donor, blob, _commit) = cross_project_fixture(false);
+
+    let (fan_out, _rest) = blob.split_at(2);
+    let dir = mount.join("repo/.git/objects").join(fan_out);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::os::unix::fs::symlink(donor.join(".git/objects").join(fan_out), &dir)
+        .expect("plant the fan-out symlink");
+
+    let result = show_at(mount, "/mnt/repo", &blob).await;
+    assert_eq!(
+        result.code, 0,
+        "the documented residual is that this read succeeds: {}",
+        result.err
+    );
+    assert_eq!(result.text_out(), HOST_BLOB_TEXT);
+}
+
+/// The half of the object residual that really is small: an **ordinary** host
+/// file at an object path is not an object, and the refusal says nothing about
+/// its bytes.
+///
+/// This is what "small for arbitrary host files" rests on — a loose object is
+/// zlib-compressed and `/etc/passwd` is not. The bytes-absent assertion is the
+/// point: a decode error that quoted what it read would make this a content
+/// probe rather than a failed read, and the negative control is the
+/// cross-project tests above, where the same object path *does* return
+/// content.
+#[tokio::test]
+async fn a_loose_object_symlinked_at_an_ordinary_host_file_is_refused_without_echoing_it() {
+    let (_fixture, mount, _donor, blob, _commit) = cross_project_fixture(false);
+
+    let host_file = mount.parent().expect("scratch root").join("ordinary-host-file");
+    std::fs::write(&host_file, format!("{NON_HEX_SENTINEL}\nnot a git object\n"))
+        .expect("write the host file");
+    let (fan_out, rest) = blob.split_at(2);
+    let dir = mount.join("repo/.git/objects").join(fan_out);
+    std::fs::create_dir_all(&dir).expect("create the fan-out directory");
+    std::os::unix::fs::symlink(&host_file, dir.join(rest)).expect("plant the object symlink");
+
+    let result = show_at(mount, "/mnt/repo", &blob).await;
+    let rendered = format!("{} {:?}", result.err, result.text_out());
+    assert_ne!(result.code, 0, "a host file is not a git object: {rendered}");
+    assert!(
+        !rendered.contains(NON_HEX_SENTINEL),
+        "the failed object read echoed the host file's bytes, which makes it a \
+         content probe rather than a failed read: {rendered}"
     );
 }

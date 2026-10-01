@@ -387,19 +387,58 @@ is taken without its `blob` feature specifically because that feature pulls
 `gix-command`, closing an entire spawn-capable code path rather than
 patching around it.
 
-**What is not closed, stated as content rather than as one bit:** gitoxide
-opens objects, packs and ref files by name, under directories this crate has
-already ceiling-checked, and a symlink at one of those leaves is not
-interceptable without wrapping every gix open. For an *object* that residual
-is small — a loose object is zlib-compressed and a host file is not, so the
-read lands outside and fails to parse. For a *ref* it is not small, and this
-document said otherwise until 2026-08-23. A loose ref is 40 hex characters
-and `packed-refs` is `<40 hex> <name>` lines; those are shapes real host
-files have, and content that parses is content that comes back.
+**What is not closed, and what it yields:** gitoxide opens objects, packs and
+ref files by name, under directories this crate has already ceiling-checked,
+and a symlink at one of those leaves is not interceptable without wrapping
+every gix open. For an *object* that residual is small for arbitrary host
+files — a loose object is zlib-compressed and `/etc/passwd` is not, so the
+read lands outside and fails with "An error occurred while obtaining an
+object from the loose object store", exit 1, naming nothing out of the file
+(`a_loose_object_symlinked_at_an_ordinary_host_file_is_refused_without_echoing_it`)
+— and it is **not** small for the host's *other repositories*, whose objects
+are already exactly the shape gix reads.
+For a *ref* it is not small either, and this document said otherwise until
+2026-08-23. A loose ref is 40 hex characters and `packed-refs` is `<40 hex>
+<name>` lines; those are shapes real host files have, and content that parses
+is content that comes back.
 
-The fixed names in that family are screened, with exit 4 and no read:
-`HEAD`, `packed-refs`, and the `refs/heads`, `refs/tags`, `refs/remotes`
-hierarchies (`a_symlinked_packed_refs_is_refused_before_it_is_read`,
+**The object half is a cross-project read**, measured 2026-08-23 against a
+donor repository outside the mount holding one blob, with the repository
+under test naming the donor's objects:
+
+- `.git/objects/<ab>/<rest>` symlinked at the donor's loose object of the
+  same oid: `show <oid>` returns the donor's blob, exit 0. For a blob whose
+  oid is public — any commit in any public repository — the attacker names
+  that path exactly.
+- `.git/objects/<ab>` symlinked at the donor's fan-out directory: the same
+  read, exit 0, without naming the object file.
+- `.git/objects/pack` symlinked at the donor's `objects/pack`: `show <oid>`
+  returns the donor's blob, `show <commit>` its commit metadata, and `log
+  <commit>` walks its history. Exit 0 throughout.
+- `.git/objects/pack/pack-<hash>.idx` and `.pack` symlinked at the donor's
+  two files: nothing comes back, exit 1. `gix_odb`'s pack scan filters
+  directory entries on `DirEntry::metadata()`, which is an lstat, so a
+  symlinked index is not a file to it and is skipped before it is opened
+  (`gix-odb-0.83.0/src/store_impls/dynamic/load_index.rs:486`). That is gix's
+  implementation, not a check this crate makes, and the same pack copied in
+  **is** read — which is what says the fixture reached the pack path at all.
+
+So a repository from an untrusted source reads the objects of every other
+repository on the host it can name a path to, whole, not 160 bits at a time.
+`objects` itself is screened and every path `objects/info/alternates` names
+is contained; `objects/pack` and the 256 `objects/<ab>` fan-out directories
+are fixed names and could be screened on the same terms, while a loose object
+path the repository names cannot be. Pinned by
+`a_symlinked_loose_object_reads_another_repositorys_object`,
+`a_symlinked_object_fan_out_directory_reads_another_repositorys_object`,
+`a_symlinked_objects_pack_directory_reads_another_repositorys_pack` and
+`a_symlinked_pack_index_is_skipped_by_gixs_pack_scan`, with
+`the_same_pack_copied_in_is_read` as the control
+(`tests/hostile_repo.rs`), and tracked as `docs/issues.md`'s **P13**.
+
+**The ref half.** The fixed names in that family are screened, with exit 4
+and no read: `HEAD`, `packed-refs`, and the `refs/heads`, `refs/tags`,
+`refs/remotes` hierarchies (`a_symlinked_packed_refs_is_refused_before_it_is_read`,
 `a_symlinked_head_is_refused_before_it_is_read`,
 `a_symlinked_refs_hierarchy_is_refused`, `tests/hostile_repo.rs`). Before
 that screen, a `packed-refs` symlinked at a host file returned a branch named
@@ -407,18 +446,28 @@ out of the file's own bytes, with an oid out of them too.
 
 What remains open is a symlink at a path *inside* `refs/` that the repository
 names — `refs/heads/pwn` pointing at a host file. gix's ref iteration does
-not follow one, so it never appears in a listing, but a lookup by name does,
-and a `.git/HEAD` reading `ref: refs/heads/pwn` makes `git info` alone do
-that lookup: the host file's first 40 characters come back inside "Object …
-could not be found". 160 bits per invocation, of any host file that is
-40-hex-shaped; non-hex content fails the parse, which is still a one-bit
-content probe. It is pinned by
+not follow one, so it never appears in a listing
+(`a_symlinked_loose_ref_does_not_appear_in_a_listing`, with
+`a_real_loose_ref_at_the_same_path_does_appear_in_the_listing` as its
+control), but a lookup by name does, and a `.git/HEAD` reading `ref:
+refs/heads/pwn` makes every verb that resolves HEAD do that lookup — `info`,
+`status`, `ls`, `log`, `show` and `branch`, of which `info` needs no argument
+at all. The host file's first 40 characters come back inside "Object … could
+not be found". 160 bits per invocation, of any host file whose first 40
+characters are hex: a file that merely *begins* with 40 hex leaks those 40
+and no more, whatever follows them
+(`a_host_file_that_only_begins_with_40_hex_leaks_those_40`). Non-hex content
+fails the parse with a message naming only the ref the repository named, so
+that case is still a one-bit content probe
+(`a_non_hex_host_file_is_refused_without_echoing_its_bytes`). It is pinned by
 `a_symlinked_loose_ref_still_reaches_a_host_file` and tracked as
 `docs/issues.md`'s **P13**. Closing it eagerly — walking `refs/` at open
 time — would cost every verb an lstat per loose ref on a tree the repository
 sizes, so the close is the platform-level one (`openat2(RESOLVE_BENEATH)` or
 a kaish VFS boundary), not a cheaper check. If your embedder points this tool
-at repositories from an untrusted source, that is the residual to weigh.
+at repositories from an untrusted source, both halves are the residual to
+weigh, and the object half first: it returns whole objects rather than 160
+bits.
 
 **What is not fuzzed at all, and this is stated plainly rather than
 implied otherwise:** there is no fuzz corpus, no `cargo-fuzz` target, and no

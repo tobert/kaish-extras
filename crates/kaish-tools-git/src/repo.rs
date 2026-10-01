@@ -395,27 +395,46 @@ impl ReadRepo {
         //
         // What the residual is, exactly, because a loose description of it was
         // wrong for two years' worth of readers. It said the read "almost
-        // always fails to parse as a git object". That is true of an object:
-        // a loose object is zlib-compressed and a host file is not. It is
-        // **false of a ref**, and refs are the larger half of what gix opens
-        // by name. A loose ref is 40 hex characters — a shape real host files
-        // have — and content that parses is content that comes back:
+        // always fails to parse as a git object". That is true of an
+        // *arbitrary* host file — a loose object is zlib-compressed and
+        // /etc/passwd is not — and false in the two places that matter:
         //
-        //   `.git/refs/heads/pwn` symlinked at a host file whose first line is
-        //   40 hex characters surfaces those 160 bits, and a `.git/HEAD`
-        //   naming that ref reaches it with no help from the caller: `info`
-        //   alone returns "Object <those 40 characters> as referred to by
-        //   refs/heads/pwn could not be found". Non-hex content fails the
-        //   parse, which is still a one-bit content probe.
+        //   The host's **other repositories**. Their objects already are the
+        //   shape gix reads, and for a blob in a public repository the oid,
+        //   and so the path, is known. `.git/objects/<ab>/<rest>` symlinked at
+        //   another repository's loose object returns that object, exit 0; so
+        //   does `.git/objects/<ab>` at its fan-out directory; and
+        //   `.git/objects/pack` at its pack directory hands over that
+        //   repository's blobs, commit metadata and history. A symlinked
+        //   `pack-<hash>.idx` does not, but only because gix_odb's pack scan
+        //   filters entries on `DirEntry::metadata()`, an lstat — gix's
+        //   implementation, not a check made here.
         //
-        // The fixed names in that family — `HEAD`, `packed-refs`, and the
+        //   A **ref**. A loose ref is 40 hex characters — a shape real host
+        //   files have — and content that parses is content that comes back.
+        //   `.git/refs/heads/pwn` symlinked at a host file whose first 40
+        //   characters are hex surfaces those 160 bits, and a `.git/HEAD`
+        //   naming that ref reaches it with no help from the caller: every
+        //   verb that resolves HEAD returns "Object <those 40 characters> as
+        //   referred to by refs/heads/pwn could not be found". Non-hex content
+        //   fails the parse without echoing the file, which is still a one-bit
+        //   content probe.
+        //
+        // The fixed names in the ref family — `HEAD`, `packed-refs`, and the
         // `refs/heads`, `refs/tags`, `refs/remotes` hierarchies — are screened
-        // above, so what is left is a symlink at a path *inside* `refs/` that
-        // the repository names, reached by a lookup by name. `docs/issues.md`
-        // (P13) carries the close; the fixture that pins the leak while it is
-        // open is `a_symlinked_loose_ref_still_reaches_a_host_file` in
-        // tests/hostile_repo.rs, and it goes red the day the close lands,
-        // which is when this comment and the guide have to change with it.
+        // above, so what is left there is a symlink at a path *inside* `refs/`
+        // that the repository names, reached by a lookup by name. On the
+        // object side `objects/pack` and the 256 `objects/<ab>` fan-out
+        // directories are fixed names too, and are deliberately **not**
+        // screened yet: screening them narrows the carve-out without closing
+        // it, because a loose object path the repository names is not a fixed
+        // name. `docs/issues.md` (P13) carries both halves and that decision.
+        //
+        // The fixtures that pin the leaks while they are open are
+        // `a_symlinked_loose_ref_still_reaches_a_host_file` and the three
+        // `a_symlinked_*_reads_another_repositorys_*` tests in
+        // tests/hostile_repo.rs. They go red the day the close lands, which is
+        // when this comment and the guide have to change with them.
         //
         // Walking `refs/` eagerly at open time is not that close: it would
         // cost every verb an lstat per loose ref, on a tree the repository
