@@ -245,6 +245,14 @@ path = "tests/tag.rs"
 name = "worktree"
 path = "tests/worktree.rs"
 
+# docs/issues.md P10: characterization tests for semantic inputs this crate
+# had never been run against — shallow clones, replace refs/grafts, octopus
+# merges, an unborn HEAD, deep tag chains, non-UTF-8 names, `--path ""`, and
+# `core.autocrlf`.
+[[test]]
+name = "semantics"
+path = "tests/semantics.rs"
+
 [[test]]
 name = "write_shaped_identifiers"
 path = "tests/write_shaped_identifiers.rs"

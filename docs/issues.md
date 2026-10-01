@@ -988,16 +988,59 @@ left, ranked:
   available without touching gix.
 
 
-- **P10 — untested semantic inputs, each a characterization test.** Shallow
-  clones (the `refuse_shallow` gate exists, nothing exercises it); replace refs
-  and grafts (git honors them by default, this walk never consults them);
-  octopus merges (every fixture merge has two parents, while `--merges`,
-  `--first-parent`, `--stat` and `^3` all have 3+-parent paths); `status` on an
-  unborn HEAD; deep tag chains against the depth-8 `show` and depth-32
-  `peel_tag_chain` bounds; non-UTF-8 tree entry names (rendered lossily where
-  `git ls-tree` C-quotes, and silently skipped in the untracked walk);
-  `--path ""` (silently matches everything, git errors); and `core.autocrlf`,
-  whose divergence C5 records in prose while every fixture sets it false.
+- **L11 — `git log` fails on a shallow clone, where git stops cleanly at the
+  boundary.** A bug, and the most consequential of P10's findings: a default
+  `git log` in a `--depth 1` checkout — the shape of most CI and benchmark
+  clones — exits 1. `enqueue` (`verbs/log.rs`) reads every parent commit for
+  its committer time as soon as the walk processes a commit, and nothing in
+  `verbs::log` consults `.git/shallow`, so the boundary commit's missing
+  parent is "An object with id <oid> could not be found" — a missing object,
+  never the shallow condition. Measured on a `--depth 2` clone of five
+  commits: git prints both commits and exit 0, and `git log -1 --format=%P`
+  on the boundary prints no parents. `--limit 1` succeeds; `--limit 2` (the
+  whole clone) and `--first-parent` fail like no limit. A fix also has to drop
+  the boundary's `parents` in `--json`, where git lists none. Pinned by
+  `semantics.rs::log_walk_on_a_shallow_clone_fails_at_the_boundary_where_git_stops_cleanly`,
+  which goes red when it is fixed.
+- **L10 — replace refs and grafts are ignored, where git honors both by
+  default.** `ReadRepo` opens the object store with raw `gix_odb::at`, which
+  knows nothing of `refs/replace/*` (that layer is in `gix::Repository`, not
+  the plumbing crates this build uses), and the walk reads parents from the
+  raw commit object, which a graft never touches. So the two agree on oids and
+  disagree about what a replaced commit *is* and what a grafted one's parents
+  are. Pinned by `semantics.rs`'s replace-ref and graft tests.
+- **V1 — `show` refuses a tag chain nine deep; git peels through.**
+  `build_show_tag` checks `depth >= 8` before reading. Real git has no such
+  bound. Pinned by `semantics.rs`.
+- **V2 — one tag chain 32 deep fails the whole `git tag` listing.**
+  `peel_tag_chain`'s bound propagates through `verbs/tag.rs`'s listing loop
+  with a bare `?`, so one bad chain hides every other tag, with no count
+  reported — unlike B6's skip-and-count. Git lists 32 levels without
+  complaint. Pinned by `semantics.rs` (a second ordinary tag on the same
+  commit never appears).
+- **N1 — a non-UTF-8 tree entry name renders lossily (U+FFFD).** `git
+  ls-tree` C-quotes it (`"bad_\377\376name.bin"`, default
+  `core.quotepath=true`). Pinned by `semantics.rs`.
+- **N2 — an untracked file with a non-UTF-8 name is silently absent from
+  `status`.** `walk_untracked_and_ignored` keeps only names
+  `OsString::into_string()` accepts; git reports it C-quoted. A UTF-8
+  untracked file beside it is reported by both, so the omission is about the
+  encoding. Pinned by `semantics.rs`.
+- **F1 — `--path ""` matches everything, where git refuses it.**
+  `PathFilter::parse` trims the empty value and adds no spec, and an empty
+  filter matches everything. Shared by `status` and `log`. Pinned by
+  `semantics.rs`.
+- **T6 — five P10 characterization tests assert less than their names.**
+  Found by the agent that resolved P10, not fixed:
+  `show_follows_a_tag_chain_exactly_eight_deep` checks the exit code and not
+  that the tag peels to the base commit; `tag_listing_survives_a_tag_chain_31_deep`
+  does not check the target oid; the 32-deep failure test asserts nothing
+  about `z-ordinary`, though its comment says it proves that tag is hidden;
+  `status_on_a_fresh_unborn_repository_matches_git` compares counts, never
+  paths; and the `--path ""` test has no control that a real `--path`
+  narrows. Also: `git_allow_fail` does not pin `XDG_CONFIG_HOME` the way
+  `support::git` does, and nothing hermetic pins L5 (a tied-timestamp octopus
+  fixture would be a cheap one).
 
 - **P16 — `diff` still fails the whole call on one over-cap worktree file, and
   nothing tests that it does.** P12 made `status` decline such a file one path
