@@ -84,16 +84,24 @@ pub fn repo_info(info: &RepoInfo) -> OutputData {
 /// git's `XY` pair — the spelling deep in model training — while `--json`
 /// carries `"index":"modified"` and friends. Both are derived from one
 /// `StatusReport`, so they cannot disagree.
+///
+/// A path the blob cap kept `status` from comparing is marked in both: `~` in
+/// the worktree column, with the reason spelled out beside the path, and
+/// `blob_capped: true` with a `null` worktree column in `--json`. A reader of
+/// either surface can tell a partial report from a complete one.
 pub fn status(report: &StatusReport) -> OutputData {
     let rows: Vec<OutputNode> = report
         .entries
         .iter()
         .map(|entry| {
             let xy: String = entry.porcelain.iter().collect();
-            let path = match &entry.orig_path {
+            let mut path = match &entry.orig_path {
                 Some(orig) => format!("{} ← {orig}", entry.path),
                 None => entry.path.clone(),
             };
+            if entry.blob_capped {
+                path.push_str(" (not compared: over this build's max_blob_bytes)");
+            }
             OutputNode::new(xy).with_cells(vec![path])
         })
         .collect();

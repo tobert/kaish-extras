@@ -211,6 +211,23 @@ impl GitTool {
                 model.entries.len()
             );
         }
+        // A path that was not compared is reported the same way truncation is:
+        // in the model, and again on stderr (E.5). The exit code stays 0 — the
+        // report is a successful answer about every other path.
+        if model.totals.blob_capped > 0 {
+            if !result.err.is_empty() {
+                result.err.push('\n');
+            }
+            let n = model.totals.blob_capped;
+            result.err.push_str(&format!(
+                "git status: {n} tracked {} not compared — over this build's \
+                 {max_blob_bytes}-byte cap (GitConfig limits, max_blob_bytes). \
+                 Each is marked 'blob_capped' in --json, with a null worktree \
+                 column, and '~' in the text surface. Raise the cap to compare \
+                 them",
+                if n == 1 { "file was" } else { "files were" }
+            ));
+        }
         result.baggage.insert("git.repo".to_string(), repo_root);
         if let Some(oid) = &model.head.oid {
             result.baggage.insert("git.head_oid".to_string(), oid.clone());

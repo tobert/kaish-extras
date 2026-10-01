@@ -1385,35 +1385,150 @@ async fn a_truncated_cache_tree_node_is_refused_not_silently_passed() {
 // The blob cap (Limits::max_blob_bytes)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// A tracked file larger than the embedder's `max_blob_bytes` is a loud
-/// refusal, not an unbounded read.
+/// A repository holding one file over the cap, one under it that changed, and
+/// one under it that did not. The blob cap fixture every test in this section
+/// runs on.
 ///
-/// Status hashes every tracked file's content, so an unchecked
-/// `std::fs::read` is a multi-GB allocation waiting for a repository that
-/// wants one. The path is inside the mount and the caller already knows it, so
-/// this one names itself — nothing to leak.
-#[tokio::test]
-async fn a_tracked_file_over_the_blob_cap_is_refused() {
+/// The middle file is the negative control: without a path that must still be
+/// compared in the same invocation, "the report arrives" passes just as well
+/// when `status` has stopped comparing anything at all.
+fn blob_cap_repo() -> Repo {
     let repo = Repo::init("repo");
     repo.write("small.txt", "ok\n");
+    repo.write("quiet.txt", "unchanged\n");
     repo.write("big.txt", &"x".repeat(4096));
     repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "add both", "--quiet"]);
+    repo.git(&["commit", "-m", "add all three", "--quiet"]);
+    repo.write("small.txt", "changed\n");
+    repo
+}
 
-    let config = GitConfig::read_only().with_limits(Limits {
+/// The 64-byte cap the fixture is sized against: `big.txt` is over it,
+/// everything else is well under.
+fn blob_cap_config() -> GitConfig {
+    GitConfig::read_only().with_limits(Limits {
         max_blob_bytes: 64,
         ..Limits::default()
-    });
-    let result = status_with(config, &repo.mount(), "/mnt/repo", &["--json"]).await;
+    })
+}
+
+/// One entry out of a `--json` report, or `Null` when the report has no row
+/// for that path.
+fn entry_for(model: &serde_json::Value, path: &str) -> serde_json::Value {
+    model["entries"]
+        .as_array()
+        .expect("entries is an array")
+        .iter()
+        .find(|entry| entry["path"] == path)
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// A tracked file larger than the embedder's `max_blob_bytes` is declined one
+/// path at a time: it is marked as not compared, and the rest of the report
+/// arrives.
+///
+/// This was a whole-call refusal — exit 1 and no report — until P12. Status
+/// hashes every tracked file's content, so it still must not read this one: an
+/// unchecked `std::fs::read` is a multi-GB allocation waiting for a repository
+/// that wants one. What changed is the blast radius: one vendored blob no
+/// longer costs the report the other paths were the point of.
+///
+/// The cost of continuing is that a partial report can be read as a complete
+/// one, so the decline is in the model itself, not only on stderr. The
+/// uncompared path claims no worktree state at all — nothing read the file, so
+/// neither `modified` nor `none` is true of it.
+#[tokio::test]
+async fn a_tracked_file_over_the_blob_cap_is_declined_and_the_report_continues() {
+    let repo = blob_cap_repo();
+    let result = status_with(blob_cap_config(), &repo.mount(), "/mnt/repo", &["--json"]).await;
     assert_eq!(
-        result.code, 1,
-        "an over-cap tracked file is a git-level no: {} {:?}",
+        result.code, 0,
+        "one over-cap file must not cost the whole report: {} {:?}",
         result.err,
         result.output()
     );
-    assert!(result.err.contains("big.txt"), "{}", result.err);
-    assert!(result.err.contains("4096"), "{}", result.err);
-    assert!(result.err.contains("64"), "{}", result.err);
+    let j = json(&result);
+
+    let big = entry_for(&j, "big.txt");
+    assert_eq!(
+        big["blob_capped"], true,
+        "the over-cap path must be in the report, marked as not compared: {j}"
+    );
+    assert!(
+        big["worktree"].is_null(),
+        "a path nothing read must claim no worktree state: {j}"
+    );
+    assert_eq!(
+        big["index"], "none",
+        "the staged column reads no worktree file, so it is still exact: {j}"
+    );
+
+    let small = entry_for(&j, "small.txt");
+    assert_eq!(
+        small["worktree"], "modified",
+        "an under-cap file in the same invocation is still compared: {j}"
+    );
+    assert_eq!(
+        small["blob_capped"], false,
+        "and the flag is not simply set on every entry: {j}"
+    );
+
+    assert!(
+        entry_for(&j, "quiet.txt").is_null(),
+        "an unchanged under-cap file is still absent from the report — the \
+         comparison ran on it: {j}"
+    );
+
+    assert_eq!(j["totals"]["blob_capped"], 1, "one path went uncompared: {j}");
+    assert_eq!(
+        j["totals"]["unstaged"], 1,
+        "the uncompared path is not counted as a change: {j}"
+    );
+    assert_eq!(
+        j["clean"], false,
+        "a tree with an unread tracked path is not known to be clean: {j}"
+    );
+
+    assert!(
+        result.err.contains("not compared")
+            && result.err.contains("max_blob_bytes")
+            && result.err.contains("64"),
+        "the decline is on stderr too, naming the cap: {}",
+        result.err
+    );
+}
+
+/// The same decline in the text surface: an agent that never asks for `--json`
+/// must still be able to tell that a path was skipped.
+///
+/// `~` in the worktree column, because git has no letter for a path it did not
+/// compare and a space there would read as "unmodified".
+#[tokio::test]
+async fn an_uncompared_path_is_marked_in_the_text_surface() {
+    let repo = blob_cap_repo();
+    let result = status_with(blob_cap_config(), &repo.mount(), "/mnt/repo", &[]).await;
+    assert_eq!(result.code, 0, "{} {:?}", result.err, result.output());
+    let rows = rows(&result);
+
+    let big = rows
+        .iter()
+        .find(|(_, path)| path.starts_with("big.txt"))
+        .unwrap_or_else(|| panic!("the text report must name the skipped path: {rows:?}"));
+    assert_eq!(
+        big.0, " ~",
+        "an uncompared path must not render a git letter that claims a state: {rows:?}"
+    );
+    assert!(
+        big.1.contains("not compared") && big.1.contains("max_blob_bytes"),
+        "the text row must say why it was skipped: {rows:?}"
+    );
+
+    let small = rows
+        .iter()
+        .find(|(_, path)| path == "small.txt")
+        .unwrap_or_else(|| panic!("the under-cap file must still be compared: {rows:?}"));
+    assert_eq!(small.0, " M", "and reported the ordinary way: {rows:?}");
 }
 
 /// The cap's over-refusal guard: a symlink whose *target string* is long is

@@ -363,13 +363,23 @@ whole set, or only the few an embedder would act on.
 ```json
 {"head":{"branch":"main","oid":"…","detached":false},
  "entries":[{"path":"src/lib.rs","orig_path":null,"kind":"file",
-             "index":"modified","worktree":"none","conflicted":false}],
- "totals":{"staged":1,"unstaged":0,"untracked":2,"ignored":0,"conflicted":0},
+             "index":"modified","worktree":"none","conflicted":false,
+             "blob_capped":false},
+            {"path":"vendor/model.bin","orig_path":null,"kind":"file",
+             "index":"none","worktree":null,"conflicted":false,
+             "blob_capped":true}],
+ "totals":{"staged":1,"unstaged":0,"untracked":2,"ignored":0,"conflicted":0,
+           "blob_capped":1},
  "clean":false,"truncated":false}
 ```
 
 In JSON, `index`/`worktree` each take one of
 `none|added|modified|deleted|renamed|copied|typechange|untracked|ignored`.
+`worktree` is additionally `null` on a path `status` did not compare: its
+working-tree file is over `max_blob_bytes`, so `blob_capped` is `true`, the
+entry claims no unstaged state, `totals.blob_capped` counts it and `clean` is
+`false`. The report continues — one over-cap file costs that path, not the
+call.
 
 **Porcelain letters in the text surface, self-describing words in JSON**
 (Amy, 2026-08-01). Parity is deep in base training and RL: a model reading a
@@ -382,7 +392,10 @@ in text, words in JSON, and no `--porcelain` flag matrix — there is no
 `-s`/`--porcelain`/`--long`. Renames are first-class (`orig_path`) and
 conflicts are a boolean, both of which v1's hand-rolled renderer got wrong.
 
-Table rendering: the `XY` pair, then `PATH` (+ `← ORIG` on renames).
+Table rendering: the `XY` pair, then `PATH` (+ `← ORIG` on renames). An
+uncompared path renders `~` in the worktree column — not one of git's letters,
+because git has no letter for a path it did not compare — and the reason
+beside the path.
 
 ### B.3 `git log`
 
@@ -1481,6 +1494,31 @@ carries the real numbers below; two items were retired rather than filed.
 ---
 
 ## Changelog / provenance
+
+**2026-08-23 — P12: one over-cap tracked file no longer costs the whole
+status.** `status` used to propagate `BlobTooLarge` from the first tracked
+file over `max_blob_bytes`, so a repository holding one vendored binary got
+exit 1 and no report. It now declines that path and reports the rest.
+
+- **A third member of the `_capped` family, not an overload.** `blob_capped`
+  on a status entry means what `lines_capped` and `hunks_capped` mean in
+  `diff`: we declined to read this, and nothing else. The rule that made
+  `hunks_capped` its own field (below) is the rule that made this one its own
+  field too.
+- **The unstaged column of an uncompared path is `null`.** Nothing read the
+  file, so `none` would claim it matches the index and `modified` would claim
+  it does not. `null` is the same answer `additions` gives past the same cap.
+  The staged column stays exact — HEAD against the index reads no working-tree
+  file.
+- **`clean` now means *verified* clean.** It is `false` while any path went
+  uncompared. A partial report that says `clean: true` is the failure mode the
+  old whole-call refusal was defending against, and the flag alone does not
+  close it: `clean` is the field a caller reads first.
+- **`show` was left alone, and `diff` was left alone.** `show`'s one blob is
+  the whole answer: it withholds the content, says so on stderr and exits 0,
+  which is the same decline one row at a time. `diff`'s comparison *is* its
+  answer, so it still fails the call — now the only producer of
+  `BlobTooLarge` (docs/issues.md **P16**).
 
 **2026-08-22 — PR 7: the three listing verbs, and blame deferred.**
 `git branch`, `git tag` and `git worktree list` shipped;

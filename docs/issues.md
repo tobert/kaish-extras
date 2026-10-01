@@ -955,42 +955,18 @@ left, ranked:
   `--path ""` (silently matches everything, git errors); and `core.autocrlf`,
   whose divergence C5 records in prose while every fixture sets it false.
 
-- **P12 — `status` fails the whole call on one over-cap tracked file, and the
-  guide implies otherwise.** `read_worktree_blob` returns `BlobTooLarge` and
-  `status` propagates it, so a repository holding any tracked file over
-  `max_blob_bytes` (8 MiB default) gets exit 1 and no report at all. That is
-  deliberate and tested (`a_tracked_file_over_the_blob_cap_is_refused`) — a
-  loud refusal beats an unbounded read — but `embedding-git.md`'s Limits table
-  says "the read is declined and reported", which reads as *that file* being
-  declined while the rest of the report arrives. For a code-review server
-  pointed at real repositories (vendored binaries, fixtures, models) this is
-  common, and real `git status` handles it fine. **Decide** whether whole-call
-  failure is right, then make the guide say what the code does.
-
-  **Decided 2026-08-23 (Amy): per-file decline, the report continues.** The
-  oversized file is marked as not compared and the rest of the report arrives.
-  Three reasons it went that way rather than keeping the refusal:
-
-  - **The vocabulary already exists.** `lines_capped` and `hunks_capped` both
-    mean "we declined to read this, and nothing else". A third member of that
-    family is the shape this crate already teaches an agent to read, and it
-    keeps one term with one meaning.
-  - **The refusal was the odd one out, not the rule.** `show` declines a single
-    over-cap blob; `diff --patch` caps hunks per file and keeps going. Only
-    `status` escalated a per-file limit to the whole call.
-  - **It is what the message and the guide already said.** `BlobTooLarge` reads
-    "it will not read this one. Raise the cap to include it", and the Limits
-    table reads "the read is declined and reported". Both describe the behavior
-    being adopted here, which is why the mismatch was reported as a doc bug
-    rather than noticed as a behavior one.
-
-  Not free, and the cost is the reason the original refusal was defensible: a
-  partial report can be mistaken for a complete one. So the decline must be
-  **visible in the report itself**, not only on stderr — an agent reading
-  `--json` has to be able to tell that a path was skipped without parsing prose.
-  `a_tracked_file_over_the_blob_cap_is_refused` inverts into a test that the
-  report arrives *and* names the skipped file, and it needs a negative control
-  proving an under-cap file in the same repository is still compared normally.
+- **P16 — `diff` still fails the whole call on one over-cap worktree file, and
+  nothing tests that it does.** P12 made `status` decline such a file one path
+  at a time (`StatusEntry::blob_capped`); `diff` kept the refusal —
+  `verbs/diff.rs:461` and `:766` propagate `BlobTooLarge`, so a `git diff`
+  against the working tree exits 1 and reports nothing when any compared file
+  is over `max_blob_bytes` (8 MiB default). That may well be right: a diff's
+  result *is* the comparison, and `--limit` bounds the file set before any blob
+  is read. But `diff` is now the only producer of `BlobTooLarge`, and the
+  behavior has no test — `an_oversize_blob_is_declined_and_declared` covers the
+  commit-to-commit path, which sets `lines_capped` and keeps going. Decide
+  whether `diff` follows `status` here or keeps the refusal, then pin whichever
+  it is.
 
 ## git — cost shapes `--limit` does not bound
 

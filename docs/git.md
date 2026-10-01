@@ -393,8 +393,11 @@ the reading and not only the reporting. `--path` is applied to the candidate
 set before the working tree is hashed, for the same reason. Each blob read is
 bounded by `max_blob_bytes`: a file over it counts in `files`, contributes no
 lines, and is marked `lines_capped`. A *working-tree* file over the cap is a
-loud refusal rather than a skipped row, because the comparison has to hash
-every tracked file to know what changed — the same rule `git status` follows.
+loud refusal (exit 1) rather than a skipped row, because the comparison has to
+hash every tracked file to know what changed and that comparison is the whole
+answer. `git status` does not follow that rule: it declines the one path,
+marks it `blob_capped`, and reports every other path (`docs/issues.md`
+**P16** asks whether `diff` should follow it).
 
 Under `--patch` a third cap applies: `max_hunk_bytes_per_file` (256 KiB by
 default) bounds the hunk text one file may produce. It is measured before a

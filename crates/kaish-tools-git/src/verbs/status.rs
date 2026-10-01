@@ -14,7 +14,10 @@
 //!   is reported honestly as a delete plus an add, never as a scored rename.
 //! - **Unstaged** — the index against the working tree, by hashing worktree
 //!   content and comparing oids (not the racy-clean stat cache, which we never
-//!   persist — that is what keeps the `.git` fingerprint test green, D.4).
+//!   persist — that is what keeps the `.git` fingerprint test green, D.4). A
+//!   file over the embedder's `max_blob_bytes` is not read: its entry says so
+//!   (`blob_capped`, and no unstaged state) and the rest of the report is
+//!   composed as usual.
 //! - **Untracked / ignored** — a worktree walk driven by `gix-worktree`'s
 //!   ignore `Stack` (`gix-ignore` / `gix-glob` under it), honoring
 //!   `--untracked` depth and `--ignored`.
@@ -122,7 +125,8 @@ pub(crate) struct StatusOptions {
     pub limit: usize,
     /// The embedder's `max_blob_bytes`. Status hashes every tracked file's
     /// content, so this is what stands between a repository and an allocation
-    /// it chose.
+    /// it chose. A file over it is declined one path at a time — the entry
+    /// carries `blob_capped` and the report continues.
     pub max_blob_bytes: u64,
 }
 
@@ -184,6 +188,13 @@ impl Code {
     }
 }
 
+/// The worktree letter of a path the blob cap kept us from comparing.
+///
+/// Not one of git's `XY` letters, deliberately: git has no letter for a path
+/// it did not compare, and a space there would read as "unmodified" — the one
+/// thing this build cannot say about a file it never read.
+const NOT_COMPARED: char = '~';
+
 /// One entry, mid-composition, before it becomes a [`StatusEntry`].
 #[derive(Debug, Clone)]
 struct Building {
@@ -192,6 +203,10 @@ struct Building {
     orig_path: Option<String>,
     kind: EntryKind,
     conflicted: bool,
+    /// Whether the working-tree file was over `max_blob_bytes`, so this path
+    /// was never compared. `worktree` stays [`Code::Unmodified`] and is not
+    /// published: [`Building::finish`] turns it into `None`.
+    blob_capped: bool,
 }
 
 impl Building {
@@ -202,6 +217,7 @@ impl Building {
             orig_path: None,
             kind,
             conflicted: false,
+            blob_capped: false,
         }
     }
 
@@ -230,15 +246,23 @@ impl Building {
     }
 
     fn finish(self, path: String) -> StatusEntry {
-        let porcelain = [self.index.letter(), self.worktree.letter()];
+        // An uncompared path publishes no unstaged state at all — in either
+        // surface. The staged column is untouched: it compares HEAD against
+        // the index and reads no working-tree file.
+        let worktree_letter = if self.blob_capped {
+            NOT_COMPARED
+        } else {
+            self.worktree.letter()
+        };
         StatusEntry {
             path,
             orig_path: self.orig_path,
             kind: self.kind,
             index: self.index.word(),
-            worktree: self.worktree.word(),
+            worktree: (!self.blob_capped).then(|| self.worktree.word()),
             conflicted: self.conflicted,
-            porcelain,
+            blob_capped: self.blob_capped,
+            porcelain: [self.index.letter(), worktree_letter],
         }
     }
 }
@@ -334,6 +358,7 @@ pub(crate) fn run(repo: &ReadRepo, opts: &StatusOptions) -> Result<StatusReport,
                 orig_path: None,
                 kind: class.kind(),
                 conflicted: true,
+                blob_capped: false,
             },
         );
     }
@@ -358,11 +383,18 @@ pub(crate) fn run(repo: &ReadRepo, opts: &StatusOptions) -> Result<StatusReport,
         if b.conflicted {
             totals.conflicted += 1;
         }
+        if b.blob_capped {
+            totals.blob_capped += 1;
+        }
     }
+    // A path we declined to read is not a clean path. It is not a dirty one
+    // either — `blob_capped` is where that is stated — but calling the tree
+    // clean would turn a partial report into a claim about the whole of it.
     let clean = totals.staged == 0
         && totals.unstaged == 0
         && totals.untracked == 0
-        && totals.conflicted == 0;
+        && totals.conflicted == 0
+        && totals.blob_capped == 0;
 
     let mut finished: Vec<StatusEntry> = entries
         .into_iter()
@@ -506,7 +538,23 @@ fn unstage_the_worktree(
             continue;
         }
 
-        let content = read_worktree_blob(op, path, &full, &meta, opts.max_blob_bytes)?;
+        let content = match read_worktree_blob(op, path, &full, &meta, opts.max_blob_bytes) {
+            Ok(content) => content,
+            // The one error this loop absorbs, matched at its narrowest: the
+            // blob cap is a limit on this path, not on the report. The entry
+            // stays — carrying `blob_capped`, and claiming no unstaged state —
+            // so a caller reading `--json` sees the path was skipped without
+            // parsing prose, and every other path is still compared. `show`
+            // withholds its one over-cap blob and has nothing else to say —
+            // that blob is the whole answer; here it is one row of many.
+            Err(GitError::BlobTooLarge { .. }) => {
+                out.entry(path.clone())
+                    .or_insert_with(|| Building::empty(class.kind()))
+                    .blob_capped = true;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         let fs_oid = gix_object::compute_hash(gix_index::hash::Kind::Sha1, gix_object::Kind::Blob, &content)
             .map_err(|e| GitError::repository(op, "hashing a worktree file", &full, e))?;
         let changed = fs_oid != *oid || *class != fs_class;
@@ -748,6 +796,7 @@ impl Walker<'_> {
                 orig_path: None,
                 kind,
                 conflicted: false,
+                blob_capped: false,
             },
         );
     }
