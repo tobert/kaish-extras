@@ -1551,6 +1551,264 @@ async fn the_blob_cap_does_not_fire_on_symlinks_or_ordinary_files() {
     assert_eq!(j["clean"], true, "a 9-char symlink target is not a blob read: {j}");
 }
 
+/// The text row for `path` (its cell starts with it), as `(letters, cell)`.
+fn row_for(result: &ExecResult, path: &str) -> (String, String) {
+    let all = rows(result);
+    all.iter()
+        .find(|(_, cell)| cell.starts_with(path))
+        .cloned()
+        .unwrap_or_else(|| panic!("no text row for {path}: {all:?}"))
+}
+
+/// A staged modification of an over-cap file keeps its staged column.
+///
+/// Declining the worktree comparison must not take the index-versus-HEAD
+/// column with it: that column reads no worktree file, so it is exact. A
+/// decline that dropped the whole entry, or reset `index` to `none`, would
+/// hide a staged change from the report and from `totals.staged`.
+#[tokio::test]
+async fn a_staged_modification_over_the_cap_keeps_its_staged_column() {
+    let repo = Repo::init("repo");
+    repo.write("big.txt", &"x".repeat(4096));
+    repo.write("small.txt", "ok\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add both", "--quiet"]);
+    repo.write("big.txt", &"y".repeat(4096));
+    repo.git(&["add", "big.txt"]);
+    // Negative control: the file really is over the cap.
+    assert!(std::fs::metadata(repo.root.join("big.txt")).expect("stat").len() > 64);
+
+    let result = status_with(blob_cap_config(), &repo.mount(), "/mnt/repo", &["--json"]).await;
+    let j = json(&result);
+    let big = entry_for(&j, "big.txt");
+    assert_eq!(big["index"], "modified", "the staged column is exact: {j}");
+    assert!(big["worktree"].is_null(), "{j}");
+    assert_eq!(big["blob_capped"], true, "{j}");
+    assert_eq!(j["totals"]["staged"], 1, "{j}");
+    assert_eq!(j["totals"]["unstaged"], 0, "{j}");
+    assert_eq!(j["clean"], false, "{j}");
+
+    let text = status_with(blob_cap_config(), &repo.mount(), "/mnt/repo", &[]).await;
+    assert_eq!(row_for(&text, "big.txt").0, "M~", "{:?}", rows(&text));
+}
+
+/// A staged rename whose destination is over the cap keeps its `orig_path`.
+///
+/// The rename pairing is an index-side fact; the decline must not rebuild the
+/// entry in a way that loses the source path or the `renamed` word.
+#[tokio::test]
+async fn a_staged_rename_over_the_cap_keeps_its_orig_path() {
+    let repo = Repo::init("repo");
+    repo.write("old.txt", &"x".repeat(4096));
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add old", "--quiet"]);
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    assert!(std::fs::metadata(repo.root.join("new.txt")).expect("stat").len() > 64);
+
+    let result = status_with(blob_cap_config(), &repo.mount(), "/mnt/repo", &["--json"]).await;
+    let j = json(&result);
+    let entry = entry_for(&j, "new.txt");
+    assert_eq!(entry["index"], "renamed", "{j}");
+    assert_eq!(entry["orig_path"], "old.txt", "{j}");
+    assert!(entry["worktree"].is_null(), "{j}");
+    assert_eq!(entry["blob_capped"], true, "{j}");
+
+    let text = status_with(blob_cap_config(), &repo.mount(), "/mnt/repo", &[]).await;
+    let (letters, cell) = row_for(&text, "new.txt");
+    assert_eq!(letters, "R~", "{:?}", rows(&text));
+    assert!(
+        cell.contains("new.txt ← old.txt (not compared"),
+        "the rename arrow and the decline note both render: {cell}"
+    );
+}
+
+/// `--limit` drops rows, not the count of declined paths or the note.
+///
+/// Entries sort by path, so `--limit 1` keeps `a-small.txt` and drops the
+/// capped `z-big.bin`. A total computed after truncation would report 0 here
+/// and `clean` logic would lose the decline silently.
+#[tokio::test]
+async fn the_blob_capped_total_and_note_survive_truncation_of_the_capped_row() {
+    let repo = Repo::init("repo");
+    repo.write("a-small.txt", "ok\n");
+    repo.write("z-big.bin", &"x".repeat(4096));
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add both", "--quiet"]);
+    repo.write("a-small.txt", "changed\n");
+
+    let result = status_with(
+        blob_cap_config(),
+        &repo.mount(),
+        "/mnt/repo",
+        &["--limit", "1", "--json"],
+    )
+    .await;
+    let j = json(&result);
+    let entries = j["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 1, "{j}");
+    assert_eq!(entries[0]["path"], "a-small.txt", "{j}");
+    assert!(entry_for(&j, "z-big.bin").is_null(), "the capped row was cut: {j}");
+    assert_eq!(j["totals"]["blob_capped"], 1, "{j}");
+    assert_eq!(j["truncated"], true, "{j}");
+    assert!(result.err.contains("truncated"), "{}", result.err);
+    assert!(result.err.contains("not compared"), "{}", result.err);
+}
+
+/// `--path` scopes the decline like every other total.
+///
+/// A declined file outside the filter is not part of the report, so it must
+/// not make `clean` false or add a stderr note. The negative control is the
+/// same repository filtered to the capped file, where all three must appear:
+/// without it, a decline that never fires passes the scoped half vacuously.
+#[tokio::test]
+async fn a_path_filter_scopes_the_decline_like_every_other_total() {
+    let repo = Repo::init("repo");
+    repo.write("z-big.bin", &"x".repeat(4096));
+    repo.write("src/keep.txt", "ok\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add both", "--quiet"]);
+
+    let scoped = status_with(
+        blob_cap_config(),
+        &repo.mount(),
+        "/mnt/repo",
+        &["--path", "src", "--json"],
+    )
+    .await;
+    let j = json(&scoped);
+    assert_eq!(j["totals"]["blob_capped"], 0, "{j}");
+    assert_eq!(j["clean"], true, "{j}");
+    assert!(!scoped.err.contains("not compared"), "{}", scoped.err);
+
+    let control = status_with(
+        blob_cap_config(),
+        &repo.mount(),
+        "/mnt/repo",
+        &["--path", "z-big.bin", "--json"],
+    )
+    .await;
+    let j = json(&control);
+    assert_eq!(entry_for(&j, "z-big.bin")["blob_capped"], true, "{j}");
+    assert_eq!(j["totals"]["blob_capped"], 1, "{j}");
+    assert_eq!(j["clean"], false, "{j}");
+}
+
+/// A read error that is not the cap still fails the call.
+///
+/// Only `BlobTooLarge` is absorbed into a per-path decline. If the decline
+/// swallowed every read error, an unreadable file would report as "not
+/// compared" and the call would exit 0 on a failure it should surface.
+#[tokio::test]
+async fn a_read_error_that_is_not_the_cap_still_fails_the_call() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::init("repo");
+    repo.write("locked.txt", "ok\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add", "--quiet"]);
+    repo.write("locked.txt", "changed\n");
+    let path = repo.root.join("locked.txt");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    if std::fs::File::open(&path).is_ok() {
+        eprintln!("skipping: chmod 000 does not block reads here (running as root?)");
+        return;
+    }
+
+    let result = status(&repo.mount(), "/mnt/repo", &["--json"]).await;
+    // Restore so the scratch directory can be removed.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod back");
+    assert_ne!(result.code, 0, "an unreadable file must fail the call: {:?}", result.output());
+    assert!(
+        !result.err.contains("not compared") && !result.err.contains("max_blob_bytes"),
+        "the error must not read as the blob-cap decline: {}",
+        result.err
+    );
+}
+
+/// The cap is inclusive: a file of exactly `max_blob_bytes` is read and one
+/// byte more is declined.
+///
+/// Catches an off-by-one (`>=` for `>`) at the boundary. Both files differ
+/// from their committed content, so a read at the cap shows `modified`.
+#[tokio::test]
+async fn a_file_exactly_at_the_cap_is_read_and_one_byte_over_is_declined() {
+    let repo = Repo::init("repo");
+    repo.write("at.txt", "committed\n");
+    repo.write("over.txt", "committed\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add both", "--quiet"]);
+    repo.write("at.txt", &"x".repeat(64));
+    repo.write("over.txt", &"x".repeat(65));
+    assert_eq!(std::fs::metadata(repo.root.join("at.txt")).expect("stat").len(), 64);
+    assert_eq!(std::fs::metadata(repo.root.join("over.txt")).expect("stat").len(), 65);
+
+    let result = status_with(blob_cap_config(), &repo.mount(), "/mnt/repo", &["--json"]).await;
+    let j = json(&result);
+    let at = entry_for(&j, "at.txt");
+    assert_eq!(at["worktree"], "modified", "{j}");
+    assert_eq!(at["blob_capped"], false, "{j}");
+    let over = entry_for(&j, "over.txt");
+    assert!(over["worktree"].is_null(), "{j}");
+    assert_eq!(over["blob_capped"], true, "{j}");
+}
+
+/// An untracked file over the cap is reported like any untracked file.
+///
+/// Status never hashes an untracked file's content, so the cap has nothing to
+/// decline there. Catches a decline that keys on size alone and marks it.
+#[tokio::test]
+async fn an_untracked_file_over_the_cap_is_reported_normally() {
+    let repo = Repo::init("repo");
+    repo.write("small.txt", "ok\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add", "--quiet"]);
+    repo.write("untracked.bin", &"x".repeat(4096));
+
+    let result = status_with(blob_cap_config(), &repo.mount(), "/mnt/repo", &["--json"]).await;
+    let j = json(&result);
+    let entry = entry_for(&j, "untracked.bin");
+    assert_ne!(entry, serde_json::Value::Null, "the untracked file is reported: {j}");
+    assert_eq!(entry["blob_capped"], false, "{j}");
+    assert_eq!(j["totals"]["untracked"], 1, "{j}");
+    assert_eq!(j["totals"]["blob_capped"], 0, "{j}");
+    assert!(!result.err.contains("not compared"), "{}", result.err);
+
+    let text = status_with(blob_cap_config(), &repo.mount(), "/mnt/repo", &[]).await;
+    assert_eq!(row_for(&text, "untracked.bin").0, "??", "{:?}", rows(&text));
+}
+
+/// A merge conflict and a declined path coexist in one report.
+///
+/// Both are per-path states with their own total; a decline that short-circuits
+/// the conflict pass (or the reverse) loses one of them.
+#[tokio::test]
+async fn a_conflict_and_a_capped_path_coexist() {
+    let repo = Repo::init("repo");
+    repo.write("f.txt", "base\n");
+    repo.write("big.txt", &"x".repeat(4096));
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base", "--quiet"]);
+
+    repo.git(&["checkout", "-b", "other", "--quiet"]);
+    repo.write("f.txt", "their change\n");
+    repo.git(&["commit", "-am", "theirs", "--quiet"]);
+
+    repo.git(&["checkout", "main", "--quiet"]);
+    repo.write("f.txt", "our change\n");
+    repo.git(&["commit", "-am", "ours", "--quiet"]);
+
+    let merge = git_allow_fail(&repo.root, &["merge", "other"]);
+    assert!(!merge.status.success(), "the merge was supposed to conflict; fixture is wrong");
+    repo.write("big.txt", &"y".repeat(4096));
+
+    let result = status_with(blob_cap_config(), &repo.mount(), "/mnt/repo", &["--json"]).await;
+    let j = json(&result);
+    assert_eq!(entry_for(&j, "f.txt")["conflicted"], true, "{j}");
+    assert_eq!(entry_for(&j, "big.txt")["blob_capped"], true, "{j}");
+    assert_eq!(j["totals"]["conflicted"], 1, "{j}");
+    assert_eq!(j["totals"]["blob_capped"], 1, "{j}");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Exact-rename pairing
 // ═══════════════════════════════════════════════════════════════════════════
