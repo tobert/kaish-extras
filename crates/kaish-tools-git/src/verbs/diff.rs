@@ -8,21 +8,24 @@
 //! this model, gated behind `--patch`, and this build does not assemble it
 //! yet — `--patch` exits 4 naming the `textdiff` feature (E.5).
 //!
-//! Five endpoint pairs, chosen by flags rather than by git(1)'s positional
-//! grammar, and stated in every result:
+//! Five endpoint pairs, named by flags or by git(1)'s own operands, and
+//! stated in every result:
 //!
 //! | Invocation | From | To |
 //! |---|---|---|
 //! | `git diff` | index | worktree |
-//! | `git diff --staged` | `HEAD` | index |
-//! | `git diff --from <A>` | `A` | worktree |
-//! | `git diff --to <B>` | `HEAD` | `B` |
-//! | `git diff --from <A> --to <B>` | `A` | `B` |
+//! | `git diff --staged` (`--cached`) | `HEAD` | index |
+//! | `git diff --from <A>`, `git diff <A>` | `A` | worktree |
+//! | `git diff --to <B>`, `git diff ..<B>` | `HEAD` | `B` |
+//! | `git diff --from <A> --to <B>`, `git diff <A> <B>`, `git diff <A>..<B>` | `A` | `B` |
 //!
 //! Bare `git diff` is git parity — unstaged changes only — decided on a
 //! five-model survey that was unanimous about what the short spelling means
-//! (B.4). `A..B` range syntax is not accepted: `--from`/`--to` is the one
-//! spelling, and two spellings for one concept is drift.
+//! (B.4). The operand spellings were added on 2026-10-01, after Terminal-Bench
+//! runs showed models typing `git diff A B` and nothing else: a spelling git
+//! has, meaning what it means in git, is accepted when this build computes
+//! that answer. `A...B` asks for a merge base this build does not compute, and
+//! is refused saying so.
 //!
 //! Both sides are flattened to `path → (oid, class)` and compared directly,
 //! which is also what `--staged` does. F.4 planned to build the tree's index
@@ -59,15 +62,22 @@ pub(crate) const DEFAULT_CONTEXT: usize = 3;
 #[command(name = "diff", about = "Compare two ends of a repository — which files changed, and by how much")]
 pub(crate) struct DiffArgs {
     /// Compare `HEAD` against the index instead of the index against the
-    /// working tree — the staged changes, git's own `--staged`. Cannot be
-    /// combined with `--from` or `--to`.
-    #[arg(long = "staged", default_value_t = false, conflicts_with_all = ["from", "to"])]
+    /// working tree — the staged changes, git's own `--staged`, also spelled
+    /// `--cached`. Cannot be combined with a revision, as `--from`, `--to` or
+    /// an operand.
+    #[arg(
+        long = "staged",
+        visible_alias = "cached",
+        default_value_t = false,
+        conflicts_with_all = ["from", "to"]
+    )]
     pub staged: bool,
 
     /// Compare from this revision. Alone it compares against the working
     /// tree; with `--to` it compares two revisions. `HEAD`, a branch, a tag,
-    /// an oid, and the `~N` / `^N` suffixes are the whole grammar — `A..B` is
-    /// refused, because `--from A --to B` is the one spelling for a range.
+    /// an oid, and the `~N` / `^N` suffixes are the whole grammar. git's
+    /// operand spellings name the same ends: `git diff A B` and
+    /// `git diff A..B` are `--from A --to B`, and `git diff A` is `--from A`.
     #[arg(long = "from", value_name = "REV")]
     pub from: Option<String>,
 
@@ -96,7 +106,7 @@ pub(crate) struct DiffArgs {
     /// file gains a `hunks` array. Needs the `textdiff` build feature —
     /// without it this exits 4, and `git info` does not list `textdiff`.
     /// Binary files carry `binary: true` and no hunks.
-    #[arg(long = "patch", default_value_t = false, conflicts_with = "name_only")]
+    #[arg(short = 'p', long = "patch", default_value_t = false, conflicts_with = "name_only")]
     pub patch: bool,
 
     /// Context lines around each hunk, default 3. Only `--patch` has hunks to
@@ -135,10 +145,11 @@ pub(crate) struct DiffArgs {
     #[command(flatten)]
     pub global: GlobalFlags,
 
-    /// Paths after `--`, and nothing before it: `git diff -- src`. Name
-    /// revisions with `--from`/`--to` (`git diff --from HEAD~1 --to HEAD`);
-    /// a bare `HEAD` would be ambiguous with a file of that name, so it is
-    /// refused rather than guessed.
+    /// Revisions, then paths, git's spelling: `git diff main 'HEAD~1' -- src`.
+    /// Before `--`, a word is a revision if it resolves as one and a path if
+    /// the index tracks it; a word that is both is refused until `--` settles
+    /// it (`git diff main --` is the revision). Two revisions at most, or one
+    /// `A..B` range. `A...B` (from the merge base) is not supported.
     // Bound so clap accepts the `--`-terminated tail `ToolArgs::to_argv()`
     // always emits. The real operands are read off `args.positional` in
     // `tool.rs` — the kernel's own convention, because `to_argv` inserts a
@@ -315,6 +326,205 @@ fn describe_endpoints(
         Endpoints::RevToWorktree { from } => (rev(from)?, DiffEndpoint::Worktree),
         Endpoints::RevToRev { from, to } => (rev(from)?, rev(to)?),
     })
+}
+
+/// `git diff`'s words before `--`, sorted into revisions and paths.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct OperandWords {
+    /// Revisions and `A..B` ranges, in the order given.
+    pub revs: Vec<String>,
+    /// Paths, which join `--path` and the operands after `--`.
+    pub paths: Vec<String>,
+}
+
+/// Sort `git diff`'s words before `--` the way git does.
+///
+/// A word is a revision when it resolves as one and a path when it matches a
+/// tracked path (a glob counts, as in `--path`). A word that is both is
+/// refused — git refuses it too — and so is a word that is neither, because
+/// an empty diff would read as "nothing changed" rather than "no such thing".
+/// Revisions come before paths. A word with `..` in it is a range and is
+/// always a revision. When the caller wrote `--` (`marked`), every word before
+/// it is a revision, which is how a caller settles a word that is both.
+///
+/// Paths are matched against the index, never the filesystem: a diff only
+/// ever compares tracked paths, and an index lookup touches nothing outside
+/// the repository.
+/// `to_repo_path` makes a word repo-relative the way every pathspec is
+/// (`tool.rs`'s cwd prefix); the paths returned are already through it.
+pub(crate) fn classify_operands(
+    repo: &ReadRepo,
+    words: &[String],
+    marked: bool,
+    to_repo_path: &dyn Fn(&str) -> String,
+) -> Result<OperandWords, GitError> {
+    const OP: &str = "diff";
+    let mut out = OperandWords::default();
+    if marked {
+        out.revs = words.to_vec();
+        return Ok(out);
+    }
+    // Read once, and only when a word needs it.
+    let mut tracked: Option<Vec<String>> = None;
+    let mut is_tracked = |word: &str| -> Result<bool, GitError> {
+        if tracked.is_none() {
+            let paths = match repo.open_index()? {
+                Some(index) => index.entries().iter().map(|e| e.path(&index).to_string()).collect(),
+                // A bare repository has no index, so no word is a path in it.
+                None => Vec::new(),
+            };
+            tracked = Some(paths);
+        }
+        let filter = PathFilter::parse(OP, &[to_repo_path(word)])?;
+        Ok(tracked.iter().flatten().any(|path| filter.matches(path)))
+    };
+
+    // The first path as the caller wrote it, for an error they can retype.
+    let mut first_path: Option<&str> = None;
+    for word in words {
+        if is_range(word) {
+            if let Some(path) = first_path {
+                return Err(revision_after_path(word, path));
+            }
+            out.revs.push(word.clone());
+            continue;
+        }
+        let rev = match repo.resolve_object(word) {
+            Ok(_) => true,
+            Err(GitError::NoSuchRevision { .. }) => false,
+            Err(e) => return Err(e),
+        };
+        let path = is_tracked(word)?;
+        match (rev, path) {
+            (true, true) => {
+                return Err(GitError::Usage {
+                    operation: OP,
+                    message: format!(
+                        "'{word}' is both a revision and a tracked path. Put \
+                         revisions before '--' and paths after it: \
+                         'git diff {w} --' compares the revision, \
+                         'git diff -- {w}' the path",
+                        w = kaish_word(word)
+                    ),
+                });
+            }
+            (true, false) => {
+                if let Some(path) = first_path {
+                    return Err(revision_after_path(word, path));
+                }
+                out.revs.push(word.clone());
+            }
+            (false, true) => {
+                first_path.get_or_insert(word);
+                out.paths.push(to_repo_path(word));
+            }
+            (false, false) => {
+                return Err(GitError::Usage {
+                    operation: OP,
+                    message: format!(
+                        "'{word}' is neither a revision nor a tracked path. A \
+                         revision is HEAD, a branch, a tag or an oid, \
+                         optionally followed by \"~N\" or \"^N\"; a path is \
+                         one the index tracks, or a glob"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a word is git's `A..B` (or `A...B`) range spelling. A bare `..` is
+/// not: it names no revision on either side.
+fn is_range(word: &str) -> bool {
+    word.split_once("..")
+        .is_some_and(|(from, to)| !from.is_empty() || !to.trim_start_matches('.').is_empty())
+}
+
+fn revision_after_path(word: &str, path: &str) -> GitError {
+    GitError::Usage {
+        operation: "diff",
+        message: format!(
+            "'{word}' is a revision after the path '{path}'. Revisions come \
+             first: 'git diff {} -- {}'",
+            kaish_word(word),
+            kaish_word(path)
+        ),
+    }
+}
+
+/// The endpoints the operand revisions name, or `None` when there are none.
+///
+/// git's spellings: `A` compares `A` with the working tree; `A B` and `A..B`
+/// compare the two revisions, and an empty side of `..` is `HEAD`. `A...B`
+/// asks for the merge base of the two, which this build does not compute, so
+/// it is refused rather than answered as `A..B`.
+pub(crate) fn endpoints_from_revs(revs: &[String]) -> Result<Option<Endpoints>, GitError> {
+    const OP: &str = "diff";
+    if let Some(word) = revs.iter().find(|w| w.contains("...")) {
+        let (from, to) = word.split_once("...").unwrap_or((word, ""));
+        let (from, to) = (or_head(from), or_head(to));
+        return Err(GitError::Usage {
+            operation: OP,
+            message: format!(
+                "'{word}' compares the merge base of {from} and {to} with {to}, \
+                 and this git does not compute merge bases. \
+                 'git diff {} {}' compares the two revisions directly",
+                kaish_word(from),
+                kaish_word(to)
+            ),
+        });
+    }
+    let ranges = revs.iter().filter(|w| is_range(w)).count();
+    match (revs, ranges) {
+        ([], _) => Ok(None),
+        ([word], 1) => {
+            let (from, to) = word.split_once("..").unwrap_or((word, ""));
+            Ok(Some(Endpoints::RevToRev {
+                from: or_head(from).to_string(),
+                to: or_head(to).to_string(),
+            }))
+        }
+        ([from], 0) => Ok(Some(Endpoints::RevToWorktree { from: from.clone() })),
+        ([from, to], 0) => Ok(Some(Endpoints::RevToRev {
+            from: from.clone(),
+            to: to.clone(),
+        })),
+        _ => Err(GitError::Usage {
+            operation: OP,
+            message: format!(
+                "compares two revisions at most, but got '{}'. \
+                 'git diff A B' compares two, as does 'git diff A..B'",
+                revs.join("' '")
+            ),
+        }),
+    }
+}
+
+/// `word` as one kaish word, for a command an error tells the caller to type.
+///
+/// Double-quoted unless every character is one kaish reads as part of a bare
+/// word. The case that matters is git's `~` and `^`, which kaish 0.17 refuses
+/// unquoted (docs/issues.md K3), so `HEAD~1` comes back as `"HEAD~1"`.
+pub(crate) fn kaish_word(word: &str) -> String {
+    let bare = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '-' | '_' | ':'));
+    if bare {
+        word.to_string()
+    } else {
+        format!("\"{}\"", word.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+/// An empty side of a range is `HEAD`, as in git.
+fn or_head(side: &str) -> &str {
+    if side.is_empty() {
+        DEFAULT_FROM_REV
+    } else {
+        side
+    }
 }
 
 /// Resolve a `--from` / `--to` revision to the tree it names.

@@ -174,16 +174,7 @@ impl GitTool {
             // the parser can reject it by name rather than hide it behind a
             // prefix.
             let prefix = cwd_prefix(&resolved.real, repo.root());
-            let paths = path_args
-                .iter()
-                .map(|spec| {
-                    if prefix.is_empty() || spec.starts_with(':') {
-                        spec.clone()
-                    } else {
-                        format!("{prefix}/{spec}")
-                    }
-                })
-                .collect();
+            let paths = path_args.iter().map(|spec| prefixed(&prefix, spec)).collect();
             let opts = verbs::status::StatusOptions {
                 untracked,
                 ignored,
@@ -271,8 +262,8 @@ impl GitTool {
             return failure(GitError::PatchNotInThisVerb {
                 operation: OP,
                 flag: "--patch",
-                instead: "One commit's patch is 'git diff --patch --from \
-                          <commit>~1 --to <commit>'; --stat gives every \
+                instead: "One commit's patch is 'git diff --patch \
+                          \"<commit>~1\" <commit>'; --stat gives every \
                           commit's changed-file and line counts.",
             });
         }
@@ -370,6 +361,7 @@ impl GitTool {
         let first_parent = parsed.first_parent;
         let body = parsed.body;
         let stat = parsed.stat;
+        let oneline = parsed.oneline;
         // Operands after `--` are pathspecs, joining the `--path` flags.
         let mut path_args = parsed.path.clone();
         path_args.extend(ops.after.iter().cloned());
@@ -379,16 +371,7 @@ impl GitTool {
             // `--path` values are relative to the caller's cwd within the repo,
             // exactly as git's pathspecs are — the same prefixing `status` does.
             let prefix = cwd_prefix(&resolved.real, repo.root());
-            let paths = path_args
-                .iter()
-                .map(|spec| {
-                    if prefix.is_empty() || spec.starts_with(':') {
-                        spec.clone()
-                    } else {
-                        format!("{prefix}/{spec}")
-                    }
-                })
-                .collect();
+            let paths = path_args.iter().map(|spec| prefixed(&prefix, spec)).collect();
             let opts = verbs::log::LogOptions {
                 rev,
                 limit,
@@ -412,7 +395,7 @@ impl GitTool {
             Err(e) => return failure(e),
         };
 
-        let mut result = ExecResult::with_output(crate::render::log(&model));
+        let mut result = ExecResult::with_output(crate::render::log(&model, oneline));
         // Truncation is always reported — a stderr note beside the JSON's
         // `truncated: true` (E.5). The exit code stays 0: a truncated log is a
         // successful answer that ran up against `--limit`.
@@ -697,26 +680,14 @@ impl GitTool {
         };
         tracing::Span::current().record("repo", tracing::field::display(resolved.real.display()));
 
-        // `git diff [-- <path>...]`: paths after the marker, and nothing
-        // before it. A bare positional in git is a revision, and this surface
-        // spells a revision `--from`/`--to` — treating one as a path would
-        // silently answer about a file named `HEAD`.
+        // git's spelling: `git diff A B -- <path>...`. The words before the
+        // marker are sorted into revisions and paths once the repository is
+        // open, because only the repository can say which a word is.
         let ops = operands(&args, consumed);
-        if !ops.before.is_empty() {
-            return failure(GitError::Usage {
-                operation: OP,
-                message: format!(
-                    "takes no bare operands, but got '{}'. Name a revision \
-                     with --from/--to ('diff --from HEAD~1 --to HEAD') and a \
-                     path after '--' ('diff -- src')",
-                    ops.before.join("' '")
-                ),
-            });
-        }
         let mut paths = parsed.path.clone();
         paths.extend(ops.after.iter().cloned());
 
-        let endpoints = match (parsed.staged, parsed.from.clone(), parsed.to.clone()) {
+        let flag_endpoints = match (parsed.staged, parsed.from.clone(), parsed.to.clone()) {
             // clap's `conflicts_with_all` refuses --staged beside --from/--to,
             // so the revisions are None here by construction.
             (true, _, _) => verbs::diff::Endpoints::HeadToIndex,
@@ -727,6 +698,15 @@ impl GitTool {
                 to,
             },
         };
+        let named_by_flag = if parsed.staged {
+            Some("--staged")
+        } else if parsed.from.is_some() || parsed.to.is_some() {
+            Some("--from/--to")
+        } else {
+            None
+        };
+        let words = ops.before.clone();
+        let marked = ops.marked;
 
         // The embedder's `max_diff_files` is a hard cap; `--limit` may only
         // lower it. Not `max_rows`: a diff's rows are files, and C.1 gives
@@ -753,6 +733,44 @@ impl GitTool {
 
         let outcome = block_in_place_compat(move || {
             let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
+            // Pathspecs are relative to the caller's cwd, as in git and as in
+            // `status` and `log`.
+            let prefix = cwd_prefix(&resolved.real, repo.root());
+            let sorted = verbs::diff::classify_operands(&repo, &words, marked, &|w| prefixed(&prefix, w))?;
+            let mut paths: Vec<String> = paths.iter().map(|spec| prefixed(&prefix, spec)).collect();
+            paths.extend(sorted.paths);
+            let endpoints = match (verbs::diff::endpoints_from_revs(&sorted.revs)?, named_by_flag) {
+                (None, _) => flag_endpoints,
+                (Some(endpoints), None) => endpoints,
+                // Two ways of naming the ends, both used. Picking one would
+                // answer a question the caller did not finish asking.
+                (Some(_), Some("--staged")) => {
+                    return Err(GitError::Usage {
+                        operation: OP,
+                        message: format!(
+                            "comparing a revision with the index is not \
+                             supported, and '{}' beside --staged asks for \
+                             that. 'git diff --staged' compares HEAD with the \
+                             index; 'git diff {}' compares {} with the \
+                             working tree",
+                            sorted.revs.join(" "),
+                            verbs::diff::kaish_word(&sorted.revs[0]),
+                            sorted.revs[0]
+                        ),
+                    });
+                }
+                (Some(_), Some(_)) => {
+                    return Err(GitError::Usage {
+                        operation: OP,
+                        message: format!(
+                            "got revisions twice, as '{}' and as --from/--to. \
+                             Name them one way: 'git diff A B' or \
+                             'git diff --from A --to B'",
+                            sorted.revs.join(" ")
+                        ),
+                    });
+                }
+            };
             let opts = verbs::diff::DiffOptions {
                 endpoints,
                 paths,
@@ -1033,6 +1051,18 @@ impl GitTool {
     }
 }
 
+/// A caller's pathspec made repo-relative. git reads a pathspec relative to
+/// the cwd, so from `src/` the spec `lib.rs` is `src/lib.rs`. A
+/// pathspec-magic value (leading `:`) is left untouched so the parser can
+/// reject it by name rather than hide it behind a prefix.
+fn prefixed(prefix: &str, spec: &str) -> String {
+    if prefix.is_empty() || spec.starts_with(':') {
+        spec.to_string()
+    } else {
+        format!("{prefix}/{spec}")
+    }
+}
+
 /// The repo-relative, slash-separated directory of `real` within `root`, or
 /// empty when `real` is the root itself or cannot be placed under it.
 fn cwd_prefix(real: &Path, root: &Path) -> String {
@@ -1167,17 +1197,18 @@ const WORKTREE_DESCRIPTION: &str = "Work with the repository's working trees";
 /// (`kaish-help`'s `tool_help`) shows only params and examples, never a bare
 /// subcommand list, so a verb with no example here would never be named in
 /// `help git` at all, enabled or not.
-const EXAMPLES: [(&str, &str); 17] = [
+const EXAMPLES: [(&str, &str); 18] = [
     ("What repository is this", "git info"),
     ("Inspect a specific repository", "git info --repo /mnt/repos/kaish"),
     ("Structured, for a script", "git info --json"),
     ("What changed in the working tree", "git status"),
     ("Recent commit history", "git log"),
+    ("One line per commit", "git log --oneline"),
     ("Read a file as of the last release", "git show v0.1.0:src/lib.rs"),
     ("List a directory as of HEAD", "git ls HEAD src"),
     ("See the unstaged changes", "git diff"),
     ("See what is staged", "git diff --staged"),
-    ("Compare two revisions under one directory", "git diff --from v0.1.0 --to HEAD -- src"),
+    ("Compare two revisions under one directory", "git diff v0.1.0 HEAD -- src"),
     ("List the branches", "git branch"),
     ("Include remote-tracking branches", "git branch --all"),
     ("Find which branches carry a fix", "git branch --contains 1a2b3c4"),
@@ -1311,7 +1342,7 @@ fn parse_leaf<P: Parser>(
         .to_argv()
         .map_err(|e| Box::new(ExecResult::failure(2, format!("git {operation}: {e}"))))?;
     P::try_parse_from(std::iter::once(format!("git {operation}")).chain(argv))
-        .map_err(|e| Box::new(ExecResult::failure(2, format!("git {operation}: {e}"))))
+        .map_err(|e| Box::new(failure(crate::spelling::refuse(operation, &e, &P::command()))))
 }
 
 /// A verb's operands, split at git's `--` end-of-options marker.
@@ -1327,6 +1358,10 @@ struct Operands {
     before: Vec<String>,
     /// Positionals after `--`. Always pathspecs, for every verb.
     after: Vec<String>,
+    /// Whether the caller wrote the `--` marker. With it, git reads every
+    /// word before the marker as a revision and never as a path, which is how
+    /// a caller settles a word that is both.
+    marked: bool,
 }
 
 impl Operands {
@@ -1366,7 +1401,11 @@ fn operands(args: &ToolArgs, consumed: usize) -> Operands {
             before.push(text);
         }
     }
-    Operands { before, after }
+    Operands {
+        before,
+        after,
+        marked: seen_marker,
+    }
 }
 
 /// Refuse operands for a verb that takes none, naming what was given.

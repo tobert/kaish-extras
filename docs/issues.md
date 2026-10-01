@@ -1471,3 +1471,53 @@ the live OpenAPI spec; ask for it when this starts.
   exits 0 under 0.16 and is a parse error under 0.17. Nothing in this
   workspace pins that, and it is kaish's behavior rather than ours — noted so
   the next reader does not re-derive it.
+
+## kaish — found by Terminal-Bench (2026-10-01)
+
+- **K3 — kaish refuses `~` and `^` inside an unquoted word, so git's revision
+  suffixes need quoting.** Measured through a real `Kernel::execute` on
+  kaish-kernel 0.17.2: `git log HEAD~1`, `git diff --from HEAD~1 --to HEAD`
+  and even `echo a~b` fail at parse time with "adjacent words with no space
+  between them are not joined into one argument"; `git log -n 1 HEAD^` fails
+  with "lexer error: unexpected character". `'HEAD~1'` and `"HEAD~1"` parse.
+  kaish-f2 confirmed it is not a regression: the lexer has never had `~` in
+  its word characters, and before v0.8.2 it silently split `HEAD~1` into two
+  arguments. The fix is on kaish's `fix/lexer-word-chars`, targeted at 0.18.0
+  (bash's rule: tilde expansion only at the start of a word or after `=`/`:`
+  in an assignment).
+
+  Our tests never saw it because they call `Tool::execute` directly and skip
+  the parser. Until our consumers (kaijutsu, kaibo) are on a kaish that
+  parses these words, every example, argument doc and refusal hint quotes a
+  revision with `~` or `^` in it. `tests/spellings.rs` parses every command
+  the tool publishes with kaish's own parser, and carries a canary that goes
+  red when an unquoted `HEAD~1` starts to parse — that is the signal to
+  unquote.
+
+## git — spellings refused for now (2026-10-01)
+
+Amy's rule from the Terminal-Bench round: accept a git spelling when it means
+what git means and this build computes that answer; refuse anything else
+saying it is not supported and what to type instead. These are refused today,
+each with a hint (`src/spelling.rs`), and each could become a real feature.
+
+- **S1 — `git log --all` (and `--branches`, `--tags`, `--remotes`).** The walk
+  is a commit-time max-heap from one revision; seeding it with every ref tip
+  is a small change to `verbs/log.rs`, and `--limit` already bounds the rows.
+  It does not bound the walk under a filter (L2), so the cost of `--all
+  --author x` on a repository with many refs needs a sentence before it ships.
+  The single most common refused spelling in the bench runs, with `--oneline`.
+- **S2 — `git branch -v` (each tip's subject).** One commit read per listed
+  branch, bounded by `--limit`, which the plain listing deliberately avoids
+  ("reads no commit at all"). Could be its own flag's cost, the way
+  `--ahead-behind` is. `-vv`'s upstream counts are `--ahead-behind` already.
+- **S3 — `git status -s` / `--short` / `--porcelain`.** The text output already
+  *is* git's short format, so under the 2026-10-01 rule these could be
+  accepted. They are refused with a hint that says so, because architecture.md
+  B.2 (Amy, 2026-08-01) decided "no `-s`/`--porcelain`/`--long`" and this round
+  did not revisit it. **Amy's call.** `-b` is a different case: we print no
+  branch line, and `git info` names the branch.
+- **S4 — `git diff A...B`.** Needs a merge base, which `reach.rs` does not
+  compute.
+- **S5 — `git diff --cached <rev>` (a revision against the index).** No
+  `RevToIndex` endpoint exists; refused naming the two comparisons that do.

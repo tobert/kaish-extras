@@ -108,6 +108,16 @@ regex hell** — predictable, typed flags in the kaish style, per-subcommand cla
 schemas, structured `--json` output from day one. bash/zsh compatibility is a
 high bar and it is not our bar.
 
+**git's own spellings, when they mean what git means** (Amy, 2026-10-01).
+Terminal-Bench runs through kaijutsu showed models typing `git log --oneline`,
+`git branch -a` and `git diff A B`, and each refusal cost a model call. So a
+spelling git has is accepted when this build computes the answer git would
+give: `-a`/`-r` on `branch`, `--cached` and two-revision operands on `diff`,
+`--oneline` and `-p` on `log`. A flag that asks for something this build does
+not compute (`--graph`, `--decorate`, `log --all`) is refused, and the refusal
+says it is not supported and what to type instead. Never accepted and ignored:
+a flag that changes nothing reads as a flag that worked.
+
 ### 2. Read-only as a real, enforceable mode
 
 The flagship use case: **kaibo wants to offer true read-only git access**, which
@@ -248,27 +258,37 @@ a status, the modes and oids on each side, and added/deleted line counts.
 by `--patch` under the `textdiff` build feature — see "`--patch`" below; a
 build without the feature exits 4 and names it.
 
-**Five endpoint pairs, chosen by flag**, and every result states which pair it
-used — on the first line of the text output and in `from`/`to` in `--json`:
+**Five endpoint pairs, named by flag or by git's own operands**, and every
+result states which pair it used — on the first line of the text output and in
+`from`/`to` in `--json`:
 
 | Invocation | From | To |
 |---|---|---|
 | `git diff` | index | worktree |
-| `git diff --staged` | `HEAD` | index |
-| `git diff --from <A>` | `A` | worktree |
-| `git diff --to <B>` | `HEAD` | `B` |
-| `git diff --from <A> --to <B>` | `A` | `B` |
+| `git diff --staged` (`--cached`) | `HEAD` | index |
+| `git diff --from <A>`, `git diff <A>` | `A` | worktree |
+| `git diff --to <B>`, `git diff ..<B>` | `HEAD` | `B` |
+| `git diff --from <A> --to <B>`, `git diff <A> <B>`, `git diff <A>..<B>` | `A` | `B` |
 
-Bare `git diff` is git parity — unstaged changes only. `A..B` is not a
-spelling here; `--from`/`--to` is the one way to name a range, and `--from
-HEAD~1..HEAD` is a usage error that says so. A bare operand is refused for the
-same reason: in git it is a revision, and quietly reading it as a path would
-answer a different question.
+Bare `git diff` is git parity — unstaged changes only. The operand spellings
+mean what they mean in git. Before `--`, a word is a revision when it resolves
+as one and a path when the index tracks it (a glob counts); a word that is
+both is refused until `--` settles it, and so is a word that is neither,
+because an empty diff would read as "nothing changed". Revisions come before
+paths. `A...B` compares from the merge base, which this build does not
+compute, so it is refused saying so. Naming the ends twice — `git diff A
+--from B`, or a revision beside `--staged` — is refused rather than guessed.
+
+**Quote a revision with `~` or `^` in it.** kaish 0.17 refuses either
+character inside an unquoted word (`docs/issues.md`, K3), so `HEAD~1` is a
+parse error before git ever sees it and `'HEAD~1'` works.
 
 ```sh
 kaish> git diff                                   # unstaged
 kaish> git diff --staged --json                   # staged, structured
-kaish> git diff --from v0.1.0 --to HEAD -- src    # two revisions, one directory
+kaish> git diff v0.1.0 HEAD -- src                # two revisions, one directory
+kaish> git diff 'HEAD~1'                          # HEAD~1 against the working tree
+kaish> git diff src/lib.rs                        # one tracked file, unstaged
 kaish> git diff --name-only                       # paths and statuses only
 kaish> git diff --patch                           # the unified patch, textdiff builds
 ```
@@ -307,10 +327,10 @@ With it, `--patch` changes what the **text** payload is and adds to what
 
 ```sh
 kaish> git diff --patch                                  # unstaged, as a patch
-kaish> git diff --patch --from HEAD~1 --to HEAD          # one commit's patch
+kaish> git diff --patch 'HEAD~1' HEAD                   # one commit's patch
 kaish> git diff --patch --context 0 -- src/lib.rs        # changes only, no context
 kaish> git diff --patch --json                           # hunks in the model
-kaish> git diff --patch --from HEAD~1 --to HEAD | git apply --check -
+kaish> git diff --patch 'HEAD~1' HEAD | git apply --check -
 ```
 
 A hunk in `--json`:
@@ -361,7 +381,7 @@ accepts the result. Six things it does not do:
   reads no oid.
 
 **`git log --patch` is not this.** It exits 4 in both builds, naming
-`git diff --patch --from <commit>~1 --to <commit>` as the spelling for one
+`git diff --patch '<commit>~1' <commit>` as the spelling for one
 commit's patch. `git log --stat` still gives every commit's counts.
 
 ### What it does not do

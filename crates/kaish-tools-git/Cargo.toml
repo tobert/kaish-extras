@@ -257,6 +257,12 @@ path = "tests/semantics.rs"
 name = "write_shaped_identifiers"
 path = "tests/write_shaped_identifiers.rs"
 
+# git's own spellings through a real kernel, and a parse check over every
+# command the tool publishes (docs/git.md §1, docs/issues.md K3).
+[[test]]
+name = "spellings"
+path = "tests/spellings.rs"
+
 [[test]]
 name = "operands"
 path = "tests/operands.rs"
@@ -274,3 +280,4 @@ path = "tests/kaish_behavior_canary.rs"
 [[test]]
 name = "big_repo"
 path = "tests/big_repo.rs"
+

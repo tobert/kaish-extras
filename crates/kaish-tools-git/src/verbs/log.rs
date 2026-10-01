@@ -114,6 +114,12 @@ pub(crate) struct LogArgs {
     #[arg(long = "body", default_value_t = false)]
     pub body: bool,
 
+    /// One line per commit: the short oid, a space, and the summary, as
+    /// `git log --oneline` prints them. With `--stat` the counts follow on the
+    /// same line. `--json` is unchanged by it.
+    #[arg(long = "oneline", default_value_t = false, conflicts_with = "body")]
+    pub oneline: bool,
+
     /// Include per-commit changed-file and line counts against the first
     /// parent.
     #[arg(long = "stat", default_value_t = false)]
@@ -122,7 +128,7 @@ pub(crate) struct LogArgs {
     /// Include per-commit patch hunks. This build has no unified-diff
     /// assembly — that is the `textdiff` phase — so this exits 4 naming the
     /// gap rather than silently ignoring the flag.
-    #[arg(long = "patch", default_value_t = false)]
+    #[arg(short = 'p', long = "patch", default_value_t = false)]
     pub patch: bool,
 
     /// Repository to inspect. Defaults to the current directory; discovery
@@ -134,7 +140,7 @@ pub(crate) struct LogArgs {
     pub global: GlobalFlags,
 
     /// A revision to start from, then paths after `--`:
-    /// `git log HEAD~5 -- src/lib.rs`. At most one revision — a range is two
+    /// `git log 'HEAD~5' -- src/lib.rs`. At most one revision — a range is two
     /// calls, not `A B`. Omit it to start from `HEAD`.
     // Bound so clap accepts the `--`-terminated tail `ToolArgs::to_argv()`
     // always emits. The real operands are read off `args.positional` in

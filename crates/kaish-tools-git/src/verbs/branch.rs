@@ -47,11 +47,11 @@ pub(crate) struct BranchArgs {
     /// List remote-tracking branches beside the local ones. A remote-tracking
     /// branch is a record of what a fetch last saw; this build performs no
     /// fetch, so it is as old as the last one someone else ran.
-    #[arg(long = "all", default_value_t = false, conflicts_with = "remote")]
+    #[arg(short = 'a', long = "all", default_value_t = false, conflicts_with = "remote")]
     pub all: bool,
 
     /// List remote-tracking branches instead of the local ones.
-    #[arg(long = "remote", default_value_t = false)]
+    #[arg(short = 'r', long = "remote", default_value_t = false)]
     pub remote: bool,
 
     /// Report only branches whose tip has this revision in its history. Costs

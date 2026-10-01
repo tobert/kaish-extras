@@ -126,7 +126,15 @@ pub fn status(report: &StatusReport) -> OutputData {
 /// the shape a reader scans; `--json` carries the parents, the full oid, the
 /// body and the stat counts. `--stat` adds a counts column rather than a second
 /// table, so one row stays one commit whatever flags are in play.
-pub fn log(report: &LogReport) -> OutputData {
+///
+/// `oneline` is `git log --oneline`'s own line: the short oid, one space, the
+/// summary. A space and not the table's tab, because that line is what a
+/// reader trained on git's output splits — `cut -d' ' -f1` takes the oid.
+/// `--stat` still adds its column after it. `--json` is the same either way.
+pub fn log(report: &LogReport, oneline: bool) -> OutputData {
+    if oneline {
+        return log_oneline(report);
+    }
     let with_stat = report.commits.iter().any(|c| c.stat.is_some());
     let with_body = report.commits.iter().any(|c| c.body.is_some());
 
@@ -183,6 +191,31 @@ pub fn log(report: &LogReport) -> OutputData {
             table
         }
     }
+}
+
+/// [`log`]'s `--oneline` layout: `<short oid> <summary>` per commit.
+fn log_oneline(report: &LogReport) -> OutputData {
+    let with_stat = report.commits.iter().any(|c| c.stat.is_some());
+    let rows: Vec<OutputNode> = report
+        .commits
+        .iter()
+        .map(|commit| {
+            let line = OutputNode::new(format!("{} {}", commit.short_oid, commit.summary));
+            if with_stat {
+                line.with_cells(vec![match &commit.stat {
+                    Some(s) => format!("{} files +{} -{}", s.files, s.additions, s.deletions),
+                    None => String::new(),
+                }])
+            } else {
+                line
+            }
+        })
+        .collect();
+    let mut headers = vec!["COMMIT".to_string()];
+    if with_stat {
+        headers.push("STAT".to_string());
+    }
+    attach(OutputData::table(headers, rows), report, "git log")
 }
 
 /// Insert `"kind": <kind>` into an already-serialized object.
