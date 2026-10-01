@@ -10,9 +10,10 @@
 //! the same fixture actually printed, never against a hand-written belief
 //! about what git does. Some of these are fidelity claims (we agree with
 //! git); some are divergences, pinned with git's own answer beside ours the
-//! way `docs/issues.md`'s D1/D2/L8/L9/B2/B3/B7 entries are; one is left
-//! failing on purpose because the underlying behavior is wrong, not merely
-//! different, and is reported rather than fixed here.
+//! way `docs/issues.md`'s D1/D2/L8/L9/B2/B3/B7 entries are. One divergence —
+//! `log` failing on a shallow clone — is a bug rather than a difference of
+//! opinion. It is pinned the same way, so the fix turns its test red on
+//! purpose, and is reported rather than fixed here.
 
 #[path = "support.rs"]
 mod support;
@@ -307,44 +308,83 @@ async fn show_is_unaffected_by_a_shallow_clone() {
     assert_eq!(result.code, 0, "show must not be gated by shallowness: {}", result.err);
 }
 
-/// **Left failing on purpose (2026-08-23).** `log`'s default walk is not
-/// gated by `refuse_shallow` at all — only `branch`/`tag`'s ancestry flags
-/// are — and nothing in `verbs::log` consults `.git/shallow` either. The walk
-/// reads a shallow boundary commit's *real* parent oid straight off the raw
-/// commit object (which still names it — the shallow marker is what tells
-/// git's own walker to stop, not a rewritten commit), then tries to
-/// `find_commit` that parent to enqueue it. On this fixture (5 commits,
-/// cloned at `--depth 2`) the object genuinely is not there, and `enqueue`
-/// (`verbs/log.rs`) propagates a raw "object not found" through `?` — a
-/// crash on the exact caller who does nothing unusual: a default `git log`
-/// against the kind of shallow checkout `actions/checkout` or `git clone
-/// --depth 1` produce every day. Real git handles this natively — a shallow
-/// clone's log stops cleanly at the boundary and reports what it has.
+/// `log` fails on a shallow clone where git stops cleanly at the boundary.
+/// Measured against git 2.55 on this fixture (5 linear commits `c1..c5`,
+/// cloned at `--depth 2`, so the clone holds `c5` and `c4`, and
+/// `.git/shallow` names `c4`):
 ///
-/// `refuse_shallow`'s own doc comment names this exact failure mode
-/// ("the failure would otherwise wear the shape of a missing object rather
-/// than of a shallow repository") as the reason `branch`/`tag`'s ancestry
-/// flags are gated — but `log` was never gated, so the failure mode the gate
-/// exists to avoid is reachable anyway, through the one verb with no gate at
-/// all. Filed as docs/issues.md L11. Do not "fix" this test by lowering the
-/// expectation to the crash it currently produces — the assertion below is
-/// what correct behavior looks like, and it should go green the day this is
-/// fixed, not before.
+/// - git: `git log` exits 0 and prints `c5`, `c4`. `git log -1 --format=%P
+///   c4` prints an empty parent list — git drops the boundary's parents.
+/// - ours: exit 1, `git log: reading a commit at '<git dir>': An object with
+///   id <c3> could not be found`. `c3` is the parent that `c4`'s raw commit
+///   object still records, and `git cat-file -e <c3>` confirms it is not in
+///   the clone.
+///
+/// Why: nothing in `verbs::log` consults `.git/shallow`, and `enqueue` reads
+/// every parent (for its committer time) as soon as the walk *processes* a
+/// commit, before any `--limit` check. So the failure fires on reaching the
+/// boundary, not on going past it: `--limit 1` succeeds, while `--limit 2` —
+/// exactly the commits the clone holds — fails the same way as no limit, and
+/// so does `--first-parent`. Only `branch`/`tag`'s ancestry flags go through
+/// `refuse_shallow`, whose doc comment names this failure ("the failure would
+/// otherwise wear the shape of a missing object rather than of a shallow
+/// repository"); `log` has no gate, so the error names a missing object and
+/// never the shallow condition. A default `git log` in a `--depth 1` CI
+/// checkout reaches it.
+///
+/// This is a bug, not a difference of opinion. It is pinned like the other
+/// divergences so a fix turns this test red on purpose; invert it then to
+/// compare against `git_log_oids`. Pinned with git's own answer beside ours:
+/// docs/issues.md L11.
 #[tokio::test]
-async fn log_default_walk_on_a_shallow_clone_matches_git() {
+async fn log_walk_on_a_shallow_clone_fails_at_the_boundary_where_git_stops_cleanly() {
     let pair = ShallowPair::build();
+
+    // Oracle: git walks the two commits the clone holds and stops cleanly,
+    // reporting the boundary commit with no parents at all.
     let oracle = git_log_oids(&pair.shallow_root, &[]);
     assert_eq!(oracle.len(), 2, "the depth-2 shallow clone must hold exactly 2 commits: {oracle:?}");
+    let (tip, boundary) = (&oracle[0], &oracle[1]);
+    let boundary_parents_per_git = git(&pair.shallow_root, &["log", "-1", "--format=%P", boundary]);
+    assert_eq!(boundary_parents_per_git, "", "git drops the boundary commit's parents");
 
+    // Fixture controls: the boundary is the commit `.git/shallow` names, its
+    // raw object still records a parent, and that parent is really absent —
+    // otherwise the failure below would be about something else.
+    let shallow_marker =
+        std::fs::read_to_string(pair.shallow_root.join(".git/shallow")).expect("read .git/shallow");
+    assert_eq!(shallow_marker.trim(), boundary.as_str(), ".git/shallow must name the boundary commit");
+    let missing = git(&pair.shallow_root, &["cat-file", "-p", boundary])
+        .lines()
+        .find_map(|l| l.strip_prefix("parent "))
+        .expect("the boundary's raw commit object still records its parent")
+        .to_string();
+    let probe = git_allow_fail(&pair.shallow_root, &["cat-file", "-e", &missing]);
+    assert!(!probe.status.success(), "the boundary's parent {missing} must be absent from the clone");
+
+    // Ours: the default walk fails, naming the missing parent.
     let result = log(&pair.scratch(), "/mnt/shallow", &[]).await;
-    assert_eq!(
-        result.code, 0,
-        "a default `git log` on a shallow clone must not crash reaching the \
-         boundary the way `refuse_shallow`'s own doc comment warns about — \
-         stderr was: {}",
+    assert_eq!(result.code, 1, "a default walk fails at the boundary; stderr was: {}", result.err);
+    assert!(
+        result.err.contains("could not be found") && result.err.contains(&missing),
+        "the error names the boundary's missing parent {missing}: {}",
         result.err
     );
-    assert_eq!(log_oids(&result), oracle);
+
+    // `--limit 2` asks for exactly the commits the clone holds, and still
+    // fails: the parent read happens when the boundary is processed.
+    let at_two = log(&pair.scratch(), "/mnt/shallow", &["--limit", "2"]).await;
+    assert_eq!(at_two.code, 1, "--limit 2 reaches the boundary; stderr was: {}", at_two.err);
+    assert!(at_two.err.contains(&missing), "same missing parent: {}", at_two.err);
+    let first_parent = log(&pair.scratch(), "/mnt/shallow", &["--first-parent"]).await;
+    assert_eq!(first_parent.code, 1, "--first-parent reaches it too; stderr was: {}", first_parent.err);
+    assert!(first_parent.err.contains(&missing), "same missing parent: {}", first_parent.err);
+
+    // Present thing: `--limit 1` stops before processing the boundary, so it
+    // succeeds and agrees with git — the clone is readable, and the failure
+    // above is specifically about reaching the boundary.
+    let at_one = log(&pair.scratch(), "/mnt/shallow", &["--limit", "1"]).await;
+    assert_eq!(log_oids(&at_one), vec![tip.clone()]);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -542,6 +582,21 @@ impl OctopusRepo {
             "fixture must be a real octopus merge (root + 3 branches): {parents}"
         );
 
+        // Negative control: every committer instant is distinct. With tied
+        // instants, git orders `--no-merges` as root, b1, b2, b3 (its
+        // discovery order) and ours by descending oid — measured 2026-10-01,
+        // the same four oids in a different order. That is L5, not anything
+        // about octopus merges, and it would fail the order comparisons below
+        // looking like a new divergence. A fixture edit back to `git()`'s
+        // single fixed clock trips this instead.
+        let instants = git(&root, &["log", "--format=%ct"]);
+        let mut distinct: Vec<&str> = instants.lines().collect();
+        let total = distinct.len();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(total, 5, "root, three branch commits, and the merge: {instants}");
+        assert_eq!(distinct.len(), total, "committer instants must not tie (L5): {instants}");
+
         Self { fixture, root, root_oid, x1, x2, x3 }
     }
 
@@ -565,7 +620,9 @@ async fn octopus_merge_filters_match_git() {
     assert_eq!(log_oids(&merges), vec![repo.merge_oid()], "exactly the octopus merge");
 
     let no_merges = log(&repo.scratch(), "/mnt/repo", &["--no-merges"]).await;
-    assert_eq!(log_oids(&no_merges), git_log_oids(&repo.root, &["--no-merges"]));
+    let oracle_no_merges = git_log_oids(&repo.root, &["--no-merges"]);
+    assert_eq!(oracle_no_merges.len(), 4, "root plus the three branch commits: {oracle_no_merges:?}");
+    assert_eq!(log_oids(&no_merges), oracle_no_merges);
 
     let all = log(&repo.scratch(), "/mnt/repo", &[]).await;
     assert_eq!(
@@ -600,30 +657,58 @@ async fn octopus_first_parent_matches_git() {
 
 /// `log --stat` on an octopus merge reports zero files/lines, matching git's
 /// default of showing no diffstat for ANY merge regardless of parent count —
-/// the same fidelity L8/L9 already pin for a two-parent merge, now checked
-/// against a real 4-parent one.
+/// the same fidelity `log.rs::a_merge_reports_no_stat_lines` pins for a
+/// two-parent merge, now checked against a real 4-parent one.
 #[tokio::test]
 async fn octopus_stat_reports_no_lines_matching_git() {
     let repo = OctopusRepo::build();
+    let merge = repo.merge_oid();
     let result = log(&repo.scratch(), "/mnt/repo", &["--stat", "--merges"]).await;
     assert_eq!(result.code, 0, "stderr: {}", result.err);
-    let stat = &json(&result)["commits"][0]["stat"];
+    let ours = &json(&result)["commits"][0];
+    assert_eq!(ours["oid"], merge.as_str(), "the row is the octopus merge itself");
+    assert_eq!(ours["parents"].as_array().map(Vec::len), Some(4), "with all 4 parents: {ours}");
+    let stat = &ours["stat"];
     assert_eq!(stat["files"], 0);
     assert_eq!(stat["additions"], 0);
     assert_eq!(stat["deletions"], 0);
 
     // `git log --stat`, not `git show --stat`: the two disagree on a merge.
-    // `git show <merge>` defaults to a combined (`--cc`-like) diff and DOES
-    // print a stat — confirmed against git 2.55 on both a 2-parent and this
-    // 3-parent fixture — while `git log --stat` (what `log --stat` in this
-    // crate models) shows nothing for any merge, parent count included. Using
-    // `show` here would have manufactured a divergence out of asking the
-    // wrong oracle.
-    let oracle = git(&repo.root, &["log", "--stat", "--format=", "-1", &repo.merge_oid()]);
+    // Measured against git 2.55 on this 4-parent fixture: `git log --stat
+    // --format= -1 <merge>` prints nothing, while `git show --stat --format=
+    // <merge>` defaults to a combined diff and prints ` one.txt | 1 +`,
+    // ` three.txt | 1 +`, ` two.txt | 1 +`, `3 files changed, 3
+    // insertions(+)`. `log --stat` in this crate models `git log --stat`;
+    // asking `show` would manufacture a divergence out of the wrong oracle.
+    let oracle = git(&repo.root, &["log", "--stat", "--format=", "-1", &merge]);
     assert!(
         oracle.trim().is_empty(),
         "git log --stat shows no diffstat for a merge by default, octopus included: {oracle:?}"
     );
+
+    // Negative control: the merge really carries changes, so the zeros above
+    // are git's merge rule rather than an empty merge. `show` is the right
+    // oracle for THIS question only.
+    let shown = git(&repo.root, &["show", "--stat", "--format=", &merge]);
+    assert!(
+        shown.contains("3 files changed, 3 insertions(+)"),
+        "the octopus merge must carry the three branch files: {shown:?}"
+    );
+
+    // Present thing: our `--stat` does count lines in this same walk — a
+    // side-branch commit reports its one-line file — so the merge's zeros are
+    // not an inert `--stat`.
+    let all = log(&repo.scratch(), "/mnt/repo", &["--stat"]).await;
+    let all = json(&all)["commits"].clone();
+    let side = all
+        .as_array()
+        .expect("commits array")
+        .iter()
+        .find(|c| c["oid"] == repo.x1.as_str())
+        .unwrap_or_else(|| panic!("b1's commit {} must be walked: {all}", repo.x1))
+        .clone();
+    assert_eq!(side["stat"]["files"], 1, "b1 adds one file: {side}");
+    assert_eq!(side["stat"]["additions"], 1, "b1 adds one line: {side}");
 }
 
 /// `^3` resolves the third parent (1-based) of an octopus merge — git's
@@ -735,7 +820,7 @@ async fn show_follows_a_tag_chain_exactly_eight_deep() {
     let outer = build_tag_chain(&root, &base, 8);
 
     // Sanity: git itself has no trouble with this depth either.
-    let peeled = git(&root, &[&format!("rev-parse"), &format!("{outer}^{{commit}}")]);
+    let peeled = git(&root, &["rev-parse", &format!("{outer}^{{commit}}")]);
     assert_eq!(peeled, base, "sanity: git peels 8 levels of tags fine");
 
     let result = show_run(&fixture.root(), "/mnt/repo", &[&outer]).await;
