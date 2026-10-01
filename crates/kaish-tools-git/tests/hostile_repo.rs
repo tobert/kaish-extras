@@ -1785,7 +1785,7 @@ fn assert_refused_without_the_host_bytes(result: &ExecResult) {
         result.err,
         result.output()
     );
-    let rendered = format!("{} {:?}", result.err, result.output());
+    let rendered = format!("{} {:?} {:?}", result.err, result.output(), result.baggage);
     assert!(
         !rendered.contains(HOST_OID),
         "the host file's bytes reached the caller: {rendered}"
@@ -2087,9 +2087,14 @@ fn cross_project_fixture(packed: bool) -> (Fixture, PathBuf, PathBuf, String, St
 
     std::fs::create_dir_all(&donor).expect("create the donor directory");
     git(&donor, &["init", "--initial-branch=main", "--quiet"]);
+    // Two commits, so a history walk has something to walk: one commit cannot
+    // tell `log` from `show`.
+    write_file(&donor, "first.txt", "the donor's first file\n");
+    git(&donor, &["add", "."]);
+    git(&donor, &["commit", "-m", DONOR_FIRST_SUBJECT, "--quiet"]);
     write_file(&donor, "secret.txt", HOST_BLOB_TEXT);
     git(&donor, &["add", "."]);
-    git(&donor, &["commit", "-m", "the host repository's own commit", "--quiet"]);
+    git(&donor, &["commit", "-m", DONOR_SECOND_SUBJECT, "--quiet"]);
     if packed {
         git(&donor, &["repack", "-ad", "--quiet"]);
     }
@@ -2103,8 +2108,48 @@ fn cross_project_fixture(packed: bool) -> (Fixture, PathBuf, PathBuf, String, St
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-m", "inside", "--quiet"]);
 
+    // The donor is outside the mount, lexically and after resolving links.
+    assert!(
+        !donor.starts_with(&mount),
+        "the donor {} is lexically under the mount {}",
+        donor.display(),
+        mount.display()
+    );
+    let donor_real = donor.canonicalize().expect("canonicalize the donor");
+    let mount_real = mount.canonicalize().expect("canonicalize the mount");
+    assert!(
+        !donor_real.starts_with(&mount_real),
+        "the donor {} resolves under the mount {}",
+        donor_real.display(),
+        mount_real.display()
+    );
+
     assert_the_mount_does_not_hold_the_sentinel(&mount);
     (fixture, mount, donor, blob, commit)
+}
+
+/// The repository under test cannot answer for the donor's objects from its
+/// own store. Run before any symlink is planted: the plaintext scan above
+/// cannot show this, because git objects are zlib-compressed and the sentinel
+/// never appears in them as plaintext.
+async fn assert_the_repository_cannot_answer_for_the_donor(
+    mount: &Path,
+    blob: &str,
+    commit: &str,
+) {
+    for oid in [blob, commit] {
+        let result = show_at(mount.to_path_buf(), "/mnt/repo", oid).await;
+        assert_ne!(
+            result.code, 0,
+            "the repository under test answered for the donor's {oid} before any \
+             symlink was planted: {}",
+            result.text_out()
+        );
+        assert!(
+            !result.text_out().contains("SENTINEL"),
+            "the donor's bytes came back before any symlink was planted"
+        );
+    }
 }
 
 /// A read that returns [`HOST_BLOB_TEXT`] can only have come from outside the
@@ -2127,6 +2172,14 @@ fn assert_the_mount_does_not_hold_the_sentinel(dir: &Path) {
             );
         }
     }
+}
+
+const DONOR_FIRST_SUBJECT: &str = "the donor's first commit";
+const DONOR_SECOND_SUBJECT: &str = "the host repository's own commit";
+
+/// How many commits a `log` rendering lists: one tab-separated line each.
+fn log_commit_count(text: &str) -> usize {
+    text.lines().filter(|l| l.split('\t').count() == 4).count()
 }
 
 /// Run `git log <rev>` with `mount_real` mounted at `/mnt`.
@@ -2156,7 +2209,8 @@ async fn log_at(mount_real: PathBuf, cwd: &str, rev: &str) -> ExecResult {
 /// not weaken it in place.
 #[tokio::test]
 async fn a_symlinked_loose_object_reads_another_repositorys_object() {
-    let (_fixture, mount, donor, blob, _commit) = cross_project_fixture(false);
+    let (_fixture, mount, donor, blob, commit) = cross_project_fixture(false);
+    assert_the_repository_cannot_answer_for_the_donor(&mount, &blob, &commit).await;
 
     let (fan_out, rest) = blob.split_at(2);
     let donor_object = donor.join(".git/objects").join(fan_out).join(rest);
@@ -2191,6 +2245,7 @@ async fn a_symlinked_loose_object_reads_another_repositorys_object() {
 #[tokio::test]
 async fn a_symlinked_objects_pack_directory_reads_another_repositorys_pack() {
     let (_fixture, mount, donor, blob, commit) = cross_project_fixture(true);
+    assert_the_repository_cannot_answer_for_the_donor(&mount, &blob, &commit).await;
 
     let pack_dir = mount.join("repo/.git/objects/pack");
     let _ = std::fs::remove_dir_all(&pack_dir);
@@ -2211,10 +2266,17 @@ async fn a_symlinked_objects_pack_directory_reads_another_repositorys_pack() {
 
     let walked = log_at(mount, "/mnt/repo", &commit).await;
     assert_eq!(walked.code, 0, "the residual is that this succeeds: {}", walked.err);
+    let text = walked.text_out();
     assert!(
-        walked.text_out().contains("the host repository's own commit"),
-        "the donor's history walked: {}",
-        walked.text_out()
+        text.contains(DONOR_SECOND_SUBJECT) && text.contains(DONOR_FIRST_SUBJECT),
+        "the donor's history walked to its parent: {text}"
+    );
+    // MEASURED: `log` renders one `<abbrev oid>\t<date>\t<author>\t<subject>`
+    // line per commit, so two such lines is two commits walked.
+    assert_eq!(
+        log_commit_count(&text),
+        2,
+        "the donor has exactly two commits, and `log` must list exactly those: {text}"
     );
 }
 
@@ -2230,19 +2292,28 @@ async fn a_symlinked_objects_pack_directory_reads_another_repositorys_pack() {
 /// half of the residual widens by one shape.
 #[tokio::test]
 async fn a_symlinked_pack_index_is_skipped_by_gixs_pack_scan() {
-    let (_fixture, mount, donor, blob, _commit) = cross_project_fixture(true);
+    let (_fixture, mount, donor, blob, commit) = cross_project_fixture(true);
+    assert_the_repository_cannot_answer_for_the_donor(&mount, &blob, &commit).await;
 
     let pack_dir = mount.join("repo/.git/objects/pack");
     std::fs::create_dir_all(&pack_dir).expect("create the pack directory");
-    let mut planted = 0;
+    let (mut packs, mut idxs) = (0, 0);
     for entry in std::fs::read_dir(donor.join(".git/objects/pack")).expect("read the donor's packs")
     {
         let entry = entry.expect("entry");
+        match entry.path().extension().and_then(|e| e.to_str()) {
+            Some("pack") => packs += 1,
+            Some("idx") => idxs += 1,
+            _ => {}
+        }
         std::os::unix::fs::symlink(entry.path(), pack_dir.join(entry.file_name()))
             .expect("plant a pack-file symlink");
-        planted += 1;
     }
-    assert!(planted >= 2, "the donor must have a pack and an index, got {planted}");
+    assert_eq!(
+        (packs, idxs),
+        (1, 1),
+        "the donor must have exactly one .pack and one .idx planted"
+    );
 
     // The mechanism, asserted rather than described: what the scan's filter
     // sees for a planted entry.
@@ -2269,6 +2340,70 @@ async fn a_symlinked_pack_index_is_skipped_by_gixs_pack_scan() {
     );
 }
 
+/// Plant the donor's pack files in the repository under test: the file with
+/// extension `link_ext` as a symlink, every other one as a copy. Returns how
+/// many `.pack` and `.idx` files were symlinked.
+fn plant_pack_files(donor: &Path, mount: &Path, link_ext: &str) -> (usize, usize) {
+    let pack_dir = mount.join("repo/.git/objects/pack");
+    std::fs::create_dir_all(&pack_dir).expect("create the pack directory");
+    let (mut packs, mut idxs) = (0, 0);
+    for entry in std::fs::read_dir(donor.join(".git/objects/pack")).expect("read the donor's packs")
+    {
+        let entry = entry.expect("entry");
+        let ext = entry.path().extension().and_then(|e| e.to_str()).map(str::to_string);
+        if ext.as_deref() == Some(link_ext) {
+            std::os::unix::fs::symlink(entry.path(), pack_dir.join(entry.file_name()))
+                .expect("plant a pack-file symlink");
+            match link_ext {
+                "pack" => packs += 1,
+                _ => idxs += 1,
+            }
+        } else {
+            std::fs::copy(entry.path(), pack_dir.join(entry.file_name())).expect("copy a pack file");
+        }
+    }
+    (packs, idxs)
+}
+
+/// Arm A: only the `.idx` is a symlink; the `.pack` (and any `.rev`) is a copy.
+#[tokio::test]
+async fn a_symlinked_pack_index_alone_is_skipped() {
+    let (_fixture, mount, donor, blob, commit) = cross_project_fixture(true);
+    assert_the_repository_cannot_answer_for_the_donor(&mount, &blob, &commit).await;
+    assert_eq!(plant_pack_files(&donor, &mount, "idx"), (0, 1), "exactly one .idx planted");
+
+    let result = show_at(mount, "/mnt/repo", &blob).await;
+    // MEASURED: exit 1 and no sentinel, as the docs predict: with the index a
+    // symlink, gix's scan skips the pair, so the copied `.pack` is never used.
+    assert_eq!(result.code, 1, "{}", result.err);
+    assert!(!result.text_out().contains("SENTINEL"), "{}", result.text_out());
+    assert!(
+        result.err.contains("does not name a commit"),
+        "the lookup must find nothing: {}",
+        result.err
+    );
+}
+
+/// Arm B: only the `.pack` is a symlink; the `.idx` (and any `.rev`) is a copy.
+///
+/// MEASURED: **this leaks.** The scan keys on the index, which is a regular
+/// file here, and gix then opens the pack by name and follows the symlink: the
+/// donor's blob comes back whole at exit 0. A symlinked `.idx` is skipped
+/// (Arm A), but a symlinked `.pack` beside a real `.idx` is not, so the
+/// residual's pack half is wider than "the index is skipped" suggests. The
+/// attacker needs a valid `.idx` for the donor's pack, which is a public
+/// function of the donor's objects.
+#[tokio::test]
+async fn a_symlinked_pack_file_beside_a_real_index_reads_another_repositorys_pack() {
+    let (_fixture, mount, donor, blob, commit) = cross_project_fixture(true);
+    assert_the_repository_cannot_answer_for_the_donor(&mount, &blob, &commit).await;
+    assert_eq!(plant_pack_files(&donor, &mount, "pack"), (1, 0), "exactly one .pack planted");
+
+    let result = show_at(mount, "/mnt/repo", &blob).await;
+    assert_eq!(result.code, 0, "MEASURED: the symlinked .pack is read: {}", result.err);
+    assert_eq!(result.text_out(), HOST_BLOB_TEXT);
+}
+
 /// The negative control for the scan: the **same** pack, copied in rather than
 /// symlinked, is read.
 ///
@@ -2277,7 +2412,8 @@ async fn a_symlinked_pack_index_is_skipped_by_gixs_pack_scan() {
 /// never reached the pack path at all.
 #[tokio::test]
 async fn the_same_pack_copied_in_is_read() {
-    let (_fixture, mount, donor, blob, _commit) = cross_project_fixture(true);
+    let (_fixture, mount, donor, blob, commit) = cross_project_fixture(true);
+    assert_the_repository_cannot_answer_for_the_donor(&mount, &blob, &commit).await;
 
     let pack_dir = mount.join("repo/.git/objects/pack");
     std::fs::create_dir_all(&pack_dir).expect("create the pack directory");
@@ -2300,7 +2436,8 @@ async fn the_same_pack_copied_in_is_read() {
 /// without the repository naming an object file at all.
 #[tokio::test]
 async fn a_symlinked_object_fan_out_directory_reads_another_repositorys_object() {
-    let (_fixture, mount, donor, blob, _commit) = cross_project_fixture(false);
+    let (_fixture, mount, donor, blob, commit) = cross_project_fixture(false);
+    assert_the_repository_cannot_answer_for_the_donor(&mount, &blob, &commit).await;
 
     let (fan_out, _rest) = blob.split_at(2);
     let dir = mount.join("repo/.git/objects").join(fan_out);
@@ -2329,22 +2466,336 @@ async fn a_symlinked_object_fan_out_directory_reads_another_repositorys_object()
 /// content.
 #[tokio::test]
 async fn a_loose_object_symlinked_at_an_ordinary_host_file_is_refused_without_echoing_it() {
-    let (_fixture, mount, _donor, blob, _commit) = cross_project_fixture(false);
+    let (_fixture, mount, _donor, blob, commit) = cross_project_fixture(false);
+    assert_the_repository_cannot_answer_for_the_donor(&mount, &blob, &commit).await;
 
     let host_file = mount.parent().expect("scratch root").join("ordinary-host-file");
     std::fs::write(&host_file, format!("{NON_HEX_SENTINEL}\nnot a git object\n"))
         .expect("write the host file");
+
+    // The control arm: the same repository and query with no symlink planted.
+    let control = show_at(mount.clone(), "/mnt/repo", &blob).await;
+    assert_eq!(control.code, 1, "the donor's blob is absent here: {}", control.err);
+    assert!(
+        control.err.contains("does not name a commit"),
+        "with no object at the path, the lookup finds nothing: {}",
+        control.err
+    );
+    assert!(
+        !control.err.contains("loose object store"),
+        "the marker below must be absent when nothing is planted: {}",
+        control.err
+    );
+
     let (fan_out, rest) = blob.split_at(2);
     let dir = mount.join("repo/.git/objects").join(fan_out);
     std::fs::create_dir_all(&dir).expect("create the fan-out directory");
     std::os::unix::fs::symlink(&host_file, dir.join(rest)).expect("plant the object symlink");
 
-    let result = show_at(mount, "/mnt/repo", &blob).await;
-    let rendered = format!("{} {:?}", result.err, result.text_out());
-    assert_ne!(result.code, 0, "a host file is not a git object: {rendered}");
+    let result = show_at(mount.clone(), "/mnt/repo", &blob).await;
+    let rendered = format!("{} {:?} {:?}", result.err, result.text_out(), result.baggage);
+    // MEASURED: exit 1, and the error is gix's loose-object-store failure
+    // ("An error occurred while obtaining an object from the loose object
+    // store"), which is what the docs claim. It appears only when gix opened
+    // the planted path.
+    assert_eq!(result.code, 1, "a host file is not a git object: {rendered}");
+    assert!(
+        result.err.contains("obtaining an object from the loose object store"),
+        "gix must have tried to read the planted file: {rendered}"
+    );
+    assert_ne!(
+        result.err.replace(&mount.parent().expect("scratch").display().to_string(), "<scratch>"),
+        control.err.replace(&mount.parent().expect("scratch").display().to_string(), "<scratch>"),
+        "the planted arm must fail differently from the arm with nothing planted"
+    );
     assert!(
         !rendered.contains(NON_HEX_SENTINEL),
         "the failed object read echoed the host file's bytes, which makes it a \
          content probe rather than a failed read: {rendered}"
     );
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Measured claims: what the residual's prose says, one assertion each
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Run one verb, with its arguments split on whitespace, from `cwd`.
+async fn verb_at(mount_real: PathBuf, cwd: &str, verb: &str) -> ExecResult {
+    let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), mount_real));
+    let mut ctx = TestCtx::new(backend, cwd);
+    let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
+    let mut args = ToolArgs::new();
+    for word in verb.split_whitespace() {
+        args.positional.push(Value::String(word.to_string()));
+    }
+    tool.execute(args, &mut ctx).await
+}
+
+/// Every verb in the read profile, invoked with no arguments. Copied from
+/// `hostile_refs.rs`, because test files here share only `support.rs`.
+const ALL_VERBS: &[&str] = &[
+    "info",
+    "status",
+    "log",
+    "ls",
+    "show",
+    "diff",
+    "branch",
+    "tag",
+    "worktree list",
+];
+
+/// The verbs whose rendering (err, output text and baggage) contains `needle`
+/// when run bare from `/mnt/repo`.
+async fn verbs_that_render(mount: &Path, needle: &str) -> std::collections::BTreeSet<&'static str> {
+    let mut found = std::collections::BTreeSet::new();
+    for verb in ALL_VERBS {
+        let r = verb_at(mount.to_path_buf(), "/mnt/repo", verb).await;
+        let rendered = format!("{} {} {:?}", r.err, r.text_out(), r.baggage);
+        if rendered.contains(needle) {
+            found.insert(*verb);
+        }
+    }
+    found
+}
+
+/// The documented claim is "every verb that resolves HEAD" returns the host
+/// file's 40 characters. This measures which verbs do.
+#[tokio::test]
+async fn the_verbs_that_return_a_symlinked_loose_refs_bytes_are_the_measured_set() {
+    let (_fixture, mount) = ref_leaf_fixture("refs/heads/pwn");
+    std::fs::write(mount.join("repo/.git/HEAD"), "ref: refs/heads/pwn\n")
+        .expect("point HEAD at the symlinked ref");
+
+    let leaking = verbs_that_render(&mount, HOST_OID).await;
+    // MEASURED: six verbs return it (the ones that resolve HEAD to an object:
+    // `info`, `status`, `log`, `ls`, `show`, `branch`), each at exit 1. `diff`
+    // (exit 0, "no changes"), `tag` (exit 0, empty) and `worktree list`
+    // (exit 0, prints the branch name `pwn` and no oid) do not resolve HEAD to
+    // an object and do not return it. This matches the six the docs name.
+    assert_eq!(
+        leaking,
+        std::collections::BTreeSet::from(["branch", "info", "log", "ls", "show", "status"]),
+        "the set of verbs returning the host file's 40 hex characters changed"
+    );
+}
+
+/// Negative control for the set above: the same fixture with a **real** loose
+/// ref holding a real commit oid returns `HOST_OID` from no verb, so the set
+/// is about the symlink and not about the verbs printing something fixed.
+#[tokio::test]
+async fn no_verb_returns_the_host_oid_when_the_loose_ref_is_a_real_file() {
+    let (_fixture, mount) = ref_leaf_fixture("refs/heads/pwn");
+    let repo = mount.join("repo");
+    let leaf = repo.join(".git/refs/heads/pwn");
+    std::fs::remove_file(&leaf).expect("remove the symlink");
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    std::fs::write(&leaf, format!("{head}\n")).expect("write a real loose ref");
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/pwn\n").expect("point HEAD");
+
+    let leaking = verbs_that_render(&mount, HOST_OID).await;
+    assert!(leaking.is_empty(), "verbs rendered HOST_OID with no symlink: {leaking:?}");
+
+    // And the verbs really ran against that ref: `info` answers.
+    let info = info_at(mount, "/mnt/repo").await;
+    assert_eq!(info.code, 0, "a real loose ref must resolve: {}", info.err);
+}
+
+/// An `objects` directory symlinked outside the mount is refused, and the
+/// outside repository's objects do not come back. The in-mount positive case
+/// is `a_symlinked_objects_dir_inside_the_mount_still_works`.
+#[tokio::test]
+async fn a_symlinked_objects_dir_outside_the_mount_is_refused() {
+    let (_fixture, mount, outside_head) = sabotaged(|git_dir, _work, outside| {
+        std::fs::remove_dir_all(git_dir.join("objects")).expect("remove the real store");
+        std::os::unix::fs::symlink(outside.join(".git/objects"), git_dir.join("objects"))
+            .expect("symlink objects at an outside store");
+    });
+    let result = info_at(mount, "/mnt/repo").await;
+    assert_contained(&result, &outside_head);
+}
+
+/// A symlinked `info/exclude` is refused before it is read. `status` is the
+/// verb that reads it.
+#[tokio::test]
+async fn a_symlinked_info_exclude_is_refused_before_it_is_read() {
+    let (_fixture, mount, outside_head) = sabotaged(|git_dir, _work, outside| {
+        let exclude = git_dir.join("info/exclude");
+        std::fs::create_dir_all(git_dir.join("info")).expect("create info");
+        let _ = std::fs::remove_file(&exclude);
+        std::os::unix::fs::symlink(outside.join("secret.txt"), &exclude)
+            .expect("symlink info/exclude at an outside file");
+    });
+    let result = verb_at(mount, "/mnt/repo", "status").await;
+    assert_contained(&result, &outside_head);
+}
+
+/// The negative control for the refusal above: a real `info/exclude` is read
+/// and `status` answers.
+#[tokio::test]
+async fn a_real_info_exclude_is_read_by_status() {
+    let (_fixture, mount, _outside_head) = sabotaged(|git_dir, _work, _outside| {
+        std::fs::write(git_dir.join("info/exclude"), "*.log\n").expect("write info/exclude");
+    });
+    let result = verb_at(mount, "/mnt/repo", "status").await;
+    assert_eq!(result.code, 0, "a real exclude file must be read: {}", result.err);
+}
+
+/// All three ref hierarchies are screened, for both verbs that list refs.
+#[tokio::test]
+async fn every_symlinked_ref_hierarchy_is_refused_by_branch_and_tag() {
+    for hierarchy in ["heads", "tags", "remotes"] {
+        for verb in ["branch", "tag"] {
+            require_git();
+            let fixture = Fixture::empty();
+            let mount = fixture.path("mount");
+            let repo = mount.join("repo");
+            let outside = fixture.path("outside/hierarchy");
+            std::fs::create_dir_all(&repo).expect("create the repository directory");
+            std::fs::create_dir_all(&outside).expect("create the outside hierarchy");
+            git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+            write_file(&repo, "README.md", "inside the mount\n");
+            git(&repo, &["add", "."]);
+            git(&repo, &["commit", "-m", "inside", "--quiet"]);
+            std::fs::write(outside.join(HOST_REF_NAME), format!("{HOST_OID}\n"))
+                .expect("write outside ref");
+
+            let link = repo.join(".git/refs").join(hierarchy);
+            let _ = std::fs::remove_dir_all(&link);
+            std::os::unix::fs::symlink(&outside, &link).expect("plant the symlinked hierarchy");
+
+            let result = verb_at(mount, "/mnt/repo", verb).await;
+            assert!(
+                result.code == 4,
+                "refs/{hierarchy} symlinked, `{verb}`: want exit 4, got {}: {}",
+                result.code,
+                result.err
+            );
+            let rendered = format!("{} {} {:?}", result.err, result.text_out(), result.baggage);
+            assert!(
+                !rendered.contains(HOST_OID) && !rendered.contains(HOST_REF_NAME),
+                "refs/{hierarchy} symlinked, `{verb}`: host bytes reached the caller: {rendered}"
+            );
+        }
+    }
+}
+
+/// The negative control: each hierarchy as a real directory holding a real
+/// ref is answered by both verbs, so exit 4 above is about the symlink.
+#[tokio::test]
+async fn every_real_ref_hierarchy_is_answered_by_branch_and_tag() {
+    for hierarchy in ["heads", "tags", "remotes"] {
+        for verb in ["branch", "tag"] {
+            require_git();
+            let fixture = Fixture::empty();
+            let mount = fixture.path("mount");
+            let repo = mount.join("repo");
+            std::fs::create_dir_all(&repo).expect("create the repository directory");
+            git(&repo, &["init", "--initial-branch=main", "--quiet"]);
+            write_file(&repo, "README.md", "inside the mount\n");
+            git(&repo, &["add", "."]);
+            git(&repo, &["commit", "-m", "inside", "--quiet"]);
+            let head = git(&repo, &["rev-parse", "HEAD"]);
+            let dir = repo.join(".git/refs").join(hierarchy);
+            std::fs::create_dir_all(&dir).expect("create the real hierarchy");
+            std::fs::write(dir.join("real-ref"), format!("{head}\n")).expect("write a real ref");
+
+            let result = verb_at(mount, "/mnt/repo", verb).await;
+            assert_eq!(
+                result.code, 0,
+                "refs/{hierarchy} real, `{verb}`: {}",
+                result.err
+            );
+        }
+    }
+}
+
+/// Replace the scratch path in an error so two fixtures' errors compare.
+fn without_the_scratch_path(err: &str, mount: &Path) -> String {
+    let scratch = mount.parent().expect("scratch root").display().to_string();
+    err.replace(&scratch, "<scratch>")
+}
+
+/// "Still a one-bit content probe": a host file that begins with 40 hex and
+/// one that does not fail **differently**, so the caller learns one bit about
+/// the file. If the two errors were equal there would be no probe at all.
+#[tokio::test]
+async fn a_hex_and_a_non_hex_host_file_fail_with_different_errors() {
+    let (_f1, hex_mount) = ref_leaf_fixture_with_body("refs/heads/pwn", &format!("{HOST_OID}\n"));
+    std::fs::write(hex_mount.join("repo/.git/HEAD"), "ref: refs/heads/pwn\n").expect("HEAD");
+    let hex = info_at(hex_mount.clone(), "/mnt/repo").await;
+
+    let (_f2, non_hex_mount) =
+        ref_leaf_fixture_with_body("refs/heads/pwn", &format!("{NON_HEX_SENTINEL}\n"));
+    std::fs::write(non_hex_mount.join("repo/.git/HEAD"), "ref: refs/heads/pwn\n").expect("HEAD");
+    let non_hex = info_at(non_hex_mount.clone(), "/mnt/repo").await;
+
+    // Both reached the leaf, or the comparison says nothing.
+    assert_ne!(hex.code, 0, "{}", hex.err);
+    assert_ne!(non_hex.code, 0, "{}", non_hex.err);
+    assert_ne!(
+        without_the_scratch_path(&hex.err, &hex_mount),
+        without_the_scratch_path(&non_hex.err, &non_hex_mount),
+        "the two failures read the same, so the host file is not a one-bit probe"
+    );
+}
+
+/// Every backticked `a_…`/`the_…` test name the docs cite exists as a test
+/// function. A doc that cites a test nobody wrote is a claim with no check.
+#[test]
+fn every_test_the_docs_cite_exists() {
+    let docs = [
+        ("embedding-git.md", include_str!("../../../docs/embedding-git.md")),
+        ("issues.md", include_str!("../../../docs/issues.md")),
+    ];
+    let mut sources = String::new();
+    // The docs also cite unit tests that live beside the code under `src/`.
+    for dir in ["tests", "src"] {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
+        for entry in std::fs::read_dir(&dir).expect("read a test source directory") {
+            let path = entry.expect("entry").path();
+            if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                sources.push_str(&std::fs::read_to_string(&path).expect("read a test file"));
+            }
+        }
+    }
+    let missing: Vec<String> = docs
+        .iter()
+        .flat_map(|(doc, text)| {
+            cited_test_names(text).into_iter().map(move |n| format!("{doc}: {n}"))
+        })
+        .filter(|cite| !has_test_fn(&sources, cite.split(": ").nth(1).expect("name")))
+        .collect();
+    assert!(missing.is_empty(), "the docs cite tests that do not exist: {missing:#?}");
+}
+
+/// Negative controls for the guard: it must find a real name and must not find
+/// a made-up one, or "nothing missing" could mean "nothing checked".
+#[test]
+fn the_citation_guard_can_fail() {
+    let sources = include_str!("hostile_repo.rs");
+    assert!(has_test_fn(sources, "a_symlinked_loose_ref_still_reaches_a_host_file"));
+    assert!(!has_test_fn(sources, "a_test_that_nobody_ever_wrote_at_all"));
+    let cited = cited_test_names("see `a_made_up_name_of_sufficient_length` and `a_short_one`");
+    assert_eq!(cited, vec!["a_made_up_name_of_sufficient_length".to_string()]);
+    // The real docs are non-empty under the same extractor.
+    assert!(!cited_test_names(include_str!("../../../docs/embedding-git.md")).is_empty());
+}
+
+fn has_test_fn(sources: &str, name: &str) -> bool {
+    sources.contains(&format!("fn {name}("))
+}
+
+/// Backticked snake_case tokens that start `a_` or `the_` and run at least 20
+/// characters.
+fn cited_test_names(text: &str) -> Vec<String> {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .map(|t| t.rsplit("::").next().unwrap_or(t))
+        .filter(|t| t.len() >= 20 && (t.starts_with("a_") || t.starts_with("the_")))
+        .filter(|t| t.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))
+        .map(str::to_string)
+        .collect()
 }
