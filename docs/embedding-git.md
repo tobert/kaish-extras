@@ -394,17 +394,19 @@ every gix open. For an *object* that residual is small for arbitrary host
 files — a loose object is zlib-compressed and `/etc/passwd` is not, so the
 read lands outside and fails with "An error occurred while obtaining an
 object from the loose object store", exit 1, naming nothing out of the file
-(`a_loose_object_symlinked_at_an_ordinary_host_file_is_refused_without_echoing_it`)
-— and it is **not** small for the host's *other repositories*, whose objects
-are already exactly the shape gix reads.
-For a *ref* it is not small either, and this document said otherwise until
-2026-08-23. A loose ref is 40 hex characters and `packed-refs` is `<40 hex>
-<name>` lines; those are shapes real host files have, and content that parses
-is content that comes back.
+(`a_loose_object_symlinked_at_an_ordinary_host_file_is_refused_without_echoing_it`,
+whose control arm, with nothing planted, fails with a different message) —
+and it is **not** small for the host's *other repositories*, whose objects
+are already exactly the shape gix reads. For a *ref* it is not small either,
+and this document said otherwise until 2026-08-23. A loose ref is 40 hex
+characters and `packed-refs` is `<40 hex> <name>` lines; those are shapes
+real host files have, and content that parses is content that comes back.
 
-**The object half is a cross-project read**, measured 2026-08-23 against a
-donor repository outside the mount holding one blob, with the repository
-under test naming the donor's objects:
+**The object half is a cross-project read.** Measured against a donor
+repository outside the mount (checked both lexically and after
+`canonicalize`) holding two commits and a blob whose bytes appear nowhere in
+the repository under test, which, before anything is planted, cannot answer
+for either commit or the blob:
 
 - `.git/objects/<ab>/<rest>` symlinked at the donor's loose object of the
   same oid: `show <oid>` returns the donor's blob, exit 0. For a blob whose
@@ -414,35 +416,50 @@ under test naming the donor's objects:
   read, exit 0, without naming the object file.
 - `.git/objects/pack` symlinked at the donor's `objects/pack`: `show <oid>`
   returns the donor's blob, `show <commit>` its commit metadata, and `log
-  <commit>` walks its history. Exit 0 throughout.
-- `.git/objects/pack/pack-<hash>.idx` and `.pack` symlinked at the donor's
-  two files: nothing comes back, exit 1. `gix_odb`'s pack scan filters
-  directory entries on `DirEntry::metadata()`, which is an lstat, so a
-  symlinked index is not a file to it and is skipped before it is opened
+  <commit>` walks its history — both commits, in order. Exit 0 throughout.
+- `.git/objects/pack/pack-<hash>.pack` symlinked at the donor's pack, beside
+  a real copy of its `.idx`: `show <oid>` returns the donor's blob, exit 0.
+  The pack file is opened by the name the index implies, and nothing checks
+  that it is not a symlink.
+- `.git/objects/pack/pack-<hash>.idx` symlinked, alone or with its `.pack`:
+  nothing comes back, exit 1. `gix_odb`'s pack scan filters directory entries
+  on `DirEntry::metadata()`, an lstat, so a symlinked index is not a file to
+  it and is skipped before it is opened
   (`gix-odb-0.83.0/src/store_impls/dynamic/load_index.rs:486`). That is gix's
   implementation, not a check this crate makes, and the same pack copied in
   **is** read — which is what says the fixture reached the pack path at all.
+  The previous bullet is why this is not a close: it is the index that must
+  be real, not the pack.
 
 So a repository from an untrusted source reads the objects of every other
 repository on the host it can name a path to, whole, not 160 bits at a time.
-`objects` itself is screened and every path `objects/info/alternates` names
-is contained; `objects/pack` and the 256 `objects/<ab>` fan-out directories
-are fixed names and could be screened on the same terms, while a loose object
-path the repository names cannot be. Pinned by
+The `objects` directory itself is screened (exit 4,
+`a_symlinked_objects_dir_outside_the_mount_is_refused`) and every path
+`objects/info/alternates` names is contained. Screening `objects/pack` and
+the 256 `objects/<ab>` fan-out directories on the same terms would narrow
+the carve-out without closing it: a `.pack` symlinked inside a real
+`objects/pack` still reads, and a loose object path the repository names is
+not a fixed name. Pinned by
 `a_symlinked_loose_object_reads_another_repositorys_object`,
 `a_symlinked_object_fan_out_directory_reads_another_repositorys_object`,
-`a_symlinked_objects_pack_directory_reads_another_repositorys_pack` and
+`a_symlinked_objects_pack_directory_reads_another_repositorys_pack`,
+`a_symlinked_pack_file_beside_a_real_index_reads_another_repositorys_pack`,
+`a_symlinked_pack_index_alone_is_skipped` and
 `a_symlinked_pack_index_is_skipped_by_gixs_pack_scan`, with
-`the_same_pack_copied_in_is_read` as the control
-(`tests/hostile_repo.rs`), and tracked as `docs/issues.md`'s **P13**.
+`the_same_pack_copied_in_is_read` as the control (`tests/hostile_repo.rs`),
+and tracked as `docs/issues.md`'s **P13**.
 
 **The ref half.** The fixed names in that family are screened, with exit 4
-and no read: `HEAD`, `packed-refs`, and the `refs/heads`, `refs/tags`,
-`refs/remotes` hierarchies (`a_symlinked_packed_refs_is_refused_before_it_is_read`,
+and no read: `HEAD`, `packed-refs`, and each of the `refs/heads`,
+`refs/tags` and `refs/remotes` hierarchies, through both `branch` and `tag`
+(`a_symlinked_packed_refs_is_refused_before_it_is_read`,
 `a_symlinked_head_is_refused_before_it_is_read`,
-`a_symlinked_refs_hierarchy_is_refused`, `tests/hostile_repo.rs`). Before
-that screen, a `packed-refs` symlinked at a host file returned a branch named
-out of the file's own bytes, with an oid out of them too.
+`every_symlinked_ref_hierarchy_is_refused_by_branch_and_tag`, with
+`every_real_ref_hierarchy_is_answered_by_branch_and_tag` as its control). So
+is `info/exclude`, which `status` reads
+(`a_symlinked_info_exclude_is_refused_before_it_is_read`). Before that
+screen, a `packed-refs` symlinked at a host file returned a branch named out
+of the file's own bytes, with an oid out of them too.
 
 What remains open is a symlink at a path *inside* `refs/` that the repository
 names — `refs/heads/pwn` pointing at a host file. gix's ref iteration does
@@ -450,16 +467,20 @@ not follow one, so it never appears in a listing
 (`a_symlinked_loose_ref_does_not_appear_in_a_listing`, with
 `a_real_loose_ref_at_the_same_path_does_appear_in_the_listing` as its
 control), but a lookup by name does, and a `.git/HEAD` reading `ref:
-refs/heads/pwn` makes every verb that resolves HEAD do that lookup — `info`,
-`status`, `ls`, `log`, `show` and `branch`, of which `info` needs no argument
-at all. The host file's first 40 characters come back inside "Object … could
-not be found". 160 bits per invocation, of any host file whose first 40
+refs/heads/pwn` makes six verbs do that lookup, measured: `info`, `status`,
+`ls`, `log`, `show` and `branch`, each at exit 1, of which `info` needs no
+argument at all. `diff`, `tag` and `worktree list` do not return the bytes
+(`the_verbs_that_return_a_symlinked_loose_refs_bytes_are_the_measured_set`,
+with `no_verb_returns_the_host_oid_when_the_loose_ref_is_a_real_file` as its
+control). The host file's first 40 characters come back inside "Object …
+could not be found". 160 bits per invocation, of any host file whose first 40
 characters are hex: a file that merely *begins* with 40 hex leaks those 40
 and no more, whatever follows them
 (`a_host_file_that_only_begins_with_40_hex_leaks_those_40`). Non-hex content
-fails the parse with a message naming only the ref the repository named, so
-that case is still a one-bit content probe
-(`a_non_hex_host_file_is_refused_without_echoing_its_bytes`). It is pinned by
+fails the parse with a message naming only the ref the repository named
+(`a_non_hex_host_file_is_refused_without_echoing_its_bytes`), and that
+message differs from the hex case's, so it is still a one-bit content probe
+(`a_hex_and_a_non_hex_host_file_fail_with_different_errors`). It is pinned by
 `a_symlinked_loose_ref_still_reaches_a_host_file` and tracked as
 `docs/issues.md`'s **P13**. Closing it eagerly — walking `refs/` at open
 time — would cost every verb an lstat per loose ref on a tree the repository

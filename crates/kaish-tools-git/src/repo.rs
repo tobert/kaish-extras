@@ -405,20 +405,23 @@ impl ReadRepo {
         //   another repository's loose object returns that object, exit 0; so
         //   does `.git/objects/<ab>` at its fan-out directory; and
         //   `.git/objects/pack` at its pack directory hands over that
-        //   repository's blobs, commit metadata and history. A symlinked
-        //   `pack-<hash>.idx` does not, but only because gix_odb's pack scan
+        //   repository's blobs, commit metadata and history; so does a single
+        //   `pack-<hash>.pack` symlinked beside a real copy of its `.idx`. A
+        //   symlinked `.idx` does not, but only because gix_odb's pack scan
         //   filters entries on `DirEntry::metadata()`, an lstat — gix's
-        //   implementation, not a check made here.
+        //   implementation, not a check made here — and the `.pack` it then
+        //   opens by name is followed.
         //
         //   A **ref**. A loose ref is 40 hex characters — a shape real host
         //   files have — and content that parses is content that comes back.
         //   `.git/refs/heads/pwn` symlinked at a host file whose first 40
         //   characters are hex surfaces those 160 bits, and a `.git/HEAD`
-        //   naming that ref reaches it with no help from the caller: every
-        //   verb that resolves HEAD returns "Object <those 40 characters> as
-        //   referred to by refs/heads/pwn could not be found". Non-hex content
-        //   fails the parse without echoing the file, which is still a one-bit
-        //   content probe.
+        //   naming that ref reaches it with no help from the caller: `info`,
+        //   `status`, `ls`, `log`, `show` and `branch` return "Object <those
+        //   40 characters> as referred to by refs/heads/pwn could not be
+        //   found" (measured; `diff`, `tag` and `worktree list` do not).
+        //   Non-hex content fails the parse without echoing the file, with a
+        //   different message, which is still a one-bit content probe.
         //
         // The fixed names in the ref family — `HEAD`, `packed-refs`, and the
         // `refs/heads`, `refs/tags`, `refs/remotes` hierarchies — are screened
@@ -427,11 +430,12 @@ impl ReadRepo {
         // object side `objects/pack` and the 256 `objects/<ab>` fan-out
         // directories are fixed names too, and are deliberately **not**
         // screened yet: screening them narrows the carve-out without closing
-        // it, because a loose object path the repository names is not a fixed
+        // it, because a `.pack` symlinked inside a real `objects/pack` still
+        // reads, and a loose object path the repository names is not a fixed
         // name. `docs/issues.md` (P13) carries both halves and that decision.
         //
         // The fixtures that pin the leaks while they are open are
-        // `a_symlinked_loose_ref_still_reaches_a_host_file` and the three
+        // `a_symlinked_loose_ref_still_reaches_a_host_file` and the
         // `a_symlinked_*_reads_another_repositorys_*` tests in
         // tests/hostile_repo.rs. They go red the day the close lands, which is
         // when this comment and the guide have to change with them.
@@ -445,8 +449,9 @@ impl ReadRepo {
         // itself as it descends the working tree (`walk_untracked_and_ignored`
         // in verbs/status.rs). Those reads are bounded by the working tree,
         // which is ceiling-checked above; a `.gitignore` symlinked out of the
-        // mount would be followed, the same interceptability gap as gix opening
-        // an object by name — and worth naming loudly because it is the one
+        // mount would be followed — read from gix-worktree's design, not yet
+        // measured (`docs/issues.md` P5) — the same interceptability gap as
+        // gix opening an object by name — and worth naming loudly because it is the one
         // carve-out path that reaches into the working tree rather than `.git`,
         // consulted on every descent whether or not `--untracked` reports what
         // it matched. What status opens *itself* is not in the carve-out: the
