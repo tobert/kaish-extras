@@ -188,20 +188,47 @@ pub struct StatusEntry {
     pub orig_path: Option<String>,
     /// What kind of item this is.
     pub kind: EntryKind,
-    /// The staged column (index vs `HEAD`).
+    /// The staged column (index vs `HEAD`). Never `null`: `HEAD` against the
+    /// index reads no working-tree file, so the blob cap cannot withhold it.
     pub index: EntryStatus,
-    /// The unstaged column (worktree vs index).
-    pub worktree: EntryStatus,
+    /// The unstaged column (worktree vs index), or `null` when this path was
+    /// not compared — `blob_capped` is `true` there and says why.
+    ///
+    /// A path whose working-tree content was never read has no honest answer
+    /// here: `none` would claim the file matches the index and `modified`
+    /// would claim it does not, and this build asserts neither.
+    pub worktree: Option<EntryStatus>,
     /// Whether this path is unmerged (a nonzero index stage).
     pub conflicted: bool,
+    /// Whether the working-tree file is over the embedder's `max_blob_bytes`,
+    /// so `status` declined to read it and **this path was not compared**
+    /// against the index. The rest of the report is unaffected: every other
+    /// path is compared normally and the entries arrive.
+    ///
+    /// It means we declined to read this file, and nothing else. It is not a
+    /// claim that the file changed, and not a claim that it did not — that is
+    /// why `worktree` is `null` on the same entry. The staged column, `kind`
+    /// and `conflicted` are still exact, because none of them reads the
+    /// working tree.
+    ///
+    /// Its siblings in `git diff` are `lines_capped` (the same cap, declining
+    /// a file's line counts) and `hunks_capped` (a different cap, trimming
+    /// hunk text). One flag, one question, in all three.
+    pub blob_capped: bool,
     /// The two porcelain letters this entry renders as, `XY` (B.2). Carried on
     /// the model so the text renderer and the JSON words are computed from one
     /// source; skipped from `--json`, which speaks words, not letters.
+    ///
+    /// The worktree letter of an uncompared entry (`blob_capped`) is `~`,
+    /// which is not one of git's. Git has no letter for a path it did not
+    /// compare, and spending one of git's — a space, which reads as
+    /// "unmodified" — would make the text surface claim what `worktree: null`
+    /// declines to claim in JSON.
     #[serde(skip)]
     pub porcelain: [char; 2],
 }
 
-/// The five running counts a status reports (architecture.md B.2).
+/// The six running counts a status reports (architecture.md B.2).
 ///
 /// `staged` and `unstaged` count *columns*, not entries: a path modified and
 /// re-modified without staging (git's `MM`) counts in both, exactly as
@@ -218,6 +245,14 @@ pub struct StatusTotals {
     pub ignored: usize,
     /// Unmerged (conflicted) entries.
     pub conflicted: usize,
+    /// Entries `status` did not compare: their working-tree file is over the
+    /// embedder's `max_blob_bytes` (`blob_capped` on the entry). Zero in the
+    /// common case.
+    ///
+    /// Taken over the untruncated set like every other total, so a report cut
+    /// by `--limit` still says how many paths went uncompared even when their
+    /// entries did not fit.
+    pub blob_capped: usize,
 }
 
 /// `git status`'s result (architecture.md B.2).
@@ -231,7 +266,15 @@ pub struct StatusReport {
     /// fact about the repository, not about how many rows fit under `--limit`.
     pub totals: StatusTotals,
     /// Whether the working tree is clean: no staged, unstaged, untracked or
-    /// conflicted changes. Ignored entries do not make a tree dirty.
+    /// conflicted changes, **and** every tracked path in the report was
+    /// compared. Ignored entries do not make a tree dirty. Like every total,
+    /// it covers the paths `--path` selects and no others.
+    ///
+    /// An uncompared path (`totals.blob_capped` above zero) makes this
+    /// `false`. A file this build declined to read is one it cannot call
+    /// unchanged, and `clean: true` beside a skipped path is exactly the
+    /// complete-looking partial report the per-entry flag exists to prevent.
+    /// `totals` and `blob_capped` say which reading it is.
     pub clean: bool,
     /// Whether the entry list was truncated by `--limit`. Always reported,
     /// never silent (E.5); a stderr note fires alongside it.
@@ -915,19 +958,46 @@ mod tests {
             orig_path: None,
             kind: EntryKind::File,
             index: EntryStatus::Modified,
-            worktree: EntryStatus::None,
+            worktree: Some(EntryStatus::None),
             conflicted: false,
+            blob_capped: false,
             porcelain: ['M', ' '],
         };
         let json = serde_json::to_value(&entry).expect("StatusEntry serializes");
         assert_eq!(json["index"], "modified");
         assert_eq!(json["worktree"], "none");
         assert_eq!(json["kind"], "file");
+        assert_eq!(json["blob_capped"], false);
         assert!(json["orig_path"].is_null());
         assert!(
             json.get("porcelain").is_none(),
             "the porcelain letters must not appear in JSON: {json}"
         );
+    }
+
+    /// A path the blob cap kept `status` from reading serializes as a decline,
+    /// not as an answer: `blob_capped` is true and the unstaged column is
+    /// `null`. `none` there would say the file matches the index — a claim
+    /// nothing read.
+    #[test]
+    fn an_uncompared_status_entry_serializes_a_null_worktree_column() {
+        let entry = StatusEntry {
+            path: "big.bin".into(),
+            orig_path: None,
+            kind: EntryKind::File,
+            index: EntryStatus::None,
+            worktree: None,
+            conflicted: false,
+            blob_capped: true,
+            porcelain: [' ', '~'],
+        };
+        let json = serde_json::to_value(&entry).expect("StatusEntry serializes");
+        assert_eq!(json["blob_capped"], true);
+        assert!(
+            json["worktree"].is_null(),
+            "an uncompared path must not claim a worktree state: {json}"
+        );
+        assert_eq!(json["index"], "none", "the staged column is still exact");
     }
 
     /// The report's key names are the B.2 wire contract, same as B.1's.
@@ -948,7 +1018,14 @@ mod tests {
         for key in ["head", "entries", "totals", "clean", "truncated"] {
             assert!(json.get(key).is_some(), "B.2 key {key} missing: {json}");
         }
-        for key in ["staged", "unstaged", "untracked", "ignored", "conflicted"] {
+        for key in [
+            "staged",
+            "unstaged",
+            "untracked",
+            "ignored",
+            "conflicted",
+            "blob_capped",
+        ] {
             assert!(
                 json["totals"].get(key).is_some(),
                 "totals.{key} missing: {json}"

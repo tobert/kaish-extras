@@ -90,7 +90,7 @@ above.
 |---|---|---|
 | `max_rows` | 1000 | Rows any listing verb (`status`, `log`, `ls`, `show`'s tree form, `branch`, `tag`, `worktree list`) returns. Not `diff` — a diff's rows are files, and they have their own cap below. |
 | `max_diff_files` | 500 | Files compared in one invocation: `git diff`'s whole result, and `log --stat`'s per-commit file list. A verb's `--limit` may lower it, never raise it. |
-| `max_blob_bytes` | 8 MiB (`8 * 1024 * 1024`) | Bytes of blob content `show` will read, and of a single working-tree file `status` will hash. Over the cap: the read is declined and reported (`git show: blob '<oid>' is <size> bytes, over this build's <cap>-byte cap`), never silently truncated. |
+| `max_blob_bytes` | 8 MiB (`8 * 1024 * 1024`) | Bytes of blob content `show` will read, and of a single working-tree file `status` and `diff` will hash. Over the cap the content is never read — never a truncated prefix — and each verb reports it differently. `show`: no content, exit 0, and a stderr note (`git show: blob '<oid>' is <size> bytes, over this build's <cap>-byte cap`). `status`: **that one path** is declined and the report continues, exit 0 — its entry carries `blob_capped: true` with a `null` worktree column, `totals.blob_capped` counts them, `clean` is `false`, and the text row renders `~` in the worktree column. Like every total, those two cover the paths `--path` selects: an over-cap file outside the filter is not in the answer. `diff`: the whole call fails, exit 1 (`docs/issues.md` **P16**), because the comparison is the answer. |
 | `max_hunk_bytes_per_file` | 256 KiB | Bytes of hunk text `git diff --patch` will produce for one file, under the `textdiff` feature. Measured before a hunk's lines are built and applied at whole-hunk granularity — a half-hunk is not a patch — so a file it cuts is marked `hunks_capped` with its counts still exact —
 distinct from `lines_capped`, which means the file was not read at all. Not consulted by a build without `textdiff`, which has no hunks. |
 | `submodule_depth` | 1 | Reserved; `git info`'s `submodules` count reads `.gitmodules` in the working tree only, no recursive descent exists yet to bound. |
@@ -578,8 +578,9 @@ tree-depth bounds and the entries not listed here.
   commit with a very large message costs a correspondingly large allocation.
 - **The blob cap declines the whole blob, never a truncated prefix.** A blob
   over `max_blob_bytes` is not read at all — `git show` reports its oid and
-  real size and nothing else. Raise the cap if you need to read it; there is
-  no partial-read mode.
+  real size and nothing else, and `git status` reports the path with
+  `blob_capped: true` and no worktree state rather than guessing at one. Raise
+  the cap if you need the content; there is no partial-read mode.
 - **Two independent tree-depth bounds, not unified.** `log`'s `--stat` walk
   (64 levels, no call-stack recursion) and `status`'s worktree walk (256
   levels, genuinely self-recursive, empirically anchored to a measured

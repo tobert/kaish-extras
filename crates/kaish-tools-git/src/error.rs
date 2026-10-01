@@ -255,17 +255,22 @@ pub enum GitError {
         repo: PathBuf,
     },
 
-    /// A working-tree file a verb had to read whole is larger than the
+    /// A working-tree file `git diff` had to read whole is larger than the
     /// embedder's `max_blob_bytes`. Exit 1 — a git-level "no" about this
     /// working tree.
     ///
-    /// Loud on purpose, and named on purpose. Skipping the file would make the
-    /// answer silently wrong about a tracked path, and reading it would let a
-    /// repository choose our allocation size — `git status` hashes every
+    /// Loud on purpose, and named on purpose. Reading the file would let a
+    /// repository choose our allocation size — the comparison hashes every
     /// tracked file, so a multi-GB blob is an OOM in a tool whose whole job is
     /// to be safe to point at a repository you did not write. The path is
     /// inside the mount and the caller can already see it, so naming it leaks
     /// nothing and is the only way an embedder can act on this.
+    ///
+    /// `git status` does not raise this. It declines the same file one path at
+    /// a time (`StatusEntry::blob_capped`) and reports the rest, because a
+    /// status is a report over many paths and one unread path does not make
+    /// the other rows wrong. `diff` still fails the call: its result is the
+    /// comparison itself.
     #[error(
         "git {operation}: working-tree file '{path}' is {size} bytes, over \
          this build's {cap}-byte cap (GitConfig limits, max_blob_bytes) — \
@@ -721,7 +726,7 @@ mod tests {
                 magic: ":(".into(),
             },
             GitError::BlobTooLarge {
-                operation: "status",
+                operation: "diff",
                 path: "big.bin".into(),
                 size: 4096,
                 cap: 64,
