@@ -908,31 +908,75 @@ left, ranked:
   as P13 in `840fed0` and renumbered here: the containment branch landed its
   own P13, and that one is cited from `repo.rs`, `embedding-git.md` and a test.
 
-- **P13 — a symlinked loose ref is an open content read of the host, and the
+- **P13 — a symlinked object or loose ref is an open read of the host, and the
   close is platform-level.** What is left of P4 after the fixed names were
-  screened (2026-08-23). `HEAD`, `packed-refs` and the `refs/heads`,
-  `refs/tags`, `refs/remotes` hierarchies now go through `open_leaf` and are
-  refused with exit 4; a symlink at a path *inside* `refs/` that the
-  repository names is not, because gix opens it by name. Measured, not
-  reasoned: `.git/refs/heads/pwn` symlinked at a host file whose first line is
-  40 hex characters, plus `.git/HEAD` reading `ref: refs/heads/pwn`, makes
-  `git info` alone return "Object <those 40 characters> as referred to by
-  refs/heads/pwn could not be found" — 160 bits per invocation, no caller
-  cooperation. Non-hex content fails the parse, which is still a one-bit
-  content probe. gix's ref *iteration* does not follow a symlink (a symlinked
-  hierarchy lists as empty, and so does a symlinked loose ref), so this is the
-  by-name path only.
+  screened (2026-08-23). Two halves, and the object half — carried here as a
+  parenthetical until 2026-08-23 — is the larger one. Every claim below is
+  pinned in `tests/hostile_repo.rs`; `docs/embedding-git.md`, "What is not
+  closed", names the test under each, and `every_test_the_docs_cite_exists`
+  fails if a cited name goes missing.
 
-  Pinned by `hostile_repo.rs::a_symlinked_loose_ref_still_reaches_a_host_file`,
-  which asserts the leak and goes red the day it closes — update it and
-  `docs/embedding-git.md`'s "What is not closed" paragraph together.
+  **The object half: another repository's objects, whole.** Measured against a
+  donor repository outside the mount holding two commits and a blob whose
+  bytes appear nowhere in the repository under test, which cannot answer for
+  any of them before anything is planted. `.git/objects/<ab>/<rest>` symlinked
+  at the donor's loose object makes `git show <oid>` return the donor's blob,
+  exit 0; `.git/objects/<ab>` symlinked at the donor's fan-out directory does
+  the same without naming the object file; `.git/objects/pack` symlinked at
+  the donor's pack directory hands over the blob, the commit metadata and the
+  history (`log <commit>` lists both commits); and a single
+  `pack-<hash>.pack` symlinked beside a real copy of its `.idx` returns the
+  blob too. Yield: whole objects, of every repository on the host the
+  attacker can name a path to — not 160 bits at a time. The files a hostile
+  repository most wants to read are the ones already in the shape gix reads,
+  and for a blob in a public repository the oid, and so the loose path, is
+  known.
 
-  The cheap close is not available: walking `refs/` at open time costs every
-  verb an lstat per loose ref, on a tree the repository sizes, to protect a
-  lookup most verbs never make. The honest close is
-  `openat2(RESOLVE_BENEATH)` or a kaish VFS boundary that gix opens through,
-  which is the same close the object and pack halves of this carve-out need.
-  Same shape as **G6**: do not build it on the strength of this entry alone.
+  What does **not** leak: a symlinked `pack-<hash>.idx`, alone or with its
+  `.pack`, is skipped, since `gix_odb`'s pack scan filters directory entries
+  on `DirEntry::metadata()` — an lstat, so a symlink is not a file to it
+  (`gix-odb-0.83.0/src/store_impls/dynamic/load_index.rs:486`). That is gix's
+  implementation, not a check this crate makes, the same pack copied in is
+  read, and it is the *index* that must be real: the `.pack` beside it is
+  opened by name and followed. Whether an attacker can produce an `.idx` that
+  matches a host pack without reading that pack was not measured; the
+  directory symlink above needs no index at all.
+
+  A **partial** close exists and was deliberately not taken: `objects/pack`
+  and the 256 `objects/<ab>` fan-out directories are fixed names under a
+  directory already ceiling-checked, so `open_leaf` could screen them the way
+  it screens `refs/heads` — one lstat for `objects/pack`, and a `readdir` of
+  `objects/` for the fan-out directories. An `open_leaf` call on
+  `objects/pack` before `guard_alternates` was tried while this entry was
+  written, refused the directory fixture with the ordinary exit-4
+  `EscapesMount` message, and was **reverted**: it is not in the tree. It
+  would not close the class. A `.pack` symlinked inside a real `objects/pack`
+  still reads, which a screen would need a `readdir` of the pack directory to
+  catch, and a loose object path the repository names is not a fixed name at
+  all. Decide it deliberately, not as a side effect of a doc change.
+
+  **The ref half: 160 bits per invocation.** `HEAD`, `packed-refs` and each of
+  the `refs/heads`, `refs/tags`, `refs/remotes` hierarchies go through
+  `open_leaf` and are refused with exit 4, through both `branch` and `tag`; a
+  symlink at a path *inside* `refs/` that the repository names is not, because
+  gix opens it by name. `.git/refs/heads/pwn` symlinked at a host file whose
+  first 40 characters are hex, plus `.git/HEAD` reading `ref: refs/heads/pwn`,
+  returns "Object <those 40 characters> as referred to by refs/heads/pwn could
+  not be found" from six verbs, measured: `info`, `status`, `ls`, `log`,
+  `show` and `branch`, each exit 1, with no caller cooperation at all for
+  `info`. `diff`, `tag` and `worktree list` do not return the bytes. A file
+  that merely *begins* with 40 hex leaks those 40 and no more. Non-hex content
+  fails the parse with a message naming only the ref, and that message
+  differs from the hex case's, so it is a one-bit content probe. gix's ref
+  *iteration* does not follow a symlink, so this is the by-name path only.
+
+  The cheap close is not available for this half: walking `refs/` at open
+  time costs every verb an lstat per loose ref, on a tree the repository
+  sizes, to protect a lookup most verbs never make. The honest close for both
+  halves is `openat2(RESOLVE_BENEATH)` or a kaish VFS boundary that gix opens
+  through. Same shape as **G6**: do not build it on the strength of this entry
+  alone. Update the tests, this entry and `docs/embedding-git.md`'s "What is
+  not closed" paragraph together.
 
 - **P5 — a `.gitignore` symlinked out of the mount is a content oracle.**
   `gix-worktree` reads per-directory `.gitignore` itself during the untracked

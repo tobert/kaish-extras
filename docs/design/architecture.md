@@ -1098,26 +1098,36 @@ The residual carve-out, stated honestly: a symlinked leaf that gitoxide opens
 repository-named path in `refs/`, and the per-directory `.gitignore` files
 `gix-worktree`'s ignore `Stack` reads as `git status` descends the working
 tree — is not intercepted by any of the above, because nothing here wraps
-every `open` gitoxide makes. The ref half of that is a **content** read and
-not a one-bit probe: a loose ref is 40 hex characters, and `.git/HEAD` naming
-a symlinked one makes `git info` return the target file's first 40 characters
-inside a "could not be found" message (`docs/issues.md`'s P13,
-`hostile_repo.rs::a_symlinked_loose_ref_still_reaches_a_host_file`). The
-`.gitignore` reads belong in that list and not in a footnote: they are the one
-carve-out path that reaches into the *working tree* rather than `.git`, the
-`Stack` consults them on every descent (`--untracked no` does not avoid them,
-it only stops us reporting what they matched), and a working tree is where a
-symlink is easiest to plant. They stay inside the mount only because the
-working tree root is ceiling-checked; a `.gitignore` symlinked out of it would
-be followed. What status opens *itself* — `.git/index`, `info/exclude`, and
-every path an index entry names — is contained above and is not in the
-carve-out. Closing the remainder needs platform-level containment
-(`openat2(RESOLVE_BENEATH)`), which belongs in a kaish VFS seam, not this
-crate — tracked as kaish #276 ("VFS seam: RESOLVE_BENEATH-scoped mount view
-for symlink containment"). The TOCTOU between a canonicalize/ceiling-check
-here and gitoxide's later open is inherent to that design and is at parity
-with kaish's own `LocalFs`, which canonicalizes and ceiling-checks the same
-way before every open.
+every `open` gitoxide makes. What each yields, measured (`docs/issues.md`'s
+P13, `docs/embedding-git.md`'s "What is not closed" for the test under each
+claim):
+
+- **Objects: a cross-project read.** Another repository's loose object,
+  fan-out directory, `objects/pack` directory, or a single `.pack` file beside
+  a real `.idx`, symlinked into this one, returns that repository's blobs,
+  commit metadata and history, whole and at exit 0.
+- **Refs: 40 characters at a time, or one bit.** A loose ref is 40 hex
+  characters, and `.git/HEAD` naming a symlinked one makes six verbs (`info`,
+  `status`, `ls`, `log`, `show`, `branch`) return the target file's first 40
+  characters inside a "could not be found" message. A target that does not
+  begin with 40 hex fails with a different message, which is one bit.
+- **`.gitignore`: not measured** (`docs/issues.md`'s P5). It belongs in this
+  list and not in a footnote: it is the one carve-out path that reaches into
+  the *working tree* rather than `.git`, and a working tree is where a symlink
+  is easiest to plant. From `gix-worktree`'s design, the `Stack` consults the
+  files on every descent, `--untracked no` stops us reporting what they
+  matched rather than reading them, and a `.gitignore` symlinked out of the
+  ceiling-checked working tree root would be followed — none of which a test
+  here has exercised yet.
+
+What status opens *itself* — `.git/index`, `info/exclude`, and every path an
+index entry names — is contained above and is not in the carve-out. Closing
+the remainder needs platform-level containment (`openat2(RESOLVE_BENEATH)`),
+which belongs in a kaish VFS boundary, not this crate — tracked as kaish #276
+("VFS seam: RESOLVE_BENEATH-scoped mount view for symlink containment"). The
+TOCTOU between a canonicalize/ceiling-check here and gitoxide's later open is
+inherent to that design and is at parity with kaish's own `LocalFs`, which
+canonicalizes and ceiling-checks the same way before every open.
 
 ### E.3 Blocking calls and Send-ness
 
