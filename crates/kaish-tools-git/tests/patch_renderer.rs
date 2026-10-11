@@ -29,7 +29,7 @@ use kaish_types::{ExecResult, ToolSchema};
 
 use kaish_tools_git::{
     ChangeKind, ChangedFile, GitConfig, Limits, PatchOptions, PatchRenderError, PatchRenderer,
-    RenderedPatch,
+    RenderedPatch, Withheld,
 };
 
 use support::{git, require_git, verb_words, write_file, Fixture, StrictBackend, TestCtx};
@@ -60,7 +60,7 @@ struct Seen {
     after: Option<Vec<u8>>,
     old_size: Option<u64>,
     new_size: Option<u64>,
-    over_max_blob_bytes: bool,
+    withheld: Option<Withheld>,
 }
 
 impl Seen {
@@ -77,7 +77,7 @@ impl Seen {
             after: file.after.map(<[u8]>::to_vec),
             old_size: file.old_size,
             new_size: file.new_size,
-            over_max_blob_bytes: file.over_max_blob_bytes,
+            withheld: file.withheld,
         }
     }
 
@@ -355,7 +355,7 @@ fn expected(root: &Path) -> Vec<Seen> {
             after: if over { None } else { after },
             old_size,
             new_size,
-            over_max_blob_bytes: over,
+            withheld: over.then_some(Withheld::OverMaxBlobBytes),
         });
     }
     out.sort_by_key(Seen::key);
@@ -399,7 +399,10 @@ async fn the_renderer_receives_every_changed_file_as_git_reports_it() {
     ] {
         assert!(kinds.contains(&&kind), "the oracle must hold a {kind:?} file: {want:#?}");
     }
-    assert!(want.iter().any(|s| s.over_max_blob_bytes), "the oracle must hold an over-cap file");
+    assert!(
+        want.iter().any(|s| s.withheld.is_some()),
+        "the oracle must hold an over-cap file"
+    );
     assert!(
         want.iter().any(|s| s.after.as_deref().is_some_and(|b| b.contains(&0))),
         "the oracle must hold a binary file"
@@ -423,7 +426,7 @@ async fn a_file_over_max_blob_bytes_arrives_with_sizes_and_no_content() {
         .iter()
         .find(|s| s.new_path.as_deref() == Some("big.txt"))
         .expect("big.txt is in the change set");
-    assert!(big.over_max_blob_bytes);
+    assert_eq!(big.withheld, Some(Withheld::OverMaxBlobBytes));
     assert_eq!(big.before, None);
     assert_eq!(big.after, None);
     assert_eq!(big.old_size, Some(big_len("")));
@@ -762,7 +765,11 @@ async fn the_note_counts_what_the_renderer_did_not_get() {
     let result = direct(&root, config(rec.clone()), &["--patch", "HEAD~1", "HEAD"]).await;
     assert_eq!(result.code, 0, "{}", result.err);
 
-    let withheld = rec.calls()[0].0.iter().filter(|s| s.over_max_blob_bytes).count();
+    let withheld = rec.calls()[0]
+        .0
+        .iter()
+        .filter(|s| s.withheld == Some(Withheld::OverMaxBlobBytes))
+        .count();
     assert_eq!(withheld, 3, "control: huge2.txt, g and bigedit.txt are over the cap");
     assert!(
         result.err.contains(&format!("{withheld} file(s) have a side over max_blob_bytes")),
@@ -774,7 +781,7 @@ async fn the_note_counts_what_the_renderer_did_not_get() {
 /// A working-tree symlink's target is read whatever the cap — the hashing
 /// pass reads it the same way, and a path is bounded by the platform's path
 /// limit — so it reaches a renderer as content, with its real size and
-/// `over_max_blob_bytes: false`, even when that size is over the cap.
+/// no `withheld` reason, even when that size is over the cap.
 #[tokio::test]
 async fn a_worktree_symlink_target_is_content_whatever_the_cap() {
     require_git();
@@ -810,5 +817,114 @@ async fn a_worktree_symlink_target_is_content_whatever_the_cap() {
     assert_eq!(link.after.as_deref(), Some(long.as_bytes()));
     assert_eq!(link.new_size, Some(long.len() as u64));
     assert!(link.new_size.expect("size") > cap, "control: the target is over the cap");
-    assert!(!link.over_max_blob_bytes);
+    assert_eq!(link.withheld, None);
+}
+
+// ---------------------------------------------------------------------------
+// The per-call content budget
+// ---------------------------------------------------------------------------
+
+/// [`limits`] with a content budget small enough to run out inside the
+/// fixture: `added.txt` (10 bytes) fits, `big.txt` is over `max_blob_bytes`
+/// and costs nothing, and `data.bin` (two 9-byte sides) does not fit in what
+/// is left.
+fn tight() -> Limits {
+    Limits {
+        max_patch_content_bytes: 20,
+        ..limits()
+    }
+}
+
+/// Files are filled in path order until the next one would not fit; from
+/// there on every file arrives the way an over-cap file does — no content,
+/// real sizes — with the budget named as the reason. The answer is the same
+/// on every run.
+#[tokio::test]
+async fn a_spent_content_budget_withholds_every_later_file() {
+    let (_f, root) = repo();
+    let want = expected(&root);
+
+    let rec = Recorder::replying("rendered\n");
+    let config = GitConfig::read_only()
+        .with_limits(tight())
+        .with_patch_renderer(rec.clone());
+    let result = run(&root, config.clone(), &format!("git diff --patch {RANGE}")).await;
+    assert_eq!(result.code, 0, "{}", result.err);
+    let seen = rec.calls()[0].0.clone();
+
+    let keys: Vec<String> = seen.iter().map(Seen::key).collect();
+    let spent_at = keys
+        .iter()
+        .position(|k| k == "data.bin")
+        .expect("data.bin is in the change set");
+    assert!(spent_at > 0 && spent_at < seen.len() - 1, "control: files on both sides of the boundary");
+
+    for (file, oracle) in seen.iter().zip(&want) {
+        assert_eq!(file.key(), oracle.key(), "the same files, in path order");
+        // Sizes and everything but content are untouched by the budget.
+        assert_eq!((file.old_size, file.new_size), (oracle.old_size, oracle.new_size));
+        assert_eq!(file.kind, oracle.kind);
+    }
+    let added = &seen[keys.iter().position(|k| k == "added.txt").expect("added.txt")];
+    assert_eq!(added.after.as_deref(), Some(&b"brand new\n"[..]), "before the boundary: content");
+    assert_eq!(added.withheld, None);
+    let big = &seen[keys.iter().position(|k| k == "big.txt").expect("big.txt")];
+    assert_eq!(
+        big.withheld,
+        Some(Withheld::OverMaxBlobBytes),
+        "a file over max_blob_bytes keeps that reason"
+    );
+    let mut budgeted = 0;
+    for file in &seen[spent_at..] {
+        assert_eq!(file.before, None, "{} must carry no content", file.key());
+        assert_eq!(file.after, None, "{} must carry no content", file.key());
+        assert_eq!(
+            file.withheld,
+            Some(Withheld::OverMaxPatchContentBytes),
+            "{} names the budget as the reason",
+            file.key()
+        );
+        budgeted += 1;
+    }
+    assert!(
+        result.err.contains(&format!("{budgeted} file(s)")) && result.err.contains("max_patch_content_bytes"),
+        "the note counts the files the budget withheld: {}",
+        result.err
+    );
+
+    // Deterministic: a second run hands over exactly the same thing.
+    let again = Recorder::replying("rendered\n");
+    let config = GitConfig::read_only()
+        .with_limits(tight())
+        .with_patch_renderer(again.clone());
+    run(&root, config, &format!("git diff --patch {RANGE}")).await;
+    assert_eq!(again.calls()[0].0, seen);
+}
+
+/// The budget withholds content from the renderer and nothing from the
+/// model: counts and `binary` are still the ones plain `git diff` reports.
+#[tokio::test]
+async fn a_spent_budget_leaves_the_model_alone() {
+    let (_f, root) = repo();
+    let stock = model(&direct(&root, GitConfig::read_only().with_limits(tight()), &["HEAD~1", "HEAD"]).await);
+    let rec = Recorder::replying("rendered\n");
+    let config = GitConfig::read_only().with_limits(tight()).with_patch_renderer(rec.clone());
+    let rendered = model(&direct(&root, config, &["--patch", "HEAD~1", "HEAD"]).await);
+    assert!(
+        rec.calls()[0].0.iter().any(|s| s.withheld == Some(Withheld::OverMaxPatchContentBytes)),
+        "control: the budget really ran out"
+    );
+    assert_eq!(rendered, stock);
+}
+
+/// `git info` reports the budget beside the other limits.
+#[tokio::test]
+async fn git_info_reports_the_content_budget() {
+    let (_f, root) = repo();
+    let result = run(&root, GitConfig::read_only().with_limits(tight()), "git info --json").await;
+    assert_eq!(result.code, 0, "{}", result.err);
+    let json: serde_json::Value = serde_json::from_str(&result.text_out()).expect("json");
+    let limits = &json["capabilities"]["limits"];
+    assert_eq!(limits["max_patch_content_bytes"], 20, "{limits}");
+    assert_eq!(limits["max_blob_bytes"], CAP, "control: the other limits are this config's too");
 }

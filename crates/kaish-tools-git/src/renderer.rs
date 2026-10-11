@@ -9,9 +9,11 @@
 //!
 //! What it does not receive is anything this build declined to read: a file
 //! with a side over the embedder's `max_blob_bytes` arrives with
-//! `before`/`after` both `None`, both sizes, and
-//! [`ChangedFile::over_max_blob_bytes`] set — so installing a renderer can
-//! never cause a read the caps would have refused.
+//! `before`/`after` both `None`, its sizes, and [`ChangedFile::withheld`]
+//! saying why — so installing a renderer can never cause a read the caps
+//! would have refused. The whole call's content is bounded too, by
+//! `max_patch_content_bytes`: past it, files arrive the same way with the
+//! budget as the reason.
 //!
 //! This module depends on nothing else of ours, for the same reason
 //! `config.rs` does not: [`crate::GitConfig`] holds the renderer, and the
@@ -129,7 +131,7 @@ pub struct ChangedFile<'a> {
     pub new_oid: Option<&'a str>,
     /// The old side's content. `None` where the path is absent, where the
     /// side is a submodule (`160000`, no blob in this repository), and on
-    /// both sides when [`Self::over_max_blob_bytes`] is set. A symlink's
+    /// both sides when [`Self::withheld`] is set. A symlink's
     /// content is its target path.
     pub before: Option<&'a [u8]>,
     /// The new side's content, under the same rule as `before`.
@@ -139,14 +141,27 @@ pub struct ChangedFile<'a> {
     pub old_size: Option<u64>,
     /// The new side's size in bytes, under the same rule as `old_size`.
     pub new_size: Option<u64>,
-    /// Whether a side's blob is over the embedder's `max_blob_bytes`. When
-    /// it is, **neither** side's content was passed — a renderer cannot diff
-    /// half a file — and each present side's size still is. One exception
-    /// to the cap: a working-tree symlink's target is read whatever its
-    /// length, as `git diff`'s hashing pass reads it, so it arrives as
-    /// content with this `false` even when its size is over the cap. A
-    /// target is bounded by the platform's path length.
-    pub over_max_blob_bytes: bool,
+    /// Why this file carries no content, or `None` when it carries all it
+    /// has. When set, **neither** side's content was passed — a renderer
+    /// cannot diff half a file — and each present side's size still is.
+    ///
+    /// One exception to `max_blob_bytes`: a working-tree symlink's target is
+    /// read whatever its length, as `git diff`'s hashing pass reads it, so it
+    /// arrives as content even when its size is over the cap. A target is
+    /// bounded by the platform's path length.
+    pub withheld: Option<Withheld>,
+}
+
+/// Why a [`ChangedFile`] arrives with no content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Withheld {
+    /// A side is over the embedder's `max_blob_bytes`, so it was not read.
+    /// Takes precedence over the budget: it holds whatever the budget says.
+    OverMaxBlobBytes,
+    /// The call's `max_patch_content_bytes` was spent before this file.
+    /// Every later file in the slice that has content is withheld too.
+    OverMaxPatchContentBytes,
 }
 
 /// The `git diff --patch` options a [`PatchRenderer`] is asked to honor.

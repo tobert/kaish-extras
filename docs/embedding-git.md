@@ -94,6 +94,7 @@ above.
 | `max_blob_bytes` | 8 MiB (`8 * 1024 * 1024`) | Bytes of blob content `show` will read, and of a single working-tree file `status` and `diff` will hash. Over the cap the content is never read — never a truncated prefix — and each verb reports it differently. `show`: no content, exit 0, and a stderr note (`git show: blob '<oid>' is <size> bytes, over this build's <cap>-byte cap`). `status`: **that one path** is declined and the report continues, exit 0 — its entry carries `blob_capped: true` with a `null` worktree column, `totals.blob_capped` counts them, `clean` is `false`, and the text row renders `~` in the worktree column. Like every total, those two cover the paths `--path` selects: an over-cap file outside the filter is not in the answer. `diff`: the whole call fails, exit 1 (`docs/issues.md` **P16**), because the comparison is the answer. |
 | `max_hunk_bytes_per_file` | 256 KiB | Bytes of hunk text `git diff --patch` will produce for one file, under the `textdiff` feature. Measured before a hunk's lines are built and applied at whole-hunk granularity — a half-hunk is not a patch — so a file it cuts is marked `hunks_capped` with its counts still exact —
 distinct from `lines_capped`, which means the file was not read at all. Not consulted by a build without `textdiff`, which has no hunks. With a [patch renderer](#rendering---patch-yourself) installed it is passed to the renderer as `PatchOptions::max_hunk_bytes_per_file` and does not bound the renderer's output. |
+| `max_patch_content_bytes` | 64 MiB (`64 * 1024 * 1024`) | Bytes of file content one `git diff --patch` call hands an embedder's [patch renderer](#rendering---patch-yourself), summed over every file. Files are filled in path order; the first that would take the total past the budget, and every file after it, arrives with no content and `withheld: OverMaxPatchContentBytes`, and stderr counts them. The default is eight `max_blob_bytes`. Not consulted without a renderer, whose built-in counterpart holds one file at a time, nor by a build without `textdiff`. |
 | `submodule_depth` | 1 | Reserved; `git info`'s `submodules` count reads `.gitmodules` in the working tree only, no recursive descent exists yet to bound. |
 
 Pinned by `limits_defaults_match_the_design` (`src/config.rs`) — a silent
@@ -201,13 +202,13 @@ section that read the repository, so CPU-bound work belongs there directly
 | `kind` | `Added`, `Deleted`, `Modified` (content, mode, or both), `Renamed { similarity }`, `TypeChanged`. Renames are exact-match only, so `similarity` is always `100` and the two sides are the same bytes; a file moved *and* edited arrives as a delete plus an add. |
 | `old_mode`, `new_mode` | Six-digit octal strings (`100644`, `100755`, `120000`, `160000`), `None` on the absent side. |
 | `old_oid`, `new_oid` | Full hex oids, `None` on the absent side and on a working-tree side, which has no oid. |
-| `before`, `after` | The content as **bytes**, `None` on the absent side, on a submodule side (`160000`), and on both sides of a file over the cap. A symlink's content is its target. The renderer decides what is binary: this build's NUL-byte rule is not applied to what it passes. |
+| `before`, `after` | The content as **bytes**, `None` on the absent side, on a submodule side (`160000`), and on both sides of a file whose content is withheld. A symlink's content is its target. The renderer decides what is binary: this build's NUL-byte rule is not applied to what it passes. |
 | `old_size`, `new_size` | Bytes, set whenever the side holds a blob — including when the content was not read. |
-| `over_max_blob_bytes` | `true` when either side is over `max_blob_bytes`. |
+| `withheld` | Why the file carries no content, `None` when it carries all it has: `Some(OverMaxBlobBytes)` when a side is over `max_blob_bytes`, `Some(OverMaxPatchContentBytes)` when the call's content budget was spent before it. The enum is `#[non_exhaustive]`. |
 
 **The cap rule.** A file with either side over `max_blob_bytes` arrives with
 `before` and `after` both `None`, the size of each side that exists, and
-`over_max_blob_bytes: true` — a renderer cannot diff half a file, and
+`withheld: Some(OverMaxBlobBytes)` — a renderer cannot diff half a file, and
 installing one cannot cause a read the cap refused
 (`a_file_over_max_blob_bytes_arrives_with_sizes_and_no_content`). That covers
 revision and index sides. A **working-tree** file over the cap never reaches
@@ -217,7 +218,7 @@ renderer is asked (**P16**;
 `a_worktree_file_over_the_cap_fails_before_the_renderer_is_asked`). A
 working-tree **symlink** is the one exception: its target is read whatever
 its length, as the hashing pass reads it, so it arrives as content with
-`over_max_blob_bytes: false` even when its size is over the cap
+`withheld: None` even when its size is over the cap
 (`a_worktree_symlink_target_is_content_whatever_the_cap`). A symlink target
 is bounded by the platform's path length.
 
@@ -264,13 +265,22 @@ each `source()` joined with `": "`
 (`a_renderer_error_is_a_loud_failure_naming_its_message`). There is no
 fallback to this build's renderer. A panic is not caught (untested).
 
-**The cost.** The built-in renderer holds one file's two sides at a time.
-A renderer gets every file at once, so the content of the whole change set is
-in memory together: up to `--limit` files (at most `max_diff_files`, default
-500), each side up to `max_blob_bytes` (default 8 MiB) — 8 GiB at the default
-caps in the worst case. Two sides that are the same blob are held once.
-`max_diff_files` and `max_blob_bytes` are the bounds to lower if that matters
-(`docs/issues.md`, **T7**).
+**The budget.** The built-in renderer holds one file's two sides at a time.
+A renderer gets every file at once, so the content handed to it is bounded
+per call by `Limits::max_patch_content_bytes` (64 MiB by default). Files are
+filled in path order — the order the slice is in — and two sides that are
+the same blob count once. The first file whose content would take the total
+past the budget, and **every file after it**, arrives with `before` and
+`after` both `None`, its sizes, and `withheld: Some(OverMaxPatchContentBytes)`,
+so which files carry content depends on path order alone, not on whether a
+later, smaller file would have fit. A file over `max_blob_bytes` keeps that
+reason wherever it falls and costs nothing. Withheld files are still read
+one at a time for the model's counts and their content dropped, so peak
+memory is the budget plus one file, and the model is the one plain
+`git diff` builds. Stderr counts the withheld files and names
+`max_patch_content_bytes` (`a_spent_content_budget_withholds_every_later_file`,
+`a_spent_budget_leaves_the_model_alone`), and `git info` reports the budget
+under `capabilities.limits` (`git_info_reports_the_content_budget`).
 
 **With no renderer**, `--patch` prints this build's own patch text exactly as
 it did before the boundary existed: `tests/textdiff.rs` compares it to real
@@ -683,10 +693,10 @@ Concretely, for a repository a caller chose rather than one you control:
   that (`docs/issues.md` **G7**).
 - **A tree flatten allocates one map entry per leaf.** Depth is capped at 64,
   width is not (**G8**).
-- **A patch renderer holds the whole change set in memory.** Up to `--limit`
-  files × two sides × `max_blob_bytes` — 8 GiB at the default caps — where
-  the built-in renderer holds one file at a time
-  ([Rendering `--patch` yourself](#rendering---patch-yourself), **T7**).
+- **A patch renderer holds the change set's content in memory at once,**
+  up to `max_patch_content_bytes` (64 MiB by default) plus the one file being
+  read, where the built-in renderer holds one file at a time
+  ([Rendering `--patch` yourself](#rendering---patch-yourself)).
 - **A single diff has no deadline.** Myers is O(ND) in edit distance over
   blobs capped at 8 MiB each, so one pathological pair can stall a call, and
   there is no cancellation to interrupt it (**G9**, and see the no-cancellation

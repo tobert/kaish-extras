@@ -743,6 +743,7 @@ pub struct Limits {
     pub max_diff_files: usize,    // 500
     pub max_blob_bytes: u64,      // 8 MiB
     pub max_hunk_bytes_per_file: u64, // 256 KiB
+    pub max_patch_content_bytes: u64, // 64 MiB, added 2026-10-11 with PatchRenderer
     pub submodule_depth: u8,      // 1
 }
 

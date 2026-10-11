@@ -147,6 +147,7 @@ pub use model::{DiffHunk, DiffLine, DiffOp};
 #[cfg(all(not(target_family = "wasm"), feature = "textdiff"))]
 pub use renderer::{
     ChangeKind, ChangedFile, PatchOptions, PatchRenderError, PatchRenderer, RenderedPatch,
+    Withheld,
 };
 #[cfg(not(target_family = "wasm"))]
 pub use repo::ReadRepo;

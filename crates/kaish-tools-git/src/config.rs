@@ -152,6 +152,21 @@ pub struct Limits {
     pub max_blob_bytes: u64,
     /// Maximum bytes of hunk text per file.
     pub max_hunk_bytes_per_file: u64,
+    /// Maximum bytes of file content one `git diff --patch` call hands an
+    /// embedder's patch renderer, summed over every file (`textdiff` only;
+    /// not consulted without a renderer, whose built-in counterpart holds one
+    /// file at a time).
+    ///
+    /// Files are filled in path order. The first file whose content would
+    /// take the total past this budget, and every file after it, arrives
+    /// with no content and with [`crate::Withheld::OverMaxPatchContentBytes`]
+    /// as the reason. Two sides that are the same blob count once.
+    ///
+    /// The default, 64 MiB, is eight `max_blob_bytes`: room for eight files
+    /// at the per-file cap, or a change set of several hundred ordinary
+    /// source files, whole. Without it the bound was `max_diff_files` × 2 ×
+    /// `max_blob_bytes` — 8 GiB at the defaults — for one call.
+    pub max_patch_content_bytes: u64,
     /// How deep to descend into submodules.
     pub submodule_depth: u8,
 }
@@ -164,6 +179,7 @@ impl Default for Limits {
             max_diff_files: 500,
             max_blob_bytes: 8 * 1024 * 1024,
             max_hunk_bytes_per_file: 256 * 1024,
+            max_patch_content_bytes: 64 * 1024 * 1024,
             submodule_depth: 1,
         }
     }
@@ -253,10 +269,11 @@ impl GitConfig {
     /// Changes the text only. `--json` still reports this build's own model
     /// and hunks and never calls the renderer; plain `git diff` never calls
     /// it either. The renderer receives content read under
-    /// `max_blob_bytes`, and nothing over it — see
-    /// [`crate::ChangedFile::over_max_blob_bytes`] — though it does cost one
-    /// read the built-in renderer skips: a renamed file's blob. With no
-    /// renderer installed, `--patch` prints this build's own patch text.
+    /// `max_blob_bytes` and within the call's `max_patch_content_bytes`,
+    /// and nothing past either — see [`crate::ChangedFile::withheld`]. It
+    /// costs one read the built-in renderer skips: a renamed file's blob.
+    /// With no renderer installed, `--patch` prints this build's own patch
+    /// text.
     #[cfg(feature = "textdiff")]
     pub fn with_patch_renderer(mut self, renderer: Arc<dyn PatchRenderer>) -> Self {
         self.patch_renderer = Some(renderer);
@@ -385,6 +402,7 @@ mod tests {
         assert_eq!(l.max_diff_files, 500);
         assert_eq!(l.max_blob_bytes, 8 * 1024 * 1024);
         assert_eq!(l.max_hunk_bytes_per_file, 256 * 1024);
+        assert_eq!(l.max_patch_content_bytes, 64 * 1024 * 1024);
         assert_eq!(l.submodule_depth, 1);
     }
 

@@ -58,6 +58,7 @@ impl GitTool {
                 max_diff_files: limits.max_diff_files,
                 max_blob_bytes: limits.max_blob_bytes,
                 max_hunk_bytes_per_file: limits.max_hunk_bytes_per_file,
+                max_patch_content_bytes: limits.max_patch_content_bytes,
                 submodule_depth: limits.submodule_depth,
             },
         }
@@ -737,6 +738,8 @@ impl GitTool {
             max_bytes: self.config.limits().max_hunk_bytes_per_file,
         });
         #[cfg(feature = "textdiff")]
+        let max_patch_content_bytes = self.config.limits().max_patch_content_bytes;
+        #[cfg(feature = "textdiff")]
         let patch_opts = crate::renderer::PatchOptions {
             context,
             max_hunk_bytes_per_file: self.config.limits().max_hunk_bytes_per_file,
@@ -798,7 +801,8 @@ impl GitTool {
             // content it is handed — which never leaves this closure.
             #[cfg(feature = "textdiff")]
             if let Some(renderer) = renderer {
-                let (model, contents) = verbs::diff::run_with_content(&repo, &opts)?;
+                let (model, contents) =
+                    verbs::diff::run_with_content(&repo, &opts, max_patch_content_bytes)?;
                 let files = verbs::diff::changed_files(&model, &contents);
                 let patch = renderer.render(&files, &patch_opts).map_err(|e| {
                     GitError::PatchRendererFailed {
@@ -806,8 +810,10 @@ impl GitTool {
                         message: error_chain(&*e),
                     }
                 })?;
-                let withheld = contents.iter().filter(|c| c.over_cap).count();
-                return Ok((model, root, Some(Rendered { patch, withheld })));
+                let count = |why| contents.iter().filter(|c| c.withheld == Some(why)).count();
+                let over_blob = count(crate::renderer::Withheld::OverMaxBlobBytes);
+                let over_budget = count(crate::renderer::Withheld::OverMaxPatchContentBytes);
+                return Ok((model, root, Some(Rendered { patch, over_blob, over_budget })));
             }
             let rendered: MaybeRendered = None;
             verbs::diff::run(&repo, &opts).map(|model| (model, root, rendered))
@@ -821,7 +827,7 @@ impl GitTool {
         // How many files the renderer got sizes and no content for, when
         // there was one.
         #[cfg(feature = "textdiff")]
-        let withheld = rendered.as_ref().map(|r| r.withheld);
+        let withheld = rendered.as_ref().map(|r| (r.over_blob, r.over_budget));
         #[cfg(feature = "textdiff")]
         let (data, text, sideband) = match rendered {
             Some(Rendered { patch, .. }) => {
@@ -866,12 +872,23 @@ impl GitTool {
             // Counted from what the renderer was handed, not from
             // `lines_capped`: a renamed file over the cap is withheld from
             // the renderer and still `0/0`, uncapped, in the model.
-            if let Some(withheld) = withheld.filter(|n| *n > 0) {
-                notes.push(format!(
-                    "{withheld} file(s) have a side over max_blob_bytes, so \
-                     the patch renderer got their sizes and no content"
-                ));
-            } else if withheld.is_none() && model.totals.lines_capped > 0 {
+            if let Some((over_blob, over_budget)) = withheld {
+                if over_blob > 0 {
+                    notes.push(format!(
+                        "{over_blob} file(s) have a side over max_blob_bytes, \
+                         so the patch renderer got their sizes and no content"
+                    ));
+                }
+                if over_budget > 0 {
+                    notes.push(format!(
+                        "{over_budget} file(s) came after the call's \
+                         {max_patch_content_bytes}-byte content budget was \
+                         spent (max_patch_content_bytes), so the patch \
+                         renderer got their sizes and no content; narrow the \
+                         diff with a path to see them"
+                    ));
+                }
+            } else if model.totals.lines_capped > 0 {
                 notes.push(format!(
                     "{} file(s) were not read: a side was over \
                      max_blob_bytes, so their counts and hunks are absent; \
@@ -1338,7 +1355,10 @@ impl Tool for GitTool {
 #[cfg(feature = "textdiff")]
 struct Rendered {
     patch: crate::renderer::RenderedPatch,
-    withheld: usize,
+    /// Files with a side over `max_blob_bytes`.
+    over_blob: usize,
+    /// Files after `max_patch_content_bytes` was spent.
+    over_budget: usize,
 }
 
 /// What `git diff --patch` produces when an embedder installed a renderer.

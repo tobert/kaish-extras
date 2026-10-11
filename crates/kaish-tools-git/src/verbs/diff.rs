@@ -221,22 +221,39 @@ pub(crate) struct FileContent {
     pub after: Option<std::sync::Arc<[u8]>>,
     pub old_size: Option<u64>,
     pub new_size: Option<u64>,
-    /// A side was over `max_blob_bytes`, so neither side's content is here.
-    pub over_cap: bool,
+    /// Why neither side's content is here, if it is not.
+    pub withheld: Option<crate::renderer::Withheld>,
+}
+
+#[cfg(feature = "textdiff")]
+impl FileContent {
+    /// Bytes this file's content holds, counting one blob shared by both
+    /// sides once.
+    fn cost(&self) -> u64 {
+        let len = |side: &Option<std::sync::Arc<[u8]>>| side.as_ref().map_or(0, |b| b.len() as u64);
+        match (&self.before, &self.after) {
+            (Some(a), Some(b)) if std::sync::Arc::ptr_eq(a, b) => a.len() as u64,
+            _ => len(&self.before) + len(&self.after),
+        }
+    }
 }
 
 /// [`run`], keeping each file's content for a patch renderer.
 ///
 /// The model it returns has no hunks — the renderer is the one making them —
 /// and its counts come from the same bytes the renderer receives, so every
-/// blob is read once. Content is held for every file at once, up to
-/// `--limit` files and `max_blob_bytes` per side: that is the price of one
-/// renderer call per invocation (docs/issues.md, T7).
+/// blob is read once. Content is held for every file at once, so its total
+/// is bounded by `budget` (`max_patch_content_bytes`): files are kept in
+/// path order until the next one would not fit, and from there on each file
+/// is still read and counted for the model, one at a time, and its content
+/// dropped. Peak memory is the budget plus one file.
 #[cfg(feature = "textdiff")]
 pub(crate) fn run_with_content(
     repo: &ReadRepo,
     opts: &DiffOptions,
+    budget: u64,
 ) -> Result<(DiffReport, Vec<FileContent>), GitError> {
+    use crate::renderer::Withheld;
     let Prepared {
         from,
         to,
@@ -248,8 +265,24 @@ pub(crate) fn run_with_content(
     } = prepare(repo, opts)?;
     let mut files = Vec::with_capacity(rows.len());
     let mut contents = Vec::with_capacity(rows.len());
+    let mut used: u64 = 0;
+    let mut spent = false;
     for row in rows {
-        let (file, content) = finish_with_content(repo, opts, &old, &new, row)?;
+        let (file, mut content) = finish_with_content(repo, opts, &old, &new, row)?;
+        if content.withheld.is_none() && (content.before.is_some() || content.after.is_some()) {
+            let cost = content.cost();
+            // Once one file does not fit, none after it gets content either,
+            // so which files carry content depends only on path order — not
+            // on whether a later, smaller file happens to squeeze in.
+            if spent || used.saturating_add(cost) > budget {
+                spent = true;
+                content.before = None;
+                content.after = None;
+                content.withheld = Some(Withheld::OverMaxPatchContentBytes);
+            } else {
+                used += cost;
+            }
+        }
         files.push(file);
         contents.push(content);
     }
@@ -1071,6 +1104,7 @@ fn finish_with_content(
         Got::OverCap(size) => Some(*size),
     };
     let over_cap = matches!(old_got, Got::OverCap(_)) || matches!(new_got, Got::OverCap(_));
+    let withheld = over_cap.then_some(crate::renderer::Withheld::OverMaxBlobBytes);
     let bytes = |got: &Got| match got {
         Got::Bytes(bytes) if !over_cap => Some(bytes.clone()),
         _ => None,
@@ -1080,7 +1114,7 @@ fn finish_with_content(
         after: bytes(&new_got),
         old_size: size(&old_got),
         new_size: size(&new_got),
-        over_cap,
+        withheld,
     };
 
     // The model's counts, by `finish`'s rules and in its order: a rename
@@ -1271,7 +1305,7 @@ pub(crate) fn changed_files<'a>(
                 after: content.after.as_deref(),
                 old_size: content.old_size,
                 new_size: content.new_size,
-                over_max_blob_bytes: content.over_cap,
+                withheld: content.withheld,
             }
         })
         .collect()

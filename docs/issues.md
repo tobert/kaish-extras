@@ -424,18 +424,6 @@ typechange (`120644`). Both are pinned against a live git oracle in
   renderer, since the counts move with it. Not tested — the two fixtures
   above are playground measurements, not a case in `textdiff.rs`.
 
-- **T7 — a patch renderer holds every file's content at once.** The
-  renderer boundary (`PatchRenderer`, docs/embedding-git.md) is one call per
-  invocation by design — kaijutsu applies one truncation budget across the
-  whole change set — so `run_with_content` keeps both sides of every file
-  until the call: up to `--limit` × 2 × `max_blob_bytes`, 8 GiB at the default
-  caps, where the built-in renderer holds one file at a time. Bounded, and
-  only by caps that exist for other reasons. Closing it needs an aggregate
-  content budget, which is a new `Limits` field; `Limits` is not
-  `#[non_exhaustive]`, so adding one breaks an embedder that builds it
-  without `..Limits::default()`. Decide together with the first embedder that
-  hits it.
-
 ## git branch / tag / worktree list — deferred (architecture.md B.7, B.9, shipped in PR 7)
 
 - **B1 — `--ahead-behind` reads both histories to their roots, rather than
