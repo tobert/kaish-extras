@@ -64,9 +64,10 @@ pub(crate) const DEFAULT_REV: &str = "HEAD";
 )]
 pub(crate) struct LogArgs {
     /// Revision to start from: `HEAD` (the default), a branch, a tag, an oid,
-    /// or any of those with a `~N` / `^N` suffix. Range syntax (`A..B`) and
-    /// reflog syntax (`@{...}`) are usage errors, not silent reinterpretations.
-    /// Also accepted as a bare operand, git's spelling: `git log main`.
+    /// or any of those with a `~N` / `^N` suffix. `A..B` lists the commits B
+    /// reaches and A does not (an empty side is `HEAD`). `A...B` and reflog
+    /// syntax (`@{...}`) are usage errors, not silent reinterpretations. Also
+    /// accepted as a bare operand, git's spelling: `git log main..feature`.
     #[arg(long = "rev", value_name = "REV", default_value = DEFAULT_REV)]
     pub rev: String,
 
@@ -139,9 +140,9 @@ pub(crate) struct LogArgs {
     #[command(flatten)]
     pub global: GlobalFlags,
 
-    /// A revision to start from, then paths after `--`:
-    /// `git log 'HEAD~5' -- src/lib.rs`. At most one revision — a range is two
-    /// calls, not `A B`. Omit it to start from `HEAD`.
+    /// A revision or an `A..B` range, then paths: `git log 'HEAD~5' --
+    /// src/lib.rs`. A tracked path before `--` is a path too, as in git. At
+    /// most one revision or range. Omit it to start from `HEAD`.
     // Every operand, in order, on both sides of the caller's `--`: the tool is
     // bound verbatim, so this argv is the caller's own. `tool.rs`'s
     // `operands` splits it at the marker.
@@ -363,7 +364,16 @@ pub(crate) fn run(repo: &ReadRepo, opts: &LogOptions) -> Result<LogReport, GitEr
     let filter = PathFilter::parse(OP, &opts.paths)?;
     let filtering_paths = !opts.paths.is_empty();
 
-    let start = repo.resolve_commit(&opts.rev)?;
+    // `A..B`: what B reaches and A does not. An empty side is HEAD, as in
+    // git. `A...B` is left whole, so the revision parser refuses it by name.
+    let (hide, tip) = match opts.rev.split_once("..") {
+        Some((from, to)) if !to.starts_with('.') => (
+            Some(if from.is_empty() { "HEAD" } else { from }),
+            if to.is_empty() { "HEAD" } else { to },
+        ),
+        _ => (None, opts.rev.as_str()),
+    };
+    let start = repo.resolve_commit(tip)?;
     let objects = repo.objects();
 
     let mut commits: Vec<CommitInfo> = Vec::new();
@@ -379,8 +389,21 @@ pub(crate) fn run(repo: &ReadRepo, opts: &LogOptions) -> Result<LogReport, GitEr
     // committer time reproduces `Sorting::ByCommitTime(NewestFirst)`, which is
     // git's default ordering.
     let mut heap: BinaryHeap<Pending> = BinaryHeap::new();
-    let mut seen: HashSet<ObjectId> = HashSet::new();
-    enqueue(repo, &mut heap, &mut seen, start)?;
+    // Everything A reaches starts out seen, so the walk never enters it —
+    // which is git's `A..B`. Simplification then runs over what is left. The
+    // ancestry walk is bounded the way `branch --merged`'s is, and a shallow
+    // repository is refused rather than answered from a cut history.
+    let mut seen: HashSet<ObjectId> = match hide {
+        Some(from) => {
+            crate::reach::refuse_shallow(repo, OP, "a range")?;
+            let mut budget = crate::reach::Budget::new(OP);
+            crate::reach::ancestors(repo, &mut budget, repo.resolve_commit(from)?)?
+        }
+        None => HashSet::new(),
+    };
+    if !seen.contains(&start) {
+        enqueue(repo, &mut heap, &mut seen, start)?;
+    }
 
     while let Some(Pending { oid, .. }) = heap.pop() {
         examined += 1;

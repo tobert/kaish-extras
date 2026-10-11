@@ -113,7 +113,7 @@ Terminal-Bench runs through kaijutsu showed models typing `git log --oneline`,
 `git branch -a` and `git diff A B`, and each refusal cost a model call. So a
 spelling git has is accepted when this build computes the answer git would
 give: `-a`/`-r` on `branch`, `--cached` and two-revision operands on `diff`,
-`--oneline` on `log`, and `-p` for `--patch` on `diff`. A flag that asks for
+`--oneline` and `A..B` ranges on `log`, and `-p` for `--patch` on `diff`. A flag that asks for
 something this build does not compute (`--graph`, `--decorate`, `log --all`) is refused, and the refusal
 says it is not supported and what to type instead. Never accepted and ignored:
 a flag that changes nothing reads as a flag that worked. A flag that asks for

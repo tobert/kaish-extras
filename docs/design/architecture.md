@@ -316,12 +316,13 @@ Conventions that apply to every verb:
   resolved through kaish's cwd then made repo-relative. **No git pathspec magic**
   — `:(exclude)`, `:!`, `:(glob)`, `:/` are a loud usage error naming the
   unsupported syntax.
-- **Revisions** accept a deliberately small grammar (`revspec.rs`): `HEAD`,
-  `<branch>`, `<tag>`, `refs/...`, `<oid>` (full or ≥4-char unambiguous prefix),
-  `<rev>~N`, `<rev>^`, `<rev>^N`, and `<rev>:<path>` for `show`. Everything else
-  — `@{...}`, `^{/regex}`, `:/text`, `A..B`, `A...B` — is a loud usage error.
-  `git diff`'s operands accept `A..B` (2026-10-01) by splitting it into its
-  two ends before either is resolved; the grammar itself still has no range.
+- **Revisions** accept a deliberately small grammar (`repo.rs`,
+  `split_base_and_nav`): `HEAD`, `<branch>`, `<tag>`, `refs/...`, `<oid>` (full
+  or ≥4-char unambiguous prefix), `<rev>~N`, `<rev>^`, `<rev>^N`, and
+  `<rev>:<path>` for `show`. Everything else — `@{...}`, `^{/regex}`, `:/text`,
+  `A...B` — is a loud usage error. `A..B` is split into its two ends before
+  either is resolved, by `git diff` (2026-10-01) and by `git log` (2026-10-11,
+  B reaches minus A reaches); the grammar itself has no range.
   We parse that grammar ourselves and do not link `gix-revision`'s `spec`
   module at all. `gix_revision::spec::parse` is a pure parser driving a
   caller-supplied delegate — it resolves nothing — and the facade's

@@ -359,8 +359,9 @@ impl GitTool {
                     return Err(GitError::Usage {
                         operation: OP,
                         message: format!(
-                            "takes at most one revision, but got '{}'. A range is \
-                             not supported here; paths go after '--'",
+                            "takes at most one revision, but got '{}'. The commits \
+                             one has and the other lacks are 'git log A..B'; \
+                             paths go after '--'",
                             many.join("' '")
                         ),
                     })
@@ -1483,13 +1484,14 @@ const WORKTREE_DESCRIPTION: &str = "Work with the repository's working trees";
 /// (`kaish-help`'s `tool_help`) shows only params and examples, never a bare
 /// subcommand list, so a verb with no example here would never be named in
 /// `help git` at all, enabled or not.
-const EXAMPLES: [(&str, &str); 18] = [
+const EXAMPLES: [(&str, &str); 19] = [
     ("What repository is this", "git info"),
     ("Inspect a specific repository", "git info --repo /mnt/repos/kaish"),
     ("Structured, for a script", "git info --json"),
     ("What changed in the working tree", "git status"),
     ("Recent commit history", "git log"),
     ("One line per commit", "git log --oneline"),
+    ("List the commits a branch has that main lacks", "git log --oneline main..feature"),
     ("Read a file as of the last release", "git show v0.1.0:src/lib.rs"),
     ("List a directory as of HEAD", "git ls HEAD src"),
     ("See the unstaged changes", "git diff"),

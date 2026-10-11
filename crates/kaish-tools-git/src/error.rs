@@ -471,7 +471,8 @@ pub enum GitError {
     #[error(
         "git {operation}: revision '{spec}' uses '{syntax}', which kaish-git \
          does not parse — the accepted forms are HEAD, a branch, a tag, \
-         refs/..., a full or >=4-char oid, and the ~N / ^ / ^N suffixes"
+         refs/..., a full or >=4-char oid, the ~N / ^ / ^N suffixes, and \
+         A..B on log and diff"
     )]
     UnsupportedRevspec {
         /// The verb that was asked for.
