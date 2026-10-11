@@ -1,0 +1,301 @@
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 1, "command": "git status"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 2, "command": "git status -s"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 3, "command": "git status"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 4, "command": "git diff"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 5, "command": "git diff --staged"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 6, "command": "git log --oneline -10"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 7, "command": "git log --oneline --follow -- README.md"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 8, "command": "git log -1 --format='%an %ad' -- Cargo.toml"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 9, "command": "git show abc1234"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 10, "command": "git branch"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 11, "command": "git branch --show-current"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 12, "command": "git log --oneline main..feature/x"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 13, "command": "git diff main..feature/x"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 14, "command": "git tag"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 15, "command": "git rev-parse --show-toplevel"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 16, "command": "git ls-files"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 17, "command": "git show HEAD~2:README.md"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 18, "command": "git add README.md && git commit -m \"update readme\""}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 19, "command": "git add -A && git commit -m \"wip\""}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 20, "command": "git commit --amend -m \"better message\""}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 21, "command": "git switch -c topic"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 22, "command": "git restore --staged README.md"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 23, "command": "git restore Cargo.toml"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 24, "command": "git stash"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 24, "command": "git stash pop"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 1, "command": "git status"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 2, "command": "git status -s"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 3, "command": "git status"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 4, "command": "git diff"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 5, "command": "git diff --staged"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 6, "command": "git log --oneline -10"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 7, "command": "git log --follow -- README.md"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 8, "command": "git log -1 --format='%an %ad' -- Cargo.toml"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 9, "command": "git show abc1234"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 10, "command": "git branch"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 11, "command": "git branch --show-current"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 12, "command": "git log --oneline main..feature/x"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 13, "command": "git diff main..feature/x"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 14, "command": "git tag"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 15, "command": "git rev-parse --show-toplevel"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 15, "command": "git rev-parse --is-inside-work-tree"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 16, "command": "git ls-files"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 17, "command": "git show HEAD~2:README.md"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 18, "command": "git add README.md"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 18, "command": "git commit -m \"update readme\""}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 19, "command": "git add -A"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 19, "command": "git commit -m \"wip\""}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 20, "command": "git commit --amend -m \"better message\""}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 21, "command": "git checkout -b topic"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 22, "command": "git restore --staged README.md"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 23, "command": "git restore Cargo.toml"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 24, "command": "git stash"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 24, "command": "git stash pop"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 1, "command": "git status"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 2, "command": "git status --json"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 3, "command": "git diff --staged"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 3, "command": "git diff"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 4, "command": "git diff"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 5, "command": "git diff --staged"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 6, "command": "git log --limit 10"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 7, "command": "git log -- README.md"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 8, "command": "git log --limit 1 -- Cargo.toml"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 8, "command": "git log --limit 1 -- Cargo.toml --json"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 9, "command": "git show abc1234"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 9, "command": "git diff --from abc1234~1 --to abc1234"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 10, "command": "git branch"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 11, "command": "git info"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 11, "command": "git branch"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 12, "command": "git log feature/x"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 12, "command": "git log main"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 13, "command": "git diff --from main --to feature/x"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 14, "command": "git tag"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 15, "command": "git info"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 16, "command": "git ls --recursive HEAD"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 17, "command": "git show HEAD~2:README.md"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 18, "command": "N/A"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 19, "command": "N/A"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 20, "command": "N/A"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 21, "command": "N/A"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 22, "command": "N/A"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 23, "command": "N/A"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 24, "command": "N/A"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 1, "command": "git status"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 2, "command": "git status --json"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 3, "command": "git status"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 4, "command": "git diff"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 5, "command": "git diff --staged"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 6, "command": "git log --limit 10"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 7, "command": "git log -- README.md"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 8, "command": "git log --limit 1 -- Cargo.toml"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 9, "command": "git show abc1234"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 10, "command": "git branch"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 11, "command": "git branch"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 12, "command": "git log feature/x"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 12, "command": "git log main"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 13, "command": "git diff --from main --to feature/x"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 14, "command": "git tag"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 15, "command": "git info"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 16, "command": "git ls --recursive HEAD"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 17, "command": "git show HEAD~2:README.md"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 18, "command": "git status"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 19, "command": "git status"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 20, "command": "git log --limit 1"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 21, "command": "git branch"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 22, "command": "git diff --staged -- README.md"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 23, "command": "git diff -- Cargo.toml"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 24, "command": "git status"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 1, "command": "git status"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 2, "command": "git status -s"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 3, "command": "git status"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 4, "command": "git diff"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 5, "command": "git diff --staged"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 6, "command": "git log -n 10 --oneline"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 7, "command": "git log README.md"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 8, "command": "git log -1 Cargo.toml"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 9, "command": "git show abc1234"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 10, "command": "git branch"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 11, "command": "git branch --show-current"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 12, "command": "git log main..feature/x"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 13, "command": "git diff main..feature/x"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 14, "command": "git tag"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 15, "command": "git rev-parse --show-toplevel"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 16, "command": "git ls-files"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 17, "command": "git show HEAD~2:README.md"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 18, "command": "git add README.md"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 18, "command": "git commit -m \"update readme\""}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 19, "command": "git add ."}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 19, "command": "git commit -m \"wip\""}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 20, "command": "git commit --amend -m \"better message\""}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 21, "command": "git checkout -b topic"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 22, "command": "git restore --staged README.md"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 23, "command": "git restore Cargo.toml"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 24, "command": "git stash"}
+{"model": "gemini-flash", "arm": "cold", "run": "gemini-flash cold", "task": 24, "command": "git stash pop"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 1, "command": "git status"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 2, "command": "git status -s"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 3, "command": "git status"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 4, "command": "git diff"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 5, "command": "git diff --staged"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 6, "command": "git log -n 10 --oneline"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 7, "command": "git log -- README.md"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 8, "command": "git log -n 1 Cargo.toml"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 9, "command": "git show abc1234"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 10, "command": "git branch"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 11, "command": "git branch"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 12, "command": "git log main..feature/x"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 13, "command": "git diff --from main --to feature/x"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 14, "command": "git tag"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 15, "command": "git info"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 16, "command": "git ls --recursive HEAD"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 17, "command": "git show HEAD~2:README.md"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 18, "command": "git add README.md"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 18, "command": "git commit -m \"update readme\""}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 19, "command": "git add ."}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 19, "command": "git commit -m \"wip\""}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 20, "command": "git commit --amend -m \"better message\""}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 21, "command": "git checkout -b topic"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 22, "command": "git restore --staged README.md"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 23, "command": "git restore Cargo.toml"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 24, "command": "git stash"}
+{"model": "gemini-flash", "arm": "warm", "run": "gemini-flash warm", "task": 24, "command": "git stash pop"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 1, "command": "git status"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 2, "command": "git status -s"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 3, "command": "git status"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 4, "command": "git diff"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 5, "command": "git diff --staged"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 6, "command": "git log --oneline -n 10"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 7, "command": "git log --follow -- README.md"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 8, "command": "git log -1 --format=%an,%ad -- Cargo.toml"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 9, "command": "git show abc1234"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 10, "command": "git branch --list"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 11, "command": "git branch --show-current"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 12, "command": "git log --oneline main..feature/x"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 13, "command": "git diff main feature/x"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 14, "command": "git tag --list"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 15, "command": "git rev-parse --show-toplevel"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 16, "command": "git ls-files"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 17, "command": "git show HEAD~2:README.md"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 18, "command": "git add README.md"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 18, "command": "git commit -m \"update readme\""}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 19, "command": "git add -A"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 19, "command": "git commit -m \"wip\""}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 20, "command": "git commit --amend -m \"better message\""}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 21, "command": "git checkout -b topic"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 22, "command": "git restore --staged README.md"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 23, "command": "git restore Cargo.toml"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 24, "command": "git stash"}
+{"model": "haiku", "arm": "cold", "run": "haiku cold", "task": 24, "command": "git stash pop"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 1, "command": "git status"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 2, "command": "git status"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 3, "command": "git status"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 3, "command": "git diff --staged"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 3, "command": "git diff"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 4, "command": "git diff"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 5, "command": "git diff --staged"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 6, "command": "git log --limit 10"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 7, "command": "git log --path README.md"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 8, "command": "git log --limit 1 --path Cargo.toml"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 9, "command": "git show abc1234"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 10, "command": "git branch"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 11, "command": "git branch"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 12, "command": "git log feature/x"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 13, "command": "git diff --from main --to feature/x"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 14, "command": "git tag"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 15, "command": "git info"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 16, "command": "git ls HEAD --recursive"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 17, "command": "git show HEAD~2:README.md"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 18, "command": "git add README.md"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 18, "command": "git commit -m \"update readme\""}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 19, "command": "git add -A"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 19, "command": "git commit -m \"wip\""}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 20, "command": "git commit --amend -m \"better message\""}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 21, "command": "git checkout -b topic"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 22, "command": "git restore --staged README.md"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 23, "command": "git restore Cargo.toml"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 24, "command": "git stash"}
+{"model": "haiku", "arm": "warm", "run": "haiku warm", "task": 24, "command": "git stash pop"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 1, "command": "git status"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 2, "command": "git status -s"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 3, "command": "git status"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 4, "command": "git diff"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 5, "command": "git diff --cached"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 6, "command": "git log --oneline -10"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 7, "command": "git log --follow -- README.md"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 8, "command": "git log -1 --format='%an %ad' -- Cargo.toml"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 9, "command": "git show abc1234"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 10, "command": "git branch -a"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 11, "command": "git branch --show-current"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 12, "command": "git log main..feature/x --oneline"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 13, "command": "git diff main feature/x"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 14, "command": "git tag"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 15, "command": "git rev-parse --show-toplevel"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 16, "command": "git ls-files"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 17, "command": "git show HEAD~2:README.md"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 18, "command": "git add README.md"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 18, "command": "git commit -m \"update readme\""}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 19, "command": "git add -A"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 19, "command": "git commit -m \"wip\""}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 20, "command": "git commit --amend -m \"better message\""}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 21, "command": "git switch -c topic"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 22, "command": "git restore --staged README.md"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 23, "command": "git restore Cargo.toml"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 24, "command": "git stash"}
+{"model": "glm-flash", "arm": "cold", "run": "glm-flash cold", "task": 24, "command": "git stash pop"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 1, "command": "git status"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 2, "command": "git status --json"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 3, "command": "git status"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 3, "command": "git diff --staged"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 3, "command": "git diff"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 4, "command": "git diff"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 5, "command": "git diff --staged"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 6, "command": "git log -n 10"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 7, "command": "git log -- README.md"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 8, "command": "git log -n 1 -- Cargo.toml"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 9, "command": "git show abc1234"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 9, "command": "git diff --from abc1234^ --to abc1234"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 10, "command": "git branch"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 11, "command": "git info"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 11, "command": "git branch"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 12, "command": "git log feature/x --json"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 12, "command": "git log main --json"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 13, "command": "git diff --from main --to feature/x"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 14, "command": "git tag"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 15, "command": "git info"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 16, "command": "git ls HEAD --recursive"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 17, "command": "git show 'HEAD~2:README.md'"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 18, "command": "command git add README.md && command git commit -m 'update readme'"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 19, "command": "command git add -A && command git commit -m 'wip'"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 20, "command": "command git commit --amend -m 'better message'"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 21, "command": "command git switch -c topic"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 22, "command": "command git restore --staged README.md"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 23, "command": "command git restore Cargo.toml"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 24, "command": "command git stash"}
+{"model": "glm-flash", "arm": "warm", "run": "glm-flash warm", "task": 24, "command": "command git stash pop"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 1, "command": "git status"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 2, "command": "git status -s"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 3, "command": "git status"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 4, "command": "git diff"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 5, "command": "git diff --staged"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 6, "command": "git log -n 10 --oneline"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 7, "command": "git log -- README.md"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 8, "command": "git log -1 --format='%an <%ae> %ad' --date=iso -- Cargo.toml"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 9, "command": "git show abc1234"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 10, "command": "git branch --list"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 11, "command": "git branch --show-current"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 12, "command": "git log --oneline main..feature/x"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 13, "command": "git diff main feature/x"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 14, "command": "git tag --list"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 15, "command": "git rev-parse --show-toplevel"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 16, "command": "git ls-files"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 17, "command": "git show HEAD~2:README.md"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 18, "command": "git add README.md"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 18, "command": "git commit -m 'update readme'"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 19, "command": "git add -A"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 19, "command": "git commit -m 'wip'"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 20, "command": "git commit --amend -m 'better message'"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 21, "command": "git switch -c topic"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 22, "command": "git restore --staged README.md"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 23, "command": "git restore Cargo.toml"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 24, "command": "git stash push"}
+{"model": "qwen-flash", "arm": "cold", "run": "qwen-flash cold", "task": 24, "command": "git stash pop"}

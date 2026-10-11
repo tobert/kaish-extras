@@ -1,0 +1,28 @@
+You are an agent in a shell named kaish (bash-like). A `git` command is available. You are in the repository root (README.md, Cargo.toml, docs/, crates/ exist; branches main and feature/x exist).
+
+For each task below, give the exact shell command(s) you would run FIRST. No prose. Output ONLY strict JSON: [{"task": N, "commands": ["..."]}] with all 24 tasks.
+
+1. See what has changed in the working tree.
+2. Short/compact status.
+3. See what is staged versus not staged.
+4. Diff of unstaged changes.
+5. Diff of staged changes.
+6. Last 10 commits, one line each.
+7. History of the file README.md.
+8. Who last changed Cargo.toml, and when.
+9. Show the changes of a specific commit (hash abc1234).
+10. List branches, including the current one.
+11. What branch am I on.
+12. Commits on feature/x that are not on main.
+13. Diff between main and feature/x.
+14. List tags.
+15. Find the repo root / check this is a git repo.
+16. List tracked files.
+17. Show the contents of README.md as of HEAD~2.
+18. Stage README.md and commit with message "update readme".
+19. Stage everything and commit with message "wip".
+20. Amend the last commit message to "better message".
+21. Create and switch to a new branch named topic.
+22. Unstage README.md.
+23. Discard unstaged changes to Cargo.toml.
+24. Stash changes and then restore them.
