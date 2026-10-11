@@ -512,9 +512,8 @@ pub enum GitError {
     /// generic "unknown flag".
     #[error(
         "git {operation}: {flag} needs unified-diff text, which this build \
-         does not assemble — that is the 'textdiff' feature, added in a later \
-         phase, where it will render hunks and patch text from the same model \
-         this verb already returns. {instead}"
+         does not assemble — that is the 'textdiff' cargo feature, on by \
+         default and turned off by whoever built this tool. {instead}"
     )]
     PatchNeedsTextdiff {
         /// The verb that was asked for.
@@ -538,6 +537,25 @@ pub enum GitError {
         flag: &'static str,
         /// What to reach for instead.
         instead: &'static str,
+    },
+
+    /// The embedder's patch renderer returned an error, so no patch was
+    /// printed. Exit 1 — the call failed, and nothing about the request was
+    /// wrong.
+    ///
+    /// No fallback to this build's own renderer: an embedder that installed
+    /// one asked for its output, and a different patch printed in its place
+    /// would be a silent substitution.
+    #[error(
+        "git {operation}: the patch renderer failed, so no patch was printed: \
+         {message}. 'git diff --json --patch' reports the same change, hunks \
+         included, without it"
+    )]
+    PatchRendererFailed {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The renderer's error and each of its sources, joined with ": ".
+        message: String,
     },
 
     /// The repository is on disk but malformed, or a file we must read is
@@ -609,6 +627,7 @@ impl GitError {
             | GitError::AmbiguousRevision { .. }
             | GitError::NotATree { .. }
             | GitError::AncestryBudgetExhausted { .. }
+            | GitError::PatchRendererFailed { .. }
             | GitError::NoSuchPath { .. } => 1,
             GitError::Usage { .. }
             | GitError::NoVerb { .. }
@@ -771,6 +790,10 @@ mod tests {
                 operation: "log",
                 flag: "--patch",
                 instead: "Use git diff --patch.",
+            },
+            GitError::PatchRendererFailed {
+                operation: "diff",
+                message: "engine refused".into(),
             },
             GitError::UnsupportedIndexMode {
                 operation: "status",

@@ -113,13 +113,15 @@ jobs:
 
       # Both feature configurations, because `textdiff` gates a third of this
       # crate's diff path and a lint clean on one build says nothing about the
-      # other. The suite is gated the same way: `tests/textdiff.rs` compiles to
-      # nothing without the feature, and three refusal tests in `diff.rs` and
-      # `log.rs` compile to nothing with it.
+      # other. `textdiff` is a default feature, so the second run is the
+      # opt-out an embedder gets with `default-features = false`. The suite is
+      # gated the same way: `tests/textdiff.rs` and `tests/patch_renderer.rs`
+      # compile to nothing without the feature, and three refusal tests in
+      # `diff.rs` and `log.rs` compile to nothing with it.
       - name: Clippy (deny warnings)
         run: |
           cargo clippy -p kaish-tools-git --all-targets --locked -- -D warnings
-          cargo clippy -p kaish-tools-git --all-targets --locked --features textdiff -- -D warnings
+          cargo clippy -p kaish-tools-git --all-targets --locked --no-default-features -- -D warnings
 
       - name: Build
         run: cargo build -p kaish-tools-git --locked
@@ -136,7 +138,7 @@ jobs:
         run: |
           git --version
           cargo test -p kaish-tools-git --locked
-          cargo test -p kaish-tools-git --locked --features textdiff
+          cargo test -p kaish-tools-git --locked --no-default-features
 
   curl-tool:
     name: kaish-tools-curl (native)
@@ -217,31 +219,32 @@ jobs:
       - name: Prove cargo tree -i can find a package that is present
         run: |
           cargo tree -i gix-imara-diff --workspace --locked
-          cargo tree -i gix-imara-diff --workspace --locked --features kaish-tools-git/textdiff
+          cargo tree -i gix-imara-diff --package kaish-tools-git --no-default-features --locked
 
-      # Twice: the default feature set, and `kaish-tools-git/textdiff`. A
-      # tripwire that only ever ran on the default set would prove nothing
-      # about the feature — and `textdiff` is precisely the axis A.2 once
-      # described as the no-subprocess boundary, so it is the one an embedder
-      # would most want the assertion for. It adds no dependency today
-      # (gix-imara-diff is already unconditional); the second run is what says
-      # so, and what catches the day that changes.
+      # Twice: the whole workspace on its default features — which include
+      # `kaish-tools-git/textdiff` — and kaish-tools-git alone with
+      # `--no-default-features`, the build an embedder opting out gets. A
+      # tripwire that only ever ran on one set would prove nothing about the
+      # other, and `textdiff` is precisely the axis A.2 once described as the
+      # no-subprocess boundary. It adds no dependency today (gix-imara-diff is
+      # already unconditional); the pair of runs is what says so, and what
+      # catches the day that changes.
       - name: Assert ${{ matrix.pkg }} is absent from the workspace lockfile
         run: |
-          for features in "" "--features kaish-tools-git/textdiff"; do
-            echo "::group::${{ matrix.pkg }} with features: ${features:-<default>}"
+          for features in "--workspace" "--package kaish-tools-git --no-default-features"; do
+            echo "::group::${{ matrix.pkg }} with: ${features}"
             set +e
-            out=$(cargo tree -i ${{ matrix.pkg }} --workspace --locked $features 2>&1)
+            out=$(cargo tree -i ${{ matrix.pkg }} $features --locked 2>&1)
             code=$?
             set -e
             echo "$out"
             echo "::endgroup::"
             if [ "$code" -eq 0 ]; then
-              echo "::error::${{ matrix.pkg }} IS present in the dependency graph (${features:-default features}) — expected absent"
+              echo "::error::${{ matrix.pkg }} IS present in the dependency graph (${features}) — expected absent"
               exit 1
             fi
             if ! echo "$out" | grep -q "did not match any packages"; then
-              echo "::error::cargo tree failed for a reason other than a clean 'not found' (${features:-default features})"
+              echo "::error::cargo tree failed for a reason other than a clean 'not found' (${features})"
               exit 1
             fi
           done

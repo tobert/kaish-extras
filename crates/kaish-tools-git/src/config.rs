@@ -10,11 +10,21 @@
 //! which verbs exist. There is no `with_verb`, so no config edit anywhere can
 //! widen the surface past what the constructor granted.
 //!
-//! This module depends on nothing else of ours and nothing of kaish's — the
-//! dependency direction in A.1 that keeps a future `kaish-git-core` split
-//! mechanical.
+//! One knob is not subtractive and is not about verbs:
+//! [`GitConfig::with_patch_renderer`] (`textdiff` only) replaces the text
+//! `git diff --patch` prints. It adds no verb, no flag, and no read the caps
+//! would refuse: the renderer receives content read under `max_blob_bytes`.
+//!
+//! This module depends on nothing of kaish's, and on nothing else of ours
+//! but `renderer.rs`, which depends on nothing — the dependency direction in
+//! A.1 that keeps a future `kaish-git-core` split mechanical.
 
 use std::collections::BTreeSet;
+#[cfg(feature = "textdiff")]
+use std::sync::Arc;
+
+#[cfg(feature = "textdiff")]
+use crate::renderer::PatchRenderer;
 
 /// A capability profile: the set of verbs an embedder is opting into.
 ///
@@ -163,13 +173,34 @@ impl Default for Limits {
 ///
 /// Built by [`GitConfig::read_only`] and narrowed from there. Fields are
 /// private so the only reachable transitions are the subtractive ones.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct GitConfig {
     profiles: BTreeSet<Profile>,
     verbs: BTreeSet<Verb>,
     tool_name: String,
     limits: Limits,
+    #[cfg(feature = "textdiff")]
+    patch_renderer: Option<Arc<dyn PatchRenderer>>,
+}
+
+// By hand because a renderer is not `Debug`: the trait asks only for
+// `Send + Sync`, and an embedder's engine should not have to grow a `Debug`
+// impl to be installed.
+impl std::fmt::Debug for GitConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("GitConfig");
+        s.field("profiles", &self.profiles)
+            .field("verbs", &self.verbs)
+            .field("tool_name", &self.tool_name)
+            .field("limits", &self.limits);
+        #[cfg(feature = "textdiff")]
+        s.field(
+            "patch_renderer",
+            &self.patch_renderer.as_ref().map(|_| "<installed>"),
+        );
+        s.finish()
+    }
 }
 
 impl GitConfig {
@@ -185,6 +216,8 @@ impl GitConfig {
             verbs: Verb::ALL.iter().copied().collect(),
             tool_name: "git".to_string(),
             limits: Limits::default(),
+            #[cfg(feature = "textdiff")]
+            patch_renderer: None,
         }
     }
 
@@ -213,6 +246,23 @@ impl GitConfig {
         self
     }
 
+    /// Render `git diff --patch`'s text with `renderer` instead of this
+    /// build's unified-patch renderer. Installing a second one replaces the
+    /// first.
+    ///
+    /// Changes the text only. `--json` still reports this build's own model
+    /// and hunks and never calls the renderer; plain `git diff` never calls
+    /// it either. The renderer receives content read under
+    /// `max_blob_bytes`, and nothing over it — see
+    /// [`crate::ChangedFile::over_max_blob_bytes`] — though it does cost one
+    /// read the built-in renderer skips: a renamed file's blob. With no
+    /// renderer installed, `--patch` prints this build's own patch text.
+    #[cfg(feature = "textdiff")]
+    pub fn with_patch_renderer(mut self, renderer: Arc<dyn PatchRenderer>) -> Self {
+        self.patch_renderer = Some(renderer);
+        self
+    }
+
     /// Whether this config enables `verb`.
     pub fn has(&self, verb: Verb) -> bool {
         self.verbs.contains(&verb)
@@ -226,6 +276,12 @@ impl GitConfig {
     /// The output caps.
     pub fn limits(&self) -> Limits {
         self.limits
+    }
+
+    /// The installed patch renderer, if any.
+    #[cfg(feature = "textdiff")]
+    pub(crate) fn patch_renderer(&self) -> Option<&Arc<dyn PatchRenderer>> {
+        self.patch_renderer.as_ref()
     }
 
     /// The enabled profiles, in a stable order.
@@ -275,6 +331,40 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "textdiff")]
+    struct NullRenderer;
+
+    #[cfg(feature = "textdiff")]
+    impl PatchRenderer for NullRenderer {
+        fn render(
+            &self,
+            _files: &[crate::ChangedFile<'_>],
+            _opts: &crate::PatchOptions,
+        ) -> Result<crate::RenderedPatch, crate::PatchRenderError> {
+            Ok(crate::RenderedPatch::new(""))
+        }
+    }
+
+    /// A renderer on a config that had every verb leaves every verb, and one
+    /// on a narrowed config leaves it narrowed: the knob is about text, not
+    /// about the verb set.
+    #[cfg(feature = "textdiff")]
+    #[test]
+    fn a_patch_renderer_does_not_change_the_verb_set() {
+        let full: BTreeSet<Verb> = GitConfig::read_only().verbs().collect();
+        let with: BTreeSet<Verb> = GitConfig::read_only()
+            .with_patch_renderer(std::sync::Arc::new(NullRenderer))
+            .verbs()
+            .collect();
+        assert_eq!(full, with);
+        let narrowed: BTreeSet<Verb> = GitConfig::read_only()
+            .without_verb(Verb::Diff)
+            .with_patch_renderer(std::sync::Arc::new(NullRenderer))
+            .verbs()
+            .collect();
+        assert!(!narrowed.contains(&Verb::Diff), "installing a renderer must not restore diff");
+    }
 
     #[test]
     fn read_only_enables_every_implemented_verb() {
@@ -326,6 +416,10 @@ mod tests {
                 max_rows: 5,
                 ..Limits::default()
             });
+        // Every non-subtractive knob goes through the chain too: a renderer
+        // replaces text, and must not be a side door to a verb.
+        #[cfg(feature = "textdiff")]
+        let narrowed = narrowed.with_patch_renderer(std::sync::Arc::new(NullRenderer));
         let after: BTreeSet<Verb> = narrowed.verbs().collect();
         assert!(
             after.is_subset(&start),

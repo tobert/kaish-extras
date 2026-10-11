@@ -498,6 +498,22 @@ pub fn diff_patch(report: &DiffReport) -> (OutputData, String) {
     (data, text)
 }
 
+/// The model's `--json` payload beside text an embedder's patch renderer
+/// produced. The renderer is never asked under `--json`, so the rich JSON is
+/// only reached if a caller asks for JSON some way this tool did not see.
+#[cfg(feature = "textdiff")]
+pub fn diff_rendered(report: &DiffReport, text: String) -> (OutputData, String) {
+    let data = OutputData::text(text.clone());
+    let data = match serde_json::to_value(report) {
+        Ok(json) => data.with_rich_json(json),
+        Err(e) => {
+            tracing::warn!(error = %e, "git diff --patch: could not build the --json payload");
+            data
+        }
+    };
+    (data, text)
+}
+
 /// `git`'s own shortstat wording, plus what a cap withheld.
 fn summary_line(report: &DiffReport) -> String {
     let plural = |n: u64, one: &str, many: &str| if n == 1 { one.to_string() } else { many.to_string() };

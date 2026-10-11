@@ -58,6 +58,7 @@ chain of calls, however long, can widen a build's surface past what
 | `GitConfig::read_only()` | — | The only constructor. Read profile, every verb in `Verb::ALL`, name `git`, default `Limits`. |
 | `.without_verb(Verb)` | none subtracted | Removes a verb from the schema, not just from dispatch — see [Verb visibility](#verb-visibility-a-disabled-verb-is-genuinely-gone). Subtracting an already-absent verb is a no-op. Subtracting every verb makes `tool()` fail at registration (`NoVerbsEnabled`). |
 | `.with_tool_name(name)` | `"git"` | Registering as anything else means external `git` on `PATH` is not shadowed — a caller who types `git` gets whichever one kaish's own PATH-vs-builtin resolution picks, not necessarily this tool. An empty or whitespace-containing name is rejected at registration (`UnusableToolName`). |
+| `.with_patch_renderer(Arc<dyn PatchRenderer>)` | none: this build's own patch text | Replaces the text `git diff --patch` prints, and nothing else — no verb or flag is added, and no read the caps would refuse. Needs the `textdiff` feature. See [Rendering `--patch` yourself](#rendering---patch-yourself), including what it costs in memory. |
 | `.with_limits(Limits)` | see below | Every field is a **hard cap** — a verb's own `--limit` flag may only lower it, never raise it. Raising a limit raises real cost: `max_blob_bytes` and `max_diff_files` bound single-allocation and single-invocation work respectively (see [L3](#known-limitations) for where "per-blob bounded, not per-commit bounded" still bites). |
 
 `Verb` is `#[non_exhaustive]` and today carries exactly the implemented verbs:
@@ -92,7 +93,7 @@ above.
 | `max_diff_files` | 500 | Files compared in one invocation: `git diff`'s whole result, and `log --stat`'s per-commit file list. A verb's `--limit` may lower it, never raise it. |
 | `max_blob_bytes` | 8 MiB (`8 * 1024 * 1024`) | Bytes of blob content `show` will read, and of a single working-tree file `status` and `diff` will hash. Over the cap the content is never read — never a truncated prefix — and each verb reports it differently. `show`: no content, exit 0, and a stderr note (`git show: blob '<oid>' is <size> bytes, over this build's <cap>-byte cap`). `status`: **that one path** is declined and the report continues, exit 0 — its entry carries `blob_capped: true` with a `null` worktree column, `totals.blob_capped` counts them, `clean` is `false`, and the text row renders `~` in the worktree column. Like every total, those two cover the paths `--path` selects: an over-cap file outside the filter is not in the answer. `diff`: the whole call fails, exit 1 (`docs/issues.md` **P16**), because the comparison is the answer. |
 | `max_hunk_bytes_per_file` | 256 KiB | Bytes of hunk text `git diff --patch` will produce for one file, under the `textdiff` feature. Measured before a hunk's lines are built and applied at whole-hunk granularity — a half-hunk is not a patch — so a file it cuts is marked `hunks_capped` with its counts still exact —
-distinct from `lines_capped`, which means the file was not read at all. Not consulted by a build without `textdiff`, which has no hunks. |
+distinct from `lines_capped`, which means the file was not read at all. Not consulted by a build without `textdiff`, which has no hunks. With a [patch renderer](#rendering---patch-yourself) installed it is passed to the renderer as `PatchOptions::max_hunk_bytes_per_file` and does not bound the renderer's output. |
 | `submodule_depth` | 1 | Reserved; `git info`'s `submodules` count reads `.gitmodules` in the working tree only, no recursive descent exists yet to bound. |
 
 Pinned by `limits_defaults_match_the_design` (`src/config.rs`) — a silent
@@ -143,6 +144,139 @@ advertise a `worktree` group with nothing in it
 (`subtracting_the_verb_removes_the_worktree_node`, `tests/worktree.rs`). A
 bare `git worktree` is a usage error naming what the group holds, not a
 listing.
+
+## Rendering `--patch` yourself
+
+`textdiff` is a default feature, so `git diff --patch` prints unified-patch
+text out of the box. An embedder with its own diff engine can replace that
+text with `GitConfig::with_patch_renderer`. The doctest on `PatchRenderer`
+(`src/renderer.rs`) is the compiled form of this:
+
+```rust
+use std::sync::Arc;
+use kaish_tools_git::{
+    ChangedFile, GitConfig, PatchOptions, PatchRenderError, PatchRenderer, RenderedPatch,
+};
+
+struct Names;
+
+impl PatchRenderer for Names {
+    fn render(
+        &self,
+        files: &[ChangedFile<'_>],
+        _opts: &PatchOptions,
+    ) -> Result<RenderedPatch, PatchRenderError> {
+        let mut text = String::new();
+        for file in files {
+            let path = file.new_path.or(file.old_path).unwrap_or_default();
+            text.push_str(&format!("{:?} {path}\n", file.kind));
+        }
+        Ok(RenderedPatch::new(text))
+    }
+}
+
+let git = kaish_tools_git::tool(GitConfig::read_only().with_patch_renderer(Arc::new(Names)))?;
+```
+
+The tests cited below are in `tests/patch_renderer.rs`. Most drive a real
+`kaish_kernel::Kernel`, and the one that checks what the renderer receives
+compares it with real git's `git diff --raw` and `git cat-file`. A claim with
+no test named is said to be untested.
+
+**When it is called.** Once per `git diff --patch` invocation, with every
+changed file in one slice, in path order
+(`the_renderer_receives_every_changed_file_as_git_reports_it`), after
+`--limit` has cut the list — stderr says when it did. It is not called under
+`--json`, which reports this build's own model with its own `hunks`
+(`json_output_is_unaffected_by_a_renderer`), and not without `--patch`
+(`plain_diff_does_not_call_the_renderer`). It runs inside the same blocking
+section that read the repository, so CPU-bound work belongs there directly
+(untested: nothing observable distinguishes it).
+
+**What each file carries** (`ChangedFile`, `#[non_exhaustive]`):
+
+| Field | Value |
+|---|---|
+| `old_path`, `new_path` | Repository-relative, slash-separated, no `a/`/`b/` prefix. `None` on the absent side: `old_path` for an add, `new_path` for a delete. |
+| `kind` | `Added`, `Deleted`, `Modified` (content, mode, or both), `Renamed { similarity }`, `TypeChanged`. Renames are exact-match only, so `similarity` is always `100` and the two sides are the same bytes; a file moved *and* edited arrives as a delete plus an add. |
+| `old_mode`, `new_mode` | Six-digit octal strings (`100644`, `100755`, `120000`, `160000`), `None` on the absent side. |
+| `old_oid`, `new_oid` | Full hex oids, `None` on the absent side and on a working-tree side, which has no oid. |
+| `before`, `after` | The content as **bytes**, `None` on the absent side, on a submodule side (`160000`), and on both sides of a file over the cap. A symlink's content is its target. The renderer decides what is binary: this build's NUL-byte rule is not applied to what it passes. |
+| `old_size`, `new_size` | Bytes, set whenever the side holds a blob — including when the content was not read. |
+| `over_max_blob_bytes` | `true` when either side is over `max_blob_bytes`. |
+
+**The cap rule.** A file with either side over `max_blob_bytes` arrives with
+`before` and `after` both `None`, the size of each side that exists, and
+`over_max_blob_bytes: true` — a renderer cannot diff half a file, and
+installing one cannot cause a read the cap refused
+(`a_file_over_max_blob_bytes_arrives_with_sizes_and_no_content`). That covers
+revision and index sides. A **working-tree** file over the cap never reaches
+a renderer: `git diff` hashes every tracked working-tree file to find what
+changed, and one over the cap fails the whole call with exit 1 before any
+renderer is asked (**P16**;
+`a_worktree_file_over_the_cap_fails_before_the_renderer_is_asked`). A
+working-tree **symlink** is the one exception: its target is read whatever
+its length, as the hashing pass reads it, so it arrives as content with
+`over_max_blob_bytes: false` even when its size is over the cap
+(`a_worktree_symlink_target_is_content_whatever_the_cap`). A symlink target
+is bounded by the platform's path length.
+
+One read is added: the built-in renderer reads nothing for an exact rename,
+and a renderer is handed the renamed blob, under the same cap. The model
+behind the rendered text is the one plain `git diff` builds — counts,
+`binary` and `lines_capped` included
+(`the_renderer_path_builds_the_model_json_reports`). The stderr note counts
+the files the renderer got no content for, which can be more than
+`lines_capped` counts: a renamed file over the cap is withheld and still
+`0/0`, uncapped, in the model
+(`the_note_counts_what_the_renderer_did_not_get`).
+
+**What is not passed.** `ChangedFile` and `PatchOptions` have no field for
+hunks — the renderer makes its own — nor for the endpoints, which are on
+stderr as they are for this build's own patch, nor for `--limit` truncation,
+which stderr also carries. Unmerged paths are not in the slice (a diff omits
+them, **D2**), and nothing is read from `.gitattributes` (**T3**, **T5**).
+
+**`PatchOptions`** (`#[non_exhaustive]`, with a `Default`):
+
+| Field | Value |
+|---|---|
+| `context` | `--context <N>`, default 3 (`the_parsed_options_reach_the_renderer`). |
+| `max_hunk_bytes_per_file` | The embedder's `Limits::max_hunk_bytes_per_file`, passed through as a budget the renderer may use. This build does not measure the renderer's output against it. |
+| `word_diff` | Always `false`: no flag sets it yet. Declared so a renderer can be written against it. |
+
+**The output.** `RenderedPatch::text` is stdout, verbatim
+(`the_renderer_text_is_stdout`). `RenderedPatch::data`, when set, becomes the
+result's structured data — the pipeline's structured input, so
+`git diff --patch | jq …` reads it. It does **not** change what
+`x=$(git diff --patch)` binds: the tool leaves `typed_substitution` off, so a
+substitution binds the text. `renderer_data_is_attached_and_a_substitution_still_binds_text`
+checks both through the kernel, with `jq` reading the data as the control
+that it was attached, and goes red when the schema declares typed
+substitution. With a renderer installed, `--patch`'s published description
+stops promising that `git apply` takes the output, since that is now the
+renderer's promise to make (`the_patch_description_says_who_renders`).
+
+**Failure.** A renderer `Err` fails the call with exit 1, empty stdout, and
+a stderr message that begins `git diff: the patch renderer failed, so no
+patch was printed: <message>`, the message being the error's `Display` and
+each `source()` joined with `": "`
+(`a_renderer_error_is_a_loud_failure_naming_its_message`). There is no
+fallback to this build's renderer. A panic is not caught (untested).
+
+**The cost.** The built-in renderer holds one file's two sides at a time.
+A renderer gets every file at once, so the content of the whole change set is
+in memory together: up to `--limit` files (at most `max_diff_files`, default
+500), each side up to `max_blob_bytes` (default 8 MiB) — 8 GiB at the default
+caps in the worst case. Two sides that are the same blob are held once.
+`max_diff_files` and `max_blob_bytes` are the bounds to lower if that matters
+(`docs/issues.md`, **T7**).
+
+**With no renderer**, `--patch` prints this build's own patch text exactly as
+it did before the boundary existed: `tests/textdiff.rs` compares it to real
+`git diff --patch` byte for byte and runs unchanged. With
+`default-features = false` there is no `--patch` (exit 4, naming `textdiff`)
+and no `PatchRenderer` to implement.
 
 ## The read-only story: five layers, stated precisely
 
@@ -549,6 +683,10 @@ Concretely, for a repository a caller chose rather than one you control:
   that (`docs/issues.md` **G7**).
 - **A tree flatten allocates one map entry per leaf.** Depth is capped at 64,
   width is not (**G8**).
+- **A patch renderer holds the whole change set in memory.** Up to `--limit`
+  files × two sides × `max_blob_bytes` — 8 GiB at the default caps — where
+  the built-in renderer holds one file at a time
+  ([Rendering `--patch` yourself](#rendering---patch-yourself), **T7**).
 - **A single diff has no deadline.** Myers is O(ND) in edit distance over
   blobs capped at 8 MiB each, so one pathological pair can stall a call, and
   there is no cancellation to interrupt it (**G9**, and see the no-cancellation
@@ -683,10 +821,12 @@ tree-depth bounds and the entries not listed here.
   are the only bounds on a full-history `log`. If you run this inline on a
   request path, size the timeout around that.
 - **`--patch` is a build feature, and only `git diff` has it.** Unified patch
-  text needs the `textdiff` cargo feature, which is off by default; `git info`
-  lists it under `capabilities.features` so an agent can tell. Without it,
+  text needs the `textdiff` cargo feature, which is on by default and off
+  with `default-features = false`; `git info` lists it under
+  `capabilities.features` so an agent can tell. Without it,
   `git diff --patch` and `--context` refuse with exit 4 naming the feature.
-  With it, `git diff --patch` renders the patch — byte-identical to
+  With it and no [patch renderer](#rendering---patch-yourself) installed,
+  `git diff --patch` renders the patch — byte-identical to
   `git diff --patch` for the two object-backed endpoint pairs over the inputs
   the tests compare, and accepted by `git apply --check` — with six stated
   non-fidelities: no `index` line for a working-tree side, no binary patch

@@ -74,8 +74,10 @@
 //! model, the unified-patch renderer behind `git diff --patch`, and the D.3
 //! hostile-textconv fixture that proves a repository declaring
 //! `diff.*.textconv`, `filter.*.clean/smudge` or `core.hooksPath` gets
-//! nothing from this build. With `textdiff` off, `--patch` and `--context`
-//! exit 4 naming it. PR 7 adds the listing verbs — `git branch` (with
+//! nothing from this build. `textdiff` is a default feature; with it turned
+//! off, `--patch` and `--context` exit 4 naming it. An embedder can replace
+//! the patch text with its own renderer — see [`PatchRenderer`] and
+//! [`GitConfig::with_patch_renderer`]. PR 7 adds the listing verbs — `git branch` (with
 //! `--contains`/`--merged`/`--ahead-behind`, each metered through
 //! `reach.rs`'s budget), `git tag`, and `git worktree list`. `git blame` is
 //! specified in architecture.md B.8 and deliberately unbuilt; see
@@ -120,6 +122,8 @@ mod tool;
 mod diffcore;
 #[cfg(all(not(target_family = "wasm"), feature = "textdiff"))]
 mod patch;
+#[cfg(all(not(target_family = "wasm"), feature = "textdiff"))]
+mod renderer;
 #[cfg(not(target_family = "wasm"))]
 mod treewalk;
 #[cfg(not(target_family = "wasm"))]
@@ -140,6 +144,10 @@ pub use model::{
 };
 #[cfg(all(not(target_family = "wasm"), feature = "textdiff"))]
 pub use model::{DiffHunk, DiffLine, DiffOp};
+#[cfg(all(not(target_family = "wasm"), feature = "textdiff"))]
+pub use renderer::{
+    ChangeKind, ChangedFile, PatchOptions, PatchRenderError, PatchRenderer, RenderedPatch,
+};
 #[cfg(not(target_family = "wasm"))]
 pub use repo::ReadRepo;
 #[cfg(not(target_family = "wasm"))]
