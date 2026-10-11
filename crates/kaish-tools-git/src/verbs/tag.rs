@@ -58,9 +58,9 @@ pub(crate) struct TagArgs {
     /// Takes no operands: `git tag` lists every tag, and narrowing is
     /// `git tag --contains <REV>`. A single tag's own metadata is
     /// `git show <TAG>`.
-    // Bound so clap accepts the `--`-terminated tail `ToolArgs::to_argv()`
-    // always emits. The real operands are read off `args.positional` in
-    // `tool.rs`, which refuses them by name.
+    // Every operand, in order, on both sides of the caller's `--`: the tool is
+    // bound verbatim, so this argv is the caller's own. `tool.rs`'s
+    // `operands` splits it at the marker.
     #[arg(hide = true)]
     pub operands: Vec<String>,
 }

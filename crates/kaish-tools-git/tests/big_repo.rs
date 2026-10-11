@@ -38,7 +38,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use kaish_tool_api::Tool;
-use kaish_types::{ExecResult, ToolArgs, Value};
+use kaish_types::{ExecResult, ToolArgs};
 
 use kaish_tools_git::{GitConfig, Limits};
 
@@ -94,38 +94,9 @@ fn big_repo() -> Option<PathBuf> {
     }
 }
 
-/// Build the `ToolArgs` the kernel would, from an argv slice — the same
-/// shape `log.rs`/`status.rs` build, trimmed to what this file needs
-/// (repeatable `--path`, single-value flags, bare flags).
+/// The `ToolArgs` a kaish kernel builds for `git <verb> <argv>`.
 fn tool_args(verb: &str, argv: &[&str]) -> ToolArgs {
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String(verb.to_string()));
-    let mut i = 0;
-    while i < argv.len() {
-        let token = argv[i]
-            .strip_prefix("--")
-            .unwrap_or_else(|| panic!("argv must use long flags: {}", argv[i]));
-        match argv.get(i + 1) {
-            Some(value) if !value.starts_with("--") => {
-                let next = match args.named.remove(token) {
-                    Some(Value::Json(serde_json::Value::Array(mut outer))) => {
-                        outer.push(serde_json::json!([*value]));
-                        Value::Json(serde_json::Value::Array(outer))
-                    }
-                    Some(Value::String(first)) => Value::Json(serde_json::json!([[first], [*value]])),
-                    Some(other) => panic!("unexpected repeat of {token}: {other:?}"),
-                    None => Value::String((*value).to_string()),
-                };
-                args.named.insert(token.to_string(), next);
-                i += 2;
-            }
-            _ => {
-                args.flags.insert(token.to_string());
-                i += 1;
-            }
-        }
-    }
-    args
+    support::verb_words(verb, argv)
 }
 
 /// Run a verb against `repo_root` mounted whole at `/mnt`, under `config`.

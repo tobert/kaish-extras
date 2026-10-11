@@ -1539,6 +1539,18 @@ instead.
   `HEAD~1` never reached this tool. Every published command quotes such a
   word, and `tests/spellings.rs` parses all of them with kaish's parser.
 - **`diff` pathspecs are cwd-relative**, matching `status`, `log` and git.
+- **Bound verbatim** (`ToolSchema::with_verbatim_argv`). kaish's typed binder
+  drops a caller's `--`, by design — its own `GlobalFlags` docs say so — and
+  every verb here assumed the marker reached it, so `git log main -- src`
+  was refused as two revisions through a real kernel for as long as
+  operands have been read (X2). Nothing
+  caught it because every test built `ToolArgs` by hand, with a literal
+  `"--"` the kernel never sends. Verbatim hands the tool every word in source
+  order, `--` included, and lifts only `--json`. The 2026-08-21 review called
+  this binding right for git and deferred it as a rewrite of the argument
+  path; the dropped marker is what made it worth the rewrite. The test
+  helpers now build `words` the way a kernel does (`support::words`), and
+  `tests/spellings.rs` drives the marker through `Kernel::execute`.
 
 **2026-08-23 — P12: one over-cap tracked file no longer costs the whole
 status.** `status` used to propagate `BlobTooLarge` from the first tracked

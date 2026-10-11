@@ -15,7 +15,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use kaish_tool_api::Tool;
-use kaish_types::{ExecResult, ToolArgs, Value};
+use kaish_types::{ExecResult, ToolArgs};
 
 use kaish_tools_git::{GitConfig, Limits};
 
@@ -24,30 +24,9 @@ use support::{git, require_git, write_file, Fixture, StrictBackend, TestCtx};
 /// The VFS root the fixture scratch directory is mounted at.
 const MOUNT: &str = "/mnt";
 
-/// Build the `ToolArgs` the kernel would, from an argv slice. `--flag value`
-/// binds a named argument, a lone `--flag` binds a flag, and the verb word
-/// leads the positionals.
+/// The `ToolArgs` a kaish kernel builds for `git <verb> <argv>`.
 fn tool_args(verb: &str, argv: &[&str]) -> ToolArgs {
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String(verb.to_string()));
-    let mut i = 0;
-    while i < argv.len() {
-        let token = argv[i]
-            .strip_prefix("--")
-            .unwrap_or_else(|| panic!("argv must use long flags: {}", argv[i]));
-        match argv.get(i + 1) {
-            Some(value) if !value.starts_with("--") => {
-                args.named
-                    .insert(token.to_string(), Value::String((*value).to_string()));
-                i += 2;
-            }
-            _ => {
-                args.flags.insert(token.to_string());
-                i += 1;
-            }
-        }
-    }
-    args
+    support::verb_words(verb, argv)
 }
 
 /// Run `git status` against `mount_real` mounted at `/mnt`, from `cwd`.

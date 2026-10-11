@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use kaish_tool_api::Tool;
-use kaish_types::{ExecResult, ToolArgs, Value};
+use kaish_types::{ExecResult, ToolArgs};
 
 use kaish_tools_git::{GitConfig, Limits};
 
@@ -29,47 +29,10 @@ use support::{git, DiffRepo, StrictBackend, TestCtx};
 
 const MOUNT: &str = "/mnt";
 
-const VALUE_FLAGS: &[&str] = &["repo", "limit", "from", "to", "path", "context"];
-const BOOL_FLAGS: &[&str] = &[
-    "json",
-    "staged",
-    "name-only",
-    "patch",
-    "find-renames",
-    "no-find-renames",
-];
 
+/// The `ToolArgs` a kaish kernel builds for `git <verb> <argv>`.
 fn tool_args(verb: &str, argv: &[&str]) -> ToolArgs {
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String(verb.to_string()));
-    let mut i = 0;
-    while i < argv.len() {
-        let token = argv[i];
-        let Some(name) = token.strip_prefix("--") else {
-            args.positional.push(Value::String(token.to_string()));
-            i += 1;
-            continue;
-        };
-        if name.is_empty() {
-            // A literal `--`: the end-of-options marker, which reaches a tool
-            // as a positional exactly as the kernel hands it through.
-            args.positional.push(Value::String("--".to_string()));
-            i += 1;
-        } else if VALUE_FLAGS.contains(&name) {
-            let value = argv
-                .get(i + 1)
-                .unwrap_or_else(|| panic!("'--{name}' takes a value, none followed in {argv:?}"));
-            args.named
-                .insert(name.to_string(), Value::String((*value).to_string()));
-            i += 2;
-        } else if BOOL_FLAGS.contains(&name) {
-            args.flags.insert(name.to_string());
-            i += 1;
-        } else {
-            panic!("'--{name}' is not classified in VALUE_FLAGS or BOOL_FLAGS");
-        }
-    }
-    args
+    support::verb_words(verb, argv)
 }
 
 async fn diff(mount_real: &Path, cwd: &str, argv: &[&str]) -> ExecResult {
@@ -711,15 +674,19 @@ async fn a_range_revspec_is_refused() {
     }
 }
 
-/// A bare operand is a revision in git and a path here would be a wrong
-/// answer, so it is refused with both spellings named.
+/// A bare operand is a revision in git, and here too since 2026-10-01:
+/// `git diff HEAD` is `git diff --from HEAD`. It used to be refused, naming
+/// both spellings; git's own spelling is now the accepted one.
 #[tokio::test]
-async fn a_bare_operand_names_from_and_the_marker() {
+async fn a_bare_revision_operand_is_from() {
     let repo = DiffRepo::build();
-    let result = diff(&repo.scratch(), "/mnt/repo", &["HEAD"]).await;
-    assert_eq!(result.code, 2);
-    assert!(result.err.contains("--from"), "stderr: {}", result.err);
-    assert!(result.err.contains("--"), "stderr: {}", result.err);
+    let bare = diff(&repo.scratch(), "/mnt/repo", &["HEAD", "--json"]).await;
+    let flag = diff(&repo.scratch(), "/mnt/repo", &["--from", "HEAD", "--json"]).await;
+    assert_eq!(bare.code, 0, "stderr: {}", bare.err);
+    assert_eq!(flag.code, 0, "stderr: {}", flag.err);
+    let model = |r: &ExecResult| r.output().and_then(|o| o.rich_json.clone()).expect("--json");
+    assert_eq!(model(&bare), model(&flag));
+    assert_eq!(model(&bare)["from"]["kind"], "rev", "negative control: the operand set an end");
 }
 
 /// `--staged` and `--from` name two different comparisons; asking for both is

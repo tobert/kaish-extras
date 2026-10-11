@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use kaish_tool_api::Tool;
-use kaish_types::{ExecResult, ToolArgs, Value};
+use kaish_types::ExecResult;
 
 use kaish_tools_git::GitConfig;
 
@@ -31,12 +31,7 @@ async fn run(mount_real: &Path, cwd: &str, verb: &str, operands: &[&str]) -> Exe
     ));
     let mut ctx = TestCtx::new(backend, cwd);
     let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String(verb.to_string()));
-    for op in operands {
-        args.positional.push(Value::String((*op).to_string()));
-    }
-    tool.execute(args, &mut ctx).await
+    tool.execute(support::verb_words(verb, operands), &mut ctx).await
 }
 
 fn json(result: &ExecResult) -> serde_json::Value {
@@ -190,12 +185,9 @@ async fn a_revision_given_twice_is_a_usage_error() {
     ));
     let mut ctx = TestCtx::new(backend, "/mnt/repo");
     let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String("log".into()));
-    args.positional.push(Value::String("side".into()));
-    args.named
-        .insert("rev".to_string(), Value::String("main".to_string()));
-    let both = tool.execute(args, &mut ctx).await;
+    let both = tool
+        .execute(support::words(&["log", "side", "--rev", "main"]), &mut ctx)
+        .await;
     assert_eq!(both.code, 2, "stderr: {}", both.err);
     assert!(
         both.err.contains("side") && both.err.contains("main"),

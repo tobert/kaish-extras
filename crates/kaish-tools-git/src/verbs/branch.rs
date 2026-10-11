@@ -91,9 +91,9 @@ pub(crate) struct BranchArgs {
     /// Takes no operands: `git branch` lists branches, and narrowing is
     /// `--contains` or `--merged`. A single branch's history is
     /// `git log <BRANCH>`.
-    // Bound so clap accepts the `--`-terminated tail `ToolArgs::to_argv()`
-    // always emits. The real operands are read off `args.positional` in
-    // `tool.rs`, which refuses them by name.
+    // Every operand, in order, on both sides of the caller's `--`: the tool is
+    // bound verbatim, so this argv is the caller's own. `tool.rs`'s
+    // `operands` splits it at the marker.
     #[arg(hide = true)]
     pub operands: Vec<String>,
 }

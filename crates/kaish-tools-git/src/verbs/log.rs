@@ -142,11 +142,9 @@ pub(crate) struct LogArgs {
     /// A revision to start from, then paths after `--`:
     /// `git log 'HEAD~5' -- src/lib.rs`. At most one revision — a range is two
     /// calls, not `A B`. Omit it to start from `HEAD`.
-    // Bound so clap accepts the `--`-terminated tail `ToolArgs::to_argv()`
-    // always emits. The real operands are read off `args.positional` in
-    // `tool.rs` — the kernel's own convention, because `to_argv` inserts a
-    // `--` of its own and clap cannot tell it from the caller's. Do not read
-    // this field; it cannot distinguish them either.
+    // Every operand, in order, on both sides of the caller's `--`: the tool is
+    // bound verbatim, so this argv is the caller's own. `tool.rs`'s
+    // `operands` splits it at the marker.
     #[arg(hide = true)]
     pub operands: Vec<String>,
 }

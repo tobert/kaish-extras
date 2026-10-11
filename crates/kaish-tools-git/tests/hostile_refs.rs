@@ -49,7 +49,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use kaish_tool_api::Tool;
-use kaish_types::{ExecResult, ToolArgs, Value};
+use kaish_types::{ExecResult, ToolArgs};
 
 use kaish_tools_git::GitConfig;
 
@@ -77,13 +77,9 @@ const VERBS: &[&str] = &[
     "worktree list",
 ];
 
-/// Build the `ToolArgs` for a bare verb invocation.
+/// The `ToolArgs` a kaish kernel builds for a bare `git <verb>`.
 fn bare_args(verb: &str) -> ToolArgs {
-    let mut args = ToolArgs::new();
-    for word in verb.split_whitespace() {
-        args.positional.push(Value::String(word.to_string()));
-    }
-    args
+    support::verb_words(verb, &[])
 }
 
 /// Run one bare verb invocation against `repo`, from its own root.

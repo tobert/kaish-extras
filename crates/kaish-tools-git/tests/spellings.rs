@@ -216,7 +216,25 @@ async fn an_unknown_flag_without_a_hint_lists_the_verbs_flags() {
     assert!(!err.contains("-- --frobnicate"), "clap's advice would make the flag a path: {err}");
 }
 
-// --- the `--` marker, through the kernel ------------------------------------
+// --- verbatim binding, through the kernel -----------------------------------
+
+/// `--json` is the kernel's: under verbatim binding it lifts the flag out of
+/// the words and applies it itself, so the tool never sees it. What has to
+/// hold is the observable half, that `git info --json` answers in JSON.
+#[tokio::test]
+async fn json_is_applied_by_the_kernel() {
+    let (_f, root) = repo();
+    let json = run(&root, "git info --json").await;
+    assert_eq!(json.code, 0, "{}", json.err);
+    let parsed: serde_json::Value = serde_json::from_str(&json.out).expect("--json answers in JSON");
+    assert!(parsed.get("head").is_some(), "the info model: {parsed}");
+    let text = run(&root, "git info").await;
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&text.out).is_err(),
+        "negative control: without --json the answer is text: {}",
+        text.out
+    );
+}
 
 /// `git log <rev> -- <path>` is git's spelling for "this revision's history of
 /// this path". The marker has to reach the tool for the two operands to mean
