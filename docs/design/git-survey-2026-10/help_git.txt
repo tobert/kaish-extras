@@ -1,0 +1,183 @@
+$ help git    # cwd /mnt/repo/.
+git — Read a git repository — shallow, safety-first, and read-only by construction
+
+No parameters.
+
+Subcommands:
+  info — Report what repository this is and what this build will let you ask of it
+    repo : string
+      Repository to inspect. Defaults to the current directory; discovery searches upward, never past the mount root that contains the path
+    operands : string
+      Takes no operands. `git info` describes the repository the current directory is in; use `--repo <PATH>` to ask about a different one
+  status — Show staged, unstaged, untracked, ignored and conflicted paths
+    untracked : string
+      Untracked reporting depth: `no`, `normal` (default), or `all`
+    ignored : bool
+      Include ignored entries
+    path : string
+      Restrict to paths under these literal paths or simple globs (`*`, `**`, `?`). Repeatable. Git pathspec magic (`:(exclude)`, `:!`, `:/`) is a loud usage error, never silently matched
+    limit : string
+      Maximum entries to report. Truncation is always reported (`truncated: true` and a stderr note), never silent
+    repo : string
+      Repository to inspect. Defaults to the current directory; discovery searches upward, never past the mount root that contains the path
+    operands : string
+      Paths to restrict the report to, the same pathspecs `--path` takes: `git status -- src tests`. `git status` takes no revision, so every operand is a path whether or not it follows `--`
+  log — Show commit history from a revision, newest first
+    rev : string
+      Revision to start from: `HEAD` (the default), a branch, a tag, an oid, or any of those with a `~N` / `^N` suffix. Range syntax (`A..B`) and reflog syntax (`@{...}`) are usage errors, not silent reinterpretations. Also accepted as a bare operand, git's spelling: `git log main`
+    limit : string (also: n)
+      Maximum commits to report. Truncation is always reported (`truncated: true` and a stderr note), never silent
+    path : string
+      Restrict history to commits that touched these literal paths or simple globs (`*`, `**`, `?`). Repeatable. Git pathspec magic (`:(exclude)`, `:!`, `:/`) is a loud usage error, never silently matched
+    since : string
+      Only commits at or after this instant. RFC3339 (`2026-08-01T10:00:00Z`) or `YYYY-MM-DD` only — git's "2 weeks ago" approxidate syntax is refused rather than guessed at
+    until : string
+      Only commits at or before this instant. Same two accepted forms as `--since`
+    author : string
+      Only commits whose author name or email contains this substring. A **literal** substring, case-sensitive — not a regex, and not a glob
+    merges : bool
+      Only merge commits (two or more parents)
+    no-merges : bool (also: no_merges)
+      Skip merge commits
+    first-parent : bool (also: first_parent)
+      Follow only the first parent of each merge — mainline history, without the merged branches' commits
+    body : bool
+      Include each commit's full message body, not just its summary line
+    stat : bool
+      Include per-commit changed-file and line counts against the first parent
+    patch : bool
+      Include per-commit patch hunks. This build has no unified-diff assembly — that is the `textdiff` phase — so this exits 4 naming the gap rather than silently ignoring the flag
+    repo : string
+      Repository to inspect. Defaults to the current directory; discovery searches upward, never past the mount root that contains the path
+    operands : string
+      A revision to start from, then paths after `--`: `git log HEAD~5 -- src/lib.rs`. At most one revision — a range is two calls, not `A B`. Omit it to start from `HEAD`
+  ls — List a tree's entries at a revision
+    recursive : bool
+      Expand subtrees instead of stopping one level down. A recursive listing reports only leaves (files, symlinks, submodule gitlinks) at their full repo-relative path; a directory is a step to more of them, not a row of its own — the same shape `git ls-tree -r` reports
+    limit : string (also: n)
+      Maximum rows to report. Truncation is always reported (`truncated: true` and a stderr note), never silent
+    repo : string
+      Repository to inspect. Defaults to the current directory; discovery searches upward, never past the mount root that contains the path
+    operands : string
+      The revision to list, then a path under it: `git ls HEAD src`. Position decides which is which, so no `--` is needed. The colon form `git ls HEAD:src` works too. Omit the path to list the repository root
+  show — Show a commit, tag, tree, or blob at a revision
+    limit : string (also: n)
+      Maximum rows to report for a tree form. Truncation is always reported (`truncated: true` and a stderr note), never silent. The blob form's byte cap is this build's `max_blob_bytes`, which `--limit` does not affect
+    repo : string
+      Repository to inspect. Defaults to the current directory; discovery searches upward, never past the mount root that contains the path
+    operands : string
+      One revision, with an optional `:<path>` inside it: `git show HEAD:src/lib.rs` is a single operand, not two. Bare `git show HEAD` shows the commit. A second operand is an error
+  diff — Compare two ends of a repository — which files changed, and by how much
+    staged : bool
+      Compare `HEAD` against the index instead of the index against the working tree — the staged changes, git's own `--staged`. Cannot be combined with `--from` or `--to`
+    from : string
+      Compare from this revision. Alone it compares against the working tree; with `--to` it compares two revisions. `HEAD`, a branch, a tag, an oid, and the `~N` / `^N` suffixes are the whole grammar — `A..B` is refused, because `--from A --to B` is the one spelling for a range
+    to : string
+      Compare to this revision. Alone it compares `HEAD` to it
+    path : string
+      Restrict the comparison to these paths. Repeatable. A literal path matches itself and everything under it; `*`, `**`, `?` and `[...]` are globs over the whole repo-relative path. Git pathspec magic (`:(exclude)`, `:!`, `:/`) is refused by name, never matched as a literal path
+    name-only : bool (also: name_only)
+      Report paths and statuses only. Nothing is read from the object store or the working tree beyond what naming the change needs, so `additions`, `deletions` and `binary` come back `null` rather than zero
+    patch : bool
+      Report the unified patch text as well as the counts. Text output becomes the patch itself, so `git diff --patch | git apply` works and the endpoints move to stderr; `--json` is unchanged except that every file gains a `hunks` array. Needs the `textdiff` build feature — without it this exits 4, and `git info` does not list `textdiff`. Binary files carry `binary: true` and no hunks
+    context : string
+      Context lines around each hunk, default 3. Only `--patch` has hunks to size, so `--context` without it is a usage error. Hunk text per file is capped at this build's `max_hunk_bytes_per_file`, so a large `--context` buys fewer hunks, not more output
+    find-renames : bool (also: find_renames)
+      Pair a deleted path with an added path carrying the same content. **This is already what happens** — rename pairing is on unless `--no-find-renames` turns it off — so the flag only makes the choice explicit. **Exact match only**: a rename is a blob oid reappearing at a new path, so `similarity` is always 100, and a file that was edited *and* moved is reported as a delete plus an add where git would fold the pair. Copy detection does not exist here
+    no-find-renames : bool (also: no_find_renames)
+      Report a moved file as a delete plus an add, without pairing them. Rename pairing is on by default, and this is the only way off
+    limit : string (also: n)
+      Maximum files to report, default 500. Line counts are computed only for the files that fit, so this bounds the reading too. Truncation is always reported (`truncated: true` and a stderr note), never silent
+    repo : string
+      Repository to inspect. Defaults to the current directory; discovery searches upward, never past the mount root that contains the path
+    operands : string
+      Paths after `--`, and nothing before it: `git diff -- src`. Name revisions with `--from`/`--to` (`git diff --from HEAD~1 --to HEAD`); a bare `HEAD` would be ambiguous with a file of that name, so it is refused rather than guessed
+  branch — List the repository's branches
+    all : bool
+      List remote-tracking branches beside the local ones. A remote-tracking branch is a record of what a fetch last saw; this build performs no fetch, so it is as old as the last one someone else ran
+    remote : bool
+      List remote-tracking branches instead of the local ones
+    contains : string
+      Report only branches whose tip has this revision in its history. Costs a walk of the history behind every candidate branch, before `--limit` applies; `commits_examined` in `--json` reports what it spent
+    merged : string
+      Report only branches whose tip is already in this revision's history. Costs one walk of that revision's whole history, before `--limit` applies
+    ahead-behind : bool (also: ahead_behind)
+      Count each reported branch's commits against its upstream. Off by default because it costs a history walk per branch — the plain listing reads no commit at all. Only the branches `--limit` keeps are counted, so lowering the limit lowers the cost
+    limit : string (also: n)
+      Maximum branches to report. Truncation is always reported (`truncated: true` and a stderr note), never silent. It bounds the rows, and the `--ahead-behind` walks that follow them; it does not bound the history `--contains` and `--merged` read
+    repo : string
+      Repository to inspect. Defaults to the current directory; discovery searches upward, never past the mount root that contains the path
+    operands : string
+      Takes no operands: `git branch` lists branches, and narrowing is `--contains` or `--merged`. A single branch's history is `git log <BRANCH>`
+  tag — List the repository's tags
+    contains : string
+      Report only tags whose target has this revision in its history. Costs a walk of the history behind every tag, so it is slower than the plain listing by an amount that tracks the repository, not the tag count; `commits_examined` in `--json` reports what it spent
+    limit : string (also: n)
+      Maximum tags to report. Truncation is always reported (`truncated: true` and a stderr note), never silent. It bounds the rows, not the history `--contains` reads
+    repo : string
+      Repository to inspect. Defaults to the current directory; discovery searches upward, never past the mount root that contains the path
+    operands : string
+      Takes no operands: `git tag` lists every tag, and narrowing is `git tag --contains <REV>`. A single tag's own metadata is `git show <TAG>`
+  worktree — Work with the repository's working trees
+  worktree list — List every working tree of this repository
+    limit : string (also: n)
+      Maximum working trees to report. Truncation is always reported (`truncated: true` and a stderr note), never silent
+    repo : string
+      Repository to inspect. Defaults to the current directory; discovery searches upward, never past the mount root that contains the path. Listing from inside a linked working tree reports them all
+    operands : string
+      Takes no operands: `git worktree list` reports every working tree, and a repository other than the current directory is named with `--repo`
+
+Examples:
+  # What repository is this
+  git info
+
+  # Inspect a specific repository
+  git info --repo /mnt/repos/kaish
+
+  # Structured, for a script
+  git info --json
+
+  # What changed in the working tree
+  git status
+
+  # Recent commit history
+  git log
+
+  # Read a file as of the last release
+  git show v0.1.0:src/lib.rs
+
+  # List a directory as of HEAD
+  git ls HEAD src
+
+  # See the unstaged changes
+  git diff
+
+  # See what is staged
+  git diff --staged
+
+  # Compare two revisions under one directory
+  git diff --from v0.1.0 --to HEAD -- src
+
+  # List the branches
+  git branch
+
+  # Include remote-tracking branches
+  git branch --all
+
+  # Find which branches carry a fix
+  git branch --contains 1a2b3c4
+
+  # Count each branch against its upstream
+  git branch --ahead-behind
+
+  # List the tags
+  git tag
+
+  # Find which tags carry a fix
+  git tag --contains 1a2b3c4
+
+  # List every working tree
+  git worktree list
+
+[exit 0]
+
