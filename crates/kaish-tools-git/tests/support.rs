@@ -26,7 +26,7 @@ use kaish_tool_api::{KernelBackend, ToolCtx};
 use kaish_types::backend::{
     BackendResult, MountInfo, PatchOp, ReadRange, ToolInfo, ToolResult, WriteMode,
 };
-use kaish_types::{DirEntry, OutputFormat, ToolArgs, Value};
+use kaish_types::{DirEntry, ToolArgs, Value};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Fixture repositories
@@ -1248,74 +1248,20 @@ impl KernelBackend for VirtualBackend {
     }
 }
 
-/// A minimal `ToolCtx` over a backend and a cwd.
-pub struct TestCtx {
-    backend: Arc<dyn KernelBackend>,
-    cwd: PathBuf,
-    vars: BTreeMap<String, Value>,
-    /// The output format the tool asked for, if any — how a test observes
-    /// `--json` having been honored.
-    pub output_format: Option<OutputFormat>,
-}
+/// The kernel's own `ToolCtx` — `kaish_kernel::ExecContext` — over a backend
+/// and a VFS cwd. kaish 0.18 sealed `ToolCtx`, so a test drives a tool through
+/// the context the kernel hands it rather than one of its own, which also
+/// means paths resolve exactly as they do under a real kernel.
+pub struct TestCtx;
 
 impl TestCtx {
     /// A context with `backend` mounted and the given VFS cwd.
-    pub fn new(backend: Arc<dyn KernelBackend>, cwd: impl Into<PathBuf>) -> Self {
-        Self {
-            backend,
-            cwd: cwd.into(),
-            vars: BTreeMap::new(),
-            output_format: None,
-        }
-    }
-}
-
-impl ToolCtx for TestCtx {
-    fn backend(&self) -> &Arc<dyn KernelBackend> {
-        &self.backend
-    }
-
-    fn cwd(&self) -> &Path {
-        &self.cwd
-    }
-
-    fn resolve_path(&self, path: &str) -> PathBuf {
-        // Lexical only, like the kernel's: never touches the real filesystem.
-        let joined = if path.starts_with('/') {
-            PathBuf::from(path)
-        } else {
-            self.cwd.join(path)
-        };
-        let mut out = PathBuf::new();
-        for component in joined.components() {
-            match component {
-                std::path::Component::ParentDir => {
-                    out.pop();
-                }
-                std::path::Component::CurDir => {}
-                other => out.push(other),
-            }
-        }
-        out
-    }
-
-    fn var(&self, name: &str) -> Option<Value> {
-        self.vars.get(name).cloned()
-    }
-
-    fn set_var(&mut self, name: &str, value: Value) {
-        self.vars.insert(name.to_string(), value);
-    }
-
-    fn set_output_format(&mut self, format: OutputFormat) {
-        self.output_format = Some(format);
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
+    // Returns the kernel's context, not `Self`: `TestCtx::new` keeps every
+    // call site from before `ToolCtx` was sealed.
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(backend: Arc<dyn KernelBackend>, cwd: impl Into<PathBuf>) -> kaish_kernel::ExecContext {
+        let mut ctx = kaish_kernel::ExecContext::with_backend(backend);
+        ctx.set_cwd(cwd.into());
+        ctx
     }
 }

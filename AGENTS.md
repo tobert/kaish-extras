@@ -34,16 +34,18 @@ has caught real broken deploys.
 ## kaish dependency pinning
 
 `[workspace.dependencies]` in the root `Cargo.toml` pins all four kaish crates
-to **published crates.io versions** (`"0.17"` as of 2026-09-01). Rules:
+to **published crates.io versions** (`"0.18"` as of 2026-10-11, resolving
+0.18.1). Rules:
 
 - **All four must pin the SAME version** — mixing them puts two copies of a
   kaish crate in the dependency graph.
-- **The pin is a caret range, and downstream depends on that.** `"0.17"` is
-  `^0.17`: any 0.17.x patch resolves, so an embedder that consumes both a tool
-  crate from here and kaish directly (kaijutsu) can move to 0.17.1 and still
-  unify on one copy of each kaish crate. 0.18 cannot ride along — pre-1.0 a
-  minor carries breaking changes — so a kaish minor is a bump here that has to
-  build and pass the checks. Do not widen the range to buy the illusion.
+- **The pin is a caret range, and downstream depends on that.** `"0.18"` is
+  `^0.18`: any 0.18.x patch resolves, so an embedder that consumes both a tool
+  crate from here and kaish directly (kaijutsu) can move between 0.18 patches
+  and still unify on one copy of each kaish crate. The next minor cannot ride
+  along — pre-1.0 a minor carries breaking changes — so a kaish minor is a
+  bump here that has to build and pass the checks, and kaijutsu has to move
+  with it. Do not widen the range to buy the illusion.
 - **A two-minor range makes the two-copies failure MORE reachable, not less.**
   Measured with cargo and the real crates on 2026-09-01, three resolutions of
   one graph where an embedder depends on a tool crate from here:
@@ -107,6 +109,14 @@ to **published crates.io versions** (`"0.17"` as of 2026-09-01). Rules:
   each enabled verb's path (`path_prefixes`), not the verb alone — checked
   against the actual roster output and against `kaish-help`'s renderer
   (`push_subcommand_roster` in `topic.rs`), not reasoned from the changelog.
+- **What 0.18 changed here** (bumped 2026-10-11). `ToolCtx` is sealed, so
+  both crates' test `TestCtx` is now a constructor for the kernel's own
+  `ExecContext` — tests run against the real context and its path
+  resolution. A kernel now answers `--help` for a verbatim tool itself,
+  printing the whole tool tree, unless the root schema claims `help`; the git
+  tool claims it so `git log --help` shows one verb. 0.18.1 also carries
+  `to_argv`'s repeatable-flag fix (kaish #525) and parses `HEAD~1` unquoted,
+  which retired the K3 canary.
 - `kaish-kernel` is `default-features = false`. Keep it that way: a sibling
   crate enabling kernel default features tramples the no-default choice
   (`localfs` etc. must not leak into the browser build).

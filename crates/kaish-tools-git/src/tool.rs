@@ -8,7 +8,7 @@ use clap::{CommandFactory, Parser};
 
 use kaish_tool_api::{schema_tree_from_clap, Tool, ToolCtx};
 use kaish_types::backend::MountInfo;
-use kaish_types::{ExecResult, OutputData, ToolArgs, ToolSchema, Value};
+use kaish_types::{ExecResult, OutputData, ParamSchema, ToolArgs, ToolSchema, Value};
 
 use crate::config::{ConfigError, GitConfig, Verb};
 use crate::error::GitError;
@@ -1327,6 +1327,14 @@ impl Tool for GitTool {
         )
         // The true argv, `--` included; see `execute`.
         .with_verbatim_argv()
+        // Claimed so a kaish kernel hands `--help` to the tool rather than
+        // printing the whole tree for `git log --help`; `verb_help` answers
+        // with that one verb.
+        .param(
+            ParamSchema::new("help", "bool")
+                .with_aliases(["h"])
+                .with_description("Show one verb's flags and examples: `git log --help`"),
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -1362,6 +1370,23 @@ impl Tool for GitTool {
             );
         }
         let argv = args.words_argv();
+
+        // `git --help`: the verbs, and where each one's help is.
+        if matches!(argv.first().map(String::as_str), Some("--help" | "-h")) {
+            let verbs: Vec<&str> = Verb::ALL
+                .iter()
+                .filter(|v| self.config.has(**v))
+                .map(|v| v.as_str())
+                .collect();
+            return ExecResult::with_output(OutputData::text(format!(
+                "{} — {DESCRIPTION}\n\nVerbs: {}\n\n'{} <verb> --help' shows one verb's flags \
+                 and examples; 'help {}' shows them all.\n",
+                schema.name,
+                verbs.join(", "),
+                schema.name,
+                schema.name
+            )));
+        }
 
         let (verb, consumed) = match route(&schema, &argv) {
             Ok(r) => r,

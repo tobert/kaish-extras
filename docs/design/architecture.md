@@ -1549,9 +1549,10 @@ instead.
   `--patch` for `--cached`. `src/spelling.rs` names known git flags and their
   next step, and lists the verb's flags otherwise. `docs/issues.md` S1–S5 are
   the refused spellings that could become features.
-- **K3**: kaish 0.17 refuses `~` and `^` inside an unquoted word, so
-  `HEAD~1` never reached this tool. Every published command quotes such a
-  word, and `tests/spellings.rs` parses all of them with kaish's parser.
+- **K3**: kaish 0.17 refused `~` and `^` inside an unquoted word, so
+  `HEAD~1` never reached this tool; kaish 0.18 fixed it. Every published
+  command still quotes such a word, which parses on every kaish, and
+  `tests/spellings.rs` parses all of them with kaish's parser.
 - **`diff` pathspecs are cwd-relative**, matching `status`, `log` and git.
 - **Bound verbatim** (`ToolSchema::with_verbatim_argv`). kaish's typed binder
   drops a caller's `--`, by design — its own `GlobalFlags` docs say so — and

@@ -672,8 +672,8 @@ pub(crate) fn endpoints_from_revs(revs: &[String]) -> Result<Option<Endpoints>, 
 /// `word` as one kaish word, for a command an error tells the caller to type.
 ///
 /// Double-quoted unless every character is one kaish reads as part of a bare
-/// word. The case that matters is git's `~` and `^`, which kaish 0.17 refuses
-/// unquoted (docs/issues.md K3), so `HEAD~1` comes back as `"HEAD~1"`.
+/// word. The case that matters is git's `~` and `^`, which kaish 0.17 refused
+/// unquoted, so `HEAD~1` comes back as `"HEAD~1"` — a form every kaish parses.
 pub(crate) fn kaish_word(word: &str) -> String {
     let bare = !word.is_empty()
         && word
