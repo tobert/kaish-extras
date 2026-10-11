@@ -290,7 +290,7 @@ kaish> git diff v0.1.0 HEAD -- src                # two revisions, one directory
 kaish> git diff 'HEAD~1'                          # HEAD~1 against the working tree
 kaish> git diff src/lib.rs                        # one tracked file, unstaged
 kaish> git diff --name-only                       # paths and statuses only
-kaish> git diff --patch                           # the unified patch, textdiff builds
+kaish> git diff --patch                           # the unified patch
 ```
 
 The text surface is a table under the endpoint line:
@@ -308,9 +308,15 @@ uses, and the same letters `git diff --name-status` prints, `R100` included.
 
 ### `--patch`
 
-Needs the `textdiff` cargo feature. `git info` lists it under
-`capabilities.features`; a build without it exits 4 on `--patch` and on
-`--context`, naming the feature.
+Needs the `textdiff` cargo feature, which is on by default. `git info` lists
+it under `capabilities.features`; a build with it turned off exits 4 on
+`--patch` and on `--context`, naming the feature.
+
+An embedder may install its own patch renderer
+(`docs/embedding-git.md`, "Rendering `--patch` yourself"). The text is then
+that renderer's: what it looks like and whether `git apply` takes it are its
+choices, and `help git diff` says so in `--patch`'s description. `--json` is
+unchanged either way — it is this build's model and this build's hunks.
 
 With it, `--patch` changes what the **text** payload is and adds to what
 `--json` carries:

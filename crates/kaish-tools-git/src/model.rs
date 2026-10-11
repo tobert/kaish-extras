@@ -72,6 +72,9 @@ pub struct LimitsReport {
     pub max_blob_bytes: u64,
     /// Maximum bytes of hunk text per file.
     pub max_hunk_bytes_per_file: u64,
+    /// Maximum bytes of file content one `git diff --patch` call hands an
+    /// embedder's patch renderer, summed over every file.
+    pub max_patch_content_bytes: u64,
     /// How deep to descend into submodules.
     pub submodule_depth: u8,
 }
@@ -917,6 +920,7 @@ mod tests {
                     max_diff_files: 500,
                     max_blob_bytes: 8 * 1024 * 1024,
                     max_hunk_bytes_per_file: 256 * 1024,
+                    max_patch_content_bytes: 64 * 1024 * 1024,
                     submodule_depth: 1,
                 },
             },

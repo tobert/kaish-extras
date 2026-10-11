@@ -439,19 +439,44 @@ fn load<'a>(
         Side::Gitlink => return Ok(Loaded::Gitlink),
         Side::Object(oid) => oid,
     };
+    Ok(match read_blob_capped(repo, op, oid, max_blob_bytes)? {
+        Capped::Content(bytes) => Loaded::Content(std::borrow::Cow::Owned(bytes)),
+        Capped::OverCap { .. } => Loaded::OverCap,
+    })
+}
+
+/// One blob, or its size when that is over the cap.
+pub(crate) enum Capped {
+    /// The blob's bytes, at most `max_blob_bytes` of them.
+    Content(Vec<u8>),
+    /// The blob is `size` bytes, over the cap, and was not read.
+    // Only the patch renderer reports the size, and it is `textdiff`-only.
+    #[cfg_attr(not(feature = "textdiff"), allow(dead_code))]
+    OverCap { size: u64 },
+}
+
+/// Read one blob from the store, refusing it when the header says it is over
+/// `max_blob_bytes` — the same header-first rule [`load`] applies, for a
+/// caller that needs the bytes themselves or the size it was refused at.
+pub(crate) fn read_blob_capped(
+    repo: &ReadRepo,
+    op: &'static str,
+    oid: ObjectId,
+    max_blob_bytes: u64,
+) -> Result<Capped, GitError> {
     let header = repo
         .objects()
         .header(oid)
         .map_err(|e| GitError::repository(op, "reading an object header", repo.git_dir(), e))?;
     if header.size() > max_blob_bytes {
-        return Ok(Loaded::OverCap);
+        return Ok(Capped::OverCap { size: header.size() });
     }
     let mut buf = Vec::new();
     let data = repo
         .objects()
         .find(&oid, &mut buf)
         .map_err(|e| GitError::repository(op, "reading a blob", repo.git_dir(), e))?;
-    Ok(Loaded::Content(std::borrow::Cow::Owned(data.data.to_vec())))
+    Ok(Capped::Content(data.data.to_vec()))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

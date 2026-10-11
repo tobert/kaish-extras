@@ -58,6 +58,7 @@ impl GitTool {
                 max_diff_files: limits.max_diff_files,
                 max_blob_bytes: limits.max_blob_bytes,
                 max_hunk_bytes_per_file: limits.max_hunk_bytes_per_file,
+                max_patch_content_bytes: limits.max_patch_content_bytes,
                 submodule_depth: limits.submodule_depth,
             },
         }
@@ -620,7 +621,7 @@ impl GitTool {
         skip_all,
         fields(verb = "diff", repo)
     )]
-    async fn run_diff(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
+    async fn run_diff(&self, argv: &[String], json: bool, ctx: &mut dyn ToolCtx) -> ExecResult {
         const OP: &str = "diff";
         if let Err(e) = verb_enabled(&self.config, Verb::Diff, OP) {
             return failure(e);
@@ -716,13 +717,34 @@ impl GitTool {
         // context a hunk carries, and this decides how much hunk text one file
         // may cost whatever the caller asked for.
         #[cfg(feature = "textdiff")]
-        let hunks = parsed.patch.then(|| crate::diffcore::HunkOptions {
-            context: u32::try_from(parsed.context.unwrap_or(verbs::diff::DEFAULT_CONTEXT))
-                .unwrap_or(u32::MAX),
+        let patch_wanted = parsed.patch;
+        // An embedder's renderer replaces the patch text and nothing else:
+        // `--json` reports this build's own model and hunks, so it is not
+        // asked there, and without `--patch` there is no patch to render.
+        #[cfg(feature = "textdiff")]
+        let renderer = if patch_wanted && !(json || parsed.global.json) {
+            self.config.patch_renderer().cloned()
+        } else {
+            None
+        };
+        #[cfg(not(feature = "textdiff"))]
+        let _ = json;
+        #[cfg(feature = "textdiff")]
+        let context = parsed.context.unwrap_or(verbs::diff::DEFAULT_CONTEXT);
+        // No hunks of ours when a renderer will make its own.
+        #[cfg(feature = "textdiff")]
+        let hunks = (patch_wanted && renderer.is_none()).then(|| crate::diffcore::HunkOptions {
+            context: u32::try_from(context).unwrap_or(u32::MAX),
             max_bytes: self.config.limits().max_hunk_bytes_per_file,
         });
         #[cfg(feature = "textdiff")]
-        let patch_wanted = parsed.patch;
+        let max_patch_content_bytes = self.config.limits().max_patch_content_bytes;
+        #[cfg(feature = "textdiff")]
+        let patch_opts = crate::renderer::PatchOptions {
+            context,
+            max_hunk_bytes_per_file: self.config.limits().max_hunk_bytes_per_file,
+            word_diff: false,
+        };
 
         let outcome = block_in_place_compat(move || {
             let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
@@ -775,24 +797,67 @@ impl GitTool {
                 hunks,
             };
             let root = repo.root().display().to_string();
-            verbs::diff::run(&repo, &opts).map(|model| (model, root))
+            // The renderer runs here, inside the blocking section, beside the
+            // content it is handed — which never leaves this closure.
+            #[cfg(feature = "textdiff")]
+            if let Some(renderer) = renderer {
+                let (model, contents) =
+                    verbs::diff::run_with_content(&repo, &opts, max_patch_content_bytes)?;
+                let files = verbs::diff::changed_files(&model, &contents);
+                let patch = renderer.render(&files, &patch_opts).map_err(|e| {
+                    GitError::PatchRendererFailed {
+                        operation: OP,
+                        message: error_chain(&*e),
+                    }
+                })?;
+                let count = |why| contents.iter().filter(|c| c.withheld == Some(why)).count();
+                let over_blob = count(crate::renderer::Withheld::OverMaxBlobBytes);
+                let over_budget = count(crate::renderer::Withheld::OverMaxPatchContentBytes);
+                return Ok((model, root, Some(Rendered { patch, over_blob, over_budget })));
+            }
+            let rendered: MaybeRendered = None;
+            verbs::diff::run(&repo, &opts).map(|model| (model, root, rendered))
         });
 
-        let (model, repo_root) = match outcome {
-            Ok(pair) => pair,
+        let (model, repo_root, rendered) = match outcome {
+            Ok(triple) => triple,
             Err(e) => return failure(e),
         };
 
+        // How many files the renderer got sizes and no content for, when
+        // there was one.
         #[cfg(feature = "textdiff")]
-        let (data, text) = if patch_wanted {
-            crate::render::diff_patch(&model)
-        } else {
-            crate::render::diff(&model)
+        let withheld = rendered.as_ref().map(|r| (r.over_blob, r.over_budget));
+        #[cfg(feature = "textdiff")]
+        let (data, text, sideband) = match rendered {
+            Some(Rendered { patch, .. }) => {
+                let (data, text) = crate::render::diff_rendered(&model, patch.text);
+                (data, text, patch.data)
+            }
+            None if patch_wanted => {
+                let (data, text) = crate::render::diff_patch(&model);
+                (data, text, None)
+            }
+            None => {
+                let (data, text) = crate::render::diff(&model);
+                (data, text, None)
+            }
         };
+        #[cfg(not(feature = "textdiff"))]
+        let _ = rendered;
         #[cfg(not(feature = "textdiff"))]
         let (data, text) = crate::render::diff(&model);
 
         let mut result = ExecResult::with_output_and_text(data, text);
+        // The renderer's structured data is the pipeline's structured input
+        // to the next stage. It does not change what `x=$(git diff --patch)`
+        // binds: the schema leaves `typed_substitution` off, so a
+        // substitution binds the text (AGENTS.md, "Command substitution
+        // binds text"; pinned by `tests/patch_renderer.rs`).
+        #[cfg(feature = "textdiff")]
+        if let Some(value) = sideband {
+            result.data = Some(kaish_types::json_to_value_no_envelope(value));
+        }
         let mut notes: Vec<String> = Vec::new();
         // The patch payload is a patch and nothing else — `git diff --patch |
         // git apply` must not have to skip a preamble — so the endpoints B.4
@@ -804,7 +869,26 @@ impl GitTool {
                 crate::render::endpoint_text(&model.from),
                 crate::render::endpoint_text(&model.to)
             ));
-            if model.totals.lines_capped > 0 {
+            // Counted from what the renderer was handed, not from
+            // `lines_capped`: a renamed file over the cap is withheld from
+            // the renderer and still `0/0`, uncapped, in the model.
+            if let Some((over_blob, over_budget)) = withheld {
+                if over_blob > 0 {
+                    notes.push(format!(
+                        "{over_blob} file(s) have a side over max_blob_bytes, \
+                         so the patch renderer got their sizes and no content"
+                    ));
+                }
+                if over_budget > 0 {
+                    notes.push(format!(
+                        "{over_budget} file(s) came after the call's \
+                         {max_patch_content_bytes}-byte content budget was \
+                         spent (max_patch_content_bytes), so the patch \
+                         renderer got their sizes and no content; narrow the \
+                         diff with a path to see them"
+                    ));
+                }
+            } else if model.totals.lines_capped > 0 {
                 notes.push(format!(
                     "{} file(s) were not read: a side was over \
                      max_blob_bytes, so their counts and hunks are absent; \
@@ -1147,7 +1231,17 @@ impl Tool for GitTool {
             cmd = cmd.subcommand(verbs::show::ShowArgs::command().name("show"));
         }
         if self.config.has(Verb::Diff) {
-            cmd = cmd.subcommand(verbs::diff::DiffArgs::command().name("diff"));
+            let diff = verbs::diff::DiffArgs::command().name("diff");
+            // The default `--patch` text promises `git apply` takes the
+            // output. With an embedder's renderer that is the renderer's
+            // promise to make, not this build's, so it is not published.
+            #[cfg(feature = "textdiff")]
+            let diff = if self.config.patch_renderer().is_some() {
+                diff.mut_arg("patch", |arg| arg.help(RENDERED_PATCH_HELP))
+            } else {
+                diff
+            };
+            cmd = cmd.subcommand(diff);
         }
         if self.config.has(Verb::Branch) {
             cmd = cmd.subcommand(verbs::branch::BranchArgs::command().name("branch"));
@@ -1223,7 +1317,10 @@ impl Tool for GitTool {
             "log" => self.run_log(leaf, ctx).await,
             "ls" => self.run_ls(leaf, ctx).await,
             "show" => self.run_show(leaf, ctx).await,
-            "diff" => self.run_diff(leaf, ctx).await,
+            // `--json` arrives lifted into `flags` by the kernel, not in the
+            // words; `diff` is the one verb that needs to know before it runs,
+            // because `--json` decides whether a patch renderer is asked.
+            "diff" => self.run_diff(leaf, args.has_flag("json"), ctx).await,
             "branch" => self.run_branch(leaf, ctx).await,
             "tag" => self.run_tag(leaf, ctx).await,
             "worktree list" => self.run_worktree_list(leaf, ctx).await,
@@ -1252,6 +1349,47 @@ impl Tool for GitTool {
             ),
         }
     }
+}
+
+/// A renderer's answer, and how many files it got no content for.
+#[cfg(feature = "textdiff")]
+struct Rendered {
+    patch: crate::renderer::RenderedPatch,
+    /// Files with a side over `max_blob_bytes`.
+    over_blob: usize,
+    /// Files after `max_patch_content_bytes` was spent.
+    over_budget: usize,
+}
+
+/// What `git diff --patch` produces when an embedder installed a renderer.
+#[cfg(feature = "textdiff")]
+type MaybeRendered = Option<Rendered>;
+/// Never anything: a build without `textdiff` has no renderer to ask.
+#[cfg(not(feature = "textdiff"))]
+type MaybeRendered = Option<std::convert::Infallible>;
+
+/// `--patch`'s published description when an embedder's renderer makes the
+/// text. Replaces the derive's, which promises `git apply` compatibility.
+#[cfg(feature = "textdiff")]
+const RENDERED_PATCH_HELP: &str = "Report the changes as patch text from this \
+    tool's patch renderer, which the embedder supplies; whether `git apply` \
+    takes it is up to that renderer. The endpoints move to stderr. --json is \
+    unchanged and does not use the renderer: it reports this build's own \
+    model, and every file gains a `hunks` array. Needs the `textdiff` build \
+    feature.";
+
+/// An error and each of its sources, joined with ": ", so a renderer's
+/// wrapped engine error reaches stderr whole.
+#[cfg(feature = "textdiff")]
+fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(next) = source {
+        out.push_str(": ");
+        out.push_str(&next.to_string());
+        source = next.source();
+    }
+    out
 }
 
 /// The tool's own description, shared by the clap tree and the schema.

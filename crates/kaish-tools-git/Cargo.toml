@@ -21,9 +21,15 @@ repository.workspace = true
 autotests = false
 
 # architecture.md A.2's `textdiff` axis, and the only cargo feature this crate
-# has. It gates line hunks in the diff model and the unified-patch renderer
-# behind `git diff --patch`; with it off, `--patch` and `--context` exit 4
-# naming it.
+# has. It gates line hunks in the diff model, the unified-patch renderer
+# behind `git diff --patch`, and the `PatchRenderer` boundary an embedder
+# replaces that renderer through; with it off, `--patch` and `--context` exit
+# 4 naming it.
+#
+# On by default since 2026-10-11. An embedder that took the crate with
+# default features never saw a hunk — kaijutsu's agents got exit 4 for every
+# `--patch` — and the feature costs no dependency, so off-by-default bought
+# nothing. `default-features = false` still turns it off.
 #
 # It adds no dependency, and that is the point A.2 makes: `gix-imara-diff` is
 # already unconditional (`git log --stat` and `git diff`'s line counts run it),
@@ -33,7 +39,7 @@ autotests = false
 # off, because a tripwire that only ever ran on the default set would prove
 # nothing about the feature.
 [features]
-default = []
+default = ["textdiff"]
 textdiff = []
 
 # Path 2 plumbing pin set (docs/design/architecture.md, Co-architect note 3):
@@ -228,7 +234,7 @@ path = "tests/show.rs"
 name = "diff"
 path = "tests/diff.rs"
 
-# Empty without `--features textdiff`; the whole file is gated on it.
+# Empty with `--no-default-features`; the whole file is gated on `textdiff`.
 [[test]]
 name = "textdiff"
 path = "tests/textdiff.rs"
@@ -266,6 +272,12 @@ path = "tests/spellings.rs"
 [[test]]
 name = "operands"
 path = "tests/operands.rs"
+
+# The embedder's patch renderer behind `git diff --patch`
+# (docs/embedding-git.md). Gated on `textdiff`, like the patch it replaces.
+[[test]]
+name = "patch_renderer"
+path = "tests/patch_renderer.rs"
 
 [[test]]
 name = "router_kernel_drift"

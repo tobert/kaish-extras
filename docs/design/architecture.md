@@ -142,7 +142,7 @@ cleanly, and the default is the smallest useful thing.
 | Feature | Default | Adds | Cost / risk |
 |---|---|---|---|
 | `read` | ✓ | the plumbing pin set ([A.4](#a4-pinning-and-the-dependency-tripwires)); all ten read verbs | none — offline, no C toolchain but `zlib-rs`, no spawn machinery linked at all |
-| `textdiff` | — | line hunks from `gix-imara-diff` on raw blob bytes; `--patch` rendering | we render the patch ourselves; no textconv, no attributes machinery |
+| `textdiff` | ✓ (since 2026-10-11) | line hunks from `gix-imara-diff` on raw blob bytes; `--patch` rendering | we render the patch ourselves; no textconv, no attributes machinery |
 | `worktree` | — | worktree create/remove/lock/prune (**depends on ledger**) | writes refs and directories |
 | `commit` | — | index staging + commit (**depends on ledger**) | writes objects and refs |
 | `remote` | — | **unrevisited under Path 2** — the facade-era wiring (`gix/blocking-http-transport-reqwest` + direct `reqwest` `rustls-no-provider` + `rustls/ring`) assumes a facade we no longer have, and `gix-transport` is a tripwire-forbidden crate | re-derive before pursuing; never available on wasm |
@@ -166,6 +166,14 @@ Notes that are load-bearing:
   `max_diff_files` x `max_hunk_bytes_per_file` of text, which is a choice an
   embedder should make. The tripwires are asserted with it on as well as off,
   so the structural claim covers both builds.
+  **Revised 2026-10-11: `textdiff` is a default feature.** The choice stays
+  the embedder's — `default-features = false` turns it off — but the default
+  flipped, because an embedder that took the defaults (kaijutsu) never saw a
+  hunk: its agents got exit 4 for every `--patch`. The output it allows was
+  already bounded by the two caps above. The same change added the
+  `PatchRenderer` boundary, through which an embedder replaces the patch
+  text with its own renderer (`docs/embedding-git.md`, "Rendering `--patch`
+  yourself").
 - **Rename detection does not exist without `gix-diff`'s `blob` feature**, and
   `blob` is exactly what pulls `gix-command`. The whole `rewrites` tracker —
   `Rewrites`, `rewrites::Tracker`, `tree_with_rewrites` — is
@@ -735,6 +743,7 @@ pub struct Limits {
     pub max_diff_files: usize,    // 500
     pub max_blob_bytes: u64,      // 8 MiB
     pub max_hunk_bytes_per_file: u64, // 256 KiB
+    pub max_patch_content_bytes: u64, // 64 MiB, added 2026-10-11 with PatchRenderer
     pub submodule_depth: u8,      // 1
 }
 

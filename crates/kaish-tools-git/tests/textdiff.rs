@@ -1,9 +1,13 @@
 //! `git diff --patch` — hunks and unified patch text, with real git as the
 //! oracle (architecture.md B.4, F.1, H PR 6).
 //!
-//! The whole file is gated on the `textdiff` cargo feature, so a default
-//! build compiles it to nothing. `tests/diff.rs` holds the other half: with
-//! the feature off, `--patch` and `--context` exit 4 naming it.
+//! The whole file is gated on the `textdiff` cargo feature — a default
+//! feature — so a `--no-default-features` build compiles it to nothing.
+//! `tests/diff.rs` holds the other half: with the feature off, `--patch` and
+//! `--context` exit 4 naming it. Every case here runs with no patch renderer
+//! installed, which makes this file the check that an embedder who installs
+//! none gets the same patch text as before the `PatchRenderer` boundary
+//! existed; `tests/patch_renderer.rs` covers an embedder who does.
 //!
 //! The phasing gate for this PR names two proofs, and both are here:
 //! `git_apply_check_accepts_our_patch` feeds our patch to real

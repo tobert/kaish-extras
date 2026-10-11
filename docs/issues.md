@@ -1042,21 +1042,24 @@ left, ranked:
   `support::git` does, and nothing hermetic pins L5 (a tied-timestamp octopus
   fixture would be a cheap one).
 
-- **P16 — `diff` still fails the whole call on one over-cap worktree file, and
-  nothing tests that it does.** P12 made `status` decline such a file one path
-  at a time (`StatusEntry::blob_capped`); `diff` kept the refusal —
-  `verbs/diff.rs:461` and `:766` propagate `BlobTooLarge`, so a `git diff`
-  against the working tree exits 1 and reports nothing when any compared file
-  is over `max_blob_bytes` (8 MiB default). That may well be right: a diff's
-  result *is* the comparison. `--limit` is no help with it: `worktree_side`
-  hashes every tracked file the `--path` filter kept (`verbs/diff.rs:437-465`)
-  before the limit applies (`:599-607`), so one over-cap file exits 1 even
-  when the limit would have dropped it from the report. `--path` is the
-  mitigation that works. `diff` is now the only verb that propagates
-  `BlobTooLarge`, and the behavior has no test — `an_oversize_blob_is_declined_and_declared` covers the
-  commit-to-commit path, which sets `lines_capped` and keeps going. Decide
-  whether `diff` follows `status` here or keeps the refusal, then pin whichever
-  it is.
+- **P16 — `diff` still fails the whole call on one over-cap worktree file.**
+  P12 made `status` decline such a file one path at a time
+  (`StatusEntry::blob_capped`); `diff` kept the refusal — `worktree_side` and
+  `worktree_bytes` in `verbs/diff.rs` propagate `BlobTooLarge`, so a
+  `git diff` against the working tree exits 1 and reports nothing when any
+  compared file is over `max_blob_bytes` (8 MiB default). That may well be
+  right: a diff's result *is* the comparison. `--limit` is no help with it:
+  `worktree_side` hashes every tracked file the `--path` filter kept before
+  the limit applies in `compare`, so one over-cap file exits 1 even when the
+  limit would have dropped it from the report. `--path` is the mitigation
+  that works. `diff` is the only verb that propagates `BlobTooLarge`. The
+  refusal is pinned for one path only —
+  `patch_renderer.rs::a_worktree_file_over_the_cap_fails_before_the_renderer_is_asked`,
+  `git diff --patch` with a renderer installed — and
+  `an_oversize_blob_is_declined_and_declared` covers the commit-to-commit
+  path, which sets `lines_capped` and keeps going. Decide whether `diff`
+  follows `status` here or keeps the refusal, then pin whichever it is for
+  plain `git diff` too.
 
 ## git — cost shapes `--limit` does not bound
 
@@ -1158,6 +1161,15 @@ repository size, not result size.
 
   Cost disclosure belongs in `docs/embedding-git.md` regardless, and is in
   scope for PR 8.
+
+- **G11 — stderr notes end without a newline.** Every `result.err = format!(…)`
+  in `tool.rs` leaves the note unterminated, so in a pipeline the next stage's
+  stderr runs onto the same line — seen in `tests/patch_renderer.rs` while
+  mutation-testing: `…'lines_capped' says which file in --jsonjq: invalid
+  JSON input`. kaish 0.17's `ExecResult::err` line contract (#363) covers
+  the messages kaish mints and calls tool stderr pass-through, so this is a
+  readability fix, not a contract breach. Terminate each note; check whether
+  any test compares stderr exactly first.
 
 ## curl — deferred (see docs/curl.md)
 

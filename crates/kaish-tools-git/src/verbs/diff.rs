@@ -5,8 +5,10 @@
 //! without parsing anything; an agent handed patch text has to re-derive that
 //! structure from a format designed for a pager, and will get renames, mode
 //! changes and binary markers slightly wrong. Patch text is a rendering of
-//! this model, gated behind `--patch`, and this build does not assemble it
-//! yet — `--patch` exits 4 naming the `textdiff` feature (E.5).
+//! this model, behind `--patch` and the `textdiff` feature (on by default;
+//! with it off, `--patch` exits 4 naming it, E.5) — rendered by this build,
+//! or by an embedder's `PatchRenderer` from the same change set
+//! ([`run_with_content`]).
 //!
 //! Five endpoint pairs, named by flags or by git(1)'s own operands, and
 //! stated in every result:
@@ -192,6 +194,155 @@ pub(crate) struct DiffOptions {
 
 /// Compose a diff for `repo` under `opts` (architecture.md B.4).
 pub(crate) fn run(repo: &ReadRepo, opts: &DiffOptions) -> Result<DiffReport, GitError> {
+    let Prepared {
+        from,
+        to,
+        old,
+        new,
+        rows,
+        truncated,
+        unmerged,
+    } = prepare(repo, opts)?;
+    let mut files = Vec::with_capacity(rows.len());
+    for row in rows {
+        files.push(finish(repo, opts, &old, &new, row)?);
+    }
+    Ok(report(from, to, files, unmerged, truncated, opts.name_only))
+}
+
+/// One file's two sides as a patch renderer receives them (`textdiff` only).
+///
+/// Shared rather than copied where the two sides are the same bytes — an
+/// exact rename, or a mode-only change between two revisions — so a renderer
+/// batch holds each blob once.
+#[cfg(feature = "textdiff")]
+pub(crate) struct FileContent {
+    pub before: Option<std::sync::Arc<[u8]>>,
+    pub after: Option<std::sync::Arc<[u8]>>,
+    pub old_size: Option<u64>,
+    pub new_size: Option<u64>,
+    /// Why neither side's content is here, if it is not.
+    pub withheld: Option<crate::renderer::Withheld>,
+}
+
+#[cfg(feature = "textdiff")]
+impl FileContent {
+    /// Bytes this file's content holds, counting one blob shared by both
+    /// sides once.
+    fn cost(&self) -> u64 {
+        let len = |side: &Option<std::sync::Arc<[u8]>>| side.as_ref().map_or(0, |b| b.len() as u64);
+        match (&self.before, &self.after) {
+            (Some(a), Some(b)) if std::sync::Arc::ptr_eq(a, b) => a.len() as u64,
+            _ => len(&self.before) + len(&self.after),
+        }
+    }
+}
+
+/// [`run`], keeping each file's content for a patch renderer.
+///
+/// The model it returns has no hunks — the renderer is the one making them —
+/// and its counts come from the same bytes the renderer receives, so every
+/// blob is read once. Content is held for every file at once, so its total
+/// is bounded by `budget` (`max_patch_content_bytes`): files are kept in
+/// path order until the next one would not fit, and from there on each file
+/// is still read and counted for the model, one at a time, and its content
+/// dropped. Peak memory is the budget plus one file.
+#[cfg(feature = "textdiff")]
+pub(crate) fn run_with_content(
+    repo: &ReadRepo,
+    opts: &DiffOptions,
+    budget: u64,
+) -> Result<(DiffReport, Vec<FileContent>), GitError> {
+    use crate::renderer::Withheld;
+    let Prepared {
+        from,
+        to,
+        old,
+        new,
+        rows,
+        truncated,
+        unmerged,
+    } = prepare(repo, opts)?;
+    let mut files = Vec::with_capacity(rows.len());
+    let mut contents = Vec::with_capacity(rows.len());
+    let mut used: u64 = 0;
+    let mut spent = false;
+    for row in rows {
+        let (file, mut content) = finish_with_content(repo, opts, &old, &new, row)?;
+        if content.withheld.is_none() && (content.before.is_some() || content.after.is_some()) {
+            let cost = content.cost();
+            // Once one file does not fit, none after it gets content either,
+            // so which files carry content depends only on path order — not
+            // on whether a later, smaller file happens to squeeze in.
+            if spent || used.saturating_add(cost) > budget {
+                spent = true;
+                content.before = None;
+                content.after = None;
+                content.withheld = Some(Withheld::OverMaxPatchContentBytes);
+            } else {
+                used += cost;
+            }
+        }
+        files.push(file);
+        contents.push(content);
+    }
+    Ok((report(from, to, files, unmerged, truncated, opts.name_only), contents))
+}
+
+/// Both ends read and compared, with the rows that differ and nothing
+/// finished yet.
+struct Prepared {
+    from: DiffEndpoint,
+    to: DiffEndpoint,
+    old: SideMap,
+    new: SideMap,
+    rows: Vec<Changed>,
+    truncated: bool,
+    unmerged: usize,
+}
+
+/// The report around a finished set of files: the totals, counted from them.
+fn report(
+    from: DiffEndpoint,
+    to: DiffEndpoint,
+    files: Vec<DiffFile>,
+    unmerged: usize,
+    truncated: bool,
+    name_only: bool,
+) -> DiffReport {
+    let mut totals = DiffTotals {
+        files: files.len(),
+        additions: if name_only { None } else { Some(0) },
+        deletions: if name_only { None } else { Some(0) },
+        lines_capped: 0,
+        hunks_capped: 0,
+    };
+    for file in &files {
+        if let (Some(t), Some(a)) = (totals.additions.as_mut(), file.additions) {
+            *t += a;
+        }
+        if let (Some(t), Some(d)) = (totals.deletions.as_mut(), file.deletions) {
+            *t += d;
+        }
+        if file.lines_capped {
+            totals.lines_capped += 1;
+        }
+        if file.hunks_capped {
+            totals.hunks_capped += 1;
+        }
+    }
+    DiffReport {
+        from,
+        to,
+        files,
+        totals,
+        unmerged,
+        truncated,
+    }
+}
+
+/// Resolve both ends, read both sides, and find the rows that differ.
+fn prepare(repo: &ReadRepo, opts: &DiffOptions) -> Result<Prepared, GitError> {
     const OP: &str = "diff";
 
     let filter = PathFilter::parse(OP, &opts.paths)?;
@@ -259,37 +410,15 @@ pub(crate) fn run(repo: &ReadRepo, opts: &DiffOptions) -> Result<DiffReport, Git
         new.foreign.remove(path);
     }
 
-    let (files, truncated) = compare(repo, opts, &old, &new)?;
-
-    let mut totals = DiffTotals {
-        files: files.len(),
-        additions: if opts.name_only { None } else { Some(0) },
-        deletions: if opts.name_only { None } else { Some(0) },
-        lines_capped: 0,
-        hunks_capped: 0,
-    };
-    for file in &files {
-        if let (Some(t), Some(a)) = (totals.additions.as_mut(), file.additions) {
-            *t += a;
-        }
-        if let (Some(t), Some(d)) = (totals.deletions.as_mut(), file.deletions) {
-            *t += d;
-        }
-        if file.lines_capped {
-            totals.lines_capped += 1;
-        }
-        if file.hunks_capped {
-            totals.hunks_capped += 1;
-        }
-    }
-
-    Ok(DiffReport {
+    let (rows, truncated) = compare(opts, &old, &new);
+    Ok(Prepared {
         from: from_end,
         to: to_end,
-        files,
-        totals,
-        unmerged: unmerged.len(),
+        old,
+        new,
+        rows,
         truncated,
+        unmerged: unmerged.len(),
     })
 }
 
@@ -688,8 +817,8 @@ struct Changed {
     new: Option<(ObjectId, Class)>,
 }
 
-/// Compare the two sides, pair renames, cap the result, then count lines for
-/// what survived.
+/// Compare the two sides, pair renames, and cap the result. The caller
+/// counts lines for what survived.
 ///
 /// The order matters: `--limit` is applied *before* any blob is read, so it
 /// bounds the line-counting reads and not only the reporting. A cap that only
@@ -702,12 +831,7 @@ struct Changed {
 /// without looking at all of them. `--limit` is a cap on blob reads and on
 /// rows, never on the comparison itself. `--path` is the flag that bounds the
 /// flattening, and it is the real mitigation on a large repository.
-fn compare(
-    repo: &ReadRepo,
-    opts: &DiffOptions,
-    old: &SideMap,
-    new: &SideMap,
-) -> Result<(Vec<DiffFile>, bool), GitError> {
+fn compare(opts: &DiffOptions, old: &SideMap, new: &SideMap) -> (Vec<Changed>, bool) {
     let mut changed: BTreeMap<String, Changed> = BTreeMap::new();
     let mut added: Vec<(String, ObjectId, Class)> = Vec::new();
     let mut deleted: Vec<(String, ObjectId, Class)> = Vec::new();
@@ -813,12 +937,7 @@ fn compare(
     let mut rows: Vec<Changed> = changed.into_values().collect();
     let truncated = rows.len() > opts.limit;
     rows.truncate(opts.limit);
-
-    let mut files = Vec::with_capacity(rows.len());
-    for row in rows {
-        files.push(finish(repo, opts, old, new, row)?);
-    }
-    Ok((files, truncated))
+    (rows, truncated)
 }
 
 /// Turn one comparison result into its reported row, counting lines unless
@@ -830,36 +949,7 @@ fn finish(
     new: &SideMap,
     row: Changed,
 ) -> Result<DiffFile, GitError> {
-    let oid_of = |side: &SideMap, entry: Option<(ObjectId, Class)>| {
-        if side.from_worktree {
-            None
-        } else {
-            entry.map(|(oid, _)| oid.to_string())
-        }
-    };
-    let mut file = DiffFile {
-        old_mode: row.old.map(|(_, class)| class.mode_str().to_string()),
-        new_mode: row.new.map(|(_, class)| class.mode_str().to_string()),
-        old_oid: oid_of(old, row.old),
-        new_oid: oid_of(new, row.new),
-        similarity: match row.status {
-            // Exact match, so the two sides are byte-identical: 100 is
-            // measured here, not assumed, and it is the number git's own
-            // `R100` carries for the same pair.
-            EntryStatus::Renamed => Some(100),
-            _ => None,
-        },
-        binary: None,
-        additions: None,
-        deletions: None,
-        #[cfg(feature = "textdiff")]
-        hunks: None,
-        lines_capped: false,
-        hunks_capped: false,
-        path: row.path,
-        old_path: row.old_path,
-        status: row.status,
-    };
+    let mut file = base_file(old, new, &row);
     if opts.name_only {
         return Ok(file);
     }
@@ -939,6 +1029,166 @@ fn finish(
     Ok(file)
 }
 
+/// One side's content for a patch renderer, as far as the cap let it be read.
+#[cfg(feature = "textdiff")]
+enum Got {
+    /// The path does not exist on this side.
+    Absent,
+    /// A submodule: a commit in another repository, no blob here.
+    Gitlink,
+    /// The bytes, at most `max_blob_bytes` of them.
+    Bytes(std::sync::Arc<[u8]>),
+    /// Over `max_blob_bytes`, so not read; the size is the header's.
+    OverCap(u64),
+}
+
+/// Read one side for a patch renderer: a blob through the same header-first
+/// cap [`diffcore::read_blob_capped`] applies, a working-tree file through
+/// [`worktree_bytes`].
+#[cfg(feature = "textdiff")]
+fn side_content(
+    repo: &ReadRepo,
+    opts: &DiffOptions,
+    side: &SideMap,
+    path: &str,
+    entry: Option<(ObjectId, Class)>,
+) -> Result<Got, GitError> {
+    let Some((oid, class)) = entry else {
+        return Ok(Got::Absent);
+    };
+    if class == Class::Commit {
+        return Ok(Got::Gitlink);
+    }
+    if side.from_worktree {
+        // A file that vanished between the hashing pass and this one reads
+        // as empty, the same rule `side_for` applies to the counts.
+        let bytes = worktree_bytes(repo, opts, side, path, entry)?.unwrap_or_default();
+        return Ok(Got::Bytes(bytes.into()));
+    }
+    Ok(match diffcore::read_blob_capped(repo, "diff", oid, opts.max_blob_bytes)? {
+        diffcore::Capped::Content(bytes) => Got::Bytes(bytes.into()),
+        diffcore::Capped::OverCap { size } => Got::OverCap(size),
+    })
+}
+
+/// [`finish`] for a patch renderer: read both sides once, keep them, and
+/// count lines from the same bytes. No hunks — the renderer makes its own.
+#[cfg(feature = "textdiff")]
+fn finish_with_content(
+    repo: &ReadRepo,
+    opts: &DiffOptions,
+    old: &SideMap,
+    new: &SideMap,
+    row: Changed,
+) -> Result<(DiffFile, FileContent), GitError> {
+    let mut file = base_file(old, new, &row);
+    let old_path = row.old_path.clone().unwrap_or_else(|| row.path.clone());
+
+    let new_got = side_content(repo, opts, new, &row.path, row.new)?;
+    // The same bytes, read once: an exact rename is a blob oid reappearing at
+    // a new path, and two object sides with one oid are one blob whatever
+    // their modes say.
+    let same_blob = row.status == EntryStatus::Renamed
+        || (!old.from_worktree
+            && !new.from_worktree
+            && matches!((row.old, row.new), (Some((a, _)), Some((b, _))) if a == b));
+    let old_got = match (&new_got, same_blob) {
+        (Got::Bytes(bytes), true) => Got::Bytes(bytes.clone()),
+        (Got::OverCap(size), true) => Got::OverCap(*size),
+        _ => side_content(repo, opts, old, &old_path, row.old)?,
+    };
+
+    let size = |got: &Got| match got {
+        Got::Absent | Got::Gitlink => None,
+        Got::Bytes(bytes) => Some(bytes.len() as u64),
+        Got::OverCap(size) => Some(*size),
+    };
+    let over_cap = matches!(old_got, Got::OverCap(_)) || matches!(new_got, Got::OverCap(_));
+    let withheld = over_cap.then_some(crate::renderer::Withheld::OverMaxBlobBytes);
+    let bytes = |got: &Got| match got {
+        Got::Bytes(bytes) if !over_cap => Some(bytes.clone()),
+        _ => None,
+    };
+    let content = FileContent {
+        before: bytes(&old_got),
+        after: bytes(&new_got),
+        old_size: size(&old_got),
+        new_size: size(&new_got),
+        withheld,
+    };
+
+    // The model's counts, by `finish`'s rules and in its order: a rename
+    // first, before anything is read; then a gitlink side, which
+    // `diffcore::load_both` checks before the cap; then the cap. The order is
+    // what keeps this model equal to the one `--json` prints for the same
+    // change (`the_renderer_path_builds_the_model_json_reports`) — a renamed
+    // over-cap file is `0/0` there, not capped.
+    if row.status == EntryStatus::Renamed {
+        file.binary = Some(false);
+        file.additions = Some(0);
+        file.deletions = Some(0);
+    } else if matches!(old_got, Got::Gitlink) || matches!(new_got, Got::Gitlink) {
+        file.binary = Some(false);
+        file.additions = Some(u64::from(row.new.is_some()));
+        file.deletions = Some(u64::from(row.old.is_some()));
+    } else if over_cap {
+        file.lines_capped = true;
+    } else {
+        let empty: &[u8] = &[];
+        let old_side = Side::Bytes(content.before.as_deref().unwrap_or(empty));
+        let new_side = Side::Bytes(content.after.as_deref().unwrap_or(empty));
+        match diffcore::line_delta(repo, "diff", old_side, new_side, opts.max_blob_bytes)? {
+            LineDelta::Counted { added, deleted } => {
+                file.binary = Some(false);
+                file.additions = Some(added);
+                file.deletions = Some(deleted);
+            }
+            LineDelta::Binary => file.binary = Some(true),
+            // Two `Side::Bytes` are counted as given: nothing is read, so no
+            // cap can decline them, and the gitlink case returned above.
+            LineDelta::OverCap | LineDelta::Gitlink => {
+                unreachable!("line_delta over two in-memory sides answered a read-side outcome")
+            }
+        }
+    }
+    Ok((file, content))
+}
+
+/// A changed row as a reported file, before anything is read: paths, status,
+/// modes, oids, and every count still `None`.
+fn base_file(old: &SideMap, new: &SideMap, row: &Changed) -> DiffFile {
+    let oid_of = |side: &SideMap, entry: Option<(ObjectId, Class)>| {
+        if side.from_worktree {
+            None
+        } else {
+            entry.map(|(oid, _)| oid.to_string())
+        }
+    };
+    DiffFile {
+        old_mode: row.old.map(|(_, class)| class.mode_str().to_string()),
+        new_mode: row.new.map(|(_, class)| class.mode_str().to_string()),
+        old_oid: oid_of(old, row.old),
+        new_oid: oid_of(new, row.new),
+        similarity: match row.status {
+            // Exact match, so the two sides are byte-identical: 100 is
+            // measured here, not assumed, and it is the number git's own
+            // `R100` carries for the same pair.
+            EntryStatus::Renamed => Some(100),
+            _ => None,
+        },
+        binary: None,
+        additions: None,
+        deletions: None,
+        #[cfg(feature = "textdiff")]
+        hunks: None,
+        lines_capped: false,
+        hunks_capped: false,
+        path: row.path.clone(),
+        old_path: row.old_path.clone(),
+        status: row.status,
+    }
+}
+
 /// Re-read a working-tree file's bytes for the line count.
 ///
 /// Deliberately a second read: the hashing pass that decided *whether* the
@@ -1004,4 +1254,59 @@ fn side_for<'a>(
             }
         }
     }
+}
+
+/// The renderer's view of a finished diff: one [`ChangedFile`] per row,
+/// borrowing the model's paths, modes and oids and the kept content.
+///
+/// [`ChangedFile`]: crate::renderer::ChangedFile
+#[cfg(feature = "textdiff")]
+pub(crate) fn changed_files<'a>(
+    report: &'a DiffReport,
+    contents: &'a [FileContent],
+) -> Vec<crate::renderer::ChangedFile<'a>> {
+    use crate::renderer::{ChangeKind, ChangedFile};
+    assert_eq!(
+        report.files.len(),
+        contents.len(),
+        "run_with_content keeps one content per reported file"
+    );
+    report
+        .files
+        .iter()
+        .zip(contents)
+        .map(|(file, content)| {
+            let path = Some(file.path.as_str());
+            let (old_path, new_path, kind) = match file.status {
+                EntryStatus::Added => (None, path, ChangeKind::Added),
+                EntryStatus::Deleted => (path, None, ChangeKind::Deleted),
+                EntryStatus::Modified => (path, path, ChangeKind::Modified),
+                EntryStatus::Typechange => (path, path, ChangeKind::TypeChanged),
+                EntryStatus::Renamed => (
+                    file.old_path.as_deref(),
+                    path,
+                    ChangeKind::Renamed {
+                        similarity: file
+                            .similarity
+                            .expect("base_file sets similarity on every rename"),
+                    },
+                ),
+                other => unreachable!("git diff reported a {other:?} row, which it never builds"),
+            };
+            ChangedFile {
+                old_path,
+                new_path,
+                kind,
+                old_mode: file.old_mode.as_deref(),
+                new_mode: file.new_mode.as_deref(),
+                old_oid: file.old_oid.as_deref(),
+                new_oid: file.new_oid.as_deref(),
+                before: content.before.as_deref(),
+                after: content.after.as_deref(),
+                old_size: content.old_size,
+                new_size: content.new_size,
+                withheld: content.withheld,
+            }
+        })
+        .collect()
 }
