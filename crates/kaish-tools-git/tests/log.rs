@@ -341,8 +341,8 @@ async fn unknown_revision_exits_one_and_names_it() {
 #[tokio::test]
 async fn unsupported_revspec_is_a_named_usage_error() {
     let h = History::build();
+    // `A..B` is supported (see `a_range_lists_what_git_lists`); `A...B` is not.
     for (spec, token) in [
-        ("main..side", ".."),
         ("main...side", "..."),
         ("HEAD@{1}", "@{"),
         ("HEAD^{tree}", "^{"),
@@ -1093,4 +1093,89 @@ async fn a_zero_limit_reports_no_commits() {
         Some(1),
         "--limit 1 must still report one commit"
     );
+}
+
+// --- ranges: `git log A..B` ------------------------------------------------
+
+/// main: c1 - c2 - c3 - M (merges x)        x: (from c2) x1 - x2
+/// Each commit at its own minute, so newest-first order is unambiguous.
+fn diverged() -> (Fixture, PathBuf) {
+    require_git();
+    let fixture = Fixture::empty();
+    let root = fixture.path("repo");
+    std::fs::create_dir_all(&root).expect("create repo dir");
+    git(&root, &["init", "--initial-branch=main", "--quiet"]);
+    let me = ("T", "t@e.x");
+    let commit = |file: &str, body: &str, minute: u32| {
+        write_file(&root, file, body);
+        git(&root, &["add", file]);
+        git_as(&root, me, &format!("2026-01-01T00:{minute:02}:00Z"), &["commit", "--quiet", "-m", file]);
+    };
+    commit("c1.txt", "1\n", 1);
+    commit("c2.txt", "2\n", 2);
+    git(&root, &["checkout", "--quiet", "-b", "x"]);
+    commit("x1.txt", "x1\n", 3);
+    commit("shared.txt", "from x\n", 4);
+    git(&root, &["checkout", "--quiet", "main"]);
+    commit("c3.txt", "3\n", 5);
+    git(&root, &["branch", "before-merge"]);
+    git_as(&root, me, "2026-01-01T00:06:00Z", &["merge", "--quiet", "--no-ff", "-m", "merge x", "x"]);
+    (fixture, root)
+}
+
+#[tokio::test]
+async fn a_range_lists_what_git_lists() {
+    let (_f, root) = diverged();
+    for spec in [
+        "before-merge..x",
+        "x..before-merge",
+        "x..main",
+        "main..x",
+        "..x",
+        "x..",
+        "HEAD~2..HEAD",
+        "before-merge..main",
+    ] {
+        let r = log(&root, MOUNT, &["--json", spec]).await;
+        assert_eq!(r.code, 0, "{spec}: {}", r.err);
+        assert_eq!(oids(&r), git_oids(&root, &[spec]), "{spec}");
+    }
+    // Negative control: at least one range is non-empty and one is empty.
+    assert!(!git_oids(&root, &["before-merge..x"]).is_empty());
+    assert!(git_oids(&root, &["main..x"]).is_empty());
+}
+
+#[tokio::test]
+async fn a_range_with_a_path_lists_what_git_lists() {
+    let (_f, root) = diverged();
+    for (spec, path) in [("before-merge..main", "shared.txt"), ("x..main", "c3.txt"), ("main..x", "x1.txt")] {
+        let r = log(&root, MOUNT, &["--json", spec, "--", path]).await;
+        assert_eq!(r.code, 0, "{spec} -- {path}: {}", r.err);
+        assert_eq!(oids(&r), git_oids(&root, &[spec, "--", path]), "{spec} -- {path}");
+    }
+}
+
+#[tokio::test]
+async fn a_range_respects_limit() {
+    let (_f, root) = diverged();
+    let r = log(&root, MOUNT, &["--json", "--limit", "1", "before-merge..main"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(oids(&r), git_oids(&root, &["-n", "1", "before-merge..main"]));
+    assert_eq!(json(&r)["truncated"], true);
+}
+
+#[tokio::test]
+async fn a_symmetric_range_is_refused_by_name() {
+    let (_f, root) = diverged();
+    let r = log(&root, MOUNT, &["main...x"]).await;
+    assert_eq!(r.code, 2, "{}", r.err);
+    assert!(r.err.contains("..."), "{}", r.err);
+}
+
+#[tokio::test]
+async fn a_range_naming_nothing_is_refused_naming_the_side() {
+    let (_f, root) = diverged();
+    let r = log(&root, MOUNT, &["nosuch..main"]).await;
+    assert_ne!(r.code, 0, "{}", r.err);
+    assert!(r.err.contains("nosuch"), "{}", r.err);
 }
