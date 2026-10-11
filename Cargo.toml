@@ -32,9 +32,9 @@ repository = "https://github.com/tobert/kaish-extras"
 # the publish PR rather than settled here. It would only ever help the two tool
 # crates, since nothing downstream links `kaish-web`, and neither tool crate is
 # published yet — so today it buys nothing. What makes it thinkable is measured:
-# both tool crates built against 0.16 and 0.17 with no source change, because
-# neither touches an API a minor has moved. 0.18 broke that: the library code
-# built unchanged, but the tests' `ToolCtx` and git's `--help` both moved. What it would cost is a CI job that
+# both tool crates' library code built against 0.16 and 0.17 unchanged, though
+# 0.17 still broke a test. 0.18 needed changes in both crates' tests (`ToolCtx`)
+# and in git's schema (`--help`). What it would cost is a CI job that
 # resolves and tests the **low** end; without one, a range is a claim CI never
 # checks.
 kaish-kernel = { version = "0.18", default-features = false }

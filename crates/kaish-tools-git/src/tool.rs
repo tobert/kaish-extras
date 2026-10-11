@@ -1333,7 +1333,10 @@ impl Tool for GitTool {
         .param(
             ParamSchema::new("help", "bool")
                 .with_aliases(["h"])
-                .with_description("Show one verb's flags and examples: `git log --help`"),
+                .with_description(
+                    "List the verbs (`git --help`), or show one verb's flags and \
+                     examples (`git log --help`)",
+                ),
         )
     }
 
@@ -1371,8 +1374,21 @@ impl Tool for GitTool {
         }
         let argv = args.words_argv();
 
-        // `git --help`: the verbs, and where each one's help is.
-        if matches!(argv.first().map(String::as_str), Some("--help" | "-h")) {
+        // `git --help` and `git help`: the verbs, and where each one's help
+        // is. With a verb after it, that verb's help, as git's `help log`.
+        if matches!(argv.first().map(String::as_str), Some("--help" | "-h" | "help")) {
+            if let Some(word) = argv.get(1) {
+                return match route(&schema, &argv[1..]) {
+                    Ok((verb, consumed)) if consumed + 1 == argv.len() => verb_help(&schema, &verb),
+                    _ => failure(GitError::Usage {
+                        operation: "help",
+                        message: format!(
+                            "'{word}' is not a verb this build has, or more than one was \
+                             given. 'git --help' lists the verbs"
+                        ),
+                    }),
+                };
+            }
             let verbs: Vec<&str> = Verb::ALL
                 .iter()
                 .filter(|v| self.config.has(**v))
@@ -2002,10 +2018,9 @@ mod tests {
     /// `add`, `remove`, `lock`, `prune`), disabling `worktree list` would
     /// leave the node standing — correctly, since a sibling still needs it —
     /// and every node-level check would pass with the disabled leaf still
-    /// routable underneath. `help git` cannot catch that either: kaish 0.17's
-    /// renderer stops at the node (K1 in docs/issues.md), and the examples it
-    /// prints are filtered by the config rather than by the schema, so they
-    /// would drop the verb whether or not the leaf survived.
+    /// routable underneath. `help git` cannot catch that either: its examples
+    /// are filtered by the config rather than by the schema, so they would
+    /// drop the verb whether or not the leaf survived.
     ///
     /// So the leaf-level property is asserted here, from the walk that
     /// already recurses, rather than left to the coincidence that today's

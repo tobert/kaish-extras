@@ -82,9 +82,10 @@ async fn a_post_body_reaches_the_socket() {
 #[tokio::test]
 async fn a_socket_outside_the_mount_is_refused() {
     // The containment rule CU9 asks for, applied to the flag that names a
-    // path. `..` out of the mount is caught because the check asks the
-    // backend where the path really lands, not whether the string looks
-    // contained.
+    // path. The kernel resolves `..` lexically inside the VFS, so
+    // `/run/../x` lands at `/x`, under no real mount, and is refused as
+    // virtual before the tool's real-path comparison runs. That comparison
+    // is what catches a symlink out of the mount (the test below).
     let server = Server::builder()
         .route("/info", Response::text(200, "unreachable"))
         .start_unix();
@@ -107,6 +108,11 @@ async fn a_socket_outside_the_mount_is_refused() {
     .await;
 
     assert_ne!(result.code, 0, "a socket outside the mount must be refused");
+    assert!(
+        result.err.contains("does not name a path on a real filesystem"),
+        "refused as a virtual path: {}",
+        result.err
+    );
     assert!(server.requests().is_empty(), "nothing should have been sent");
 }
 

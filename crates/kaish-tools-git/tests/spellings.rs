@@ -459,6 +459,22 @@ async fn every_command_the_tool_publishes_parses_with_kaishs_parser() {
     assert!(commands.iter().any(|c| c == "git diff v0.1.0 HEAD -- src"), "an example: {commands:?}");
     assert!(commands.iter().any(|c| c.starts_with("git log -n 1 ")), "a hint: {commands:?}");
 
+    // Every published `~`/`^` is quoted. kaish 0.17 refused them bare and
+    // 0.18 accepts them, so the parse below no longer enforces this; the
+    // quoted form is what keeps a command valid on every kaish.
+    let bare: Vec<&String> = commands
+        .iter()
+        .filter(|c| {
+            c.split_whitespace()
+                .any(|w| !w.starts_with(['\'', '"']) && w.contains(['~', '^']))
+        })
+        .collect();
+    assert!(
+        commands.iter().any(|c| c.contains('~')),
+        "negative control: the harvest has a ~ to check: {commands:?}"
+    );
+    assert!(bare.is_empty(), "published commands with a bare ~ or ^: {bare:?}");
+
     let failures: Vec<String> = commands
         .iter()
         .map(|c| fill_placeholders(c))
@@ -885,4 +901,22 @@ async fn bare_git_help_lists_the_verbs() {
             assert!(r.out.contains(needle), "{script} must name {needle:?}: {}", r.out);
         }
     }
+}
+
+/// git's `help log` and `--help log` both mean log's help; an unknown word
+/// after them is refused rather than ignored.
+#[tokio::test]
+async fn help_with_a_verb_is_that_verbs_help() {
+    let (_f, root) = repo();
+    let want = run(&root, "git log --help").await;
+    assert_eq!(want.code, 0, "{}", want.err);
+    for script in ["git --help log", "git help log", "git -h log"] {
+        let r = run(&root, script).await;
+        assert_eq!(r.code, 0, "{script}: {}", r.err);
+        assert_eq!(r.out, want.out, "{script}");
+    }
+    let r = run(&root, "git help").await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.out.contains("git <verb> --help"), "{}", r.out);
+    refused(&root, "git --help nosuchverb", &["nosuchverb", "git --help"]).await;
 }

@@ -1427,6 +1427,11 @@ we owe other people, or things they do better than us.
   of an open-ended wait, because it is an event both sides can observe. By then
   they will know whether the work laptop — the only place a corporate
   TLS-inspecting CA would appear — is actually in play.
+- **X6 — curl has no substitution test.** git's canary and
+  `tests/patch_renderer.rs` pin that `$(git …)` binds text while `.data` is
+  set; curl sets `.data` on every response and nothing pins `$(curl …)`.
+  Adding `with_typed_substitution()` to curl's schema would flip it to the
+  JSON value with the suite green. Copy git's kernel-driven check.
 
 ## kaish-tools-image — a proposed third tool crate
 
