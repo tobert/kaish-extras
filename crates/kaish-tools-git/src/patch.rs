@@ -52,6 +52,7 @@
 //!   an add ([`crate::DiffFile::similarity`]).
 
 use crate::model::{DiffFile, DiffHunk, DiffOp, DiffReport, EntryStatus};
+use crate::render::quote_c_style;
 
 /// The whole report as one unified patch.
 pub(crate) fn render(report: &DiffReport) -> String {
@@ -255,39 +256,6 @@ impl Label {
 /// the `rename from` / `rename to` lines take.
 fn bare(path: &str) -> String {
     quote_c_style("", path).unwrap_or_else(|| path.to_string())
-}
-
-/// git's `quote_c_style`: `Some(quoted)` when the path holds a byte git
-/// refuses to print raw — a quote, a backslash, a control character, or
-/// anything above ASCII (`core.quotePath`, on by default) — and `None` when
-/// the path prints as itself.
-fn quote_c_style(prefix: &str, path: &str) -> Option<String> {
-    let needs = path
-        .bytes()
-        .any(|b| b < 0x20 || b == 0x7f || b == b'"' || b == b'\\' || b >= 0x80);
-    if !needs {
-        return None;
-    }
-    let mut out = String::with_capacity(path.len() + prefix.len() + 4);
-    out.push('"');
-    out.push_str(prefix);
-    for b in path.bytes() {
-        match b {
-            b'"' => out.push_str("\\\""),
-            b'\\' => out.push_str("\\\\"),
-            0x07 => out.push_str("\\a"),
-            0x08 => out.push_str("\\b"),
-            0x0c => out.push_str("\\f"),
-            b'\n' => out.push_str("\\n"),
-            b'\r' => out.push_str("\\r"),
-            b'\t' => out.push_str("\\t"),
-            0x0b => out.push_str("\\v"),
-            b if !(0x20..0x7f).contains(&b) => out.push_str(&format!("\\{b:03o}")),
-            b => out.push(b as char),
-        }
-    }
-    out.push('"');
-    Some(out)
 }
 
 #[cfg(test)]

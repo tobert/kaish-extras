@@ -55,9 +55,9 @@ pub(crate) struct BranchArgs {
     pub remote: bool,
 
     /// List branches, as plain `git branch` does. With patterns after it,
-    /// list only the branches whose name matches one: `git branch --list
-    /// 'feat*'`. `*` matches any run of characters, `/` included, and `?`
-    /// matches one.
+    /// list only the branches whose name matches one, in git's wildcard
+    /// syntax: `git branch --list 'feat*'`. `*` matches any run of
+    /// characters, `/` included; `?` matches one; `[a-z]` is a class.
     #[arg(short = 'l', long = "list", default_value_t = false)]
     pub list: bool,
 
@@ -141,31 +141,12 @@ pub(crate) struct BranchOptions {
     pub patterns: Vec<String>,
 }
 
-/// Whether `name` matches a `--list` pattern the way git matches one: `*`
-/// is any run of characters, `/` included, and `?` is one character.
-/// Everything else is literal.
+/// Whether `name` matches a `--list` pattern the way git matches one: with
+/// git's own wildcard matcher (`gix_glob::wildmatch`, git's `wildmatch.c`),
+/// where `*` crosses `/`, `?` is one character, `[a-z]` is a class, and `\`
+/// escapes.
 pub(crate) fn ref_pattern_matches(pattern: &str, name: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let n: Vec<char> = name.chars().collect();
-    let (mut pi, mut ni) = (0, 0);
-    // The last `*` seen, and the name position it was tried at.
-    let mut star: Option<(usize, usize)> = None;
-    while ni < n.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
-            pi += 1;
-            ni += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some((pi, ni));
-            pi += 1;
-        } else if let Some((sp, sn)) = star {
-            pi = sp + 1;
-            ni = sn + 1;
-            star = Some((sp, sn + 1));
-        } else {
-            return false;
-        }
-    }
-    p[pi..].iter().all(|&c| c == '*')
+    gix_glob::wildmatch(pattern.into(), name.into(), gix_glob::wildmatch::Mode::empty())
 }
 
 /// Compose the branch listing for `repo` (architecture.md B.7).
@@ -427,6 +408,9 @@ mod tests {
         assert!(!ref_pattern_matches("main", "maint"));
         assert!(!ref_pattern_matches("feat*", "docs"));
         assert!(!ref_pattern_matches("", "main"));
+        assert!(ref_pattern_matches("[a-d]*", "docs"));
+        assert!(!ref_pattern_matches("[a-d]*", "main"));
+        assert!(ref_pattern_matches("v\\*", "v*"));
     }
 
     #[test]

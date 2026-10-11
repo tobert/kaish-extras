@@ -76,7 +76,7 @@ impl GitTool {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::info::InfoArgs>(argv, OP) {
+        let parsed = match parse_leaf::<verbs::info::InfoArgs>(argv, OP, &self.config) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -135,7 +135,7 @@ impl GitTool {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::status::StatusArgs>(argv, OP) {
+        let parsed = match parse_leaf::<verbs::status::StatusArgs>(argv, OP, &self.config) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -234,7 +234,7 @@ impl GitTool {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::log::LogArgs>(argv, OP) {
+        let parsed = match parse_leaf::<verbs::log::LogArgs>(argv, OP, &self.config) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -435,7 +435,7 @@ impl GitTool {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::ls::LsArgs>(argv, OP) {
+        let parsed = match parse_leaf::<verbs::ls::LsArgs>(argv, OP, &self.config) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -522,7 +522,7 @@ impl GitTool {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::show::ShowArgs>(argv, OP) {
+        let parsed = match parse_leaf::<verbs::show::ShowArgs>(argv, OP, &self.config) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -582,16 +582,19 @@ impl GitTool {
             verbs::show::ShowOutcome::Commit(show) => {
                 let mut r = ExecResult::with_output(crate::render::show_commit(&show));
                 if show.files.is_none() {
+                    let c = &show.commit.short_oid;
+                    let next = format!(
+                        " 'git diff --from \"{c}^1\" --to {c}' lists what it changed \
+                         against its first parent"
+                    );
                     r.err = format!(
-                        "git show: {} is a merge, so its files are not listed. \
-                         'git diff --from \"{}^1\" --to {}' lists what it changed \
-                         against its first parent",
-                        show.commit.short_oid, show.commit.short_oid, show.commit.short_oid
+                        "git show: {c} is a merge, so its files are not listed.{}",
+                        if crate::spelling::runnable(&next, &self.config) { next.as_str() } else { "" }
                     );
                 } else if show.files_truncated {
                     r.err = format!(
-                        "git show: file list truncated at {} files (--limit); \
-                         'files_truncated' is true in --json",
+                        "git show: file list truncated at {} files (--limit, or this \
+                         build's max_rows); 'files_truncated' is true in --json",
                         show.files.as_ref().map_or(0, Vec::len)
                     );
                 }
@@ -651,7 +654,7 @@ impl GitTool {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::diff::DiffArgs>(argv, OP) {
+        let parsed = match parse_leaf::<verbs::diff::DiffArgs>(argv, OP, &self.config) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -963,7 +966,7 @@ impl GitTool {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::branch::BranchArgs>(argv, OP) {
+        let parsed = match parse_leaf::<verbs::branch::BranchArgs>(argv, OP, &self.config) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -1056,7 +1059,7 @@ impl GitTool {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::tag::TagArgs>(argv, OP) {
+        let parsed = match parse_leaf::<verbs::tag::TagArgs>(argv, OP, &self.config) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -1119,7 +1122,7 @@ impl GitTool {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::worktree::WorktreeListArgs>(argv, OP) {
+        let parsed = match parse_leaf::<verbs::worktree::WorktreeListArgs>(argv, OP, &self.config) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -1364,9 +1367,9 @@ impl Tool for GitTool {
             Err(e) => {
                 // A git command this build lacks gets its own refusal: why,
                 // and what to type instead.
-                let known = argv.first().and_then(|word| {
-                    crate::spelling::unsupported_verb(&schema.name, word, |v| self.config.has(v))
-                });
+                let known = argv
+                    .first()
+                    .and_then(|word| crate::spelling::unsupported_verb(&schema.name, word, &self.config));
                 return failure(known.unwrap_or(e));
             }
         };
@@ -1665,11 +1668,15 @@ fn verb_help(schema: &ToolSchema, verb: &str) -> ExecResult {
 /// Parse the leaf's own argv — the words after the verb — with its flat clap
 /// `Parser` (E.1). `route` has already taken the verb words off the front,
 /// so the clap tree is never asked to route.
-fn parse_leaf<P: Parser>(argv: &[String], operation: &'static str) -> Result<P, Box<ExecResult>> {
+fn parse_leaf<P: Parser>(
+    argv: &[String],
+    operation: &'static str,
+    config: &GitConfig,
+) -> Result<P, Box<ExecResult>> {
     // Boxed: `ExecResult` is a wide type, and an unboxed `Err` variant makes
     // every `Ok` return pay for it (clippy::result_large_err).
     P::try_parse_from(std::iter::once(format!("git {operation}")).chain(argv.iter().cloned()))
-        .map_err(|e| Box::new(failure(crate::spelling::refuse(operation, &e, &P::command()))))
+        .map_err(|e| Box::new(failure(crate::spelling::refuse(operation, &e, &P::command(), config))))
 }
 
 /// A verb's operands, split at git's `--` end-of-options marker.

@@ -42,8 +42,9 @@ pub(crate) struct TagArgs {
     pub contains: Option<String>,
 
     /// List tags, as plain `git tag` does. With patterns after it, list only
-    /// the tags whose name matches one: `git tag --list 'v1.*'`. `*` matches
-    /// any run of characters, `/` included, and `?` matches one.
+    /// the tags whose name matches one, in git's wildcard syntax: `git tag
+    /// --list 'v1.*'`. `*` matches any run of characters, `/` included; `?`
+    /// matches one; `[0-9]` is a class.
     #[arg(short = 'l', long = "list", default_value_t = false)]
     pub list: bool,
 

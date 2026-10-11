@@ -47,8 +47,9 @@ const MAX_TAG_DEPTH: usize = 8;
 #[derive(Parser, Debug)]
 #[command(name = "show", about = "Show a commit, tag, tree, or blob at a revision")]
 pub(crate) struct ShowArgs {
-    /// Maximum rows to report for a tree form. Truncation is always
-    /// reported (`truncated: true` and a stderr note), never silent. The
+    /// Maximum rows to report: a tree form's entries (`truncated: true`
+    /// in `--json`), or a commit's changed files (`files_truncated: true`).
+    /// Truncation is always reported, with a stderr note, never silent. The
     /// blob form's byte cap is this build's `max_blob_bytes`, which
     /// `--limit` does not affect.
     #[arg(short = 'n', long = "limit", value_name = "N", default_value_t = 1000)]

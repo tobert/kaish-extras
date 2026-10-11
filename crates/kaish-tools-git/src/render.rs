@@ -97,13 +97,18 @@ pub fn status(report: &StatusReport) -> OutputData {
             let xy: String = entry.porcelain.iter().collect();
             // git's short format: a rename is `old -> new`, and an untracked
             // or ignored directory ends in `/`.
-            let mut path = match &entry.orig_path {
-                Some(orig) => format!("{orig} -> {}", entry.path),
-                None => entry.path.clone(),
+            // Each side is C-quoted the way `--porcelain=v1` quotes it, with
+            // a directory's `/` inside the quotes.
+            let quoted = |p: &str| quote_c_style("", p).unwrap_or_else(|| p.to_string());
+            let new = if entry.kind == EntryKind::Dir {
+                format!("{}/", entry.path)
+            } else {
+                entry.path.clone()
             };
-            if entry.kind == EntryKind::Dir {
-                path.push('/');
-            }
+            let mut path = match &entry.orig_path {
+                Some(orig) => format!("{} -> {}", quoted(orig), quoted(&new)),
+                None => quoted(&new),
+            };
             if entry.blob_capped {
                 path.push_str(" (not compared: over this build's max_blob_bytes)");
             }
@@ -699,4 +704,37 @@ fn attach<T: serde::Serialize>(table: OutputData, model: &T, what: &str) -> Outp
             table
         }
     }
+}
+
+/// git's `quote_c_style`: `Some(quoted)` when the path holds a byte git
+/// refuses to print raw — a quote, a backslash, a control character, or
+/// anything above ASCII (`core.quotePath`, on by default) — and `None` when
+/// the path prints as itself.
+pub(crate) fn quote_c_style(prefix: &str, path: &str) -> Option<String> {
+    let needs = path
+        .bytes()
+        .any(|b| b < 0x20 || b == 0x7f || b == b'"' || b == b'\\' || b >= 0x80);
+    if !needs {
+        return None;
+    }
+    let mut out = String::with_capacity(path.len() + prefix.len() + 4);
+    out.push('"');
+    out.push_str(prefix);
+    for b in path.bytes() {
+        match b {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x07 => out.push_str("\\a"),
+            0x08 => out.push_str("\\b"),
+            0x0c => out.push_str("\\f"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x0b => out.push_str("\\v"),
+            b if !(0x20..0x7f).contains(&b) => out.push_str(&format!("\\{b:03o}")),
+            b => out.push(b as char),
+        }
+    }
+    out.push('"');
+    Some(out)
 }

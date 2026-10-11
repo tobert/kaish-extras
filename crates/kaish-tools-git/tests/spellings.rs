@@ -61,10 +61,10 @@ fn tool() -> Box<dyn Tool> {
     Box::new(kaish_tools_git::tool(GitConfig::read_only()).expect("valid config"))
 }
 
-async fn kernel(root: &Path, cwd: &str) -> Kernel {
+async fn kernel_with(config: GitConfig, root: &Path, cwd: &str) -> Kernel {
     let backend: Arc<dyn KernelBackend> =
         Arc::new(StrictBackend::single(PathBuf::from("/mnt"), root.to_path_buf()));
-    let git = kaish_tools_git::tool(GitConfig::read_only()).expect("valid config");
+    let git = kaish_tools_git::tool(config).expect("valid config");
     let mut cfg = KernelConfig::transient();
     // Set here rather than with `cd`: the kernel's `cd` stats the directory
     // through the backend, and `StrictBackend` fails any VFS I/O on purpose.
@@ -86,7 +86,11 @@ async fn run(root: &Path, script: &str) -> Run {
 }
 
 async fn run_in(root: &Path, cwd: &str, script: &str) -> Run {
-    let k = kernel(root, cwd).await;
+    run_with(GitConfig::read_only(), root, cwd, script).await
+}
+
+async fn run_with(config: GitConfig, root: &Path, cwd: &str, script: &str) -> Run {
+    let k = kernel_with(config, root, cwd).await;
     let result = k
         .execute(script)
         .await
@@ -770,6 +774,11 @@ async fn status_text_rows_carry_git_short_format_fields() {
     git(&root, &["mv", "a.txt", "renamed.txt"]);
     write_file(&root, "newdir/inside.txt", "x\n");
     write_file(&root, "loose.txt", "x\n");
+    // Names git's porcelain C-quotes: a quote, non-ASCII, and a directory
+    // whose `/` lands inside the quotes.
+    write_file(&root, "quo\"te.txt", "x\n");
+    write_file(&root, "ünï code.txt", "x\n");
+    write_file(&root, "dir ü/x.txt", "x\n");
 
     let r = run(&root, "git status -s").await;
     assert_eq!(r.code, 0, "{}", r.err);
@@ -792,5 +801,82 @@ async fn status_text_rows_carry_git_short_format_fields() {
 
     assert!(theirs.iter().any(|(xy, _)| xy.starts_with('R')), "negative control: a rename row");
     assert!(theirs.iter().any(|(_, p)| p.ends_with('/')), "negative control: an untracked directory row");
+    assert!(theirs.iter().any(|(_, p)| p.starts_with('"')), "negative control: a quoted row");
     assert_eq!(ours, theirs);
+}
+
+/// `--list` patterns go through git's own matcher, classes included.
+#[tokio::test]
+async fn a_list_pattern_matches_the_way_gits_matcher_does() {
+    let (_f, root) = repo();
+    git(&root, &["tag", "v1", "HEAD"]);
+    git(&root, &["tag", "w1", "HEAD"]);
+    for (script, oracle) in [
+        ("git branch --list '[a-d]*' --json", vec!["branch", "--list", "[a-d]*", "--format=%(refname:short)"]),
+        ("git tag --list 'v[0-9]' --json", vec!["tag", "--list", "v[0-9]"]),
+    ] {
+        let want: Vec<String> = git(&root, &oracle).lines().map(|l| l.trim().to_string()).collect();
+        assert!(!want.is_empty(), "negative control: {oracle:?} lists something");
+        let r = run(&root, script).await;
+        assert_eq!(r.code, 0, "{script}: {}", r.err);
+        let json: serde_json::Value = serde_json::from_str(&r.out).expect("json");
+        let rows = json["branches"].as_array().or(json["tags"].as_array()).expect("rows");
+        let got: Vec<String> = rows.iter().map(|b| b["name"].as_str().expect("name").to_string()).collect();
+        assert_eq!(got, want, "{script}");
+    }
+}
+
+/// A next step must work in the build that printed it: with a verb
+/// subtracted, no refusal names it.
+#[tokio::test]
+async fn a_refusal_never_names_a_verb_the_config_disabled() {
+    use kaish_tools_git::Verb;
+    let (_f, root) = repo();
+    let no_diff = || GitConfig::read_only().without_verb(Verb::Diff);
+    // A merge, whose `show` note names `git diff`.
+    git(&root, &["stash", "--quiet"]);
+    git(&root, &["checkout", "--quiet", "-b", "side", "HEAD~1"]);
+    write_file(&root, "side.txt", "side\n");
+    git(&root, &["add", "side.txt"]);
+    git(&root, &["commit", "--quiet", "-m", "side"]);
+    git(&root, &["checkout", "--quiet", "main"]);
+    git(&root, &["merge", "--quiet", "--no-ff", "-m", "merge side", "side"]);
+    let control = run(&root, "git show HEAD").await;
+    assert!(control.err.contains("git diff"), "negative control: the full build names it: {}", control.err);
+    for script in ["git add a.txt", "git log --name-only", "git show HEAD"] {
+        let r = run_with(no_diff(), &root, "/mnt", script).await;
+        assert!(!r.err.contains("git diff"), "{script:?} named a disabled verb: {}", r.err);
+    }
+    let r = run_with(no_diff(), &root, "/mnt", "git add a.txt").await;
+    assert!(r.err.contains("git status"), "the enabled half survives: {}", r.err);
+
+    let no_status = GitConfig::read_only().without_verb(Verb::Status);
+    let r = run_with(no_status, &root, "/mnt", "git ls-files").await;
+    assert!(!r.err.contains("git status") && r.err.contains("git ls --recursive"), "{}", r.err);
+}
+
+/// git reads `-h` as a help request even where a value belongs
+/// (`git log --author -h` prints git's usage), and so does this build.
+#[tokio::test]
+async fn a_help_flag_in_a_value_position_is_a_help_request_as_in_git() {
+    let (_f, root) = repo();
+    let r = run(&root, "git log --author -h").await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.out.contains("git log"), "{}", r.out);
+    // After `--`, it is a path.
+    let r = run(&root, "git log -- -h").await;
+    assert!(!r.out.contains("See 'help git'"), "{}", r.out);
+}
+
+#[tokio::test]
+async fn branch_show_current_names_an_unborn_branch() {
+    require_git();
+    let fixture = Fixture::empty();
+    let root = fixture.path("repo");
+    std::fs::create_dir_all(&root).expect("create repo dir");
+    git(&root, &["init", "--initial-branch=trunk", "--quiet"]);
+    let r = run(&root, "git branch --show-current").await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(r.out.trim_end(), git(&root, &["branch", "--show-current"]).trim_end());
+    assert_eq!(r.out.trim_end(), "trunk");
 }

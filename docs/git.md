@@ -122,7 +122,7 @@ git's short format, and the text output is that format.
 
 The 2026-10-11 survey (`docs/design/git-survey-2026-10.md`) added
 `status -s`/`--short`/`--porcelain`, `branch --show-current`,
-`branch --list`/`tag --list` with `*`/`?` patterns, a file list on
+`branch --list`/`tag --list` with git's wildcard patterns, a file list on
 `git show <commit>` (git's `--name-status`; none for a merge, with the
 command that answers it on stderr), and `git <verb> --help` answered from the
 schema. A git command this build has no verb for is refused by name: a write
