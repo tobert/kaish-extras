@@ -1115,6 +1115,27 @@ repository size, not result size.
   thread-stack assumption where an embedder will see it. **The doc half is
   done** (`docs/embedding-git.md`); the conversion is not.
 
+## git — from the 2026-10-11 deepseek review of the spellings branch
+
+- **R5 — `--oneline` prints a fixed 7-character oid.** git's `core.abbrev=auto`
+  prints the shortest unambiguous prefix and grows with the object count:
+  kaijutsu's `git log --oneline` prints `c6eba240`, ours `c6eba24`. Same
+  shape as T4 for the patch `index` line. Harmless until two prefixes
+  collide; then two commits print one oid.
+- **R6 — `git branch -a` names remote rows `origin/main`; git's `-a` prints
+  `remotes/origin/main`** (its `-r` prints `origin/main`). docs/git.md calls
+  the strip a choice; `tests/spellings.rs`'s `-a` test uses `contains`, which
+  cannot tell the two apart. Compare against git's `-a` output and decide.
+- **R7 — small refusal gaps.** `git status -uno` may miss the `-u` hint,
+  depending on the token clap reports for a clustered short (unpinned).
+  `git log -p` is refused naming `--patch`, a flag the caller did not type.
+  `--oneline --stat` puts the counts on the same line, where git puts them on
+  the lines after.
+- **R8 — no test pins the text surface of the table verbs.** Only
+  `log --oneline`'s text is asserted exactly; status, branch, tag and
+  worktree list are asserted through the typed table, so an agent-visible
+  string in `render.rs` can change with every test green.
+
 ## git — the embedder boundary
 
 - **G6 — "mount the common dir" may be a wider grant than the git verbs need.**

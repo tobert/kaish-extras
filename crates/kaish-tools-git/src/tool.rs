@@ -168,8 +168,8 @@ impl GitTool {
             // it says. A pathspec-magic value (leading `:`) is left untouched so
             // the parser can reject it by name rather than hide it behind a
             // prefix.
-            let prefix = cwd_prefix(&resolved.real, repo.root());
-            let paths = path_args.iter().map(|spec| prefixed(&prefix, spec)).collect();
+            let base = PathBase::new(&resolved, &repo);
+            let paths = base.repo_paths(OP, &path_args)?;
             let opts = verbs::status::StatusOptions {
                 untracked,
                 ignored,
@@ -316,42 +316,13 @@ impl GitTool {
             // it — and `(false, false)` is the documented default.
             _ => verbs::log::MergeFilter::Both,
         };
-        // `git log [<rev>] [-- <path>...]`, git's own shape.
-        //
-        // A positional before `--` is a **revision**, always. Git would guess:
-        // it tries the string as a rev, then as a path, and errors only when
-        // the string is both or neither. We do not guess — the same reason the
-        // revision grammar is small and approxidate is refused. One rule, and
-        // a failure that names the other spelling, beats a heuristic that
-        // silently answers about a path when the caller meant a branch.
+        // `git log [<rev>] [<path>...] [-- <path>...]`, git's own shape. Each
+        // word before `--` is sorted the way `git diff` sorts it
+        // (`classify_operands`): a revision when it resolves as one, a path
+        // when it matches a tracked path, refused when it is both or neither.
+        // That needs the repository, so it happens below.
         let ops = operands(&parsed.operands, argv);
-        if ops.before.len() > 1 {
-            return failure(GitError::Usage {
-                operation: OP,
-                message: format!(
-                    "takes at most one revision, but got '{}'. A range is \
-                     '--rev A' plus '--rev B' in two calls, not 'A B'; paths \
-                     go after '--'",
-                    ops.before.join("' '")
-                ),
-            });
-        }
-        let rev = match ops.before.first() {
-            Some(positional) if parsed.rev != verbs::log::DEFAULT_REV => {
-                // Both spellings, disagreeing. Picking one silently would
-                // answer about a revision the caller did not choose.
-                return failure(GitError::Usage {
-                    operation: OP,
-                    message: format!(
-                        "got a revision twice — '{positional}' and '--rev \
-                         {}'. Give it once",
-                        parsed.rev
-                    ),
-                });
-            }
-            Some(positional) => positional.clone(),
-            None => parsed.rev.clone(),
-        };
+        let rev_flag = (parsed.rev != verbs::log::DEFAULT_REV).then(|| parsed.rev.clone());
         let author = parsed.author.clone();
         let first_parent = parsed.first_parent;
         let body = parsed.body;
@@ -360,13 +331,40 @@ impl GitTool {
         // Operands after `--` are pathspecs, joining the `--path` flags.
         let mut path_args = parsed.path.clone();
         path_args.extend(ops.after.iter().cloned());
+        let words = ops.before.clone();
+        let marked = ops.marked;
 
         let outcome = block_in_place_compat(move || {
             let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
-            // `--path` values are relative to the caller's cwd within the repo,
-            // exactly as git's pathspecs are — the same prefixing `status` does.
-            let prefix = cwd_prefix(&resolved.real, repo.root());
-            let paths = path_args.iter().map(|spec| prefixed(&prefix, spec)).collect();
+            // Pathspecs are relative to the caller's cwd within the repo,
+            // exactly as git's are — the same rule `status` and `diff` use.
+            let base = PathBase::new(&resolved, &repo);
+            let sorted = verbs::diff::classify_operands(OP, &repo, &words, marked, &|w| base.repo_path(OP, w))?;
+            let mut paths = base.repo_paths(OP, &path_args)?;
+            paths.extend(sorted.paths);
+            let rev = match (sorted.revs.as_slice(), rev_flag) {
+                ([], None) => verbs::log::DEFAULT_REV.to_string(),
+                ([], Some(flag)) => flag,
+                ([one], None) => one.clone(),
+                // Both spellings, disagreeing. Picking one silently would
+                // answer about a revision the caller did not choose.
+                ([one], Some(flag)) => {
+                    return Err(GitError::Usage {
+                        operation: OP,
+                        message: format!("got a revision twice — '{one}' and '--rev {flag}'. Give it once"),
+                    })
+                }
+                (many, _) => {
+                    return Err(GitError::Usage {
+                        operation: OP,
+                        message: format!(
+                            "takes at most one revision, but got '{}'. A range is \
+                             not supported here; paths go after '--'",
+                            many.join("' '")
+                        ),
+                    })
+                }
+            };
             let opts = verbs::log::LogOptions {
                 rev,
                 limit,
@@ -730,9 +728,9 @@ impl GitTool {
             let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
             // Pathspecs are relative to the caller's cwd, as in git and as in
             // `status` and `log`.
-            let prefix = cwd_prefix(&resolved.real, repo.root());
-            let sorted = verbs::diff::classify_operands(&repo, &words, marked, &|w| prefixed(&prefix, w))?;
-            let mut paths: Vec<String> = paths.iter().map(|spec| prefixed(&prefix, spec)).collect();
+            let base = PathBase::new(&resolved, &repo);
+            let sorted = verbs::diff::classify_operands(OP, &repo, &words, marked, &|w| base.repo_path(OP, w))?;
+            let mut paths = base.repo_paths(OP, &paths)?;
             paths.extend(sorted.paths);
             let endpoints = match (verbs::diff::endpoints_from_revs(&sorted.revs)?, named_by_flag) {
                 (None, _) => flag_endpoints,
@@ -1036,15 +1034,75 @@ impl GitTool {
     }
 }
 
-/// A caller's pathspec made repo-relative. git reads a pathspec relative to
-/// the cwd, so from `src/` the spec `lib.rs` is `src/lib.rs`. A
-/// pathspec-magic value (leading `:`) is left untouched so the parser can
-/// reject it by name rather than hide it behind a prefix.
-fn prefixed(prefix: &str, spec: &str) -> String {
-    if prefix.is_empty() || spec.starts_with(':') {
-        spec.to_string()
-    } else {
-        format!("{prefix}/{spec}")
+/// How a caller's pathspec becomes repo-relative, the way git reads one:
+/// relative to the cwd (from `src/`, `lib.rs` is `src/lib.rs`), with `.` and
+/// `..` resolved, and an absolute path accepted when it names something
+/// inside the repository. A pathspec-magic value (leading `:`) is left
+/// untouched so the parser can reject it by name.
+///
+/// Lexical on purpose: the spec names a path in the index or a tree, which
+/// may not exist on disk, and resolving it against the filesystem would
+/// touch the host to answer a question about the repository.
+struct PathBase {
+    /// The cwd's repo-relative segments.
+    prefix: Vec<String>,
+    /// The repository root's VFS path, for absolute specs; `None` when the
+    /// root cannot be named in the VFS.
+    root_vfs: Option<String>,
+}
+
+impl PathBase {
+    fn new(resolved: &ResolvedPaths, repo: &ReadRepo) -> Self {
+        let prefix = cwd_prefix(&resolved.real, repo.root());
+        PathBase {
+            prefix: prefix.split('/').filter(|s| !s.is_empty()).map(str::to_string).collect(),
+            root_vfs: to_vfs_path(repo.root(), &resolved.mount_real, &resolved.mount_vfs),
+        }
+    }
+
+    fn repo_paths(&self, operation: &'static str, specs: &[String]) -> Result<Vec<String>, GitError> {
+        specs.iter().map(|spec| self.repo_path(operation, spec)).collect()
+    }
+
+    fn repo_path(&self, operation: &'static str, spec: &str) -> Result<String, GitError> {
+        if spec.starts_with(':') {
+            return Ok(spec.to_string());
+        }
+        let outside = || GitError::Usage {
+            operation,
+            message: format!(
+                "path '{spec}' is outside the repository{}. A path is read from the \
+                 current directory and must stay inside the repository",
+                match &self.root_vfs {
+                    Some(root) => format!(" at {root}"),
+                    None => String::new(),
+                }
+            ),
+        };
+        let (mut segments, rest) = match spec.strip_prefix('/') {
+            Some(_) => {
+                let root = self.root_vfs.as_deref().ok_or_else(outside)?;
+                let rest = if spec == root {
+                    ""
+                } else {
+                    spec.strip_prefix(root)
+                        .and_then(|r| r.strip_prefix('/'))
+                        .ok_or_else(outside)?
+                };
+                (Vec::new(), rest)
+            }
+            None => (self.prefix.clone(), spec),
+        };
+        for segment in rest.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    segments.pop().ok_or_else(outside)?;
+                }
+                other => segments.push(other.to_string()),
+            }
+        }
+        Ok(segments.join("/"))
     }
 }
 
@@ -1313,6 +1371,11 @@ fn route(schema: &ToolSchema, words: &[String]) -> Result<(String, usize), GitEr
     if path.is_empty() {
         let available: Vec<&str> = schema.subcommands.iter().map(|s| s.name.as_str()).collect();
         let got = match words.first() {
+            // `git --repo x status`: a flag where the verb goes. Flags belong
+            // to a verb here, so they follow it.
+            Some(word) if word.starts_with('-') => format!(
+                "'{word}' is a flag, and flags follow the verb ('git <verb> {word} …')"
+            ),
             Some(word) => format!("'{word}' is not one of them"),
             None => "none was given".to_string(),
         };
@@ -1400,12 +1463,23 @@ fn no_operands(operation: &'static str, ops: &Operands) -> Result<(), GitError> 
     if ops.is_empty() {
         return Ok(());
     }
+    let all = ops.all();
+    let first = crate::verbs::diff::kaish_word(&all[0]);
+    // The next step depends on what the word most likely meant for this verb.
+    let next = match operation {
+        "branch" => format!(
+            "This git lists branches and never creates one; 'git log {first}' \
+             shows a branch's history"
+        ),
+        "tag" => format!(
+            "This git lists tags and never creates one; 'git show {first}' \
+             shows a tag and 'git log {first}' its history"
+        ),
+        _ => "Name the repository with --repo".to_string(),
+    };
     Err(GitError::Usage {
         operation,
-        message: format!(
-            "takes no operands, but got '{}'. Name the repository with --repo",
-            ops.all().join("' '")
-        ),
+        message: format!("takes no operands, but got '{}'. {next}", all.join("' '")),
     })
 }
 

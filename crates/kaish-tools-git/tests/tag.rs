@@ -272,9 +272,12 @@ async fn operands_are_refused() {
     let result = run(&repo, &["v0.1.0"]).await;
     assert_eq!(result.code, 2, "stderr: {}", result.err);
     assert!(result.err.contains("v0.1.0"), "{}", result.err);
+    // An operand to `tag` is most likely a tag name, so the next step is
+    // to look at that tag, not to name a repository.
     assert!(
-        result.err.contains("--repo"),
+        result.err.contains("git show v0.1.0"),
         "the refusal points somewhere useful: {}",
         result.err
     );
+    assert!(!result.err.contains("--repo"), "{}", result.err);
 }

@@ -1528,8 +1528,9 @@ the answer; refuse anything else saying it is not supported and what to type
 instead.
 
 - **Accepted**: `branch -a`/`-r`, `diff --cached`, `diff`'s revision operands
-  (B.4), `log --oneline` (git's own line, `<short oid> <summary>`), `-p` for
-  `--patch` on `log` and `diff`.
+  (B.4), `log --oneline` (git's own line, `<short oid> <summary>`), and `-p`
+  for `--patch` on `diff`. `log` parses `-p` too, but refuses `--patch` in
+  every build and names the `git diff` that shows one commit's patch.
 - **Refused with a next step**: an unknown flag no longer gets clap's text,
   which told an agent to write `-- --oneline` (a pathspec here) and suggested
   `--patch` for `--cached`. `src/spelling.rs` names known git flags and their

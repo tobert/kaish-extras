@@ -351,12 +351,12 @@ pub(crate) struct OperandWords {
 /// `to_repo_path` makes a word repo-relative the way every pathspec is
 /// (`tool.rs`'s cwd prefix); the paths returned are already through it.
 pub(crate) fn classify_operands(
+    op: &'static str,
     repo: &ReadRepo,
     words: &[String],
     marked: bool,
-    to_repo_path: &dyn Fn(&str) -> String,
+    to_repo_path: &dyn Fn(&str) -> Result<String, GitError>,
 ) -> Result<OperandWords, GitError> {
-    const OP: &str = "diff";
     let mut out = OperandWords::default();
     if marked {
         out.revs = words.to_vec();
@@ -373,7 +373,12 @@ pub(crate) fn classify_operands(
             };
             tracked = Some(paths);
         }
-        let filter = PathFilter::parse(OP, &[to_repo_path(word)])?;
+        // A word that leaves the repository is not a path in it; it may still
+        // be a revision, so this is an answer, not an error.
+        let Ok(path) = to_repo_path(word) else {
+            return Ok(false);
+        };
+        let filter = PathFilter::parse(op, &[path])?;
         Ok(tracked.iter().flatten().any(|path| filter.matches(path)))
     };
 
@@ -382,7 +387,7 @@ pub(crate) fn classify_operands(
     for word in words {
         if is_range(word) {
             if let Some(path) = first_path {
-                return Err(revision_after_path(word, path));
+                return Err(revision_after_path(op, word, path));
             }
             out.revs.push(word.clone());
             continue;
@@ -396,29 +401,29 @@ pub(crate) fn classify_operands(
         match (rev, path) {
             (true, true) => {
                 return Err(GitError::Usage {
-                    operation: OP,
+                    operation: op,
                     message: format!(
                         "'{word}' is both a revision and a tracked path. Put \
                          revisions before '--' and paths after it: \
-                         'git diff {w} --' compares the revision, \
-                         'git diff -- {w}' the path",
+                         'git {op} {w} --' reads the revision, \
+                         'git {op} -- {w}' the path",
                         w = kaish_word(word)
                     ),
                 });
             }
             (true, false) => {
                 if let Some(path) = first_path {
-                    return Err(revision_after_path(word, path));
+                    return Err(revision_after_path(op, word, path));
                 }
                 out.revs.push(word.clone());
             }
             (false, true) => {
                 first_path.get_or_insert(word);
-                out.paths.push(to_repo_path(word));
+                out.paths.push(to_repo_path(word)?);
             }
             (false, false) => {
                 return Err(GitError::Usage {
-                    operation: OP,
+                    operation: op,
                     message: format!(
                         "'{word}' is neither a revision nor a tracked path. A \
                          revision is HEAD, a branch, a tag or an oid, \
@@ -439,12 +444,12 @@ fn is_range(word: &str) -> bool {
         .is_some_and(|(from, to)| !from.is_empty() || !to.trim_start_matches('.').is_empty())
 }
 
-fn revision_after_path(word: &str, path: &str) -> GitError {
+fn revision_after_path(op: &'static str, word: &str, path: &str) -> GitError {
     GitError::Usage {
-        operation: "diff",
+        operation: op,
         message: format!(
             "'{word}' is a revision after the path '{path}'. Revisions come \
-             first: 'git diff {} -- {}'",
+             first: 'git {op} {} -- {}'",
             kaish_word(word),
             kaish_word(path)
         ),

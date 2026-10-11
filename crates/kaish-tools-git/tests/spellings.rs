@@ -478,3 +478,84 @@ fn kaish_still_refuses_an_unquoted_tilde_in_a_word() {
         "the quoted form must parse, or every published command is broken"
     );
 }
+
+// --- from the 2026-10-11 review of this branch ------------------------------
+
+/// git normalizes a pathspec: `./x`, `x/../y` and an absolute path inside the
+/// repository all name the same file. Matched literally, each one matched
+/// nothing and answered "clean" or "no commits" with exit 0.
+#[tokio::test]
+async fn a_pathspec_is_normalized_the_way_git_normalizes_it() {
+    let (_f, root) = repo();
+    same(&root, "git status --json ./src/lib.rs", "git status --json src/lib.rs").await;
+    same(&root, "git status --json src/../src/lib.rs", "git status --json src/lib.rs").await;
+    same(&root, "git status --json /mnt/src/lib.rs", "git status --json src/lib.rs").await;
+    same(&root, "git log --json -- ./a.txt", "git log --json -- a.txt").await;
+    same(&root, "git log --json --path ./a.txt", "git log --json -- a.txt").await;
+    same(&root, "git diff --json ./src/lib.rs", "git diff --json src/lib.rs").await;
+
+    // `..` from a subdirectory climbs to the root, as git's does.
+    let up = run_in(&root, "/mnt/src", "git status --json ../docs").await;
+    assert_eq!(up.code, 0, "{}", up.err);
+    assert!(up.out.contains("docs/readme.md"), "{}", up.out);
+}
+
+#[tokio::test]
+async fn a_pathspec_outside_the_repository_is_refused() {
+    let (_f, root) = repo();
+    refused(&root, "git status ../elsewhere", &["outside the repository"]).await;
+    refused(&root, "git log -- /etc/passwd", &["outside the repository"]).await;
+}
+
+/// git sorts a word before `--` into a revision or a tracked path, and
+/// refuses one that is both or neither. `log` now does what `diff` does.
+#[tokio::test]
+async fn log_reads_a_tracked_path_operand_as_a_path() {
+    let (_f, root) = repo();
+    same(&root, "git log --json a.txt", "git log --json -- a.txt").await;
+    same(&root, "git log --json main a.txt", "git log --json main -- a.txt").await;
+    refused(&root, "git log docs", &["git log docs --", "git log -- docs"]).await;
+    refused(&root, "git log nosuchthing", &["nosuchthing"]).await;
+}
+
+#[tokio::test]
+async fn an_operand_to_branch_or_tag_gets_that_verbs_next_step() {
+    let (_f, root) = repo();
+    let err = refused(&root, "git branch side", &["git log side"]).await;
+    assert!(!err.contains("--repo"), "branch's operand is not a repository: {err}");
+    let err = refused(&root, "git tag v1", &["git show v1"]).await;
+    assert!(!err.contains("--repo"), "tag's operand is not a repository: {err}");
+    // The control: info's operand is most likely a repository.
+    refused(&root, "git info /mnt", &["--repo"]).await;
+}
+
+#[tokio::test]
+async fn a_flag_before_the_verb_is_named_as_a_flag() {
+    let (_f, root) = repo();
+    refused(&root, "git --repo /mnt status", &["flags follow the verb"]).await;
+}
+
+#[tokio::test]
+async fn a_bare_git_lists_the_verbs() {
+    let (_f, root) = repo();
+    let err = refused(&root, "git", &["status", "log"]).await;
+    assert!(!err.contains("ToolArgs"), "an agent must not be told about the Rust API: {err}");
+}
+
+/// The binary screen is the one check on a word's type, now that the tool
+/// binds verbatim. A placeholder token would read as a revision.
+#[tokio::test]
+async fn a_binary_word_is_refused() {
+    let (_f, root) = repo();
+    let backend: Arc<dyn KernelBackend> =
+        Arc::new(StrictBackend::single(PathBuf::from("/mnt"), root.clone()));
+    let mut ctx = support::TestCtx::new(backend, "/mnt");
+    let mut args = support::words(&["log"]);
+    args.words
+        .as_mut()
+        .expect("words")
+        .push(kaish_types::Value::Bytes(vec![0xff, 0x00, 0xfe]));
+    let r = tool().execute(args, &mut ctx).await;
+    assert_eq!(r.code, 2, "{}", r.err);
+    assert!(r.err.contains("binary"), "{}", r.err);
+}
