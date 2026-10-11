@@ -1139,6 +1139,21 @@ repository size, not result size.
   worktree list are asserted through the typed table, so an agent-visible
   string in `render.rs` can change with every test green.
 
+## git — from the 2026-10-11 survey (docs/design/git-survey-2026-10.md)
+
+- **Q2 — `git log A..B` is refused with no substitute.** The survey's models typed a
+  range 12 times for "commits on feature/x not on main", and the warm
+  arm, told ranges are unsupported, typed `git log feature/x` — every commit
+  on the branch, silently wrong for the question. Implement git's meaning
+  (walk from B, hide what A reaches, bounded like `--merged`'s walk), or name
+  a substitute in the refusal.
+- **Q3 — `--format`/`--pretty` and `--date`.** 8 cells. Refused with a pointer
+  at `--json`; a `--format` subset (`%H %h %s %an %ae %ad`) would cover most
+  of what models typed. Needs kaish to accept `%` in a word first — check.
+- **Q4 — re-run the survey after these land.** `git-survey-2026-10/` keeps
+  the tasks, responses and fixture; replay `responses.jsonl` through
+  `examples/probe.rs` and compare the bins.
+
 ## git — the embedder boundary
 
 - **G6 — "mount the common dir" may be a wider grant than the git verbs need.**
@@ -1544,12 +1559,6 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   branch, bounded by `--limit`, which the plain listing deliberately avoids
   ("reads no commit at all"). Could be its own flag's cost, the way
   `--ahead-behind` is. `-vv`'s upstream counts are `--ahead-behind` already.
-- **S3 — `git status -s` / `--short` / `--porcelain`.** The text output already
-  *is* git's short format, so under the 2026-10-01 rule these could be
-  accepted. They are refused with a hint that says so, because architecture.md
-  B.2 (Amy, 2026-08-01) decided "no `-s`/`--porcelain`/`--long`" and this round
-  did not revisit it. **Amy's call.** `-b` is a different case: we print no
-  branch line, and `git info` names the branch.
 - **S4 — `git diff A...B`.** Needs a merge base, which `reach.rs` does not
   compute.
 - **S5 — `git diff --cached <rev>` (a revision against the index).** No

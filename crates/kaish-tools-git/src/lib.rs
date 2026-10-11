@@ -139,7 +139,7 @@ pub use error::GitError;
 pub use model::{
     BranchKind, BranchReport, BranchRow, Capabilities, CommitInfo, DiffEndpoint, DiffFile,
     DiffReport, DiffTotals, EntryKind, EntryStatus, Head, LimitsReport, LogReport, LsReport,
-    RefBackend, RepoInfo, ShowTag, ShowTarget, Signature, StatSummary, StatusEntry, StatusReport,
+    RefBackend, RepoInfo, ShowCommit, ShowTag, ShowTarget, Signature, StatSummary, StatusEntry, StatusReport,
     StatusTotals, TagKind, TagReport, TagRow, TreeRow, WorktreeReport, WorktreeRow,
 };
 #[cfg(all(not(target_family = "wasm"), feature = "textdiff"))]

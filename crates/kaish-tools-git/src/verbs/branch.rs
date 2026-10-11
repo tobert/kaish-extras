@@ -54,6 +54,22 @@ pub(crate) struct BranchArgs {
     #[arg(short = 'r', long = "remote", default_value_t = false)]
     pub remote: bool,
 
+    /// List branches, as plain `git branch` does. With patterns after it,
+    /// list only the branches whose name matches one, in git's wildcard
+    /// syntax: `git branch --list 'feat*'`. `*` matches any run of
+    /// characters, `/` included; `?` matches one; `[a-z]` is a class.
+    #[arg(short = 'l', long = "list", default_value_t = false)]
+    pub list: bool,
+
+    /// Print the current branch's name and nothing else; print nothing when
+    /// HEAD is detached.
+    #[arg(
+        long = "show-current",
+        default_value_t = false,
+        conflicts_with_all = ["all", "remote", "list", "contains", "merged", "ahead_behind"]
+    )]
+    pub show_current: bool,
+
     /// Report only branches whose tip has this revision in its history. Costs
     /// a walk of the history behind every candidate branch, before `--limit`
     /// applies; `commits_examined` in `--json` reports what it spent.
@@ -88,9 +104,9 @@ pub(crate) struct BranchArgs {
     #[command(flatten)]
     pub global: GlobalFlags,
 
-    /// Takes no operands: `git branch` lists branches, and narrowing is
-    /// `--contains` or `--merged`. A single branch's history is
-    /// `git log <BRANCH>`.
+    /// Patterns, after `--list`. Without `--list`, `git branch` takes no
+    /// operands: narrowing is `--contains` or `--merged`, and a single
+    /// branch's history is `git log <BRANCH>`.
     // Every operand, in order, on both sides of the caller's `--`: the tool is
     // bound verbatim, so this argv is the caller's own. `tool.rs`'s
     // `operands` splits it at the marker.
@@ -121,6 +137,16 @@ pub(crate) struct BranchOptions {
     pub ahead_behind: bool,
     /// The effective row cap: the smaller of `--limit` and the embedder's cap.
     pub limit: usize,
+    /// `--list` patterns; empty lists every branch.
+    pub patterns: Vec<String>,
+}
+
+/// Whether `name` matches a `--list` pattern the way git matches one: with
+/// git's own wildcard matcher (`gix_glob::wildmatch`, git's `wildmatch.c`),
+/// where `*` crosses `/`, `?` is one character, `[a-z]` is a class, and `\`
+/// escapes.
+pub(crate) fn ref_pattern_matches(pattern: &str, name: &str) -> bool {
+    gix_glob::wildmatch(pattern.into(), name.into(), gix_glob::wildmatch::Mode::empty())
 }
 
 /// Compose the branch listing for `repo` (architecture.md B.7).
@@ -163,6 +189,9 @@ pub(crate) fn run(repo: &ReadRepo, opts: &BranchOptions) -> Result<BranchReport,
             Some(pair) => pair,
             None => continue,
         };
+        if !opts.patterns.is_empty() && !opts.patterns.iter().any(|p| ref_pattern_matches(p, &name)) {
+            continue;
+        }
         let Some(oid) = repo.ref_object(&reference)? else {
             // A symbolic ref whose chain ends at a ref that is not there —
             // `refs/remotes/<r>/HEAD` left behind by a deleted branch. A row
@@ -366,6 +395,23 @@ fn apply_refspec(spec: &str, source: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ref_pattern_star_crosses_slashes_and_question_mark_is_one_char() {
+        assert!(ref_pattern_matches("feat*", "feature/x"));
+        assert!(ref_pattern_matches("*", "origin/main"));
+        assert!(ref_pattern_matches("*/main", "origin/main"));
+        assert!(ref_pattern_matches("v1.?", "v1.2"));
+        assert!(ref_pattern_matches("main", "main"));
+        assert!(ref_pattern_matches("m*n", "main"));
+        assert!(!ref_pattern_matches("v1.?", "v1.23"));
+        assert!(!ref_pattern_matches("main", "maint"));
+        assert!(!ref_pattern_matches("feat*", "docs"));
+        assert!(!ref_pattern_matches("", "main"));
+        assert!(ref_pattern_matches("[a-d]*", "docs"));
+        assert!(!ref_pattern_matches("[a-d]*", "main"));
+        assert!(ref_pattern_matches("v\\*", "v*"));
+    }
 
     #[test]
     fn a_wildcard_refspec_substitutes_the_matched_part() {

@@ -81,6 +81,12 @@ pub(crate) struct StatusArgs {
     #[arg(long = "ignored", default_value_t = false)]
     pub ignored: bool,
 
+    /// Accepted as git spells it. The text output already is git's short
+    /// format — the two `XY` letters, a tab, then the path — so these change
+    /// nothing. `--json` carries the same report as words.
+    #[arg(short = 's', long = "short", visible_alias = "porcelain", default_value_t = false)]
+    pub short: bool,
+
     /// Restrict to paths under these literal paths or simple globs (`*`, `**`,
     /// `?`). Repeatable. Git pathspec magic (`:(exclude)`, `:!`, `:/`) is a
     /// loud usage error, never silently matched.

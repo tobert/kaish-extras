@@ -14,7 +14,91 @@
 
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 
+use crate::config::{GitConfig, Verb};
 use crate::error::GitError;
+
+/// git commands that change a repository. This build has none of them.
+const WRITE_VERBS: &[&str] = &[
+    "add", "am", "apply", "checkout", "cherry-pick", "clean", "clone", "commit", "fetch",
+    "gc", "init", "merge", "mv", "notes", "pull", "push", "rebase", "reset", "restore",
+    "revert", "rm", "sparse-checkout", "stash", "submodule", "switch", "update-index",
+    "update-ref",
+];
+
+/// git read commands this build has no verb for, each with the sentences
+/// that name a verb answering the same question. A sentence is shown only
+/// when every verb it names is enabled ([`runnable`]): an embedder may
+/// subtract any of them.
+const READ_VERBS: &[(&str, &[&str])] = &[
+    (
+        "rev-parse",
+        &[
+            "'git info' reports the repository root and the commit HEAD is on.",
+            "'git log -n 1 --json <rev>' resolves a revision to its full oid.",
+        ],
+    ),
+    (
+        "ls-files",
+        &[
+            "'git ls --recursive' lists every file in HEAD's tree.",
+            "'git status' lists what the index and working tree change against it.",
+        ],
+    ),
+    ("ls-tree", &["'git ls <rev> [<path>]' lists a tree; add --recursive for every file."]),
+    ("blame", &["'git log --path <file>' lists the commits that changed a file, newest first."]),
+    ("cat-file", &["'git show <rev>:<path>' prints a file as it was at a revision."]),
+    ("remote", &["'git branch --remote' lists the remote-tracking branches a fetch left."]),
+    ("describe", &["'git tag --contains <rev>' lists the tags whose history includes a commit."]),
+    ("shortlog", &["'git log --json' carries each commit's author to count."]),
+    ("reflog", &["'git log' walks history from a revision; the reflog is not read."]),
+    ("grep", &["'git ls --recursive' lists the tracked files, and kaish's own grep searches them."]),
+    ("config", &[]),
+    ("whatchanged", &["'git log --stat' counts what each commit changed."]),
+];
+
+/// Whether every `git <verb>` a sentence names is a verb `config` enables. A
+/// next step must work in the build that printed it, so a hint naming a
+/// subtracted verb is not shown.
+pub(crate) fn runnable(sentence: &str, config: &GitConfig) -> bool {
+    sentence.match_indices("git ").all(|(i, _)| {
+        let rest = &sentence[i + 4..];
+        let named = Verb::ALL
+            .iter()
+            .filter(|v| {
+                let word = v.as_str();
+                rest.starts_with(word)
+                    && !rest[word.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '-')
+            })
+            .max_by_key(|v| v.as_str().len());
+        // "this git is read-only" names no verb.
+        named.is_none_or(|v| config.has(*v))
+    })
+}
+
+/// The refusal for a git command this build has no verb for, or `None` when
+/// the word is not a git command it knows.
+pub(crate) fn unsupported_verb(tool: &str, word: &str, config: &GitConfig) -> Option<GitError> {
+    let (mut reason, next): (String, &[&str]) = if WRITE_VERBS.contains(&word) {
+        (
+            "not supported: this git is read-only. It inspects the repository and \
+             never stages, commits, switches or rewrites anything."
+                .to_string(),
+            &["'git status' lists what is changed.", "'git diff' shows each change."],
+        )
+    } else {
+        let (_, next) = READ_VERBS.iter().find(|(name, _)| *name == word)?;
+        ("not supported by this git.".to_string(), next)
+    };
+    for sentence in next.iter().filter(|s| runnable(s, config)) {
+        reason.push(' ');
+        reason.push_str(sentence);
+    }
+    Some(GitError::UnsupportedVerb {
+        tool: tool.to_string(),
+        verb: word.to_string(),
+        reason,
+    })
+}
 
 /// Flags git has that a verb here refuses, with the reason and the next step.
 ///
@@ -86,12 +170,6 @@ const HINTS: &[(&str, &[&str], &str)] = &[
     ),
     (
         "status",
-        &["-s", "--short", "--porcelain"],
-        "The text output already is git's short format: the two XY letters, \
-         then the path. --json carries the same report as words",
-    ),
-    (
-        "status",
         &["-b", "--branch"],
         "This git's status prints no branch line. 'git info' names the branch \
          HEAD is on",
@@ -110,7 +188,12 @@ const HINTS: &[(&str, &[&str], &str)] = &[
 /// when there is one and the verb's own flag list when there is not. Any
 /// other clap error keeps clap's first line, which already names the flag and
 /// the problem, and drops the `Usage:` and `--help` lines after it.
-pub(crate) fn refuse(operation: &'static str, err: &clap::Error, cmd: &clap::Command) -> GitError {
+pub(crate) fn refuse(
+    operation: &'static str,
+    err: &clap::Error,
+    cmd: &clap::Command,
+    config: &GitConfig,
+) -> GitError {
     let message = match err.kind() {
         ErrorKind::UnknownArgument => {
             let arg = match err.get(ContextKind::InvalidArg) {
@@ -119,7 +202,7 @@ pub(crate) fn refuse(operation: &'static str, err: &clap::Error, cmd: &clap::Com
             };
             // `--pretty=oneline` is the flag `--pretty` with a value.
             let flag = arg.split_once('=').map_or(arg.as_str(), |(flag, _)| flag);
-            match hint(operation, flag) {
+            match hint(operation, flag).filter(|next| runnable(next, config)) {
                 Some(next) => format!("{flag} is not supported. {next}"),
                 None => format!(
                     "{flag} is not supported. git {operation} accepts {}. See 'help git'",
@@ -218,7 +301,7 @@ mod tests {
     #[test]
     fn an_unknown_flag_is_refused_as_not_supported_with_its_hint() {
         let err = parse("log", &["--graph"]).expect_err("--graph is refused");
-        let refused = refuse("log", &err, &verbs::log::LogArgs::command()).to_string();
+        let refused = refuse("log", &err, &verbs::log::LogArgs::command(), &GitConfig::read_only()).to_string();
         assert!(refused.starts_with("git log: --graph is not supported. "), "{refused}");
         assert!(refused.contains("--first-parent"), "the hint is carried: {refused}");
         for misleading in ["-- --graph", "Usage:", "--help", "tip:"] {
@@ -232,7 +315,7 @@ mod tests {
     #[test]
     fn an_unhinted_flag_lists_the_verbs_flags() {
         let err = parse("log", &["--frobnicate"]).expect_err("unknown");
-        let refused = refuse("log", &err, &verbs::log::LogArgs::command()).to_string();
+        let refused = refuse("log", &err, &verbs::log::LogArgs::command(), &GitConfig::read_only()).to_string();
         assert!(refused.starts_with("git log: --frobnicate is not supported. git log accepts "), "{refused}");
         assert!(refused.contains("--limit (-n)"), "the list names log's real flags: {refused}");
         assert!(refused.contains("--json"), "the global flags are listed too: {refused}");
@@ -244,7 +327,7 @@ mod tests {
     #[test]
     fn a_flag_with_an_inline_value_finds_its_hint() {
         let err = parse("log", &["--pretty=oneline"]).expect_err("refused");
-        let refused = refuse("log", &err, &verbs::log::LogArgs::command()).to_string();
+        let refused = refuse("log", &err, &verbs::log::LogArgs::command(), &GitConfig::read_only()).to_string();
         assert!(refused.starts_with("git log: --pretty is not supported. "), "{refused}");
         assert!(refused.contains("--oneline"), "{refused}");
     }
@@ -254,7 +337,7 @@ mod tests {
     #[test]
     fn a_numeric_flag_is_refused_with_the_n_spelling() {
         let err = parse("log", &["-5"]).expect_err("refused");
-        let refused = refuse("log", &err, &verbs::log::LogArgs::command()).to_string();
+        let refused = refuse("log", &err, &verbs::log::LogArgs::command(), &GitConfig::read_only()).to_string();
         assert!(refused.contains("Write the count as '-n 5'"), "{refused}");
     }
 
@@ -263,7 +346,7 @@ mod tests {
     #[test]
     fn another_clap_error_keeps_its_first_line_only() {
         let err = parse("log", &["--merges", "--no-merges"]).expect_err("conflict");
-        let refused = refuse("log", &err, &verbs::log::LogArgs::command()).to_string();
+        let refused = refuse("log", &err, &verbs::log::LogArgs::command(), &GitConfig::read_only()).to_string();
         assert!(refused.contains("--merges"), "{refused}");
         assert!(refused.contains("--no-merges"), "{refused}");
         assert!(refused.ends_with("See 'help git'"), "{refused}");
