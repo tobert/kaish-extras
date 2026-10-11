@@ -22,7 +22,7 @@ use gix_odb::HeaderExt;
 use kaish_tool_api::GlobalFlags;
 
 use crate::error::GitError;
-use crate::model::{CommitInfo, EntryKind, LsReport, ShowTag, ShowTarget, TreeRow};
+use crate::model::{CommitInfo, EntryKind, LsReport, ShowCommit, ShowTag, ShowTarget, TreeRow};
 use crate::repo::ReadRepo;
 use crate::treewalk::{self, TreeTarget};
 use crate::verbs::log;
@@ -93,7 +93,7 @@ pub(crate) struct ShowOptions {
 /// reason (see its doc comment).
 pub(crate) enum ShowOutcome {
     /// The revision named a commit.
-    Commit(CommitInfo),
+    Commit(ShowCommit),
     /// The revision named an annotated tag.
     Tag(ShowTag),
     /// The revision (or `<rev>:<path>`) named a tree.
@@ -170,7 +170,10 @@ pub(crate) fn run(repo: &ReadRepo, opts: &ShowOptions) -> Result<ShowOutcome, Gi
         .map_err(|e| GitError::repository(OP, "reading an object header", repo.git_dir(), e))?
         .kind();
     match kind {
-        gix_object::Kind::Commit => Ok(ShowOutcome::Commit(build_commit_info(repo, OP, object)?)),
+        gix_object::Kind::Commit => {
+            let commit = build_commit_info(repo, OP, object)?;
+            Ok(ShowOutcome::Commit(with_files(repo, OP, object, commit, opts)?))
+        }
         gix_object::Kind::Tag => Ok(ShowOutcome::Tag(build_show_tag(repo, OP, object, opts.limit, 0)?)),
         gix_object::Kind::Tree => {
             let mut entries = Vec::new();
@@ -229,6 +232,39 @@ fn build_commit_info(repo: &ReadRepo, op: &'static str, oid: ObjectId) -> Result
         summary,
         body: Some(body),
         stat: None,
+    })
+}
+
+/// Attach what `commit` changed against its one parent (or the empty tree,
+/// for a root commit). A merge gets no list — see [`ShowCommit::files`].
+fn with_files(
+    repo: &ReadRepo,
+    op: &'static str,
+    oid: ObjectId,
+    commit: CommitInfo,
+    opts: &ShowOptions,
+) -> Result<ShowCommit, GitError> {
+    let parent_tree = match commit.parents.as_slice() {
+        [] => None,
+        [parent] => {
+            let parent_oid = parse_oid(op, repo, parent)?;
+            Some(repo.tree_of_object(parent_oid, parent)?)
+        }
+        _ => {
+            return Ok(ShowCommit {
+                commit,
+                files: None,
+                files_truncated: false,
+            })
+        }
+    };
+    let tree = repo.tree_of_object(oid, &commit.oid)?;
+    let (files, files_truncated) =
+        crate::verbs::diff::commit_files(repo, tree, parent_tree, opts.limit, opts.max_blob_bytes)?;
+    Ok(ShowCommit {
+        commit,
+        files: Some(files),
+        files_truncated,
     })
 }
 

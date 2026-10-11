@@ -399,8 +399,10 @@ we spell it out. The clarity pressure that argued for words is relieved by the
 `--json` variants instead — `git status --json`, `git diff --json --staged`
 carry self-describing key names and word-valued fields, so scripts get clarity
 while prompts get trained-in muscle memory. **One shape per surface**: letters
-in text, words in JSON, and no `--porcelain` flag matrix — there is no
-`-s`/`--porcelain`/`--long`. Renames are first-class (`orig_path`) and
+in text, words in JSON, and no `--porcelain` flag matrix. `-s`, `--short`
+and `--porcelain` are accepted as git's names for that one text shape, which
+they select and do not change (Amy, 2026-10-11, after 7 of 11 survey runs
+typed `status -s`); there is no `--long` and no porcelain v2. Renames are first-class (`orig_path`) and
 conflicts are a boolean, both of which v1's hand-rolled renderer got wrong.
 
 Table rendering: the `XY` pair, then `PATH` (+ `← ORIG` on renames). An

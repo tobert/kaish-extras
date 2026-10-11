@@ -41,6 +41,12 @@ pub(crate) struct TagArgs {
     #[arg(long = "contains", value_name = "REV")]
     pub contains: Option<String>,
 
+    /// List tags, as plain `git tag` does. With patterns after it, list only
+    /// the tags whose name matches one: `git tag --list 'v1.*'`. `*` matches
+    /// any run of characters, `/` included, and `?` matches one.
+    #[arg(short = 'l', long = "list", default_value_t = false)]
+    pub list: bool,
+
     /// Maximum tags to report. Truncation is always reported (`truncated:
     /// true` and a stderr note), never silent. It bounds the rows, not the
     /// history `--contains` reads.
@@ -55,9 +61,9 @@ pub(crate) struct TagArgs {
     #[command(flatten)]
     pub global: GlobalFlags,
 
-    /// Takes no operands: `git tag` lists every tag, and narrowing is
-    /// `git tag --contains <REV>`. A single tag's own metadata is
-    /// `git show <TAG>`.
+    /// Patterns, after `--list`. Without `--list`, `git tag` takes no
+    /// operands: narrowing is `git tag --contains <REV>`, and a single tag's
+    /// own metadata is `git show <TAG>`.
     // Every operand, in order, on both sides of the caller's `--`: the tool is
     // bound verbatim, so this argv is the caller's own. `tool.rs`'s
     // `operands` splits it at the marker.
@@ -71,6 +77,8 @@ pub(crate) struct TagOptions {
     pub contains: Option<String>,
     /// The effective row cap: the smaller of `--limit` and the embedder's cap.
     pub limit: usize,
+    /// `--list` patterns; empty lists every tag.
+    pub patterns: Vec<String>,
 }
 
 /// Compose the tag listing for `repo` (architecture.md B.7).
@@ -100,6 +108,14 @@ pub(crate) fn run(repo: &ReadRepo, opts: &TagOptions) -> Result<TagReport, GitEr
         let Some(name) = full.strip_prefix(TAGS) else {
             continue;
         };
+        if !opts.patterns.is_empty()
+            && !opts
+                .patterns
+                .iter()
+                .any(|p| crate::verbs::branch::ref_pattern_matches(p, name))
+        {
+            continue;
+        }
         let Some(oid) = repo.ref_object(&reference)? else {
             // A tag ref whose symbolic chain ends nowhere. Nothing git writes,
             // and a row naming no object would be a row about nothing.

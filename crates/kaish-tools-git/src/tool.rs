@@ -8,7 +8,7 @@ use clap::{CommandFactory, Parser};
 
 use kaish_tool_api::{schema_tree_from_clap, Tool, ToolCtx};
 use kaish_types::backend::MountInfo;
-use kaish_types::{ExecResult, ToolArgs, ToolSchema, Value};
+use kaish_types::{ExecResult, OutputData, ToolArgs, ToolSchema, Value};
 
 use crate::config::{ConfigError, GitConfig, Verb};
 use crate::error::GitError;
@@ -579,8 +579,23 @@ impl GitTool {
         // `tag_kind`) or, for the blob form, the fact that there is no
         // structure to tag at all.
         let (mut result, kind) = match outcome {
-            verbs::show::ShowOutcome::Commit(commit) => {
-                (ExecResult::with_output(crate::render::show_commit(&commit)), "commit")
+            verbs::show::ShowOutcome::Commit(show) => {
+                let mut r = ExecResult::with_output(crate::render::show_commit(&show));
+                if show.files.is_none() {
+                    r.err = format!(
+                        "git show: {} is a merge, so its files are not listed. \
+                         'git diff --from \"{}^1\" --to {}' lists what it changed \
+                         against its first parent",
+                        show.commit.short_oid, show.commit.short_oid, show.commit.short_oid
+                    );
+                } else if show.files_truncated {
+                    r.err = format!(
+                        "git show: file list truncated at {} files (--limit); \
+                         'files_truncated' is true in --json",
+                        show.files.as_ref().map_or(0, Vec::len)
+                    );
+                }
+                (r, "commit")
             }
             verbs::show::ShowOutcome::Tag(tag) => {
                 (ExecResult::with_output(crate::render::show_tag(&tag)), "tag")
@@ -954,8 +969,12 @@ impl GitTool {
         };
         parsed.global.apply(ctx);
 
-        if let Err(e) = no_operands(OP, &operands(&parsed.operands, argv)) {
-            return failure(e);
+        // After `--list`, operands are name patterns; otherwise there are none.
+        let patterns = operands(&parsed.operands, argv).all();
+        if !parsed.list {
+            if let Err(e) = no_operands(OP, &operands(&parsed.operands, argv)) {
+                return failure(e);
+            }
         }
 
         let resolved = match resolve_repo_paths(OP, ctx, parsed.repo.as_deref()) {
@@ -963,6 +982,23 @@ impl GitTool {
             Err(e) => return failure(e),
         };
         tracing::Span::current().record("repo", tracing::field::display(resolved.real.display()));
+
+        if parsed.show_current {
+            let head = block_in_place_compat(move || {
+                let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
+                repo.head()
+            });
+            return match head {
+                // git prints the name alone, and nothing for a detached HEAD.
+                Ok(head) => {
+                    let text = head.branch.as_ref().map(|b| format!("{b}\n")).unwrap_or_default();
+                    ExecResult::with_output(
+                        OutputData::text(text).with_rich_json(serde_json::json!({ "branch": head.branch })),
+                    )
+                }
+                Err(e) => failure(e),
+            };
+        }
 
         // clap's `conflicts_with` refuses `--all --remote`, so the pair is
         // unreachable and the default is the local namespace alone.
@@ -985,6 +1021,7 @@ impl GitTool {
                 merged,
                 ahead_behind,
                 limit,
+                patterns,
             };
             let root = repo.root().display().to_string();
             verbs::branch::run(&repo, &opts).map(|model| (model, root))
@@ -1025,8 +1062,12 @@ impl GitTool {
         };
         parsed.global.apply(ctx);
 
-        if let Err(e) = no_operands(OP, &operands(&parsed.operands, argv)) {
-            return failure(e);
+        // After `--list`, operands are name patterns; otherwise there are none.
+        let patterns = operands(&parsed.operands, argv).all();
+        if !parsed.list {
+            if let Err(e) = no_operands(OP, &operands(&parsed.operands, argv)) {
+                return failure(e);
+            }
         }
 
         let resolved = match resolve_repo_paths(OP, ctx, parsed.repo.as_deref()) {
@@ -1040,7 +1081,11 @@ impl GitTool {
 
         let outcome = block_in_place_compat(move || {
             let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
-            let opts = verbs::tag::TagOptions { contains, limit };
+            let opts = verbs::tag::TagOptions {
+                contains,
+                limit,
+                patterns,
+            };
             let root = repo.root().display().to_string();
             verbs::tag::run(&repo, &opts).map(|model| (model, root))
         });
@@ -1316,9 +1361,24 @@ impl Tool for GitTool {
 
         let (verb, consumed) = match route(&schema, &argv) {
             Ok(r) => r,
-            Err(e) => return failure(e),
+            Err(e) => {
+                // A git command this build lacks gets its own refusal: why,
+                // and what to type instead.
+                let known = argv.first().and_then(|word| {
+                    crate::spelling::unsupported_verb(&schema.name, word, |v| self.config.has(v))
+                });
+                return failure(known.unwrap_or(e));
+            }
         };
         let leaf = &argv[consumed..];
+
+        // `git <verb> --help` answers from the schema, before the verb's own
+        // parser sees the flag. clap's help would print the argument struct's
+        // design notes, and `help git` is the published text.
+        let options = leaf.iter().take_while(|w| *w != "--");
+        if options.into_iter().any(|w| w == "--help" || w == "-h") {
+            return verb_help(&schema, &verb);
+        }
 
         match verb.as_str() {
             "info" => self.run_info(leaf, ctx).await,
@@ -1544,6 +1604,62 @@ fn route(schema: &ToolSchema, words: &[String]) -> Result<(String, usize), GitEr
     }
 
     Ok((path.join(" "), consumed))
+}
+
+/// `git <verb> --help`: the verb's description, flags and examples, read
+/// from the same schema `help git` renders.
+fn verb_help(schema: &ToolSchema, verb: &str) -> ExecResult {
+    let mut node = schema;
+    for word in verb.split(' ') {
+        match node.subcommands.iter().find(|c| c.name == word) {
+            Some(child) => node = child,
+            // `route` produced this path from this schema.
+            None => unreachable!("routed verb {verb:?} is not in the schema"),
+        }
+    }
+    let mut out = format!("{} {verb} — {}\n", schema.name, node.description);
+    let flags: Vec<_> = node
+        .params
+        .iter()
+        .filter(|p| !p.positional)
+        .collect();
+    if !flags.is_empty() {
+        out.push_str("\nFlags:\n");
+        for p in flags {
+            let mut spelling = format!("--{}", p.name);
+            for alias in &p.aliases {
+                let alias = alias.trim_start_matches('-');
+                // The schema also carries the name's underscore spelling
+                // (`no_merges`); it is the same flag, not one to teach.
+                if alias.replace('_', "-") == p.name {
+                    continue;
+                }
+                if alias.chars().count() == 1 {
+                    spelling.push_str(&format!(", -{alias}"));
+                } else {
+                    spelling.push_str(&format!(", --{alias}"));
+                }
+            }
+            if p.param_type != "bool" {
+                spelling.push_str(" <VALUE>");
+            }
+            out.push_str(&format!("  {spelling}\n      {}\n", p.description));
+        }
+    }
+    let prefix = format!("{} {verb}", schema.name);
+    let examples: Vec<_> = schema
+        .examples
+        .iter()
+        .filter(|e| e.code == prefix || e.code.starts_with(&format!("{prefix} ")))
+        .collect();
+    if !examples.is_empty() {
+        out.push_str("\nExamples:\n");
+        for e in examples {
+            out.push_str(&format!("  {}\n      {}\n", e.code, e.description));
+        }
+    }
+    out.push_str(&format!("\nSee 'help {}' for every verb.\n", schema.name));
+    ExecResult::with_output(OutputData::text(out))
 }
 
 /// Parse the leaf's own argv — the words after the verb — with its flat clap

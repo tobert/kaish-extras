@@ -422,6 +422,37 @@ fn prepare(repo: &ReadRepo, opts: &DiffOptions) -> Result<Prepared, GitError> {
     })
 }
 
+/// Every path a commit's tree changed against `parent_tree` — the empty tree
+/// for a root commit — as `git show --name-status` lists them: exact renames
+/// paired, line counts within `max_blob_bytes`, at most `limit` files. The
+/// bool is whether the list stopped at `limit`.
+pub(crate) fn commit_files(
+    repo: &ReadRepo,
+    commit_tree: ObjectId,
+    parent_tree: Option<ObjectId>,
+    limit: usize,
+    max_blob_bytes: u64,
+) -> Result<(Vec<DiffFile>, bool), GitError> {
+    let filter = PathFilter::parse("show", &[])?;
+    let old = SideMap::objects(tree_side(repo, parent_tree, &filter)?);
+    let new = SideMap::objects(tree_side(repo, Some(commit_tree), &filter)?);
+    let opts = DiffOptions {
+        // `compare` reads no endpoint; both sides are already built above.
+        endpoints: Endpoints::RevToRev {
+            from: String::new(),
+            to: String::new(),
+        },
+        paths: Vec::new(),
+        name_only: false,
+        find_renames: true,
+        limit,
+        max_blob_bytes,
+        #[cfg(feature = "textdiff")]
+        hunks: None,
+    };
+    compare(repo, &opts, &old, &new)
+}
+
 /// State both ends the way the result will report them — the revision
 /// verbatim as the caller spelled it, beside the oid it resolved to.
 fn describe_endpoints(

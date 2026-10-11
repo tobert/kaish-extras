@@ -368,6 +368,23 @@ pub struct CommitInfo {
     pub stat: Option<StatSummary>,
 }
 
+/// `git show <commit>`: the commit, and the files it changed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct ShowCommit {
+    /// The commit itself, flattened: `git show --json` keeps every
+    /// [`CommitInfo`] field at the top level.
+    #[serde(flatten)]
+    pub commit: CommitInfo,
+    /// What the commit changed against its parent — the empty tree for a
+    /// root commit — as `git show --name-status` lists it. `None` for a
+    /// merge: git shows a merge as a combined diff, which this build does not
+    /// compute, and listing against one parent would name only that side.
+    pub files: Option<Vec<DiffFile>>,
+    /// Whether `files` stopped at the row cap.
+    pub files_truncated: bool,
+}
+
 /// `git log`'s result (architecture.md B.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LogReport {

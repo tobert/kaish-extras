@@ -54,6 +54,22 @@ pub(crate) struct BranchArgs {
     #[arg(short = 'r', long = "remote", default_value_t = false)]
     pub remote: bool,
 
+    /// List branches, as plain `git branch` does. With patterns after it,
+    /// list only the branches whose name matches one: `git branch --list
+    /// 'feat*'`. `*` matches any run of characters, `/` included, and `?`
+    /// matches one.
+    #[arg(short = 'l', long = "list", default_value_t = false)]
+    pub list: bool,
+
+    /// Print the current branch's name and nothing else; print nothing when
+    /// HEAD is detached.
+    #[arg(
+        long = "show-current",
+        default_value_t = false,
+        conflicts_with_all = ["all", "remote", "list", "contains", "merged", "ahead_behind"]
+    )]
+    pub show_current: bool,
+
     /// Report only branches whose tip has this revision in its history. Costs
     /// a walk of the history behind every candidate branch, before `--limit`
     /// applies; `commits_examined` in `--json` reports what it spent.
@@ -88,9 +104,9 @@ pub(crate) struct BranchArgs {
     #[command(flatten)]
     pub global: GlobalFlags,
 
-    /// Takes no operands: `git branch` lists branches, and narrowing is
-    /// `--contains` or `--merged`. A single branch's history is
-    /// `git log <BRANCH>`.
+    /// Patterns, after `--list`. Without `--list`, `git branch` takes no
+    /// operands: narrowing is `--contains` or `--merged`, and a single
+    /// branch's history is `git log <BRANCH>`.
     // Every operand, in order, on both sides of the caller's `--`: the tool is
     // bound verbatim, so this argv is the caller's own. `tool.rs`'s
     // `operands` splits it at the marker.
@@ -121,6 +137,35 @@ pub(crate) struct BranchOptions {
     pub ahead_behind: bool,
     /// The effective row cap: the smaller of `--limit` and the embedder's cap.
     pub limit: usize,
+    /// `--list` patterns; empty lists every branch.
+    pub patterns: Vec<String>,
+}
+
+/// Whether `name` matches a `--list` pattern the way git matches one: `*`
+/// is any run of characters, `/` included, and `?` is one character.
+/// Everything else is literal.
+pub(crate) fn ref_pattern_matches(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    let (mut pi, mut ni) = (0, 0);
+    // The last `*` seen, and the name position it was tried at.
+    let mut star: Option<(usize, usize)> = None;
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some((pi, ni));
+            pi += 1;
+        } else if let Some((sp, sn)) = star {
+            pi = sp + 1;
+            ni = sn + 1;
+            star = Some((sp, sn + 1));
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == '*')
 }
 
 /// Compose the branch listing for `repo` (architecture.md B.7).
@@ -163,6 +208,9 @@ pub(crate) fn run(repo: &ReadRepo, opts: &BranchOptions) -> Result<BranchReport,
             Some(pair) => pair,
             None => continue,
         };
+        if !opts.patterns.is_empty() && !opts.patterns.iter().any(|p| ref_pattern_matches(p, &name)) {
+            continue;
+        }
         let Some(oid) = repo.ref_object(&reference)? else {
             // A symbolic ref whose chain ends at a ref that is not there —
             // `refs/remotes/<r>/HEAD` left behind by a deleted branch. A row
@@ -366,6 +414,20 @@ fn apply_refspec(spec: &str, source: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ref_pattern_star_crosses_slashes_and_question_mark_is_one_char() {
+        assert!(ref_pattern_matches("feat*", "feature/x"));
+        assert!(ref_pattern_matches("*", "origin/main"));
+        assert!(ref_pattern_matches("*/main", "origin/main"));
+        assert!(ref_pattern_matches("v1.?", "v1.2"));
+        assert!(ref_pattern_matches("main", "main"));
+        assert!(ref_pattern_matches("m*n", "main"));
+        assert!(!ref_pattern_matches("v1.?", "v1.23"));
+        assert!(!ref_pattern_matches("main", "maint"));
+        assert!(!ref_pattern_matches("feat*", "docs"));
+        assert!(!ref_pattern_matches("", "main"));
+    }
 
     #[test]
     fn a_wildcard_refspec_substitutes_the_matched_part() {

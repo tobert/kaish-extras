@@ -14,7 +14,100 @@
 
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 
+use crate::config::Verb;
 use crate::error::GitError;
+
+/// git commands that change a repository. This build has none of them.
+const WRITE_VERBS: &[&str] = &[
+    "add", "am", "apply", "checkout", "cherry-pick", "clean", "clone", "commit", "fetch",
+    "gc", "init", "merge", "mv", "notes", "pull", "push", "rebase", "reset", "restore",
+    "revert", "rm", "sparse-checkout", "stash", "submodule", "switch", "update-index",
+    "update-ref",
+];
+
+/// git read commands this build has no verb for, each with the sentences
+/// that name the verb answering the same question. A sentence is shown only
+/// when its verb is enabled: an embedder may subtract any of them.
+const READ_VERBS: &[(&str, &[(Verb, &str)])] = &[
+    (
+        "rev-parse",
+        &[
+            (Verb::Info, "'git info' reports the repository root and the commit HEAD is on."),
+            (Verb::Log, "'git log -n 1 --json <rev>' resolves a revision to its full oid."),
+        ],
+    ),
+    (
+        "ls-files",
+        &[(
+            Verb::Ls,
+            "'git ls --recursive' lists every file in HEAD's tree; 'git status' lists \
+             what the index and working tree change against it.",
+        )],
+    ),
+    (
+        "ls-tree",
+        &[(Verb::Ls, "'git ls <rev> [<path>]' lists a tree; add --recursive for every file.")],
+    ),
+    (
+        "blame",
+        &[(Verb::Log, "'git log --path <file>' lists the commits that changed a file, newest first.")],
+    ),
+    (
+        "cat-file",
+        &[(Verb::Show, "'git show <rev>:<path>' prints a file as it was at a revision.")],
+    ),
+    (
+        "remote",
+        &[(Verb::Branch, "'git branch --remote' lists the remote-tracking branches a fetch left.")],
+    ),
+    (
+        "describe",
+        &[(Verb::Tag, "'git tag --contains <rev>' lists the tags whose history includes a commit.")],
+    ),
+    (
+        "shortlog",
+        &[(Verb::Log, "'git log --json' carries each commit's author to count.")],
+    ),
+    (
+        "reflog",
+        &[(Verb::Log, "'git log' walks history from a revision; the reflog is not read.")],
+    ),
+    (
+        "grep",
+        &[(Verb::Ls, "'git ls --recursive' lists the tracked files, and kaish's own grep searches them.")],
+    ),
+    ("config", &[]),
+    ("whatchanged", &[(Verb::Log, "'git log --stat' counts what each commit changed.")]),
+];
+
+/// The refusal for a git command this build has no verb for, or `None` when
+/// the word is not a git command it knows.
+pub(crate) fn unsupported_verb(tool: &str, word: &str, has: impl Fn(Verb) -> bool) -> Option<GitError> {
+    let reason = if WRITE_VERBS.contains(&word) {
+        let mut reason = "not supported: this git is read-only. It inspects the repository \
+                          and never stages, commits, switches or rewrites anything."
+            .to_string();
+        if has(Verb::Status) {
+            reason.push_str(" 'git status' and 'git diff' show what is changed.");
+        }
+        reason
+    } else {
+        let (_, next) = READ_VERBS.iter().find(|(name, _)| *name == word)?;
+        let mut reason = "not supported by this git.".to_string();
+        for (verb, sentence) in next.iter() {
+            if has(*verb) {
+                reason.push(' ');
+                reason.push_str(sentence);
+            }
+        }
+        reason
+    };
+    Some(GitError::UnsupportedVerb {
+        tool: tool.to_string(),
+        verb: word.to_string(),
+        reason,
+    })
+}
 
 /// Flags git has that a verb here refuses, with the reason and the next step.
 ///
@@ -83,12 +176,6 @@ const HINTS: &[(&str, &[&str], &str)] = &[
         "tag",
         &["-d", "--delete", "-a", "--annotate", "-m", "--message", "-s", "--sign", "-f", "--force"],
         "This git is read-only: it lists tags and never creates or deletes one",
-    ),
-    (
-        "status",
-        &["-s", "--short", "--porcelain"],
-        "The text output already is git's short format: the two XY letters, \
-         then the path. --json carries the same report as words",
     ),
     (
         "status",

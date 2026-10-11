@@ -9,8 +9,8 @@
 use kaish_types::{OutputData, OutputNode};
 
 use crate::model::{
-    BranchReport, CommitInfo, DiffEndpoint, DiffFile, DiffReport, EntryStatus, LogReport, LsReport,
-    RepoInfo, ShowTag, StatusReport, TagKind, TagReport, TreeRow, WorktreeReport,
+    BranchReport, DiffEndpoint, DiffFile, DiffReport, EntryStatus, LogReport, LsReport,
+    RepoInfo, ShowCommit, ShowTag, StatusReport, TagKind, TagReport, TreeRow, WorktreeReport,
 };
 
 /// Render [`RepoInfo`] as a `FIELD`/`VALUE` table carrying the full object as
@@ -291,9 +291,10 @@ pub fn show_gitlink(entry: &TreeRow) -> OutputData {
 
 /// Render a commit reached through `git show` — the same `FIELD`/`VALUE`
 /// shape [`repo_info`] uses, tagged `"kind": "commit"`.
-pub fn show_commit(commit: &CommitInfo) -> OutputData {
+pub fn show_commit(show: &ShowCommit) -> OutputData {
+    let commit = &show.commit;
     let row = |field: &str, value: String| OutputNode::new(field).with_cells(vec![value]);
-    let rows = vec![
+    let mut rows = vec![
         row("oid", commit.oid.clone()),
         row("parents", commit.parents.join(", ")),
         row(
@@ -310,8 +311,23 @@ pub fn show_commit(commit: &CommitInfo) -> OutputData {
         row("summary", commit.summary.clone()),
         row("body", commit.body.clone().unwrap_or_default()),
     ];
+    // Then what the commit changed, one row per file in `--name-status`'s
+    // letters: `M  src/lib.rs`, `R100  old -> new`.
+    match &show.files {
+        Some(files) => {
+            rows.push(row("files", files.len().to_string()));
+            for file in files {
+                let path = match &file.old_path {
+                    Some(old) => format!("{old} -> {}", file.path),
+                    None => file.path.clone(),
+                };
+                rows.push(row(&diff_letter(file), path));
+            }
+        }
+        None => rows.push(row("files", "not listed for a merge".to_string())),
+    }
     let table = OutputData::table(vec!["FIELD".to_string(), "VALUE".to_string()], rows);
-    match serde_json::to_value(commit) {
+    match serde_json::to_value(show) {
         Ok(json) => table.with_rich_json(tag_kind(json, "commit")),
         Err(e) => {
             tracing::warn!(error = %e, "git show: could not build the --json payload");

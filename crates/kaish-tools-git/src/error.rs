@@ -59,6 +59,20 @@ pub enum GitError {
         available: String,
     },
 
+    /// The verb word is a git command this build does not have — a write
+    /// command, or a read command another verb here answers. Unlike
+    /// [`GitError::NoVerb`], the word is known, so the message says why it
+    /// is refused and what to type instead.
+    #[error("{tool} {verb}: {reason}")]
+    UnsupportedVerb {
+        /// The name this tool is registered under.
+        tool: String,
+        /// The git command the caller typed.
+        verb: String,
+        /// Why it is refused, then the next step when this build has one.
+        reason: String,
+    },
+
     /// A repository inside the mount points at a directory outside it, and
     /// that directory is one we would have had to read. Exit 4.
     ///
@@ -631,6 +645,7 @@ impl GitError {
             | GitError::NoSuchPath { .. } => 1,
             GitError::Usage { .. }
             | GitError::NoVerb { .. }
+            | GitError::UnsupportedVerb { .. }
             | GitError::PathspecMagic { .. }
             | GitError::UnsupportedRevspec { .. } => 2,
             GitError::NotRealPath { .. }
@@ -688,6 +703,11 @@ mod tests {
                 tool: "git".into(),
                 got: "none was given".into(),
                 available: "info".into(),
+            },
+            GitError::UnsupportedVerb {
+                tool: "git".into(),
+                verb: "commit".into(),
+                reason: "read-only".into(),
             },
             GitError::NotRealPath {
                 operation: "info",

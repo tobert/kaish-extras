@@ -116,7 +116,19 @@ give: `-a`/`-r` on `branch`, `--cached` and two-revision operands on `diff`,
 `--oneline` on `log`, and `-p` for `--patch` on `diff`. A flag that asks for
 something this build does not compute (`--graph`, `--decorate`, `log --all`) is refused, and the refusal
 says it is not supported and what to type instead. Never accepted and ignored:
-a flag that changes nothing reads as a flag that worked.
+a flag that changes nothing reads as a flag that worked. A flag that asks for
+what this build already prints is honored, not ignored: `status -s` asks for
+git's short format, and the text output is that format.
+
+The 2026-10-11 survey (`docs/design/git-survey-2026-10.md`) added
+`status -s`/`--short`/`--porcelain`, `branch --show-current`,
+`branch --list`/`tag --list` with `*`/`?` patterns, a file list on
+`git show <commit>` (git's `--name-status`; none for a merge, with the
+command that answers it on stderr), and `git <verb> --help` answered from the
+schema. A git command this build has no verb for is refused by name: a write
+command says this git is read-only, and a read command (`rev-parse`,
+`ls-files`, `blame`, `cat-file`, …) names the enabled verb that answers the
+same question.
 
 ### 2. Read-only as a real, enforceable mode
 
