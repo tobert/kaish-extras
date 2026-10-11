@@ -1141,11 +1141,6 @@ repository size, not result size.
 
 ## git — from the 2026-10-11 survey (docs/design/git-survey-2026-10.md)
 
-- **Q1 — `git ls` ignores the cwd.** From `crates/`, `git ls` lists the
-  repository root; git's `ls-tree HEAD` from the same directory lists
-  `crates/`. Exit 0 with a different answer. `status`, `log` and `diff`
-  already prefix pathspecs with the cwd (`cwd_prefix`); `ls`'s default path
-  should be the cwd's, and an explicit path cwd-relative.
 - **Q2 — `git log A..B` is refused with no substitute.** The survey's models typed a
   range 12 times for "commits on feature/x not on main", and the warm
   arm, told ranges are unsupported, typed `git log feature/x` — every commit

@@ -450,7 +450,12 @@ pub(crate) fn commit_files(
         #[cfg(feature = "textdiff")]
         hunks: None,
     };
-    compare(repo, &opts, &old, &new)
+    let (rows, truncated) = compare(&opts, &old, &new);
+    let mut files = Vec::with_capacity(rows.len());
+    for row in rows {
+        files.push(finish(repo, &opts, &old, &new, row)?);
+    }
+    Ok((files, truncated))
 }
 
 /// State both ends the way the result will report them — the revision
