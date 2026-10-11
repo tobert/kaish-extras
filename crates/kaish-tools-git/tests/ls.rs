@@ -359,3 +359,38 @@ async fn a_noncanonical_tree_mode_prints_the_mode_git_ls_tree_prints() {
         "git prints 100644 for this entry, and so do we: {ours:?}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The cwd, as git's ls-tree reads it (survey item Q1)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// From a subdirectory, `git ls` lists that directory, as git's `ls-tree
+/// HEAD` does from there. It used to list the repository root: exit 0, the
+/// wrong directory.
+#[tokio::test]
+async fn bare_ls_from_a_subdirectory_lists_that_directory() {
+    let repo = TreeRepo::build();
+    let result = ls(&repo.scratch(), "/mnt/repo/src", &["--json"]).await;
+    let want = git_ls_tree(&repo.root, "HEAD", Some("src/"), false);
+    assert!(!want.is_empty(), "negative control: src/ has entries");
+    assert_eq!(rows(&result), want);
+}
+
+/// A path operand is read from the cwd, `..` included.
+#[tokio::test]
+async fn a_path_operand_is_relative_to_the_cwd() {
+    let repo = TreeRepo::build();
+    let nested = ls(&repo.scratch(), "/mnt/repo/src", &["HEAD", "nested", "--json"]).await;
+    assert_eq!(rows(&nested), git_ls_tree(&repo.root, "HEAD", Some("src/nested/"), false));
+    let up = ls(&repo.scratch(), "/mnt/repo/src", &["HEAD", "..", "--json"]).await;
+    assert_eq!(rows(&up), git_ls_tree(&repo.root, "HEAD", None, false));
+}
+
+/// `<rev>:<path>` names a path from the repository root wherever the caller
+/// stands, as git's does.
+#[tokio::test]
+async fn a_colon_path_stays_root_relative() {
+    let repo = TreeRepo::build();
+    let result = ls(&repo.scratch(), "/mnt/repo/src", &["HEAD:src", "--json"]).await;
+    assert_eq!(rows(&result), git_ls_tree(&repo.root, "HEAD", Some("src/"), false));
+}
