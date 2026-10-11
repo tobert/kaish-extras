@@ -1427,6 +1427,11 @@ we owe other people, or things they do better than us.
   of an open-ended wait, because it is an event both sides can observe. By then
   they will know whether the work laptop — the only place a corporate
   TLS-inspecting CA would appear — is actually in play.
+- **X6 — curl has no substitution test.** git's canary and
+  `tests/patch_renderer.rs` pin that `$(git …)` binds text while `.data` is
+  set; curl sets `.data` on every response and nothing pins `$(curl …)`.
+  Adding `with_typed_substitution()` to curl's schema would flip it to the
+  JSON value with the suite green. Copy git's kernel-driven check.
 
 ## kaish-tools-image — a proposed third tool crate
 
@@ -1536,26 +1541,6 @@ the live OpenAPI spec; ask for it when this starts.
   the next reader does not re-derive it.
 
 ## kaish — found by Terminal-Bench (2026-10-01)
-
-- **K3 — kaish refuses `~` and `^` inside an unquoted word, so git's revision
-  suffixes need quoting.** Measured through a real `Kernel::execute` on
-  kaish-kernel 0.17.2: `git log HEAD~1`, `git diff --from HEAD~1 --to HEAD`
-  and even `echo a~b` fail at parse time with "adjacent words with no space
-  between them are not joined into one argument"; `git log -n 1 HEAD^` fails
-  with "lexer error: unexpected character". `'HEAD~1'` and `"HEAD~1"` parse.
-  kaish-f2 confirmed it is not a regression: the lexer has never had `~` in
-  its word characters, and before v0.8.2 it silently split `HEAD~1` into two
-  arguments. The fix is on kaish's `fix/lexer-word-chars`, targeted at 0.18.0
-  (bash's rule: tilde expansion only at the start of a word or after `=`/`:`
-  in an assignment).
-
-  Our tests never saw it because they call `Tool::execute` directly and skip
-  the parser. Until our consumers (kaijutsu, kaibo) are on a kaish that
-  parses these words, every example, argument doc and refusal hint quotes a
-  revision with `~` or `^` in it. `tests/spellings.rs` parses every command
-  the tool publishes with kaish's own parser, and carries a canary that goes
-  red when an unquoted `HEAD~1` starts to parse — that is the signal to
-  unquote.
 
 ## git — spellings refused for now (2026-10-01)
 

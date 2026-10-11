@@ -2,6 +2,16 @@
 
 Baseline: main at 926edd4, before any of the fixes it motivated. Replay used `crates/kaish-tools-git/examples/probe.rs` with default features (no `textdiff`).
 
+
+**Outcome (2026-10-11, PRs #30–#35).** Landed: items 1 (`--oneline`), 2
+(`log -- FILE` and a bare tracked path), 3 (`show` lists files), 4
+(`status -s`), 5 (`--show-current`), 6 (next-step refusals for `rev-parse`,
+`ls-files` and the rest), 7 (`log A..B`), 8 (`--cached`, `--list`, `-a`), 10
+(write verbs refused as read-only). Item 9 was fixed upstream: kaish 0.18.0
+parses `HEAD~2:README.md` unquoted. Item 11 (`--format`) is Q3 in
+docs/issues.md. The findings below describe main at 926edd4, before any of
+it; re-running the survey is Q4.
+
 ## Method
 
 - Fixture: clone of kaish-extras at 926edd4 with one staged edit (README.md), one unstaged edit (Cargo.toml), one untracked file, branch `feature/x` (+1 commit), tag `v0.1.0-survey`. Reproduce with `git-survey-2026-10/setup.sh <empty-dir>`.

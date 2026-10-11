@@ -159,7 +159,7 @@ full writing-style weight (`AGENTS.md`, "Writing style").
 
 ```
 python/
-  Cargo.toml        # its own [workspace]; pins kaish "0.17" like the root
+  Cargo.toml        # its own [workspace]; pins kaish "0.18" like the root
   Cargo.lock
   pyproject.toml    # maturin, package name kaish
   src/lib.rs        # the pyo3 module

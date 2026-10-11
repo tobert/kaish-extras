@@ -107,8 +107,8 @@ pub(crate) fn unsupported_verb(tool: &str, word: &str, config: &GitConfig) -> Op
 /// holds that, so adding a spelling to a verb means deleting its hint here.
 ///
 /// Commands are quoted with `'…'`; a revision with `~` or `^` inside one is
-/// double-quoted, because the kaish 0.17 parser refuses either character
-/// unquoted in a word (`docs/issues.md`, K3).
+/// double-quoted. kaish 0.17 refused either character unquoted in a word;
+/// 0.18 accepts it, and the quoted form parses on both.
 const HINTS: &[(&str, &[&str], &str)] = &[
     (
         "log",

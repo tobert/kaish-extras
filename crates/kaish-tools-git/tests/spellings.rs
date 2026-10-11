@@ -6,8 +6,8 @@
 //! cost a model call. These tests drive the spellings through
 //! `Kernel::execute` rather than `Tool::execute`, because the kernel's parser
 //! and argument binder sit between an agent and this tool, and a test that
-//! skips them is how `HEAD~1` failing to parse went unnoticed (docs/issues.md
-//! K3).
+//! skips them is how `HEAD~1` failing to parse under kaish 0.17 went
+//! unnoticed.
 //!
 //! Each accepted spelling is asserted equal to the spelling it stands for,
 //! with a negative control that the answer is not empty — two empty answers
@@ -459,6 +459,22 @@ async fn every_command_the_tool_publishes_parses_with_kaishs_parser() {
     assert!(commands.iter().any(|c| c == "git diff v0.1.0 HEAD -- src"), "an example: {commands:?}");
     assert!(commands.iter().any(|c| c.starts_with("git log -n 1 ")), "a hint: {commands:?}");
 
+    // Every published `~`/`^` is quoted. kaish 0.17 refused them bare and
+    // 0.18 accepts them, so the parse below no longer enforces this; the
+    // quoted form is what keeps a command valid on every kaish.
+    let bare: Vec<&String> = commands
+        .iter()
+        .filter(|c| {
+            c.split_whitespace()
+                .any(|w| !w.starts_with(['\'', '"']) && w.contains(['~', '^']))
+        })
+        .collect();
+    assert!(
+        commands.iter().any(|c| c.contains('~')),
+        "negative control: the harvest has a ~ to check: {commands:?}"
+    );
+    assert!(bare.is_empty(), "published commands with a bare ~ or ^: {bare:?}");
+
     let failures: Vec<String> = commands
         .iter()
         .map(|c| fill_placeholders(c))
@@ -467,29 +483,23 @@ async fn every_command_the_tool_publishes_parses_with_kaishs_parser() {
     assert!(
         failures.is_empty(),
         "commands this tool tells an agent to type do not parse in kaish — \
-         quote any word with ~ or ^ in it (docs/issues.md K3):\n{}",
+         quote any word with ~ or ^ in it:\n{}",
         failures.join("\n")
     );
 }
 
-/// K3's canary. kaish 0.17 refuses `~` inside an unquoted word, which is why
-/// every published command quotes one. This goes red the day kaish parses
-/// `HEAD~1` as one word: that is the signal to unquote the examples, hints and
-/// argument docs once our consumers are on that kaish (docs/issues.md K3).
-/// It is also the parse check's own negative control: a parser that accepted
-/// everything would pass the test above vacuously.
-#[test]
-fn kaish_still_refuses_an_unquoted_tilde_in_a_word() {
-    assert!(
-        kaish_kernel::parser::parse("git log HEAD~1").is_err(),
-        "kaish now parses HEAD~1 unquoted — K3 is fixed upstream. Unquote the \
-         published commands once kaijutsu and kaibo are on this kaish, and \
-         retire this canary (docs/issues.md K3)"
-    );
-    assert!(
-        kaish_kernel::parser::parse("git log 'HEAD~1'").is_ok(),
-        "the quoted form must parse, or every published command is broken"
-    );
+/// kaish 0.17 refused `~` and `^` inside an unquoted word, so `git log HEAD~1`
+/// never reached this tool; 0.18 parses it. This pins the fix end to end,
+/// through the kernel, beside the quoted form every published command uses.
+#[tokio::test]
+async fn an_unquoted_revision_suffix_reaches_the_tool() {
+    let (_f, root) = repo();
+    for (unquoted, quoted) in [
+        ("git log --json -n 1 HEAD~1", "git log --json -n 1 'HEAD~1'"),
+        ("git log --json -n 1 HEAD^", "git log --json -n 1 'HEAD^'"),
+    ] {
+        same(&root, unquoted, quoted).await;
+    }
 }
 
 // --- from the 2026-10-11 review of this branch ------------------------------
@@ -879,4 +889,34 @@ async fn branch_show_current_names_an_unborn_branch() {
     assert_eq!(r.code, 0, "{}", r.err);
     assert_eq!(r.out.trim_end(), git(&root, &["branch", "--show-current"]).trim_end());
     assert_eq!(r.out.trim_end(), "trunk");
+}
+
+#[tokio::test]
+async fn bare_git_help_lists_the_verbs() {
+    let (_f, root) = repo();
+    for script in ["git --help", "git -h"] {
+        let r = run(&root, script).await;
+        assert_eq!(r.code, 0, "{script}: {}", r.err);
+        for needle in ["status", "log", "git <verb> --help", "help git"] {
+            assert!(r.out.contains(needle), "{script} must name {needle:?}: {}", r.out);
+        }
+    }
+}
+
+/// git's `help log` and `--help log` both mean log's help; an unknown word
+/// after them is refused rather than ignored.
+#[tokio::test]
+async fn help_with_a_verb_is_that_verbs_help() {
+    let (_f, root) = repo();
+    let want = run(&root, "git log --help").await;
+    assert_eq!(want.code, 0, "{}", want.err);
+    for script in ["git --help log", "git help log", "git -h log"] {
+        let r = run(&root, script).await;
+        assert_eq!(r.code, 0, "{script}: {}", r.err);
+        assert_eq!(r.out, want.out, "{script}");
+    }
+    let r = run(&root, "git help").await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.out.contains("git <verb> --help"), "{}", r.out);
+    refused(&root, "git --help nosuchverb", &["nosuchverb", "git --help"]).await;
 }

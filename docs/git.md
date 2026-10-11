@@ -291,9 +291,10 @@ paths. `A...B` compares from the merge base, which this build does not
 compute, so it is refused saying so. Naming the ends twice — `git diff A
 --from B`, or a revision beside `--staged` — is refused rather than guessed.
 
-**Quote a revision with `~` or `^` in it.** kaish 0.17 refuses either
-character inside an unquoted word (`docs/issues.md`, K3), so `HEAD~1` is a
-parse error before git ever sees it and `'HEAD~1'` works.
+**`HEAD~1` needs kaish 0.18.** kaish 0.17 refused `~` or `^` inside an
+unquoted word, so `HEAD~1` was a parse error before git ever saw it. This
+build requires 0.18, where it parses; the examples here still quote it,
+which works on every kaish.
 
 ```sh
 kaish> git diff                                   # unstaged

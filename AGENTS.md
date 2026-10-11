@@ -34,16 +34,18 @@ has caught real broken deploys.
 ## kaish dependency pinning
 
 `[workspace.dependencies]` in the root `Cargo.toml` pins all four kaish crates
-to **published crates.io versions** (`"0.17"` as of 2026-09-01). Rules:
+to **published crates.io versions** (`"0.18"` as of 2026-10-11, resolving
+0.18.1). Rules:
 
 - **All four must pin the SAME version** — mixing them puts two copies of a
   kaish crate in the dependency graph.
-- **The pin is a caret range, and downstream depends on that.** `"0.17"` is
-  `^0.17`: any 0.17.x patch resolves, so an embedder that consumes both a tool
-  crate from here and kaish directly (kaijutsu) can move to 0.17.1 and still
-  unify on one copy of each kaish crate. 0.18 cannot ride along — pre-1.0 a
-  minor carries breaking changes — so a kaish minor is a bump here that has to
-  build and pass the checks. Do not widen the range to buy the illusion.
+- **The pin is a caret range, and downstream depends on that.** `"0.18"` is
+  `^0.18`: any 0.18.x patch resolves, so an embedder that consumes both a tool
+  crate from here and kaish directly (kaijutsu) can move between 0.18 patches
+  and still unify on one copy of each kaish crate. The next minor cannot ride
+  along — pre-1.0 a minor carries breaking changes — so a kaish minor is a
+  bump here that has to build and pass the checks, and kaijutsu has to move
+  with it. Do not widen the range to buy the illusion.
 - **A two-minor range makes the two-copies failure MORE reachable, not less.**
   Measured with cargo and the real crates on 2026-09-01, three resolutions of
   one graph where an embedder depends on a tool crate from here:
@@ -107,6 +109,15 @@ to **published crates.io versions** (`"0.17"` as of 2026-09-01). Rules:
   each enabled verb's path (`path_prefixes`), not the verb alone — checked
   against the actual roster output and against `kaish-help`'s renderer
   (`push_subcommand_roster` in `topic.rs`), not reasoned from the changelog.
+- **What 0.18 changed here** (bumped 2026-10-11). `ToolCtx` is sealed, so
+  both crates' test `TestCtx` is now a constructor for the kernel's own
+  `ExecContext` — tests run against the real context and its path
+  resolution. A kernel now answers `--help` for a verbatim tool itself,
+  printing the whole tool tree, unless the root schema claims `help`; the git
+  tool claims it so `git log --help` shows one verb. 0.18.0 parses `HEAD~1`
+  and `HEAD^` unquoted, which retired the K3 canary; 0.18.1 carries
+  `to_argv`'s repeatable-flag fix (kaish #525), which neither crate here
+  needs now (git binds verbatim, curl binds raw argv).
 - `kaish-kernel` is `default-features = false`. Keep it that way: a sibling
   crate enabling kernel default features tramples the no-default choice
   (`localfs` etc. must not leak into the browser build).
@@ -123,31 +134,20 @@ to **published crates.io versions** (`"0.17"` as of 2026-09-01). Rules:
 ### Command substitution binds text
 
 `x=$(git status)` binds the **text** git printed, not its typed model, and the
-same holds for curl. Two independent things make that true, and a change to
-either one flips it:
+same holds for curl. What decides it is `ToolSchema::typed_substitution`, which
+both crates leave at its default `false`. Since kaish 0.16 a substitution binds
+`.data` only for a tool that declares `with_typed_substitution()` — the ones
+whose structured value IS the answer (`fromjson`, `jq`, `keys`). Both crates
+are the other kind: `git` and `curl` name real programs, and an agent that
+wants the model asks with `--json`.
 
-- **Neither crate sets `ExecResult.data`.** Both build results with
-  `with_output`/`with_output_and_text`, which take an `OutputData` and leave
-  `data: None`. A substitution binds `.data`, so there is nothing for it to
-  bind. Switching a verb to `success_with_data` — a reasonable thing to want
-  for the pipeline sideband — would change that.
-- **Both leave `ToolSchema::typed_substitution` at its default `false`.** kaish
-  0.16 stopped inferring the answer from "does the tool set `.data`" (an
-  inference that bound a list for `cut -f2 f` and text for `awk '{print $2}'
-  f`, the same job). The rule now: declare `with_typed_substitution()` when the
-  structured thing IS the answer (`fromjson`, `jq`, `keys`); leave it off when
-  `.data` is a structured view of text the tool already printed. Both crates
-  are the second kind — `git` and `curl` name real programs, and an agent that
-  wants the model asks with `--json`.
-
-**The 0.16 bump did not move this**, though it reads like it should have: with
-`.data` never set, these crates bound text under 0.15 too. That was checked at
-the source rather than reasoned from the changelog, after the first version of
-this section asserted a behavior change that had not happened.
-
-`tests/kaish_behavior_canary.rs` pins the observable half. It goes red on the
-two-part mutation above — the schema flag alone is inert, which is itself the
-thing worth knowing.
+`.data` is set in places, and that does not change the binding: curl sets it
+on every response, and git sets it when a `PatchRenderer` returns data.
+`tests/patch_renderer.rs` proves both halves for git through a real kernel
+(`.data` set, `$(…)` still text), and git's `tests/kaish_behavior_canary.rs`
+pins the observable half. **curl has no such test**: adding
+`with_typed_substitution()` to its schema would flip `$(curl …)` to the JSON
+value with the curl suite green (docs/issues.md, X6).
 
 ## Cross-model review with kaibo
 
