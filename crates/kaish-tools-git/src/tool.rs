@@ -69,19 +69,19 @@ impl GitTool {
         skip_all,
         fields(verb = "info", repo)
     )]
-    async fn run_info(&self, args: ToolArgs, consumed: usize, ctx: &mut dyn ToolCtx) -> ExecResult {
+    async fn run_info(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
         const OP: &str = "info";
         if let Err(e) = verb_enabled(&self.config, Verb::Info, OP) {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::info::InfoArgs>(&args, consumed, OP) {
+        let parsed = match parse_leaf::<verbs::info::InfoArgs>(argv, OP) {
             Ok(p) => p,
             Err(result) => return *result,
         };
         parsed.global.apply(ctx);
 
-        if let Err(e) = no_operands(OP, &operands(&args, consumed)) {
+        if let Err(e) = no_operands(OP, &operands(&parsed.operands, argv)) {
             return failure(e);
         }
 
@@ -128,18 +128,13 @@ impl GitTool {
         skip_all,
         fields(verb = "status", repo)
     )]
-    async fn run_status(
-        &self,
-        args: ToolArgs,
-        consumed: usize,
-        ctx: &mut dyn ToolCtx,
-    ) -> ExecResult {
+    async fn run_status(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
         const OP: &str = "status";
         if let Err(e) = verb_enabled(&self.config, Verb::Status, OP) {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::status::StatusArgs>(&args, consumed, OP) {
+        let parsed = match parse_leaf::<verbs::status::StatusArgs>(argv, OP) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -163,7 +158,7 @@ impl GitTool {
         // side of the marker, because status takes no revision. They join the
         // `--path` flags rather than replacing them.
         let mut path_args = parsed.path.clone();
-        path_args.extend(operands(&args, consumed).all());
+        path_args.extend(operands(&parsed.operands, argv).all());
 
         let outcome = block_in_place_compat(move || {
             let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
@@ -173,17 +168,8 @@ impl GitTool {
             // it says. A pathspec-magic value (leading `:`) is left untouched so
             // the parser can reject it by name rather than hide it behind a
             // prefix.
-            let prefix = cwd_prefix(&resolved.real, repo.root());
-            let paths = path_args
-                .iter()
-                .map(|spec| {
-                    if prefix.is_empty() || spec.starts_with(':') {
-                        spec.clone()
-                    } else {
-                        format!("{prefix}/{spec}")
-                    }
-                })
-                .collect();
+            let base = PathBase::new(&resolved, &repo);
+            let paths = base.repo_paths(OP, &path_args)?;
             let opts = verbs::status::StatusOptions {
                 untracked,
                 ignored,
@@ -241,13 +227,13 @@ impl GitTool {
         skip_all,
         fields(verb = "log", repo)
     )]
-    async fn run_log(&self, args: ToolArgs, consumed: usize, ctx: &mut dyn ToolCtx) -> ExecResult {
+    async fn run_log(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
         const OP: &str = "log";
         if let Err(e) = verb_enabled(&self.config, Verb::Log, OP) {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::log::LogArgs>(&args, consumed, OP) {
+        let parsed = match parse_leaf::<verbs::log::LogArgs>(argv, OP) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -271,8 +257,8 @@ impl GitTool {
             return failure(GitError::PatchNotInThisVerb {
                 operation: OP,
                 flag: "--patch",
-                instead: "One commit's patch is 'git diff --patch --from \
-                          <commit>~1 --to <commit>'; --stat gives every \
+                instead: "One commit's patch is 'git diff --patch \
+                          \"<commit>~1\" <commit>'; --stat gives every \
                           commit's changed-file and line counts.",
             });
         }
@@ -330,65 +316,55 @@ impl GitTool {
             // it — and `(false, false)` is the documented default.
             _ => verbs::log::MergeFilter::Both,
         };
-        // `git log [<rev>] [-- <path>...]`, git's own shape.
-        //
-        // A positional before `--` is a **revision**, always. Git would guess:
-        // it tries the string as a rev, then as a path, and errors only when
-        // the string is both or neither. We do not guess — the same reason the
-        // revision grammar is small and approxidate is refused. One rule, and
-        // a failure that names the other spelling, beats a heuristic that
-        // silently answers about a path when the caller meant a branch.
-        let ops = operands(&args, consumed);
-        if ops.before.len() > 1 {
-            return failure(GitError::Usage {
-                operation: OP,
-                message: format!(
-                    "takes at most one revision, but got '{}'. A range is \
-                     '--rev A' plus '--rev B' in two calls, not 'A B'; paths \
-                     go after '--'",
-                    ops.before.join("' '")
-                ),
-            });
-        }
-        let rev = match ops.before.first() {
-            Some(positional) if parsed.rev != verbs::log::DEFAULT_REV => {
-                // Both spellings, disagreeing. Picking one silently would
-                // answer about a revision the caller did not choose.
-                return failure(GitError::Usage {
-                    operation: OP,
-                    message: format!(
-                        "got a revision twice — '{positional}' and '--rev \
-                         {}'. Give it once",
-                        parsed.rev
-                    ),
-                });
-            }
-            Some(positional) => positional.clone(),
-            None => parsed.rev.clone(),
-        };
+        // `git log [<rev>] [<path>...] [-- <path>...]`, git's own shape. Each
+        // word before `--` is sorted the way `git diff` sorts it
+        // (`classify_operands`): a revision when it resolves as one, a path
+        // when it matches a tracked path, refused when it is both or neither.
+        // That needs the repository, so it happens below.
+        let ops = operands(&parsed.operands, argv);
+        let rev_flag = (parsed.rev != verbs::log::DEFAULT_REV).then(|| parsed.rev.clone());
         let author = parsed.author.clone();
         let first_parent = parsed.first_parent;
         let body = parsed.body;
         let stat = parsed.stat;
+        let oneline = parsed.oneline;
         // Operands after `--` are pathspecs, joining the `--path` flags.
         let mut path_args = parsed.path.clone();
         path_args.extend(ops.after.iter().cloned());
+        let words = ops.before.clone();
+        let marked = ops.marked;
 
         let outcome = block_in_place_compat(move || {
             let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
-            // `--path` values are relative to the caller's cwd within the repo,
-            // exactly as git's pathspecs are — the same prefixing `status` does.
-            let prefix = cwd_prefix(&resolved.real, repo.root());
-            let paths = path_args
-                .iter()
-                .map(|spec| {
-                    if prefix.is_empty() || spec.starts_with(':') {
-                        spec.clone()
-                    } else {
-                        format!("{prefix}/{spec}")
-                    }
-                })
-                .collect();
+            // Pathspecs are relative to the caller's cwd within the repo,
+            // exactly as git's are — the same rule `status` and `diff` use.
+            let base = PathBase::new(&resolved, &repo);
+            let sorted = verbs::diff::classify_operands(OP, &repo, &words, marked, &|w| base.repo_path(OP, w))?;
+            let mut paths = base.repo_paths(OP, &path_args)?;
+            paths.extend(sorted.paths);
+            let rev = match (sorted.revs.as_slice(), rev_flag) {
+                ([], None) => verbs::log::DEFAULT_REV.to_string(),
+                ([], Some(flag)) => flag,
+                ([one], None) => one.clone(),
+                // Both spellings, disagreeing. Picking one silently would
+                // answer about a revision the caller did not choose.
+                ([one], Some(flag)) => {
+                    return Err(GitError::Usage {
+                        operation: OP,
+                        message: format!("got a revision twice — '{one}' and '--rev {flag}'. Give it once"),
+                    })
+                }
+                (many, _) => {
+                    return Err(GitError::Usage {
+                        operation: OP,
+                        message: format!(
+                            "takes at most one revision, but got '{}'. A range is \
+                             not supported here; paths go after '--'",
+                            many.join("' '")
+                        ),
+                    })
+                }
+            };
             let opts = verbs::log::LogOptions {
                 rev,
                 limit,
@@ -412,7 +388,7 @@ impl GitTool {
             Err(e) => return failure(e),
         };
 
-        let mut result = ExecResult::with_output(crate::render::log(&model));
+        let mut result = ExecResult::with_output(crate::render::log(&model, oneline));
         // Truncation is always reported — a stderr note beside the JSON's
         // `truncated: true` (E.5). The exit code stays 0: a truncated log is a
         // successful answer that ran up against `--limit`.
@@ -452,13 +428,13 @@ impl GitTool {
         skip_all,
         fields(verb = "ls", repo)
     )]
-    async fn run_ls(&self, args: ToolArgs, consumed: usize, ctx: &mut dyn ToolCtx) -> ExecResult {
+    async fn run_ls(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
         const OP: &str = "ls";
         if let Err(e) = verb_enabled(&self.config, Verb::Ls, OP) {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::ls::LsArgs>(&args, consumed, OP) {
+        let parsed = match parse_leaf::<verbs::ls::LsArgs>(argv, OP) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -473,7 +449,7 @@ impl GitTool {
         // Position, not content, decides the two operands: the first is
         // always the revision, the second the path — `git ls-tree <rev>
         // [<path>]`'s own grammar, which needs no `--` to tell them apart.
-        let ops = operands(&args, consumed).all();
+        let ops = operands(&parsed.operands, argv).all();
         if ops.len() > 2 {
             return failure(GitError::Usage {
                 operation: OP,
@@ -530,13 +506,13 @@ impl GitTool {
         skip_all,
         fields(verb = "show", repo)
     )]
-    async fn run_show(&self, args: ToolArgs, consumed: usize, ctx: &mut dyn ToolCtx) -> ExecResult {
+    async fn run_show(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
         const OP: &str = "show";
         if let Err(e) = verb_enabled(&self.config, Verb::Show, OP) {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::show::ShowArgs>(&args, consumed, OP) {
+        let parsed = match parse_leaf::<verbs::show::ShowArgs>(argv, OP) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -550,7 +526,7 @@ impl GitTool {
 
         // A single operand: the whole flagship spelling, colon path
         // included (`show HEAD:src/lib.rs` is one operand, not two).
-        let ops = operands(&args, consumed).all();
+        let ops = operands(&parsed.operands, argv).all();
         if ops.len() > 1 {
             return failure(GitError::Usage {
                 operation: OP,
@@ -644,13 +620,13 @@ impl GitTool {
         skip_all,
         fields(verb = "diff", repo)
     )]
-    async fn run_diff(&self, args: ToolArgs, consumed: usize, ctx: &mut dyn ToolCtx) -> ExecResult {
+    async fn run_diff(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
         const OP: &str = "diff";
         if let Err(e) = verb_enabled(&self.config, Verb::Diff, OP) {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::diff::DiffArgs>(&args, consumed, OP) {
+        let parsed = match parse_leaf::<verbs::diff::DiffArgs>(argv, OP) {
             Ok(p) => p,
             Err(result) => return *result,
         };
@@ -697,26 +673,14 @@ impl GitTool {
         };
         tracing::Span::current().record("repo", tracing::field::display(resolved.real.display()));
 
-        // `git diff [-- <path>...]`: paths after the marker, and nothing
-        // before it. A bare positional in git is a revision, and this surface
-        // spells a revision `--from`/`--to` — treating one as a path would
-        // silently answer about a file named `HEAD`.
-        let ops = operands(&args, consumed);
-        if !ops.before.is_empty() {
-            return failure(GitError::Usage {
-                operation: OP,
-                message: format!(
-                    "takes no bare operands, but got '{}'. Name a revision \
-                     with --from/--to ('diff --from HEAD~1 --to HEAD') and a \
-                     path after '--' ('diff -- src')",
-                    ops.before.join("' '")
-                ),
-            });
-        }
+        // git's spelling: `git diff A B -- <path>...`. The words before the
+        // marker are sorted into revisions and paths once the repository is
+        // open, because only the repository can say which a word is.
+        let ops = operands(&parsed.operands, argv);
         let mut paths = parsed.path.clone();
         paths.extend(ops.after.iter().cloned());
 
-        let endpoints = match (parsed.staged, parsed.from.clone(), parsed.to.clone()) {
+        let flag_endpoints = match (parsed.staged, parsed.from.clone(), parsed.to.clone()) {
             // clap's `conflicts_with_all` refuses --staged beside --from/--to,
             // so the revisions are None here by construction.
             (true, _, _) => verbs::diff::Endpoints::HeadToIndex,
@@ -727,6 +691,15 @@ impl GitTool {
                 to,
             },
         };
+        let named_by_flag = if parsed.staged {
+            Some("--staged")
+        } else if parsed.from.is_some() || parsed.to.is_some() {
+            Some("--from/--to")
+        } else {
+            None
+        };
+        let words = ops.before.clone();
+        let marked = ops.marked;
 
         // The embedder's `max_diff_files` is a hard cap; `--limit` may only
         // lower it. Not `max_rows`: a diff's rows are files, and C.1 gives
@@ -753,6 +726,44 @@ impl GitTool {
 
         let outcome = block_in_place_compat(move || {
             let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
+            // Pathspecs are relative to the caller's cwd, as in git and as in
+            // `status` and `log`.
+            let base = PathBase::new(&resolved, &repo);
+            let sorted = verbs::diff::classify_operands(OP, &repo, &words, marked, &|w| base.repo_path(OP, w))?;
+            let mut paths = base.repo_paths(OP, &paths)?;
+            paths.extend(sorted.paths);
+            let endpoints = match (verbs::diff::endpoints_from_revs(&sorted.revs)?, named_by_flag) {
+                (None, _) => flag_endpoints,
+                (Some(endpoints), None) => endpoints,
+                // Two ways of naming the ends, both used. Picking one would
+                // answer a question the caller did not finish asking.
+                (Some(_), Some("--staged")) => {
+                    return Err(GitError::Usage {
+                        operation: OP,
+                        message: format!(
+                            "comparing a revision with the index is not \
+                             supported, and '{}' beside --staged asks for \
+                             that. 'git diff --staged' compares HEAD with the \
+                             index; 'git diff {}' compares {} with the \
+                             working tree",
+                            sorted.revs.join(" "),
+                            verbs::diff::kaish_word(&sorted.revs[0]),
+                            sorted.revs[0]
+                        ),
+                    });
+                }
+                (Some(_), Some(_)) => {
+                    return Err(GitError::Usage {
+                        operation: OP,
+                        message: format!(
+                            "got revisions twice, as '{}' and as --from/--to. \
+                             Name them one way: 'git diff A B' or \
+                             'git diff --from A --to B'",
+                            sorted.revs.join(" ")
+                        ),
+                    });
+                }
+            };
             let opts = verbs::diff::DiffOptions {
                 endpoints,
                 paths,
@@ -838,24 +849,19 @@ impl GitTool {
         skip_all,
         fields(verb = "branch", repo)
     )]
-    async fn run_branch(
-        &self,
-        args: ToolArgs,
-        consumed: usize,
-        ctx: &mut dyn ToolCtx,
-    ) -> ExecResult {
+    async fn run_branch(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
         const OP: &str = "branch";
         if let Err(e) = verb_enabled(&self.config, Verb::Branch, OP) {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::branch::BranchArgs>(&args, consumed, OP) {
+        let parsed = match parse_leaf::<verbs::branch::BranchArgs>(argv, OP) {
             Ok(p) => p,
             Err(result) => return *result,
         };
         parsed.global.apply(ctx);
 
-        if let Err(e) = no_operands(OP, &operands(&args, consumed)) {
+        if let Err(e) = no_operands(OP, &operands(&parsed.operands, argv)) {
             return failure(e);
         }
 
@@ -914,19 +920,19 @@ impl GitTool {
         skip_all,
         fields(verb = "tag", repo)
     )]
-    async fn run_tag(&self, args: ToolArgs, consumed: usize, ctx: &mut dyn ToolCtx) -> ExecResult {
+    async fn run_tag(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
         const OP: &str = "tag";
         if let Err(e) = verb_enabled(&self.config, Verb::Tag, OP) {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::tag::TagArgs>(&args, consumed, OP) {
+        let parsed = match parse_leaf::<verbs::tag::TagArgs>(argv, OP) {
             Ok(p) => p,
             Err(result) => return *result,
         };
         parsed.global.apply(ctx);
 
-        if let Err(e) = no_operands(OP, &operands(&args, consumed)) {
+        if let Err(e) = no_operands(OP, &operands(&parsed.operands, argv)) {
             return failure(e);
         }
 
@@ -969,24 +975,19 @@ impl GitTool {
         skip_all,
         fields(verb = "worktree list", repo)
     )]
-    async fn run_worktree_list(
-        &self,
-        args: ToolArgs,
-        consumed: usize,
-        ctx: &mut dyn ToolCtx,
-    ) -> ExecResult {
+    async fn run_worktree_list(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
         const OP: &str = "worktree list";
         if let Err(e) = verb_enabled(&self.config, Verb::WorktreeList, OP) {
             return failure(e);
         }
 
-        let parsed = match parse_leaf::<verbs::worktree::WorktreeListArgs>(&args, consumed, OP) {
+        let parsed = match parse_leaf::<verbs::worktree::WorktreeListArgs>(argv, OP) {
             Ok(p) => p,
             Err(result) => return *result,
         };
         parsed.global.apply(ctx);
 
-        if let Err(e) = no_operands(OP, &operands(&args, consumed)) {
+        if let Err(e) = no_operands(OP, &operands(&parsed.operands, argv)) {
             return failure(e);
         }
 
@@ -1030,6 +1031,78 @@ impl GitTool {
         }
         result.baggage.insert("git.repo".to_string(), repo_root);
         result
+    }
+}
+
+/// How a caller's pathspec becomes repo-relative, the way git reads one:
+/// relative to the cwd (from `src/`, `lib.rs` is `src/lib.rs`), with `.` and
+/// `..` resolved, and an absolute path accepted when it names something
+/// inside the repository. A pathspec-magic value (leading `:`) is left
+/// untouched so the parser can reject it by name.
+///
+/// Lexical on purpose: the spec names a path in the index or a tree, which
+/// may not exist on disk, and resolving it against the filesystem would
+/// touch the host to answer a question about the repository.
+struct PathBase {
+    /// The cwd's repo-relative segments.
+    prefix: Vec<String>,
+    /// The repository root's VFS path, for absolute specs; `None` when the
+    /// root cannot be named in the VFS.
+    root_vfs: Option<String>,
+}
+
+impl PathBase {
+    fn new(resolved: &ResolvedPaths, repo: &ReadRepo) -> Self {
+        let prefix = cwd_prefix(&resolved.real, repo.root());
+        PathBase {
+            prefix: prefix.split('/').filter(|s| !s.is_empty()).map(str::to_string).collect(),
+            root_vfs: to_vfs_path(repo.root(), &resolved.mount_real, &resolved.mount_vfs),
+        }
+    }
+
+    fn repo_paths(&self, operation: &'static str, specs: &[String]) -> Result<Vec<String>, GitError> {
+        specs.iter().map(|spec| self.repo_path(operation, spec)).collect()
+    }
+
+    fn repo_path(&self, operation: &'static str, spec: &str) -> Result<String, GitError> {
+        if spec.starts_with(':') {
+            return Ok(spec.to_string());
+        }
+        let outside = || GitError::Usage {
+            operation,
+            message: format!(
+                "path '{spec}' is outside the repository{}. A path is read from the \
+                 current directory and must stay inside the repository",
+                match &self.root_vfs {
+                    Some(root) => format!(" at {root}"),
+                    None => String::new(),
+                }
+            ),
+        };
+        let (mut segments, rest) = match spec.strip_prefix('/') {
+            Some(_) => {
+                let root = self.root_vfs.as_deref().ok_or_else(outside)?;
+                let rest = if spec == root {
+                    ""
+                } else {
+                    spec.strip_prefix(root)
+                        .and_then(|r| r.strip_prefix('/'))
+                        .ok_or_else(outside)?
+                };
+                (Vec::new(), rest)
+            }
+            None => (self.prefix.clone(), spec),
+        };
+        for segment in rest.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    segments.pop().ok_or_else(outside)?;
+                }
+                other => segments.push(other.to_string()),
+            }
+        }
+        Ok(segments.join("/"))
     }
 }
 
@@ -1100,27 +1173,60 @@ impl Tool for GitTool {
             DESCRIPTION,
             examples_for(&self.config),
         )
+        // The true argv, `--` included; see `execute`.
+        .with_verbatim_argv()
     }
 
-    async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
         let schema = self.schema();
-        args.flagify_bool_named(&schema);
 
-        let (verb, consumed) = match route(&schema, &args.positional) {
+        // The schema declares `with_verbatim_argv`, so a kernel hands over
+        // every word after `git` in source order — the caller's own `--`
+        // included — and lifts only `--json`, which it applies itself. The
+        // typed binder this replaced dropped `--`, so `git log main -- src`
+        // read as two revisions (2026-10-01). No words means a caller built
+        // `ToolArgs` without a kernel's binder; guessing its argv would be
+        // guessing at the question.
+        let Some(words) = &args.words else {
+            return ExecResult::failure(
+                2,
+                "git: this call carried no `words`. kaish-tools-git binds its \
+                 arguments verbatim (ToolSchema::with_verbatim_argv), so a \
+                 kaish kernel supplies them; a direct caller must set \
+                 ToolArgs::words to the argv after `git`"
+                    .to_string(),
+            );
+        };
+        // A binary word renders as a placeholder token, which would then be
+        // read as a revision or a path nobody wrote.
+        if let Some(index) = words.iter().position(|w| matches!(w, Value::Bytes(_))) {
+            return ExecResult::failure(
+                2,
+                format!(
+                    "git: argument {} is binary data. git takes text \
+                     arguments: a revision, a path or a flag",
+                    index + 1
+                ),
+            );
+        }
+        let argv = args.words_argv();
+
+        let (verb, consumed) = match route(&schema, &argv) {
             Ok(r) => r,
             Err(e) => return failure(e),
         };
+        let leaf = &argv[consumed..];
 
         match verb.as_str() {
-            "info" => self.run_info(args, consumed, ctx).await,
-            "status" => self.run_status(args, consumed, ctx).await,
-            "log" => self.run_log(args, consumed, ctx).await,
-            "ls" => self.run_ls(args, consumed, ctx).await,
-            "show" => self.run_show(args, consumed, ctx).await,
-            "diff" => self.run_diff(args, consumed, ctx).await,
-            "branch" => self.run_branch(args, consumed, ctx).await,
-            "tag" => self.run_tag(args, consumed, ctx).await,
-            "worktree list" => self.run_worktree_list(args, consumed, ctx).await,
+            "info" => self.run_info(leaf, ctx).await,
+            "status" => self.run_status(leaf, ctx).await,
+            "log" => self.run_log(leaf, ctx).await,
+            "ls" => self.run_ls(leaf, ctx).await,
+            "show" => self.run_show(leaf, ctx).await,
+            "diff" => self.run_diff(leaf, ctx).await,
+            "branch" => self.run_branch(leaf, ctx).await,
+            "tag" => self.run_tag(leaf, ctx).await,
+            "worktree list" => self.run_worktree_list(leaf, ctx).await,
             // A node with no subcommand word after it. Routing stops at the
             // node, which is correct — the caller named a group, not a verb —
             // and the answer names what the group holds rather than guessing
@@ -1167,17 +1273,18 @@ const WORKTREE_DESCRIPTION: &str = "Work with the repository's working trees";
 /// (`kaish-help`'s `tool_help`) shows only params and examples, never a bare
 /// subcommand list, so a verb with no example here would never be named in
 /// `help git` at all, enabled or not.
-const EXAMPLES: [(&str, &str); 17] = [
+const EXAMPLES: [(&str, &str); 18] = [
     ("What repository is this", "git info"),
     ("Inspect a specific repository", "git info --repo /mnt/repos/kaish"),
     ("Structured, for a script", "git info --json"),
     ("What changed in the working tree", "git status"),
     ("Recent commit history", "git log"),
+    ("One line per commit", "git log --oneline"),
     ("Read a file as of the last release", "git show v0.1.0:src/lib.rs"),
     ("List a directory as of HEAD", "git ls HEAD src"),
     ("See the unstaged changes", "git diff"),
     ("See what is staged", "git diff --staged"),
-    ("Compare two revisions under one directory", "git diff --from v0.1.0 --to HEAD -- src"),
+    ("Compare two revisions under one directory", "git diff v0.1.0 HEAD -- src"),
     ("List the branches", "git branch"),
     ("Include remote-tracking branches", "git branch --all"),
     ("Find which branches carry a fix", "git branch --contains 1a2b3c4"),
@@ -1241,22 +1348,18 @@ fn verb_enabled(config: &GitConfig, verb: Verb, operation: &'static str) -> Resu
 /// Route the verb words off the typed positionals, mirroring the kernel's
 /// `select_leaf` (E.1).
 ///
-/// Returns the selected verb path joined by spaces, and how many positionals
-/// it consumed. Descent stops at the first positional that is not a child
-/// name, exactly as `select_leaf` does, so the leaf's own positionals are
-/// left alone.
-fn route(schema: &ToolSchema, positional: &[Value]) -> Result<(String, usize), GitError> {
+/// Returns the selected verb path joined by spaces, and how many words it
+/// consumed. Descent stops at the first word that is not a child name,
+/// exactly as `select_leaf` does, so the leaf's own words are left alone.
+fn route(schema: &ToolSchema, words: &[String]) -> Result<(String, usize), GitError> {
     let mut node = schema;
     let mut path: Vec<String> = Vec::new();
     let mut consumed = 0usize;
 
-    for value in positional {
+    for word in words {
         if node.subcommands.is_empty() {
             break;
         }
-        let Value::String(word) = value else {
-            break;
-        };
         let Some(child) = node.subcommands.iter().find(|c| c.matches_command(word)) else {
             break;
         };
@@ -1267,9 +1370,13 @@ fn route(schema: &ToolSchema, positional: &[Value]) -> Result<(String, usize), G
 
     if path.is_empty() {
         let available: Vec<&str> = schema.subcommands.iter().map(|s| s.name.as_str()).collect();
-        let got = match positional.first() {
-            Some(Value::String(s)) => format!("'{s}' is not one of them"),
-            Some(_) => "the first argument is not a verb name".to_string(),
+        let got = match words.first() {
+            // `git --repo x status`: a flag where the verb goes. Flags belong
+            // to a verb here, so they follow it.
+            Some(word) if word.starts_with('-') => format!(
+                "'{word}' is a flag, and flags follow the verb ('git <verb> {word} …')"
+            ),
+            Some(word) => format!("'{word}' is not one of them"),
             None => "none was given".to_string(),
         };
         return Err(GitError::NoVerb {
@@ -1292,41 +1399,31 @@ fn route(schema: &ToolSchema, positional: &[Value]) -> Result<(String, usize), G
     Ok((path.join(" "), consumed))
 }
 
-/// Re-parse the leaf's own argv with its flat clap `Parser` (E.1).
-///
-/// Feeding the whole `to_argv()` to a clap *tree* would break: `to_argv()`
-/// emits a `--` before positionals, and a `--` ahead of a subcommand name
-/// defeats clap's subcommand parsing. So the verb words come off the typed
-/// positionals first, and what is left is parsed flat.
-fn parse_leaf<P: Parser>(
-    args: &ToolArgs,
-    consumed: usize,
-    operation: &'static str,
-) -> Result<P, Box<ExecResult>> {
+/// Parse the leaf's own argv — the words after the verb — with its flat clap
+/// `Parser` (E.1). `route` has already taken the verb words off the front,
+/// so the clap tree is never asked to route.
+fn parse_leaf<P: Parser>(argv: &[String], operation: &'static str) -> Result<P, Box<ExecResult>> {
     // Boxed: `ExecResult` is a wide type, and an unboxed `Err` variant makes
     // every `Ok` return pay for it (clippy::result_large_err).
-    let mut leaf = args.clone();
-    leaf.positional = args.positional.iter().skip(consumed).cloned().collect();
-    let argv = leaf
-        .to_argv()
-        .map_err(|e| Box::new(ExecResult::failure(2, format!("git {operation}: {e}"))))?;
-    P::try_parse_from(std::iter::once(format!("git {operation}")).chain(argv))
-        .map_err(|e| Box::new(ExecResult::failure(2, format!("git {operation}: {e}"))))
+    P::try_parse_from(std::iter::once(format!("git {operation}")).chain(argv.iter().cloned()))
+        .map_err(|e| Box::new(failure(crate::spelling::refuse(operation, &e, &P::command()))))
 }
 
 /// A verb's operands, split at git's `--` end-of-options marker.
 ///
-/// The kernel hands a literal `--` through as a positional `Value::String`, so
-/// the split git users rely on survives all the way here. Reading operands off
-/// `args.positional` rather than off the clap-parsed struct is the kernel's own
-/// convention — every builtin does it, because `ToolArgs::to_argv()` always
-/// emits `--` before positionals and clap therefore cannot tell a caller's
-/// marker from the binder's.
+/// The tool is bound verbatim, so the leaf argv is the caller's own, `--`
+/// included. clap collects every operand into the leaf's `operands` field in
+/// order, on both sides of the marker; everything after the first `--` in the
+/// argv is an operand by definition, which is what places the split.
 struct Operands {
     /// Positionals before `--`. A revision, for a verb that takes one.
     before: Vec<String>,
     /// Positionals after `--`. Always pathspecs, for every verb.
     after: Vec<String>,
+    /// Whether the caller wrote the `--` marker. With it, git reads every
+    /// word before the marker as a revision and never as a path, which is how
+    /// a caller settles a word that is both.
+    marked: bool,
 }
 
 impl Operands {
@@ -1343,30 +1440,17 @@ impl Operands {
     }
 }
 
-/// Split the operands a verb was given at the `--` marker.
-fn operands(args: &ToolArgs, consumed: usize) -> Operands {
-    let mut before = Vec::new();
-    let mut after = Vec::new();
-    let mut seen_marker = false;
-    for value in args.positional.iter().skip(consumed) {
-        // Only a string operand can be a revision or a pathspec. A typed
-        // value here (an int from a pipeline, say) is not one, and coercing it
-        // to text would invent an argument the caller did not write.
-        let Value::String(text) = value else {
-            continue;
-        };
-        let text = text.clone();
-        if !seen_marker && text == "--" {
-            seen_marker = true;
-            continue;
-        }
-        if seen_marker {
-            after.push(text);
-        } else {
-            before.push(text);
-        }
+/// Split the operands clap parsed (`parsed`, in order) at the caller's `--`
+/// in the leaf argv.
+fn operands(parsed: &[String], argv: &[String]) -> Operands {
+    let marker = argv.iter().position(|word| word == "--");
+    let after = marker.map_or(0, |i| argv.len() - i - 1);
+    let split = parsed.len().saturating_sub(after);
+    Operands {
+        before: parsed[..split].to_vec(),
+        after: parsed[split..].to_vec(),
+        marked: marker.is_some(),
     }
-    Operands { before, after }
 }
 
 /// Refuse operands for a verb that takes none, naming what was given.
@@ -1379,12 +1463,23 @@ fn no_operands(operation: &'static str, ops: &Operands) -> Result<(), GitError> 
     if ops.is_empty() {
         return Ok(());
     }
+    let all = ops.all();
+    let first = crate::verbs::diff::kaish_word(&all[0]);
+    // The next step depends on what the word most likely meant for this verb.
+    let next = match operation {
+        "branch" => format!(
+            "This git lists branches and never creates one; 'git log {first}' \
+             shows a branch's history"
+        ),
+        "tag" => format!(
+            "This git lists tags and never creates one; 'git show {first}' \
+             shows a tag and 'git log {first}' its history"
+        ),
+        _ => "Name the repository with --repo".to_string(),
+    };
     Err(GitError::Usage {
         operation,
-        message: format!(
-            "takes no operands, but got '{}'. Name the repository with --repo",
-            ops.all().join("' '")
-        ),
+        message: format!("takes no operands, but got '{}'. {next}", all.join("' '")),
     })
 }
 
@@ -1502,8 +1597,8 @@ mod tests {
     use super::*;
     use crate::config::Limits;
 
-    fn word(s: &str) -> Value {
-        Value::String(s.to_string())
+    fn word(s: &str) -> String {
+        s.to_string()
     }
 
     /// Every routable leaf of the schema, with the verb words that reach it.
@@ -1901,9 +1996,9 @@ mod tests {
                  vacuously over it"
             );
             for param in &leaf.params {
-                // The hidden `operands` sink is the `--`-terminated tail
-                // every verb carries for `to_argv()`; it is not a flag an
-                // agent types, and clap hides it from help for that reason.
+                // The hidden `operands` field collects a verb's operands; it
+                // is not a flag an agent types, and clap hides it from help
+                // for that reason.
                 if param.name == "operands" {
                     continue;
                 }

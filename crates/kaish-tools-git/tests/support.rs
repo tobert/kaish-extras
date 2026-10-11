@@ -166,6 +166,38 @@ pub fn git_as(cwd: &Path, author: (&str, &str), date: &str, args: &[&str]) -> St
 /// The oracle is a hard requirement, not an optional extra: a suite that
 /// silently skipped its own fixtures would report green while proving
 /// nothing. Tests call [`require_git`] instead of branching on this.
+/// The `ToolArgs` a kaish kernel builds for this tool, from the words after
+/// `git`: `&["log", "--oneline", "main", "--", "src"]`.
+///
+/// The tool is bound verbatim (`ToolSchema::with_verbatim_argv`), so the
+/// kernel hands over every word in source order, `--` included, and lifts
+/// only `--json` — before any `--` — into `flags`, applying it itself. This
+/// does the same, so a test sees what an embedder's kernel would give it.
+pub fn words(argv: &[&str]) -> ToolArgs {
+    let mut args = ToolArgs::new();
+    let mut words = Vec::new();
+    let mut past_marker = false;
+    for word in argv {
+        if *word == "--" {
+            past_marker = true;
+        }
+        if !past_marker && *word == "--json" {
+            args.flags.insert("json".to_string());
+            continue;
+        }
+        words.push(Value::String((*word).to_string()));
+    }
+    args.words = Some(words);
+    args
+}
+
+/// [`words`] for a verb, which may be two words (`worktree list`), then its
+/// argv.
+pub fn verb_words(verb: &str, argv: &[&str]) -> ToolArgs {
+    let all: Vec<&str> = verb.split_whitespace().chain(argv.iter().copied()).collect();
+    words(&all)
+}
+
 pub fn have_git() -> bool {
     Command::new("git")
         .arg("--version")

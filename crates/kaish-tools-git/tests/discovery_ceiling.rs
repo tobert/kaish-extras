@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use kaish_tool_api::Tool;
-use kaish_types::{ExecResult, ToolArgs, Value};
+use kaish_types::ExecResult;
 
 use kaish_tools_git::GitConfig;
 
@@ -32,12 +32,10 @@ async fn info_at(mount_real: PathBuf, cwd: &str, repo_arg: Option<&str>) -> Exec
     let mut ctx = TestCtx::new(backend, cwd);
     let git = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
 
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String("info".to_string()));
-    if let Some(repo) = repo_arg {
-        args.named
-            .insert("repo".to_string(), Value::String(repo.to_string()));
-    }
+    let args = match repo_arg {
+        Some(repo) => support::words(&["info", "--repo", repo]),
+        None => support::words(&["info"]),
+    };
     git.execute(args, &mut ctx).await
 }
 
@@ -197,9 +195,7 @@ async fn a_virtual_mount_is_refused_with_exit_four() {
     let mut ctx = TestCtx::new(backend, "/mem/project");
     let git = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
 
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String("info".to_string()));
-    let result = git.execute(args, &mut ctx).await;
+    let result = git.execute(support::words(&["info"]), &mut ctx).await;
 
     assert_eq!(result.code, 4, "a memory mount is an environment refusal");
     assert!(

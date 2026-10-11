@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use kaish_tool_api::Tool;
-use kaish_types::{ExecResult, ToolArgs, Value};
+use kaish_types::{ExecResult, ToolArgs};
 
 use kaish_tools_git::{GitConfig, Limits};
 
@@ -42,46 +42,10 @@ use support::{git, require_git, Fixture, PatchRepo, StrictBackend, TestCtx};
 
 const MOUNT: &str = "/mnt";
 
-const VALUE_FLAGS: &[&str] = &["repo", "limit", "from", "to", "path", "context"];
-const BOOL_FLAGS: &[&str] = &[
-    "json",
-    "staged",
-    "name-only",
-    "patch",
-    "find-renames",
-    "no-find-renames",
-    "stat",
-];
 
+/// The `ToolArgs` a kaish kernel builds for `git <verb> <argv>`.
 fn tool_args(verb: &str, argv: &[&str]) -> ToolArgs {
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String(verb.to_string()));
-    let mut i = 0;
-    while i < argv.len() {
-        let token = argv[i];
-        let Some(name) = token.strip_prefix("--") else {
-            args.positional.push(Value::String(token.to_string()));
-            i += 1;
-            continue;
-        };
-        if name.is_empty() {
-            args.positional.push(Value::String("--".to_string()));
-            i += 1;
-        } else if VALUE_FLAGS.contains(&name) {
-            let value = argv
-                .get(i + 1)
-                .unwrap_or_else(|| panic!("'--{name}' takes a value, none followed in {argv:?}"));
-            args.named
-                .insert(name.to_string(), Value::String((*value).to_string()));
-            i += 2;
-        } else if BOOL_FLAGS.contains(&name) {
-            args.flags.insert(name.to_string());
-            i += 1;
-        } else {
-            panic!("'--{name}' is not classified in VALUE_FLAGS or BOOL_FLAGS");
-        }
-    }
-    args
+    support::verb_words(verb, argv)
 }
 
 async fn run(verb: &str, mount_real: &Path, cwd: &str, argv: &[&str]) -> ExecResult {

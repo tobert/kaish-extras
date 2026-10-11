@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use kaish_tool_api::Tool;
-use kaish_types::{ExecResult, ToolArgs, Value};
+use kaish_types::ExecResult;
 
 use kaish_tools_git::GitConfig;
 
@@ -55,9 +55,7 @@ async fn info_at(mount_real: PathBuf, cwd: &str) -> ExecResult {
     let mut ctx = TestCtx::new(backend, cwd);
     let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
 
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String("info".to_string()));
-    tool.execute(args, &mut ctx).await
+    tool.execute(support::words(&["info"]), &mut ctx).await
 }
 
 /// Build the escape fixture.
@@ -269,9 +267,7 @@ async fn a_real_linked_worktree_inside_the_mount_still_works() {
     let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), mount));
     let mut ctx = TestCtx::new(backend, "/mnt/linked");
     let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String("info".to_string()));
-    let result = tool.execute(args, &mut ctx).await;
+    let result = tool.execute(support::words(&["info"]), &mut ctx).await;
 
     assert_eq!(
         result.code, 0,
@@ -1175,32 +1171,7 @@ async fn pwn_run(repo: &PwnRepo, verb: &str, argv: &[&str]) -> ExecResult {
     let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), repo.mount()));
     let mut ctx = TestCtx::new(backend, "/mnt/repo");
     let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String(verb.to_string()));
-    const VALUE_FLAGS: &[&str] = &["from", "to", "repo", "limit", "path"];
-    let mut i = 0;
-    while i < argv.len() {
-        let token = argv[i];
-        match token.strip_prefix("--") {
-            None => {
-                args.positional.push(Value::String(token.to_string()));
-                i += 1;
-            }
-            Some(name) if VALUE_FLAGS.contains(&name) => {
-                let value = argv
-                    .get(i + 1)
-                    .unwrap_or_else(|| panic!("'--{name}' takes a value in {argv:?}"));
-                args.named
-                    .insert(name.to_string(), Value::String((*value).to_string()));
-                i += 2;
-            }
-            Some(name) => {
-                args.flags.insert(name.to_string());
-                i += 1;
-            }
-        }
-    }
-    tool.execute(args, &mut ctx).await
+    tool.execute(support::verb_words(verb, argv), &mut ctx).await
 }
 
 /// **The negative control**, and the reason the assertion below means
@@ -1388,7 +1359,15 @@ async fn a_long_running_process_filter_is_inert_too() {
     repo.arm_process();
     repo.disarm();
 
-    // The control: real git tries, and dies trying.
+    // The control: real git runs the process filter. Asserted on the
+    // sentinel the script writes first, not on git's exit: the script exits
+    // without reading the handshake, so git either reads its reply and fails
+    // with "protocol error", or hits a closed pipe, reports the filter's
+    // initialization failed, and — `filter.pwn.required` being unset — carries
+    // on and exits 0. Which one is a scheduling race; that the process was
+    // spawned is not, and it is the thing this control has to prove. Asserting
+    // on the exit failed CI on 2026-10-01 (run 36888409239) and passed on the
+    // next run with no change between them.
     let out = std::process::Command::new("git")
         .args(["diff", "--name-only"])
         .current_dir(&repo.root)
@@ -1397,12 +1376,10 @@ async fn a_long_running_process_filter_is_inert_too() {
         .output()
         .expect("run git diff");
     assert!(
-        !out.status.success(),
-        "real git must try to speak the filter protocol, or this proves nothing"
-    );
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("protocol error"),
-        "and fail on the protocol, not on something else: {}",
+        repo.fired().contains(&"process".to_string()),
+        "real git must spawn the process filter, or this proves nothing. git \
+         exited {:?}: {}",
+        out.status.code(),
         String::from_utf8_lossy(&out.stderr)
     );
     repo.disarm();
@@ -1760,10 +1737,7 @@ async fn show_at(mount_real: PathBuf, cwd: &str, rev: &str) -> ExecResult {
     let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), mount_real));
     let mut ctx = TestCtx::new(backend, cwd);
     let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String("show".to_string()));
-    args.positional.push(Value::String(rev.to_string()));
-    tool.execute(args, &mut ctx).await
+    tool.execute(support::words(&["show", rev]), &mut ctx).await
 }
 
 /// Run `git branch --json` with `mount_real` mounted at `/mnt`.
@@ -1771,10 +1745,7 @@ async fn branch_at(mount_real: PathBuf, cwd: &str) -> ExecResult {
     let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), mount_real));
     let mut ctx = TestCtx::new(backend, cwd);
     let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String("branch".to_string()));
-    args.flags.insert("json".to_string());
-    tool.execute(args, &mut ctx).await
+    tool.execute(support::words(&["branch", "--json"]), &mut ctx).await
 }
 
 /// Assert a refusal that named nothing out of the host file.
@@ -2187,10 +2158,7 @@ async fn log_at(mount_real: PathBuf, cwd: &str, rev: &str) -> ExecResult {
     let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), mount_real));
     let mut ctx = TestCtx::new(backend, cwd);
     let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String("log".to_string()));
-    args.positional.push(Value::String(rev.to_string()));
-    tool.execute(args, &mut ctx).await
+    tool.execute(support::words(&["log", rev]), &mut ctx).await
 }
 
 /// The residual, pinned: a symlinked **loose object** reads another
@@ -2525,11 +2493,7 @@ async fn verb_at(mount_real: PathBuf, cwd: &str, verb: &str) -> ExecResult {
     let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), mount_real));
     let mut ctx = TestCtx::new(backend, cwd);
     let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
-    let mut args = ToolArgs::new();
-    for word in verb.split_whitespace() {
-        args.positional.push(Value::String(word.to_string()));
-    }
-    tool.execute(args, &mut ctx).await
+    tool.execute(support::verb_words(verb, &[]), &mut ctx).await
 }
 
 /// Every verb in the read profile, invoked with no arguments. Copied from

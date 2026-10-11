@@ -65,11 +65,9 @@ pub(crate) struct ShowArgs {
     /// One revision, with an optional `:<path>` inside it:
     /// `git show HEAD:src/lib.rs` is a single operand, not two. Bare
     /// `git show HEAD` shows the commit. A second operand is an error.
-    // Bound so clap accepts the `--`-terminated tail `ToolArgs::to_argv()`
-    // always emits. The real operands are read off `args.positional` in
-    // `tool.rs` — the kernel's own convention, because `to_argv` inserts a
-    // `--` of its own and clap cannot tell it from the caller's. Do not read
-    // this field; it cannot distinguish them either.
+    // Every operand, in order, on both sides of the caller's `--`: the tool is
+    // bound verbatim, so this argv is the caller's own. `tool.rs`'s
+    // `operands` splits it at the marker.
     #[arg(hide = true)]
     pub operands: Vec<String>,
 }

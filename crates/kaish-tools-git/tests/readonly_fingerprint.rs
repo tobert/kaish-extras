@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use kaish_tool_api::Tool;
-use kaish_types::{ExecResult, ToolArgs, Value};
+use kaish_types::{ExecResult, ToolArgs};
 
 use kaish_tools_git::{GitConfig, Verb};
 
@@ -276,88 +276,9 @@ const TEXTDIFF_MATRIX: &[(&str, &[&[&str]])] = &[(
     ],
 )];
 
-/// Flags whose next argv token is the flag's *value*, never a bare
-/// positional. `ls` and `show`'s flagship spellings are bare positionals
-/// (`show HEAD:src/lib.rs`, `ls HEAD src`), so this harness can no longer
-/// assume every non-`--` token is a value — it has no `ParamSchema` to
-/// consult the way the kernel's real binder does, so the value-taking flags
-/// are named here explicitly instead.
-///
-/// Adding a new value-taking flag anywhere in [`VERB_MATRIX`] means adding
-/// its name here too, or `tool_args` panics rather than silently mis-bind it
-/// as a bare positional.
-const VALUE_FLAGS: &[&str] = &[
-    "repo", "rev", "limit", "path", "since", "until", "author", "untracked", "from", "to",
-    "context", "contains", "merged",
-];
-
-/// Flags that never take a value — a bare `--flag`. Every long flag used
-/// anywhere in [`VERB_MATRIX`] must be classified in exactly one of this list
-/// or [`VALUE_FLAGS`].
-const BOOL_FLAGS: &[&str] = &[
-    "json",
-    "patch",
-    "ignored",
-    "merges",
-    "no-merges",
-    "first-parent",
-    "body",
-    "stat",
-    "patch",
-    "recursive",
-    "staged",
-    "name-only",
-    "find-renames",
-    "no-find-renames",
-    "all",
-    "remote",
-    "ahead-behind",
-];
-
-/// Split an argv slice into the `ToolArgs` the kernel would have built.
-///
-/// Mirrors the kernel's binding closely enough for the verbs shipped so far:
-/// `--flag value` becomes a named argument when `flag` is in
-/// [`VALUE_FLAGS`], a lone `--flag` becomes a flag when it is in
-/// [`BOOL_FLAGS`], and a `--flag` in neither list is a fail-loud bug in the
-/// matrix rather than a guess. Any token that is not itself a flag (and was
-/// not just consumed as one's value) is a bare positional, joining the verb
-/// word at the front of `positional` — `ls`/`show`'s revision and path
-/// operands, and `log`'s bare-positional revision, all take this path.
+/// The `ToolArgs` a kaish kernel builds for `git <verb> <argv>`.
 fn tool_args(verb: &str, argv: &[&str]) -> ToolArgs {
-    let mut args = ToolArgs::new();
-    // A verb can be two words (`worktree list`), and the kernel binds each as
-    // its own positional — the same way it splits the command line.
-    for word in verb.split_whitespace() {
-        args.positional.push(Value::String(word.to_string()));
-    }
-    let mut i = 0;
-    while i < argv.len() {
-        let token = argv[i];
-        let Some(name) = token.strip_prefix("--") else {
-            args.positional.push(Value::String(token.to_string()));
-            i += 1;
-            continue;
-        };
-        if VALUE_FLAGS.contains(&name) {
-            let value = argv
-                .get(i + 1)
-                .unwrap_or_else(|| panic!("matrix flag '--{name}' takes a value, but none followed in {argv:?}"));
-            args.named
-                .insert(name.to_string(), Value::String((*value).to_string()));
-            i += 2;
-        } else if BOOL_FLAGS.contains(&name) {
-            args.flags.insert(name.to_string());
-            i += 1;
-        } else {
-            panic!(
-                "matrix flag '--{name}' is not in VALUE_FLAGS or BOOL_FLAGS — \
-                 classify it as one or the other so this harness binds it the \
-                 way the kernel's real binder would"
-            );
-        }
-    }
-    args
+    support::verb_words(verb, argv)
 }
 
 /// Run one invocation against the fixture, returning the result.
@@ -811,29 +732,6 @@ async fn info_inside_a_linked_worktree_reports_the_worktree() {
         json["worktrees"], 2,
         "worktree count is a property of the repository, not of which \
          worktree you asked from"
-    );
-}
-
-/// `--json` must reach the kernel as an output-format request, not merely be
-/// swallowed by our clap parse.
-#[tokio::test]
-async fn json_flag_sets_the_output_format() {
-    let repo = RichRepo::build();
-    let backend = Arc::new(StrictBackend::single(PathBuf::from(MOUNT), repo.scratch()));
-    let mut ctx = TestCtx::new(backend, "/mnt/main");
-    let git = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
-
-    git.execute(tool_args("info", &[]), &mut ctx).await;
-    assert!(
-        ctx.output_format.is_none(),
-        "no --json means no format override"
-    );
-
-    git.execute(tool_args("info", &["--json"]), &mut ctx).await;
-    assert_eq!(
-        ctx.output_format,
-        Some(kaish_types::OutputFormat::Json),
-        "--json must be applied to the context"
     );
 }
 

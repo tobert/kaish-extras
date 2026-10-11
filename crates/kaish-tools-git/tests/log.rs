@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use kaish_tool_api::Tool;
-use kaish_types::{ExecResult, ToolArgs, Value};
+use kaish_types::{ExecResult, ToolArgs};
 
 use kaish_tools_git::{GitConfig, Limits};
 
@@ -28,47 +28,9 @@ use support::{git, git_as, require_git, write_file, Fixture, StrictBackend, Test
 /// The VFS root the fixture scratch directory is mounted at.
 const MOUNT: &str = "/mnt";
 
-/// Build the `ToolArgs` the kernel would, from an argv slice. A repeated
-/// `--flag value` accumulates into a list, which is how `--path` is passed
-/// more than once. A token with no leading `--` is a bare positional (a
-/// revision, git's own spelling for `git log main`), joining the verb word
-/// at the front of `positional`.
+/// The `ToolArgs` a kaish kernel builds for `git <verb> <argv>`.
 fn tool_args(verb: &str, argv: &[&str]) -> ToolArgs {
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String(verb.to_string()));
-    let mut i = 0;
-    while i < argv.len() {
-        let Some(token) = argv[i].strip_prefix("--") else {
-            args.positional.push(Value::String(argv[i].to_string()));
-            i += 1;
-            continue;
-        };
-        match argv.get(i + 1) {
-            Some(value) if !value.starts_with("--") => {
-                // A repeated named argument is `Json(Array(Array))` — one inner
-                // array per occurrence — which is how `ToolArgs::to_argv`
-                // renders a `consumes > 1` parameter back into argv. Building
-                // it here is what makes a repeated `--path` reach clap as two
-                // occurrences rather than one overwriting the other.
-                let next = match args.named.remove(token) {
-                    Some(Value::Json(serde_json::Value::Array(mut outer))) => {
-                        outer.push(serde_json::json!([*value]));
-                        Value::Json(serde_json::Value::Array(outer))
-                    }
-                    Some(Value::String(first)) => Value::Json(serde_json::json!([[first], [*value]])),
-                    Some(other) => panic!("unexpected repeat of {token}: {other:?}"),
-                    None => Value::String((*value).to_string()),
-                };
-                args.named.insert(token.to_string(), next);
-                i += 2;
-            }
-            _ => {
-                args.flags.insert(token.to_string());
-                i += 1;
-            }
-        }
-    }
-    args
+    support::verb_words(verb, argv)
 }
 
 /// Run `git log` against `mount_real` mounted at `/mnt`, from `cwd`.

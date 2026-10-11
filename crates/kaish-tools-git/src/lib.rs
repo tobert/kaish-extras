@@ -113,6 +113,8 @@ mod render;
 #[cfg(not(target_family = "wasm"))]
 mod repo;
 #[cfg(not(target_family = "wasm"))]
+mod spelling;
+#[cfg(not(target_family = "wasm"))]
 mod tool;
 #[cfg(not(target_family = "wasm"))]
 mod diffcore;

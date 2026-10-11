@@ -47,11 +47,11 @@ pub(crate) struct BranchArgs {
     /// List remote-tracking branches beside the local ones. A remote-tracking
     /// branch is a record of what a fetch last saw; this build performs no
     /// fetch, so it is as old as the last one someone else ran.
-    #[arg(long = "all", default_value_t = false, conflicts_with = "remote")]
+    #[arg(short = 'a', long = "all", default_value_t = false, conflicts_with = "remote")]
     pub all: bool,
 
     /// List remote-tracking branches instead of the local ones.
-    #[arg(long = "remote", default_value_t = false)]
+    #[arg(short = 'r', long = "remote", default_value_t = false)]
     pub remote: bool,
 
     /// Report only branches whose tip has this revision in its history. Costs
@@ -91,9 +91,9 @@ pub(crate) struct BranchArgs {
     /// Takes no operands: `git branch` lists branches, and narrowing is
     /// `--contains` or `--merged`. A single branch's history is
     /// `git log <BRANCH>`.
-    // Bound so clap accepts the `--`-terminated tail `ToolArgs::to_argv()`
-    // always emits. The real operands are read off `args.positional` in
-    // `tool.rs`, which refuses them by name.
+    // Every operand, in order, on both sides of the caller's `--`: the tool is
+    // bound verbatim, so this argv is the caller's own. `tool.rs`'s
+    // `operands` splits it at the marker.
     #[arg(hide = true)]
     pub operands: Vec<String>,
 }

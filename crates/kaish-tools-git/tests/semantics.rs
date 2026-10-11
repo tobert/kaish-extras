@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use kaish_tool_api::Tool;
-use kaish_types::{ExecResult, ToolArgs, Value};
+use kaish_types::{ExecResult, ToolArgs};
 
 use kaish_tools_git::GitConfig;
 
@@ -32,44 +32,18 @@ use support::{git, git_as, require_git, write_file, Fixture, StrictBackend, Test
 const MOUNT: &str = "/mnt";
 
 // ═══════════════════════════════════════════════════════════════════════════
-// A shared argv builder, parameterized per verb like `tests/ls.rs`'s
-// VALUE_FLAGS/BOOL_FLAGS split — explicit rather than log.rs's "does the next
-// token start with `--`" heuristic, because several tests here pass a bare
-// positional (a revision) right after a bool flag, which that heuristic would
-// misread as the flag's value.
+// A shared argv builder. The tool is bound verbatim, so the argv goes to its
+// parser as typed and nothing here has to guess which word is a flag's value
+// — the guess the per-verb flag tables this replaced existed to get right.
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn build_args(verb: &str, value_flags: &[&str], bool_flags: &[&str], argv: &[&str]) -> ToolArgs {
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String(verb.to_string()));
-    let mut i = 0;
-    while i < argv.len() {
-        let token = argv[i];
-        let Some(name) = token.strip_prefix("--") else {
-            args.positional.push(Value::String(token.to_string()));
-            i += 1;
-            continue;
-        };
-        if value_flags.contains(&name) {
-            let value = argv
-                .get(i + 1)
-                .unwrap_or_else(|| panic!("'--{name}' takes a value, none followed in {argv:?}"));
-            args.named.insert(name.to_string(), Value::String((*value).to_string()));
-            i += 2;
-        } else if bool_flags.contains(&name) {
-            args.flags.insert(name.to_string());
-            i += 1;
-        } else {
-            panic!("'--{name}' is not classified as a value or bool flag for '{verb}' in this harness");
-        }
-    }
-    args
+/// The `ToolArgs` a kaish kernel builds for `git <verb> <argv>`.
+fn build_args(verb: &str, argv: &[&str]) -> ToolArgs {
+    support::verb_words(verb, argv)
 }
 
 async fn run_verb(
     verb: &str,
-    value_flags: &[&str],
-    bool_flags: &[&str],
     config: GitConfig,
     mount_real: &Path,
     cwd: &str,
@@ -78,49 +52,37 @@ async fn run_verb(
     let backend = Arc::new(StrictBackend::single(PathBuf::from(MOUNT), mount_real.to_path_buf()));
     let mut ctx = TestCtx::new(backend, cwd);
     let tool = kaish_tools_git::tool(config).expect("config");
-    tool.execute(build_args(verb, value_flags, bool_flags, argv), &mut ctx).await
+    tool.execute(build_args(verb, argv), &mut ctx).await
 }
 
-const LOG_VALUE: &[&str] = &["limit", "repo", "rev", "since", "until", "author", "path"];
-const LOG_BOOL: &[&str] = &["body", "stat", "merges", "no-merges", "first-parent", "json"];
 
 async fn log(mount_real: &Path, cwd: &str, argv: &[&str]) -> ExecResult {
-    run_verb("log", LOG_VALUE, LOG_BOOL, GitConfig::read_only(), mount_real, cwd, argv).await
+    run_verb("log", GitConfig::read_only(), mount_real, cwd, argv).await
 }
 
-const STATUS_VALUE: &[&str] = &["limit", "repo", "path", "untracked"];
-const STATUS_BOOL: &[&str] = &["ignored", "json"];
 
 async fn status_run(mount_real: &Path, cwd: &str, argv: &[&str]) -> ExecResult {
-    run_verb("status", STATUS_VALUE, STATUS_BOOL, GitConfig::read_only(), mount_real, cwd, argv).await
+    run_verb("status", GitConfig::read_only(), mount_real, cwd, argv).await
 }
 
-const BRANCH_VALUE: &[&str] = &["limit", "repo", "contains", "merged"];
-const BRANCH_BOOL: &[&str] = &["all", "remote", "ahead-behind", "json"];
 
 async fn branch_run(mount_real: &Path, cwd: &str, argv: &[&str]) -> ExecResult {
-    run_verb("branch", BRANCH_VALUE, BRANCH_BOOL, GitConfig::read_only(), mount_real, cwd, argv).await
+    run_verb("branch", GitConfig::read_only(), mount_real, cwd, argv).await
 }
 
-const TAG_VALUE: &[&str] = &["limit", "repo", "contains"];
-const TAG_BOOL: &[&str] = &["json"];
 
 async fn tag_run(mount_real: &Path, cwd: &str, argv: &[&str]) -> ExecResult {
-    run_verb("tag", TAG_VALUE, TAG_BOOL, GitConfig::read_only(), mount_real, cwd, argv).await
+    run_verb("tag", GitConfig::read_only(), mount_real, cwd, argv).await
 }
 
-const SHOW_VALUE: &[&str] = &["limit", "repo"];
-const SHOW_BOOL: &[&str] = &["json"];
 
 async fn show_run(mount_real: &Path, cwd: &str, argv: &[&str]) -> ExecResult {
-    run_verb("show", SHOW_VALUE, SHOW_BOOL, GitConfig::read_only(), mount_real, cwd, argv).await
+    run_verb("show", GitConfig::read_only(), mount_real, cwd, argv).await
 }
 
-const LS_VALUE: &[&str] = &["limit", "repo"];
-const LS_BOOL: &[&str] = &["json", "recursive"];
 
 async fn ls_run(mount_real: &Path, cwd: &str, argv: &[&str]) -> ExecResult {
-    run_verb("ls", LS_VALUE, LS_BOOL, GitConfig::read_only(), mount_real, cwd, argv).await
+    run_verb("ls", GitConfig::read_only(), mount_real, cwd, argv).await
 }
 
 /// The typed model out of a successful `--json`-carrying result.

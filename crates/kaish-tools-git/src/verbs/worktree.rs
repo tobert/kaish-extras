@@ -55,9 +55,9 @@ pub(crate) struct WorktreeListArgs {
 
     /// Takes no operands: `git worktree list` reports every working tree, and
     /// a repository other than the current directory is named with `--repo`.
-    // Bound so clap accepts the `--`-terminated tail `ToolArgs::to_argv()`
-    // always emits. The real operands are read off `args.positional` in
-    // `tool.rs`, which refuses them by name.
+    // Every operand, in order, on both sides of the caller's `--`: the tool is
+    // bound verbatim, so this argv is the caller's own. `tool.rs`'s
+    // `operands` splits it at the marker.
     #[arg(hide = true)]
     pub operands: Vec<String>,
 }

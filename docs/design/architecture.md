@@ -312,6 +312,8 @@ Conventions that apply to every verb:
   `<branch>`, `<tag>`, `refs/...`, `<oid>` (full or ≥4-char unambiguous prefix),
   `<rev>~N`, `<rev>^`, `<rev>^N`, and `<rev>:<path>` for `show`. Everything else
   — `@{...}`, `^{/regex}`, `:/text`, `A..B`, `A...B` — is a loud usage error.
+  `git diff`'s operands accept `A..B` (2026-10-01) by splitting it into its
+  two ends before either is resolved; the grammar itself still has no range.
   We parse that grammar ourselves and do not link `gix-revision`'s `spec`
   module at all. `gix_revision::spec::parse` is a pure parser driving a
   caller-supplied delegate — it resolves nothing — and the facade's
@@ -512,8 +514,19 @@ the output. HEAD→worktree is one spelling away, as `git diff --from HEAD`.
 
 `--from`/`--to` semantics are unchanged by that call, and every result — text
 and JSON — still states its endpoints; parity removes a divergence, not the
-honesty. `A..B` range syntax is not accepted (`--from`/`--to` is the one
-spelling; two spellings for one concept is drift).
+honesty.
+
+**git's operands name the same ends** (2026-10-01): `git diff A B` and
+`git diff A..B` are `--from A --to B`, `git diff A` is `--from A`, and
+`--cached` is `--staged`. This reverses the earlier "one spelling" rule for
+`diff`, on evidence again: Terminal-Bench runs through kaijutsu showed models
+typing `git diff A B` and paying a model call per refusal. Amy's rule, which
+replaces it: a spelling git has is accepted when it means what git means and
+this build computes that answer. Before `--`, a word is a revision when it
+resolves and a path when the index tracks it; a word that is both is refused
+until `--` settles it, as git refuses it. `A...B` (merge base) is refused
+saying so. Pathspecs are now cwd-relative in `diff`, as they already were in
+`status` and `log`.
 
 Other flags:
 
@@ -1505,6 +1518,40 @@ carries the real numbers below; two items were retired rather than filed.
 ---
 
 ## Changelog / provenance
+
+**2026-10-01 — git's own spellings, and refusals that say what to type.**
+Terminal-Bench runs through kaijutsu (moltar, 2026-09-30 and 10-01) were
+refused on `git branch -a -v`, `git log --oneline --all --graph --decorate`,
+`git log master --limit 10 --oneline` and `git diff master^ master`. Amy's
+rule: accept a spelling when it means what git means and this build computes
+the answer; refuse anything else saying it is not supported and what to type
+instead.
+
+- **Accepted**: `branch -a`/`-r`, `diff --cached`, `diff`'s revision operands
+  (B.4), `log --oneline` (git's own line, `<short oid> <summary>`), and `-p`
+  for `--patch` on `diff`. `log` parses `-p` too, but refuses `--patch` in
+  every build and names the `git diff` that shows one commit's patch.
+- **Refused with a next step**: an unknown flag no longer gets clap's text,
+  which told an agent to write `-- --oneline` (a pathspec here) and suggested
+  `--patch` for `--cached`. `src/spelling.rs` names known git flags and their
+  next step, and lists the verb's flags otherwise. `docs/issues.md` S1–S5 are
+  the refused spellings that could become features.
+- **K3**: kaish 0.17 refuses `~` and `^` inside an unquoted word, so
+  `HEAD~1` never reached this tool. Every published command quotes such a
+  word, and `tests/spellings.rs` parses all of them with kaish's parser.
+- **`diff` pathspecs are cwd-relative**, matching `status`, `log` and git.
+- **Bound verbatim** (`ToolSchema::with_verbatim_argv`). kaish's typed binder
+  drops a caller's `--`, by design — its own `GlobalFlags` docs say so — and
+  every verb here assumed the marker reached it, so `git log main -- src`
+  was refused as two revisions through a real kernel for as long as
+  operands have been read (X2). Nothing
+  caught it because every test built `ToolArgs` by hand, with a literal
+  `"--"` the kernel never sends. Verbatim hands the tool every word in source
+  order, `--` included, and lifts only `--json`. The 2026-08-21 review called
+  this binding right for git and deferred it as a rewrite of the argument
+  path; the dropped marker is what made it worth the rewrite. The test
+  helpers now build `words` the way a kernel does (`support::words`), and
+  `tests/spellings.rs` drives the marker through `Kernel::execute`.
 
 **2026-08-23 — P12: one over-cap tracked file no longer costs the whole
 status.** `status` used to propagate `BlobTooLarge` from the first tracked

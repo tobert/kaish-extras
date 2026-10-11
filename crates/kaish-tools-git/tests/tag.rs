@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use kaish_tool_api::Tool;
-use kaish_types::{ExecResult, ToolArgs, Value};
+use kaish_types::ExecResult;
 
 use kaish_tools_git::GitConfig;
 
@@ -24,27 +24,7 @@ async fn run(repo: &RefsRepo, argv: &[&str]) -> ExecResult {
     let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), repo.scratch()));
     let mut ctx = TestCtx::new(backend, "/mnt/repo");
     let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
-    let mut args = ToolArgs::new();
-    args.positional.push(Value::String("tag".to_string()));
-    let mut i = 0;
-    while i < argv.len() {
-        match argv[i].strip_prefix("--") {
-            Some("json") => {
-                args.flags.insert("json".to_string());
-                i += 1;
-            }
-            Some(name) => {
-                args.named
-                    .insert(name.to_string(), Value::String(argv[i + 1].to_string()));
-                i += 2;
-            }
-            None => {
-                args.positional.push(Value::String(argv[i].to_string()));
-                i += 1;
-            }
-        }
-    }
-    tool.execute(args, &mut ctx).await
+    tool.execute(support::verb_words("tag", argv), &mut ctx).await
 }
 
 fn json(result: &ExecResult) -> serde_json::Value {
@@ -292,9 +272,12 @@ async fn operands_are_refused() {
     let result = run(&repo, &["v0.1.0"]).await;
     assert_eq!(result.code, 2, "stderr: {}", result.err);
     assert!(result.err.contains("v0.1.0"), "{}", result.err);
+    // An operand to `tag` is most likely a tag name, so the next step is
+    // to look at that tag, not to name a repository.
     assert!(
-        result.err.contains("--repo"),
+        result.err.contains("git show v0.1.0"),
         "the refusal points somewhere useful: {}",
         result.err
     );
+    assert!(!result.err.contains("--repo"), "{}", result.err);
 }
