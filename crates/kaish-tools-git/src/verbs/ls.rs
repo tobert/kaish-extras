@@ -51,8 +51,10 @@ pub(crate) struct LsArgs {
     pub global: GlobalFlags,
 
     /// The revision to list, then a path under it: `git ls HEAD src`.
-    /// Position decides which is which, so no `--` is needed. The colon form
-    /// `git ls HEAD:src` works too. Omit the path to list the repository root.
+    /// Position decides which is which, so no `--` is needed. The path is
+    /// read from the current directory, and omitting it lists the current
+    /// directory, as git's `ls-tree` does. The colon form `git ls HEAD:src`
+    /// names a path from the repository root.
     // Every operand, in order, on both sides of the caller's `--`: the tool is
     // bound verbatim, so this argv is the caller's own. `tool.rs`'s
     // `operands` splits it at the marker.

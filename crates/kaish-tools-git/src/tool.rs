@@ -466,7 +466,7 @@ impl GitTool {
             .first()
             .cloned()
             .unwrap_or_else(|| verbs::ls::DEFAULT_REV.to_string());
-        let path = ops.get(1).cloned().unwrap_or_default();
+        let path_arg = ops.get(1).cloned();
 
         // The embedder's `max_rows` is a hard cap; `--limit` may only lower it.
         let limit = parsed.limit.min(self.config.limits().max_rows);
@@ -474,6 +474,15 @@ impl GitTool {
 
         let outcome = block_in_place_compat(move || {
             let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
+            // A path is read from the cwd, and with none the cwd itself is
+            // listed — git's `ls-tree` from a subdirectory. A `<rev>:<path>`
+            // revision names its path from the root, as git's does, so the
+            // cwd does not apply to it.
+            let path = match (&path_arg, rev.contains(':')) {
+                (None, true) => String::new(),
+                (arg, _) => PathBase::new(&resolved, &repo)
+                    .repo_path(OP, arg.as_deref().unwrap_or(""))?,
+            };
             let opts = verbs::ls::LsOptions {
                 rev,
                 path,
