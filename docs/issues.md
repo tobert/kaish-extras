@@ -1141,18 +1141,33 @@ repository size, not result size.
 
 ## git — from the 2026-10-11 survey (docs/design/git-survey-2026-10.md)
 
-- **Q2 — `git log A..B` is refused with no substitute.** The survey's models typed a
-  range 12 times for "commits on feature/x not on main", and the warm
-  arm, told ranges are unsupported, typed `git log feature/x` — every commit
-  on the branch, silently wrong for the question. Implement git's meaning
-  (walk from B, hide what A reaches, bounded like `--merged`'s walk), or name
-  a substitute in the refusal.
 - **Q3 — `--format`/`--pretty` and `--date`.** 8 cells. Refused with a pointer
   at `--json`; a `--format` subset (`%H %h %s %an %ae %ad`) would cover most
   of what models typed. Needs kaish to accept `%` in a word first — check.
 - **Q4 — re-run the survey after these land.** `git-survey-2026-10/` keeps
   the tasks, responses and fixture; replay `responses.jsonl` through
   `examples/probe.rs` and compare the bins.
+
+## git log — from the 2026-10-11 review of `A..B` (deepseek-flash)
+
+F1 (`--first-parent` on the hidden side) and F2 (a pathspec widening a range)
+were settled against git 2.55 and pinned in tests/log.rs: ours matches.
+
+- **G12 — the hidden side's walk is unconditional and unreported.**
+  `HEAD..HEAD` still reads A's whole ancestry, and past 100,000 commits exits 1
+  with `AncestryBudgetExhausted`, whose text names `--contains`/`--merged` —
+  branch/tag advice. `log` drops the Budget, so `commits_examined` (which
+  reach.rs promises) is not in LogReport. A shallow range's refusal says "ask
+  without a range … which reads no history", false for `log` (see L11).
+- **G13 — a bare `..` is refused where git reads the parent directory.** From
+  `src/`, `git log ..` is the whole repository in git; ours is a usage error,
+  and `--rev ..` answers `HEAD..HEAD` (empty). A tracked file named `a..b` is
+  read as a range, where git falls back to the path.
+- **G14 — log's ordering and date edges.** `--since` filters (git's
+  `--since-as-filter`) rather than stopping the walk; equal committer times
+  tie-break by oid, not git's queue order; an ambiguous ref name resolves by
+  gix's order with no warning. Each needs a discriminating fixture and a
+  decision; none is range-specific.
 
 ## git — the embedder boundary
 

@@ -1179,3 +1179,66 @@ async fn a_range_naming_nothing_is_refused_naming_the_side() {
     assert_ne!(r.code, 0, "{}", r.err);
     assert!(r.err.contains("nosuch"), "{}", r.err);
 }
+
+/// git hides A's whole ancestry even under `--first-parent`: in this fixture
+/// S is on b's first-parent chain and reaches main only through the merge's
+/// second parent, and `git log --first-parent main..b` still prints only D.
+#[tokio::test]
+async fn a_first_parent_range_hides_what_git_hides() {
+    require_git();
+    let fixture = Fixture::empty();
+    let root = fixture.path("repo");
+    std::fs::create_dir_all(&root).expect("create repo dir");
+    git(&root, &["init", "--initial-branch=main", "--quiet"]);
+    let me = ("T", "t@e.x");
+    let commit = |file: &str, minute: u32| {
+        write_file(&root, file, "x\n");
+        git(&root, &["add", file]);
+        git_as(&root, me, &format!("2026-01-01T00:{minute:02}:00Z"), &["commit", "--quiet", "-m", file]);
+    };
+    commit("X.txt", 1);
+    git(&root, &["checkout", "--quiet", "-b", "side"]);
+    commit("S.txt", 2);
+    git(&root, &["checkout", "--quiet", "-b", "b"]);
+    commit("D.txt", 3);
+    git(&root, &["checkout", "--quiet", "main"]);
+    commit("A1.txt", 4);
+    git_as(&root, me, "2026-01-01T00:05:00Z", &["merge", "--quiet", "--no-ff", "-m", "M", "side"]);
+
+    let want = git_oids(&root, &["--first-parent", "main..b"]);
+    assert_eq!(want.len(), 1, "control: git prints D alone");
+    let r = log(&root, MOUNT, &["--json", "--first-parent", "main..b"]).await;
+    assert_eq!(oids(&r), want);
+}
+
+/// A pathspec does not widen a range: C is in main's history (through a merge
+/// that discarded its change) and matches the path, and git prints nothing.
+#[tokio::test]
+async fn a_pathspec_does_not_widen_a_range() {
+    require_git();
+    let fixture = Fixture::empty();
+    let root = fixture.path("repo");
+    std::fs::create_dir_all(&root).expect("create repo dir");
+    git(&root, &["init", "--initial-branch=main", "--quiet"]);
+    write_file(&root, "f.txt", "1\n");
+    git(&root, &["add", "f.txt"]);
+    git(&root, &["commit", "--quiet", "-m", "A"]);
+    write_file(&root, "f.txt", "1\n2\n");
+    git(&root, &["commit", "--quiet", "-am", "B"]);
+    git(&root, &["checkout", "--quiet", "-b", "side", "HEAD~1"]);
+    write_file(&root, "f.txt", "1\n3\n");
+    git(&root, &["commit", "--quiet", "-am", "C"]);
+    git(&root, &["checkout", "--quiet", "main"]);
+    git(&root, &["merge", "--quiet", "-s", "ours", "--no-ff", "-m", "M", "side"]);
+    git(&root, &["checkout", "--quiet", "-b", "b", "side"]);
+    write_file(&root, "g.txt", "g\n");
+    git(&root, &["add", "g.txt"]);
+    git(&root, &["commit", "--quiet", "-m", "D"]);
+    git(&root, &["checkout", "--quiet", "main"]);
+
+    assert_eq!(git_oids(&root, &["main..b"]).len(), 1, "control: the plain range is D");
+    let want = git_oids(&root, &["main..b", "--", "f.txt"]);
+    assert!(want.is_empty(), "control: git prints nothing");
+    let r = log(&root, MOUNT, &["--json", "main..b", "--", "f.txt"]).await;
+    assert_eq!(oids(&r), want);
+}
