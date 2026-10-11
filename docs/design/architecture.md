@@ -405,7 +405,8 @@ they select and do not change (Amy, 2026-10-11, after 7 of 11 survey runs
 typed `status -s`); there is no `--long` and no porcelain v2. Renames are first-class (`orig_path`) and
 conflicts are a boolean, both of which v1's hand-rolled renderer got wrong.
 
-Table rendering: the `XY` pair, then `PATH` (+ `← ORIG` on renames). An
+Table rendering: the `XY` pair, then `PATH` — `ORIG -> PATH` on renames and a
+trailing `/` on a directory, as git's short format prints them (2026-10-11). An
 uncompared path renders `~` in the worktree column — not one of git's letters,
 because git has no letter for a path it did not compare — and the reason
 beside the path.

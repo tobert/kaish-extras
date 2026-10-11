@@ -157,9 +157,11 @@ fn our_oracle(result: &ExecResult) -> BTreeSet<(String, String)> {
     rows(result)
         .into_iter()
         .map(|(xy, path)| {
-            // Our rename rows render `new ← orig`; take the destination.
-            let path = path.split(" ← ").next().unwrap_or(&path).to_string();
-            (xy, path)
+            // Our rename rows render `orig -> new`, as git's do; take the
+            // destination. A directory's trailing `/` is dropped, as the
+            // porcelain side drops it.
+            let path = path.rsplit(" -> ").next().unwrap_or(&path);
+            (xy, path.trim_end_matches('/').to_string())
         })
         .collect()
 }
@@ -527,7 +529,7 @@ async fn text_letters_and_json_words_agree() {
         }
         let (xy, row_path) = rendered
             .iter()
-            .find(|(_, p)| p.split(" ← ").next() == Some(path))
+            .find(|(_, p)| p.rsplit(" -> ").next() == Some(path))
             .unwrap_or_else(|| panic!("no rendered row for {path}"));
         let mut chars = xy.chars();
         let x = chars.next().unwrap();
@@ -1534,7 +1536,7 @@ async fn the_blob_cap_does_not_fire_on_symlinks_or_ordinary_files() {
 fn row_for(result: &ExecResult, path: &str) -> (String, String) {
     let all = rows(result);
     all.iter()
-        .find(|(_, cell)| cell.starts_with(path))
+        .find(|(_, cell)| cell.starts_with(path) || cell.contains(&format!("-> {path}")))
         .cloned()
         .unwrap_or_else(|| panic!("no text row for {path}: {all:?}"))
 }
@@ -1596,7 +1598,7 @@ async fn a_staged_rename_over_the_cap_keeps_its_orig_path() {
     let (letters, cell) = row_for(&text, "new.txt");
     assert_eq!(letters, "R~", "{:?}", rows(&text));
     assert!(
-        cell.contains("new.txt ← old.txt (not compared"),
+        cell.contains("old.txt -> new.txt (not compared"),
         "the rename arrow and the decline note both render: {cell}"
     );
 }

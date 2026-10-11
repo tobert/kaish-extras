@@ -758,3 +758,39 @@ async fn verb_help_answers_from_the_schema() {
     let r = run(&root, "git log --help").await;
     assert!(r.out.contains("--limit"), "log's help names its flags: {}", r.out);
 }
+
+/// `status -s` is accepted because the text output is git's short format.
+/// So each text row must carry the fields git's `--porcelain=v1` line does:
+/// the `XY` pair, then the path, with a rename as `old -> new` and an
+/// untracked directory ending in `/`. kaish's table separates the two
+/// columns with a tab where git uses a space; both split the same way.
+#[tokio::test]
+async fn status_text_rows_carry_git_short_format_fields() {
+    let (_f, root) = repo();
+    git(&root, &["mv", "a.txt", "renamed.txt"]);
+    write_file(&root, "newdir/inside.txt", "x\n");
+    write_file(&root, "loose.txt", "x\n");
+
+    let r = run(&root, "git status -s").await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    let mut ours: Vec<(String, String)> = r
+        .out
+        .lines()
+        .map(|l| {
+            let (xy, path) = l.split_once('\t').unwrap_or_else(|| panic!("a tab-separated row: {l:?}"));
+            (xy.to_string(), path.to_string())
+        })
+        .collect();
+    ours.sort();
+
+    let porcelain = git(&root, &["status", "--porcelain=v1"]);
+    let mut theirs: Vec<(String, String)> = porcelain
+        .lines()
+        .map(|l| (l[..2].to_string(), l[3..].to_string()))
+        .collect();
+    theirs.sort();
+
+    assert!(theirs.iter().any(|(xy, _)| xy.starts_with('R')), "negative control: a rename row");
+    assert!(theirs.iter().any(|(_, p)| p.ends_with('/')), "negative control: an untracked directory row");
+    assert_eq!(ours, theirs);
+}

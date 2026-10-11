@@ -9,7 +9,7 @@
 use kaish_types::{OutputData, OutputNode};
 
 use crate::model::{
-    BranchReport, DiffEndpoint, DiffFile, DiffReport, EntryStatus, LogReport, LsReport,
+    BranchReport, DiffEndpoint, DiffFile, DiffReport, EntryKind, EntryStatus, LogReport, LsReport,
     RepoInfo, ShowCommit, ShowTag, StatusReport, TagKind, TagReport, TreeRow, WorktreeReport,
 };
 
@@ -95,10 +95,15 @@ pub fn status(report: &StatusReport) -> OutputData {
         .iter()
         .map(|entry| {
             let xy: String = entry.porcelain.iter().collect();
+            // git's short format: a rename is `old -> new`, and an untracked
+            // or ignored directory ends in `/`.
             let mut path = match &entry.orig_path {
-                Some(orig) => format!("{} ← {orig}", entry.path),
+                Some(orig) => format!("{orig} -> {}", entry.path),
                 None => entry.path.clone(),
             };
+            if entry.kind == EntryKind::Dir {
+                path.push('/');
+            }
             if entry.blob_capped {
                 path.push_str(" (not compared: over this build's max_blob_bytes)");
             }
@@ -434,7 +439,7 @@ pub fn diff(report: &DiffReport) -> (OutputData, String) {
     });
     for file in &report.files {
         let path = match &file.old_path {
-            Some(orig) => format!("{} ← {orig}", file.path),
+            Some(orig) => format!("{orig} -> {}", file.path),
             None => file.path.clone(),
         };
         rows.push(if name_only {

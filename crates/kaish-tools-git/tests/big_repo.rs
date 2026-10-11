@@ -178,7 +178,7 @@ fn our_status_set(result: &ExecResult) -> std::collections::BTreeSet<(String, St
         .iter()
         .map(|node| {
             let path = node.cells.first().cloned().unwrap_or_default();
-            let path = path.split(" ← ").next().unwrap_or(&path).to_string();
+            let path = path.rsplit(" -> ").next().unwrap_or(&path).to_string();
             (node.name.clone(), path)
         })
         .collect()
