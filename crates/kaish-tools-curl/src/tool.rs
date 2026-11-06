@@ -180,7 +180,9 @@ impl CurlTool {
             /// %{http_code}, %{response_code}, %{time_total} (seconds, six
             /// decimals), %{size_download}, %{url_effective}, %{content_type},
             /// %{redirect_url}, %{num_redirects}. Escapes: \n \r \t and
-            /// %% for a percent sign. Anything else exits 2. Cannot be combined
+            /// %% for a percent sign; any other backslash and the character
+            /// after it print as typed. Also printed when the request fails,
+            /// with 000 for the code. Any other variable exits 2. Cannot be combined
             /// with --json.
             #[arg(short = 'w', long)]
             write_out: Option<String>,

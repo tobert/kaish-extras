@@ -461,3 +461,26 @@ async fn header_forms_with_no_value_match_curl() {
         assert!(p.ours_req.is_empty(), "{args}");
     }
 }
+
+// ── 17. -w treats a backslash and the character after it as a pair ──────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn write_out_backslash_pairs_match_curl() {
+    let server = redirector();
+    for fmt in [
+        // An unknown pair prints as typed and does not hide a following '%'.
+        r"\%{http_code}|\\n|%%|\q\n",
+        r"a\\%{http_code}\n",
+        r"x\tz\n",
+        r"end\",
+    ] {
+        let args = format!("-s -o /dev/null -w '{fmt}' \"$URL/echo\"");
+        let p = compare(&server, &args, &[]).await;
+        assert_eq!(p.ours.code, 0, "{fmt}: {}", p.ours.err);
+        let Some(theirs) = &p.theirs else { continue };
+        assert_eq!(p.ours.text_out().as_bytes(), theirs.stdout.as_slice(), "{fmt}");
+    }
+    // The literal, for a box without curl.
+    let p = compare(&server, "-s -o /dev/null -w '\\%{http_code}|\\\\n|\\q\\n' \"$URL/echo\"", &[]).await;
+    assert_eq!(p.ours.text_out(), "\\%{http_code}|\\\\n|\\q\n");
+}

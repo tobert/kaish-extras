@@ -83,9 +83,15 @@ pub fn parse(format: &str) -> Result<WriteOut, CurlError> {
                     chars.next();
                     text.push('\t');
                 }
-                // curl prints any other backslash sequence as typed,
-                // including `\\`: it leaves both backslashes.
-                _ => text.push('\\'),
+                // curl prints any other backslash pair as typed, both
+                // characters: `\\n` is a backslash, a backslash, and an `n`,
+                // and `\%{http_code}` is not a variable. A backslash that
+                // ends the text prints as itself.
+                Some(_) => {
+                    text.push('\\');
+                    text.extend(chars.next());
+                }
+                None => text.push('\\'),
             },
             '%' => match chars.peek() {
                 Some('%') => {
