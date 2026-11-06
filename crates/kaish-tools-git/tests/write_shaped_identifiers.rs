@@ -129,6 +129,52 @@ const WRITE_SHAPED: &[(&str, &str)] = &[
         "sync_data",
         "fsync: only a writer has anything to sync",
     ),
+    (
+        "File::options",
+        "File::options() is OpenOptions by another name",
+    ),
+    (
+        "std::process",
+        "std::process spawns a program; layer 3 says no build links spawn \
+         machinery, and this is the source-level half of that claim",
+    ),
+    (
+        "process::Command",
+        "process::Command, however it was imported, spawns a program",
+    ),
+    (
+        "tokio::process",
+        "tokio::process spawns a program",
+    ),
+    (
+        "use gix_object as ",
+        "an alias for gix-object, under which `Write` carries a name the scan \
+         does not look for",
+    ),
+    (
+        "use gix_odb as ",
+        "an alias for gix-odb, under which the object-writing trait carries a \
+         name the scan does not look for",
+    ),
+    (
+        "use gix_ref as ",
+        "an alias for gix-ref, under which the transaction API carries a \
+         name the scan does not look for",
+    ),
+    (
+        "use gix_index as ",
+        "an alias for gix-index, under which its writer carries a name the \
+         scan does not look for",
+    ),
+    (
+        "use gix_lock as ",
+        "an alias for gix-lock, under which a lock file carries a name the \
+         scan does not look for",
+    ),
+    (
+        "extern crate gix_",
+        "an extern crate alias for a gix crate, which can rename it past the scan",
+    ),
 ];
 
 /// Crates whose brace-list `use` can import the object-writing trait without
@@ -142,10 +188,18 @@ const TRAIT_SOURCE_CRATES: &[&str] = &["gix_object", "gix_odb"];
 /// store whose options nothing here has checked.
 const REF_STORE_CONSTRUCTORS: &[&str] = &["Store::at(", "Store::for_linked_worktree("];
 
-/// Directories under `src/` where write-shaped plumbing is expected to live.
-///
-/// Relative to `src/`. Everything else is read-only territory.
-const WRITE_ALLOWED: &[&str] = &["verbs/write"];
+/// Where write-shaped plumbing is expected to live, relative to `src/`, as
+/// path components: the `verbs/write/` directory and the `verbs/write.rs`
+/// module file beside it. Matched by component, not by string prefix, so
+/// `verbs/write_extra.rs` is scanned like any other file (F3).
+const WRITE_DIR: [&str; 2] = ["verbs", "write"];
+const WRITE_MODULE_FILE: [&str; 2] = ["verbs", "write.rs"];
+
+/// Is `rel` (relative to `src/`) in the write territory?
+fn is_write_territory(rel: &Path) -> bool {
+    let parts: Vec<&str> = rel.components().filter_map(|c| c.as_os_str().to_str()).collect();
+    parts == WRITE_MODULE_FILE || (parts.len() > WRITE_DIR.len() && parts[..2] == WRITE_DIR)
+}
 
 fn crate_src() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -208,6 +262,23 @@ fn code_of(source: &str) -> String {
                     i += 1;
                 }
             }
+        } else if let Some((body, hashes)) = raw_string_start(&b, i) {
+            // A raw string: no escapes, ends at `"` plus the same number of
+            // `#`. Its contents are not code, and an embedded `"` must not
+            // end it early.
+            out.push_str("\"\"");
+            let mut j = body;
+            while j < b.len() {
+                if b[j] == '"' && b[j + 1..].iter().take(hashes).filter(|&&h| h == '#').count() == hashes {
+                    j += 1 + hashes;
+                    break;
+                }
+                if b[j] == '\n' {
+                    out.push('\n');
+                }
+                j += 1;
+            }
+            i = j;
         } else if c == '"' {
             out.push('"');
             i += 1;
@@ -286,6 +357,133 @@ fn drop_cfg_test_mods(code: &str) -> String {
     out
 }
 
+/// If a raw string literal (`r"`, `r#"`, `br##"`, `cr"`) starts at `b[i]`,
+/// return the index of its first content character and its `#` count. The
+/// previous character must not be part of an identifier, or `bar"x"` would
+/// read as a raw string.
+fn raw_string_start(b: &[char], i: usize) -> Option<(usize, usize)> {
+    if i > 0 && (b[i - 1].is_alphanumeric() || b[i - 1] == '_') {
+        return None;
+    }
+    let mut j = i;
+    if matches!(b.get(j), Some('b' | 'c')) {
+        j += 1;
+    }
+    if b.get(j) != Some(&'r') {
+        return None;
+    }
+    j += 1;
+    let mut hashes = 0;
+    while b.get(j) == Some(&'#') {
+        hashes += 1;
+        j += 1;
+    }
+    (b.get(j) == Some(&'"')).then_some((j + 1, hashes))
+}
+
+/// Collapse whitespace so a needle split across lines or spaced out matches:
+/// runs become one space, and the space is dropped next to `.`, `:` and a
+/// following `(`. `fs :: write (` and `store\n .transaction ()` both match.
+fn normalize(code: &str) -> String {
+    let chars: Vec<char> = code.chars().collect();
+    let mut out = String::with_capacity(code.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_whitespace() {
+            let mut j = i;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            let prev = out.chars().last();
+            let next = chars.get(j).copied();
+            let drop = prev.is_none_or(|p| matches!(p, '.' | ':'))
+                || next.is_none_or(|n| matches!(n, '.' | ':' | '('));
+            if !drop {
+                out.push(' ');
+            }
+            i = j;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Every `#[path = ..]` attribute and `include!` in one file, as a reason.
+///
+/// Either can pull code from outside the scanned tree, so neither may appear
+/// anywhere in `src/` (the write directory included), and there is no
+/// allowlist. `include_str!` and `include_bytes!` embed text and are fine.
+fn redirects_in(source: &str) -> Vec<String> {
+    let code = code_of(source);
+    let b: Vec<char> = code.chars().collect();
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let skip_ws = |mut k: usize| {
+        while b.get(k).is_some_and(|c| c.is_whitespace()) {
+            k += 1;
+        }
+        k
+    };
+    let mut hits = Vec::new();
+
+    // Attributes: `#[..]` and `#![..]`, bracket-balanced; a `path` word
+    // followed by `=` anywhere inside (so `cfg_attr(unix, path = ..)` counts).
+    for (at, &c) in b.iter().enumerate() {
+        if c != '#' {
+            continue;
+        }
+        let mut k = skip_ws(at + 1);
+        if b.get(k) == Some(&'!') {
+            k = skip_ws(k + 1);
+        }
+        if b.get(k) != Some(&'[') {
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut end = b.len();
+        for (m, &ch) in b.iter().enumerate().skip(k) {
+            match ch {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = m;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &b[k + 1..end];
+        for (m, w) in body.windows(4).enumerate() {
+            let word_start = m == 0 || !is_ident(body[m - 1]);
+            if w.iter().collect::<String>() == "path" && word_start {
+                let mut n = m + 4;
+                while body.get(n).is_some_and(|c| c.is_whitespace()) {
+                    n += 1;
+                }
+                if body.get(n) == Some(&'=') {
+                    hits.push("'#[path = ..]' — a module file chosen by path, possibly outside src/".to_string());
+                }
+            }
+        }
+    }
+
+    // `include!`, however spaced or qualified.
+    let name: Vec<char> = "include".chars().collect();
+    for m in 0..b.len().saturating_sub(name.len()) {
+        if b[m..m + name.len()] != name[..] || (m > 0 && is_ident(b[m - 1])) {
+            continue;
+        }
+        let k = skip_ws(m + name.len());
+        if b.get(k) == Some(&'!') && matches!(b.get(skip_ws(k + 1)), Some('(' | '[' | '{')) {
+            hits.push("'include!' — source text included from a path the scan does not read".to_string());
+        }
+    }
+    hits
+}
+
 /// Does a brace-list `use` of a trait-source crate import `Write`?
 /// `use gix_object::{FindExt, Write};` carries no literal `gix_object::Write`.
 fn imports_write_trait(code: &str) -> Option<String> {
@@ -324,7 +522,7 @@ fn imports_write_trait(code: &str) -> Option<String> {
 
 /// Every write-shaped hit in one file's source, as `"<needle> — <why>"`.
 fn hits_in(source: &str) -> Vec<String> {
-    let code = code_of(source);
+    let code = normalize(&code_of(source));
     let mut hits = Vec::new();
     for (needle, why) in WRITE_SHAPED {
         if code.contains(needle) {
@@ -341,7 +539,7 @@ fn hits_in(source: &str) -> Vec<String> {
 
 /// How many times `source` builds a ref store.
 fn ref_store_constructions(source: &str) -> usize {
-    let code = code_of(source);
+    let code = normalize(&code_of(source));
     REF_STORE_CONSTRUCTORS
         .iter()
         .map(|c| code.matches(c).count())
@@ -369,11 +567,16 @@ fn write_shaped_plumbing_appears_only_under_verbs_write() {
     for file in &files {
         let rel = file.strip_prefix(&src).expect("under src");
         let rel_str = rel.to_string_lossy().replace('\\', "/");
-        if WRITE_ALLOWED.iter().any(|dir| rel_str.starts_with(dir)) {
-            continue;
-        }
         let source = std::fs::read_to_string(file)
             .unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
+        // No allowlist: `#[path]` and `include!` are refused in the write
+        // territory too, since either can pull in code the scan never reads.
+        for hit in redirects_in(&source) {
+            violations.push(format!("{rel_str}: {hit}"));
+        }
+        if is_write_territory(rel) {
+            continue;
+        }
         for hit in hits_in(&source) {
             violations.push(format!("{rel_str}: {hit}"));
         }
@@ -525,14 +728,134 @@ fn the_write_directory_is_seen_and_is_where_the_plumbing_lives() {
 /// least `verbs/write/repo.rs` carries a needle from phase 1a on.
 const EXPECTED_WRITE_NEEDLE_FILES: usize = 1;
 
-/// `src/verbs/write/` is the only exemption, and it must stay the only one —
-/// an allowlist that grew a second entry would be the quiet way to defeat
-/// this test.
+
+// ---------------------------------------------------------------------------
+// F2 / F3 (PR 39 review): controls for the scan's second round. Each one
+// fails against the scan as it stood before the fix.
+// ---------------------------------------------------------------------------
+
+/// Layer 3's "no spawn" claim rested on `cargo tree` alone. The source scan
+/// now says it too.
+#[test]
+fn process_spawning_spellings_are_detected() {
+    for src in [
+        "std::process::Command::new(\"git\").spawn()?;",
+        "use std::process::Command;",
+        "use std::process::{Command, Stdio};",
+        "tokio::process::Command::new(\"git\");",
+        "let f = std::fs::File::options().append(true).open(p)?;",
+        "let f = File::options();",
+    ] {
+        assert!(!hits_in(src).is_empty(), "not flagged: {src}");
+    }
+    // Negative control: clap's `Command::new` builds a CLI, it does not spawn.
+    assert!(hits_in("let c = clap::Command::new(\"git\");").is_empty());
+}
+
+/// A needle split by whitespace or a line break is the same code.
+#[test]
+fn split_needles_are_detected() {
+    for src in [
+        "std::fs :: write(p, b)?;",
+        "std::fs::\n    write(p, b)?;",
+        "store\n    .transaction()\n    .prepare(e, a, b)?;",
+        "store . transaction ( )",
+        "let t = store.transaction  ();",
+        "fs  ::  rename(a, b)?;",
+        "use   gix_object   as   o;",
+    ] {
+        assert!(!hits_in(src).is_empty(), "not flagged: {src:?}");
+    }
+    assert!(hits_in("let n = a\n    .len();").is_empty());
+}
+
+/// `use gix_object as g;` renames the crate, so `g::Write` carries no
+/// `gix_object::Write`.
+#[test]
+fn crate_aliases_are_detected() {
+    for krate in ["gix_object", "gix_odb", "gix_ref", "gix_index", "gix_lock"] {
+        let src = format!("use {krate} as g;");
+        assert!(!hits_in(&src).is_empty(), "alias not flagged: {src}");
+    }
+    assert!(!hits_in("extern crate gix_object as g;").is_empty());
+    // Negative control: a path import with a rename inside it is not a crate
+    // alias; `repo.rs` does `use gix_index::hash as gix_hash;`.
+    assert!(hits_in("use gix_index::hash as gix_hash;").is_empty());
+}
+
+/// A raw string with an embedded `"` desynchronized the stripper, hiding code
+/// after it; and its contents are not code.
+#[test]
+fn raw_strings_are_stripped_not_scanned_and_do_not_hide_code() {
+    // Contents are not code.
+    assert!(hits_in("let s = r#\"std::fs::write(p, b)\"#;").is_empty());
+    assert!(hits_in("let s = r\"fs::write\";").is_empty());
+    assert!(hits_in("let s = br##\"fs::write \"# still inside\"##;").is_empty());
+    // An embedded quote does not end the literal early or late.
+    assert!(hits_in("let s = r#\"say \"fs::write\" aloud\"#;").is_empty());
+    // Code after the literal is still scanned.
+    assert!(!hits_in("let s = r#\"say \"hi\" \"#; std::fs::write(p, b)?;").is_empty());
+    assert!(!hits_in("let s = r#\"a\"#; let t = r#\"b\"#; fs::rename(a, b)?;").is_empty());
+    // An identifier ending in `r` before a quote is not a raw string.
+    assert!(!hits_in("let bar = foo(\"x\"); fs::write(p, b)?;").is_empty());
+}
+
+/// `#[path = ".."]` and `include!` can pull a file in from outside the scanned
+/// tree. Neither may appear anywhere in `src/`, `verbs/write/` included.
+#[test]
+fn module_redirection_is_detected() {
+    for src in [
+        "#[path = \"../elsewhere.rs\"] mod m;",
+        "#[ path=\"x.rs\" ]\nmod m;",
+        "#[cfg_attr(unix, path = \"x.rs\")] mod m;",
+        "#![path = \"x.rs\"]",
+        "include!(\"../elsewhere.rs\");",
+        "include ! (\"x.rs\");",
+        "std::include!(\"x.rs\");",
+    ] {
+        assert!(!redirects_in(src).is_empty(), "not flagged: {src:?}");
+    }
+    // Negative controls: `include_str!` embeds text, not code; a field or
+    // fn named `path` is not an attribute.
+    for src in [
+        "let s = include_str!(\"x.md\");",
+        "let b = include_bytes!(\"x.bin\");",
+        "#[derive(Debug)] struct S { path: PathBuf }",
+        "#[cfg(unix)] fn f(path: &Path) {}",
+        "// #[path = \"x\"]",
+    ] {
+        assert!(redirects_in(src).is_empty(), "false positive: {src:?}");
+    }
+}
+
+/// F3: the allowlist is a path component match, not a string prefix.
+#[test]
+fn the_write_allowlist_matches_path_components_not_prefixes() {
+    for exempt in ["verbs/write.rs", "verbs/write/repo.rs", "verbs/write/deeper/x.rs"] {
+        assert!(is_write_territory(Path::new(exempt)), "{exempt} should be exempt");
+    }
+    for scanned in [
+        "verbs/write_extra.rs",
+        "verbs/writer/x.rs",
+        "verbs/write_extra/x.rs",
+        "verbs/writes.rs",
+        "write.rs",
+        "repo.rs",
+        "verbs/branch.rs",
+        "other/verbs/write/x.rs",
+    ] {
+        assert!(!is_write_territory(Path::new(scanned)), "{scanned} must be scanned");
+    }
+}
+
+/// `src/verbs/write/` and `src/verbs/write.rs` are the only exemptions, and
+/// they must stay the only ones: an allowlist that grew a third entry would be
+/// the quiet way to defeat this test.
 #[test]
 fn the_write_allowlist_is_exactly_verbs_write() {
     assert_eq!(
-        WRITE_ALLOWED,
-        ["verbs/write"],
+        (WRITE_DIR, WRITE_MODULE_FILE),
+        (["verbs", "write"], ["verbs", "write.rs"]),
         "widening the write allowlist changes what layer 1 claims; that is a \
          design decision, not a test fixup"
     );
