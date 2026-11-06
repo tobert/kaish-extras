@@ -3,6 +3,17 @@
 
 use std::collections::BTreeMap;
 
+/// The status and headers of a redirect response that `-L` followed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hop {
+    /// The HTTP status code of the redirect.
+    pub status: u16,
+    /// The standard reason phrase for `status`.
+    pub reason: String,
+    /// The redirect's headers, shaped as in [`Response::headers`].
+    pub headers: BTreeMap<String, Vec<String>>,
+}
+
 /// The result of one HTTP request-response cycle, backend-agnostic.
 ///
 /// Headers are a `BTreeMap`: a stable iteration order keeps `-i` output
@@ -25,6 +36,9 @@ pub struct Response {
     pub headers: BTreeMap<String, Vec<String>>,
     /// How many redirects were followed to reach this response.
     pub redirects: u32,
+    /// The redirect responses followed on the way, in order, which `-i`
+    /// prints ahead of the final head as curl does. Their bodies are not read.
+    pub history: Vec<Hop>,
     /// The response body, exactly as received.
     pub body: Vec<u8>,
 }
@@ -39,6 +53,7 @@ impl Response {
             reason: String::new(),
             headers: BTreeMap::new(),
             redirects: 0,
+            history: Vec::new(),
             body: Vec::new(),
         }
     }

@@ -272,3 +272,25 @@ async fn json_output_with_a_file_is_refused_before_any_request() {
     let p = compare(&server, "--json \"$URL/text\"", &[]).await;
     assert_eq!(p.ours.code, 0, "{}", p.ours.err);
 }
+
+// ── 9. -i -L prints every hop's head ────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn include_with_location_prints_each_hops_status_and_headers() {
+    let server = redirector();
+    let p = compare(&server, "-s -i -L \"$URL/r301\"", &[]).await;
+    assert_eq!(p.ours.code, 0, "{}", p.ours.err);
+    let out = p.ours.text_out().to_string();
+    let status_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("HTTP/")).map(|l| l.trim_end()).collect();
+    assert_eq!(status_lines, ["HTTP/1.1 301 Moved Permanently", "HTTP/1.1 200 OK"], "{out}");
+    assert!(out.to_ascii_lowercase().contains("location: /echo"), "the redirect's own headers print: {out}");
+    assert!(out.ends_with("landed"), "the final body comes last: {out}");
+    if let Some(theirs) = &p.theirs {
+        let theirs = String::from_utf8_lossy(&theirs.stdout).into_owned();
+        let theirs: Vec<&str> = theirs.lines().filter(|l| l.starts_with("HTTP/")).map(|l| l.trim_end()).collect();
+        assert_eq!(theirs, status_lines, "real curl prints the same status lines");
+    }
+    // Control: without -L there is one head.
+    let p = compare(&server, "-s -i \"$URL/r301\"", &[]).await;
+    assert_eq!(p.ours.text_out().matches("HTTP/1.1").count(), 1);
+}

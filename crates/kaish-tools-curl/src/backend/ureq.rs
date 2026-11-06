@@ -187,6 +187,7 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
     let mut method = req.method.clone();
     let mut body_active = req.sends_body();
     let mut body_dropped = false;
+    let mut history: Vec<crate::model::Hop> = Vec::new();
     loop {
         if config.permit_egress(current.as_str()) != EgressResult::Allowed {
             return Err(CurlError::CouldNotConnect {
@@ -289,6 +290,11 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
                     method = "GET".to_string();
                 }
             }
+            history.push(crate::model::Hop {
+                status,
+                reason: resp.status().canonical_reason().unwrap_or_default().to_string(),
+                headers: resp_headers(resp.headers()),
+            });
             // Credentials do not cross a host boundary. docs/curl.md and CU10
             // both promised this; nothing implemented it, so `-u` plus a
             // redirect was an exfiltration path.
@@ -331,6 +337,7 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
                 .to_string(),
             headers: resp_headers(resp.headers()),
             redirects: hops,
+            history,
             body,
         });
     }

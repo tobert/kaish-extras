@@ -203,6 +203,7 @@ mod tests {
             headers: map,
             body: body.as_bytes().to_vec(),
             redirects: 2,
+            history: Vec::new(),
         }
     }
 
