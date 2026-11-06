@@ -255,3 +255,20 @@ async fn write_out_prints_000_when_the_connection_fails() {
         assert_eq!((theirs.code, theirs.stdout.as_slice()), (7, p.ours.text_out().as_bytes()));
     }
 }
+
+// ── 8. --json has nowhere to go with -o ─────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn json_output_with_a_file_is_refused_before_any_request() {
+    let server = blob_server();
+    for args in ["--json -o out.json \"$URL/text\"", "--json -O \"$URL/text\""] {
+        let p = compare(&server, args, &[]).await;
+        assert_eq!(p.ours.code, 2, "{args}: {}", p.ours.err);
+        assert!(p.ours.err.contains("--json") && p.ours.err.contains("-o"), "{}", p.ours.err);
+        assert!(p.ours_req.is_empty(), "{args}: no request was sent");
+        assert!(p.fx.file("out.json").await.is_none() && p.fx.file("text").await.is_none());
+    }
+    // Control: --json alone, and `-o -` (stdout), are fine.
+    let p = compare(&server, "--json \"$URL/text\"", &[]).await;
+    assert_eq!(p.ours.code, 0, "{}", p.ours.err);
+}

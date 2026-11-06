@@ -488,6 +488,13 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         output_file = resolve_output(output_file, remote_name, output_dir.clone(), &url)?;
     }
 
+    if json_output && output_file.is_some() {
+        return Err(CurlError::Usage(
+            "'--json' cannot be combined with '-o' or '-O' (exit 2), and no request was sent, because '--json' prints the response object on stdout and a file would hold something else. Save the body with '-o <file>' alone, or print the object with '--json' alone and read it with jq: curl --json <url> | jq -r .body"
+                .into(),
+        ));
+    }
+
     if resume {
         let problem = if output_file.is_none() {
             Some("needs '-o <file>' or '-O', because it resumes that file (curl would silently start over)")
