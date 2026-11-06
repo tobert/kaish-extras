@@ -1120,11 +1120,13 @@ repository size, not result size.
 
 ## git — from the 2026-10-11 deepseek review of the spellings branch
 
-- **R5 — `--oneline` prints a fixed 7-character oid.** git's `core.abbrev=auto`
-  prints the shortest unambiguous prefix and grows with the object count:
-  kaijutsu's `git log --oneline` prints `c6eba240`, ours `c6eba24`. Same
-  shape as T4 for the patch `index` line. Harmless until two prefixes
-  collide; then two commits print one oid.
+- **R5 — the text tables still print a fixed 7-character oid.** `log` and
+  `show` abbreviate as git's `core.abbrev=auto` does (the shortest prefix no
+  other object shares, with a floor that grows with the packed object count;
+  `core.abbrev=N` and `no` are honored; `tests/abbrev.rs`). `branch`, `tag`,
+  `worktree list` and the patch `index` line (`patch.rs`) still cut at 7, so
+  two oids that share 7 characters print the same text there. The floor also
+  ignores objects in an alternate store, which git counts.
 
 ## git — from the 2026-10-11 survey (docs/design/git-survey-2026-10.md)
 

@@ -578,7 +578,7 @@ pub(crate) fn run(repo: &ReadRepo, opts: &LogOptions) -> Result<LogReport, GitEr
 
         commits.push(CommitInfo {
             oid: oid.to_string(),
-            short_oid: oid.to_string()[..7].to_string(),
+            short_oid: repo.short_oid(&oid)?,
             parents: parents.iter().map(|p| p.to_string()).collect(),
             author,
             committer,

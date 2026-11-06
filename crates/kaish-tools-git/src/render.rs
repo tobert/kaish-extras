@@ -234,10 +234,10 @@ fn shortstat(stat: &StatSummary) -> Option<String> {
     }
     let mut parts = vec![format!("{} changed", plural(stat.files as u64, "file", "files"))];
     if stat.additions > 0 {
-        parts.push(format!("{}(+)", plural(stat.additions as u64, "insertion", "insertions")));
+        parts.push(format!("{}(+)", plural(stat.additions, "insertion", "insertions")));
     }
     if stat.deletions > 0 {
-        parts.push(format!("{}(-)", plural(stat.deletions as u64, "deletion", "deletions")));
+        parts.push(format!("{}(-)", plural(stat.deletions, "deletion", "deletions")));
     }
     Some(parts.join(", "))
 }

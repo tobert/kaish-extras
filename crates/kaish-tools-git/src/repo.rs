@@ -78,6 +78,9 @@ pub struct ReadRepo {
     ceiling: PathBuf,
     objects: gix_odb::Handle,
     refs: gix_ref::file::Store,
+    /// The shortest abbreviation `short_oid` prints, computed on first use
+    /// because it reads pack index headers and the config file.
+    abbrev_floor: std::sync::OnceLock<usize>,
 }
 
 impl ReadRepo {
@@ -488,6 +491,7 @@ impl ReadRepo {
             ceiling,
             objects,
             refs,
+            abbrev_floor: std::sync::OnceLock::new(),
         })
     }
 
@@ -661,6 +665,90 @@ impl ReadRepo {
     // `objects()` lends the odb handle to a sibling module, not to a caller
     // outside the crate; it is read-only in practice, and the
     // `write_shaped_identifiers` scan (D.1) is what keeps it that way.
+
+    /// `oid` abbreviated as git's `core.abbrev` does: the shortest prefix, at
+    /// least [`ReadRepo::abbrev_floor`] long, that no other object in the
+    /// repository shares. `git log --oneline` prints this.
+    pub(crate) fn short_oid(&self, oid: &gix_hash::ObjectId) -> Result<String, GitError> {
+        let hex = oid.to_string();
+        let mut len = self.abbrev_floor()?.min(hex.len());
+        while len < hex.len() {
+            let prefix = gix_hash::Prefix::new(oid, len).map_err(|e| {
+                GitError::repository(self.operation, "abbreviating an oid", &self.git_dir, e)
+            })?;
+            match self.objects.lookup_prefix(prefix, None).map_err(|e| {
+                GitError::repository(self.operation, "abbreviating an oid", &self.git_dir, e)
+            })? {
+                // Another object shares the prefix: one more character.
+                Some(Err(())) => len += 1,
+                _ => break,
+            }
+        }
+        Ok(hex[..len].to_string())
+    }
+
+    /// The shortest abbreviation printed, git's `core.abbrev`: a number of
+    /// characters (at least 4), `no` for the whole oid, or `auto` (the default).
+    ///
+    /// `auto` is 7 for a small repository and grows with the number of
+    /// objects in packs, as `find_unique_abbrev` does: half the bit length of
+    /// the count, rounded up. 16384 packed objects print 8 characters, 65536
+    /// print 9. Loose objects are not counted, as in git (checked against git
+    /// 2.56 with 20000 of them). Not matched: objects in an alternate store,
+    /// which git counts and this does not, so a repository borrowing a large
+    /// one can print one character fewer than git for the floor. The
+    /// uniqueness check in [`ReadRepo::short_oid`] still covers every object
+    /// the store can reach.
+    fn abbrev_floor(&self) -> Result<usize, GitError> {
+        const HEX_LEN: usize = 40;
+        const MINIMUM: usize = 4;
+        if let Some(floor) = self.abbrev_floor.get() {
+            return Ok(*floor);
+        }
+        let configured = self.config_values("core", "abbrev")?.pop().map(|(_, v)| v);
+        let floor = match configured.as_deref().map(str::trim) {
+            None | Some("auto") => self.auto_abbrev()?,
+            Some("no" | "false") => HEX_LEN,
+            Some(n) => n.parse::<usize>().map(|n| n.clamp(MINIMUM, HEX_LEN)).map_err(|e| {
+                GitError::repository(
+                    self.operation,
+                    format!("reading core.abbrev = {n:?}, which is not a number, 'auto' or 'no'"),
+                    &self.git_dir,
+                    e,
+                )
+            })?,
+        };
+        Ok(*self.abbrev_floor.get_or_init(|| floor))
+    }
+
+    /// `auto`: half the bit length of the packed object count, rounded up,
+    /// and at least 7.
+    fn auto_abbrev(&self) -> Result<usize, GitError> {
+        let op = self.operation;
+        let mut packed: u64 = 0;
+        let records = self
+            .objects
+            .store_ref()
+            .structure()
+            .map_err(|e| GitError::repository(op, "counting packed objects", &self.git_dir, e))?;
+        for record in records {
+            match record {
+                gix_odb::store::structure::Record::Index { path, .. } => {
+                    let idx = gix_pack::index::File::at(&path, gix_hash::Kind::Sha1)
+                        .map_err(|e| GitError::repository(op, "counting packed objects", &path, e))?;
+                    packed += u64::from(idx.num_objects());
+                }
+                gix_odb::store::structure::Record::MultiIndex { path, .. } => {
+                    let midx = gix_pack::multi_index::File::at(&path, Some(1 << 26))
+                        .map_err(|e| GitError::repository(op, "counting packed objects", &path, e))?;
+                    packed += u64::from(midx.num_objects());
+                }
+                _ => {}
+            }
+        }
+        let bits = (u64::BITS - packed.leading_zeros()) as usize;
+        Ok(bits.div_ceil(2).max(7))
+    }
 
     /// The object store, for reading trees and blobs.
     pub(crate) fn objects(&self) -> &gix_odb::Handle {
