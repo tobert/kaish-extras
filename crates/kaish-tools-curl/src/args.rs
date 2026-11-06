@@ -251,7 +251,13 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
                 // file, which is deferred (CU5).
                 if !raw && val.starts_with('@') {
                     return Err(CurlError::Transport(
-                        "'@path' body syntax is not supported. Read a file with 'cat <path>' and pipe it into curl --data-binary -."
+                        "'@path' body syntax is not supported, and no request was sent. Read the file in the shell instead: curl -d \"$(cat <path>)\" <url>"
+                            .into(),
+                    ));
+                }
+                if argv_flag == "--data-binary" && val == "-" {
+                    return Err(CurlError::Usage(
+                        "'--data-binary -' is refused (exit 2), because this build cannot read a request body from stdin and would send the one character '-'. No request was sent. Read the file in the shell instead: curl -d \"$(cat <path>)\" <url>"
                             .into(),
                     ));
                 }

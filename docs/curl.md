@@ -72,8 +72,8 @@ the last positional unless `--url` is used.
 | `<url>` (positional) | The URL to fetch. Required. | One URL only (curl takes many). |
 | `--url <url>` | Same as the positional. | None. |
 | `-X, --request <method>` | HTTP method. | None. |
-| `-d, --data <data>` | Body, `Content-Type: application/x-www-form-urlencoded` unless overridden, implies POST. Repeatable, joined with `&`. `@path` reads the file through the VFS. | Real curl strips trailing CR/LF from `-d` bodies; this build does not. |
-| `--data-binary <data>` | Like `-d`, and no Content-Type is implied — real curl sends none for this form either. | `@path` file reads are deferred (CU5). |
+| `-d, --data <data>` | Body, `Content-Type: application/x-www-form-urlencoded` unless overridden, implies POST. Repeatable, joined with `&`. `@path` is refused, naming `-d "$(cat <path>)"` as the form that works. | `@path` file reads are deferred (CU5). Real curl strips trailing CR/LF from `-d` bodies; this build does not. |
+| `--data-binary <data>` | Like `-d`, and no Content-Type is implied — real curl sends none for this form either. | `@path` file reads are deferred (CU5). `--data-binary -` (stdin) is refused with exit 2; real curl would send the literal `-`. |
 | `--data-raw <data>` | Like `-d`, `@` is literal, and no Content-Type is implied. | None. |
 | `--data-urlencode <data>` | Accepts `name=value`; encodes only `value`, not the name or `=` separator. | Real curl also supports `@filename` and `name@filename` forms (deferred). |
 | `-H, --header <h:v>` | Request header. Repeatable. | None. |
@@ -205,6 +205,7 @@ the rest to 1. State the number so an agent can branch on it.
 | Code | Cause |
 |---|---|
 | 0 | Success (any HTTP status unless `--fail`). |
+| 2 | A flag combination refused before any request: `--data-binary -` (stdin bodies are not supported). |
 | 6 | Host not found. |
 | 7 | Could not connect — **and** URL malformed (bad scheme, bad syntax). curl uses 3 for a malformed URL; kaish's kernel reserves 3, so this build maps malformed URLs here with an error naming the real cause (CU11). |
 | 22 | `--fail` and HTTP status >= 400. |

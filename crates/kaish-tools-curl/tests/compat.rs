@@ -216,3 +216,55 @@ async fn include_prints_the_status_line_with_its_reason_phrase() {
         assert_eq!(first_line(&ours.text_out()), first_line(&stdout));
     }
 }
+
+// ── Body from a file: the refusals name the form that works ─────────────
+
+fn echo_server() -> TcpGuard {
+    Server::builder()
+        .route_fn("/echo", |req| {
+            Response::text(200, format!("{}|{}", req.method, req.body_str()))
+        })
+        .start_tcp()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn data_binary_dash_is_refused_with_exit_2_and_sends_nothing() {
+    let server = echo_server();
+    let r = run_at(
+        &server,
+        "echo '{\"a\":1}' | curl --data-binary - \"$URL/echo\"",
+    )
+    .await;
+    assert_eq!(r.code, 2, "stderr: {}", r.err);
+    assert!(
+        r.err.contains("-d \"$(cat"),
+        "the refusal must name the working form: {}",
+        r.err
+    );
+    assert!(server.requests().is_empty(), "a refused flag must not reach the server");
+
+    // Control: the form the message names works and sends the file's text.
+    let r = run_at(
+        &server,
+        "echo '{\"a\":1}' > /work/p.json\ncurl -s -d \"$(cat /work/p.json)\" \"$URL/echo\"",
+    )
+    .await;
+    assert_eq!(r.code, 0, "stderr: {}", r.err);
+    assert_eq!(r.text_out(), "POST|{\"a\":1}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_at_path_refusal_names_the_working_form_not_data_binary_dash() {
+    let server = echo_server();
+    for flag in ["-d", "--data-binary"] {
+        let r = run_at(&server, &format!("curl {flag} @/work/p.json \"$URL/echo\"")).await;
+        assert_ne!(r.code, 0);
+        assert!(r.err.contains("-d \"$(cat"), "{flag}: {}", r.err);
+        assert!(
+            !r.err.contains("data-binary -"),
+            "{flag}: must not recommend a form that sends the wrong body: {}",
+            r.err
+        );
+    }
+    assert!(server.requests().is_empty());
+}

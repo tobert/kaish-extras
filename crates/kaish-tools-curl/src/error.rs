@@ -85,6 +85,11 @@ pub enum CurlError {
         reason: String,
     },
 
+    /// The command line asked for something this build refuses before any
+    /// request is made. Exit 2, curl's "failed init".
+    #[error("curl: {0}")]
+    Usage(String),
+
     /// Any other transport failure this table does not name. Exit 1.
     #[error("curl: {0}")]
     Transport(String),
@@ -102,6 +107,7 @@ impl CurlError {
             CurlError::TlsHandshakeFailed { .. } => 35,
             CurlError::TooManyRedirects { .. } => 47,
             CurlError::CertificateNotAuthenticated { .. } => 60,
+            CurlError::Usage(_) => 2,
             CurlError::Transport(_) => 1,
         }
     }
