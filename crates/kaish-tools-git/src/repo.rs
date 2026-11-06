@@ -133,7 +133,7 @@ pub(crate) struct RefsRead<'a>(&'a gix_ref::file::Store);
 
 impl<'a> RefsRead<'a> {
     /// The store's reflog policy, for the test that pins it to `Disable`.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "commit"))]
     pub(crate) fn write_reflog(&self) -> gix_ref::store::WriteReflog {
         self.0.write_reflog
     }
