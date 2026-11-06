@@ -216,7 +216,7 @@ the rest to 1. State the number so an agent can branch on it.
 | Code | Cause |
 |---|---|
 | 0 | Success (any HTTP status unless `--fail`). |
-| 2 | A flag combination refused before any request: `-d @-` and the other stdin forms (not supported). |
+| 2 | The command line is refused before any request, as in curl: an unknown flag, a missing URL or flag value, a bad number, a second URL, a flag this build declines (`--retry`, `-v`, ...), a flag combination (`-I` with `-d`, `--json` with `-o`), `-d @-` and the other stdin forms. |
 | 26 | A file named by `-d @path` and its relatives could not be read (missing, a directory, unreadable). No request was sent. |
 | 6 | Host not found. |
 | 7 | Could not connect — **and** URL malformed (bad scheme, bad syntax). curl uses 3 for a malformed URL; kaish's kernel reserves 3, so this build maps malformed URLs here with an error naming the real cause (CU11). |
@@ -227,7 +227,7 @@ the rest to 1. State the number so an agent can branch on it.
 | 35 | TLS handshake failed. |
 | 47 | Too many redirects. |
 | 60 | Certificate could not be authenticated. |
-| 1 | Any other transport error. |
+| 1 | Any other transport error, or a body over `Limits::max_response_bytes`. |
 
 ## Literate errors
 

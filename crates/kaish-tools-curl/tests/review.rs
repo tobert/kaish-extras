@@ -341,3 +341,30 @@ async fn zero_max_time_leaves_the_embedders_ceiling_in_force() {
     let r = fx.run(&server.url(""), "curl -s -m 0 \"$URL/slow\"").await;
     assert_eq!(r.code, 28, "{}", r.err);
 }
+
+// ── 11. A command line this build refuses is exit 2, as in curl ─────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refused_command_lines_exit_2_like_curl() {
+    let server = redirector();
+    for args in [
+        "--bogus \"$URL/echo\"",
+        "",
+        "-d",
+        "-m abc \"$URL/echo\"",
+        "-X",
+    ] {
+        let p = compare(&server, args, &[]).await;
+        assert_eq!(p.ours.code, 2, "{args:?}: {}", p.ours.err);
+        assert!(p.ours_req.is_empty(), "{args:?}: no request");
+        if let Some(theirs) = &p.theirs {
+            assert_eq!(theirs.code, 2, "{args:?}: real curl exits 2 too");
+        }
+    }
+    // The refusals curl has no equivalent for (a flag this build declines,
+    // a second URL) are usage errors as well.
+    for args in ["--retry 3 \"$URL/echo\"", "\"$URL/echo\" \"$URL/echo\"", "-v \"$URL/echo\""] {
+        let p = compare(&server, args, &[]).await;
+        assert_eq!(p.ours.code, 2, "{args}: {}", p.ours.err);
+    }
+}

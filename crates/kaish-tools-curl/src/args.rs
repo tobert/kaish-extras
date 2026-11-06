@@ -295,7 +295,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         let inline = inline.map(str::to_string);
 
         if let Some((_, message)) = REFUSED_FLAGS.iter().find(|(f, _)| *f == flag) {
-            return Err(CurlError::Transport((*message).to_string()));
+            return Err(CurlError::Usage((*message).to_string()));
         }
 
         // Consume this flag's value: the inline half of `--flag=value`, or the
@@ -308,7 +308,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             }
             *i += 1;
             argv.get(*i).cloned().ok_or_else(|| {
-                CurlError::Transport(format!("'{flag}' requires a value, and none followed it."))
+                CurlError::Usage(format!("'{flag}' requires a value, and none followed it."))
             })
         };
 
@@ -330,7 +330,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             "-H" | "--header" => {
                 let hv = value(&mut i)?;
                 let Some((name, v)) = hv.split_once(':') else {
-                    return Err(CurlError::Transport(format!(
+                    return Err(CurlError::Usage(format!(
                         "'-H {hv}' is not a header. Headers are 'Name: value'."
                     )));
                 };
@@ -391,7 +391,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             "-L" | "--location" => follow_redirects = true,
             "--unix-socket" => {
                 if cfg!(not(unix)) {
-                    return Err(CurlError::Transport(
+                    return Err(CurlError::Usage(
                         "'--unix-socket' needs a unix-family target, and this build is not one. Reach the service over http:// instead."
                             .into(),
                     ));
@@ -400,7 +400,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             }
             "-k" | "--insecure" => {
                 if !config.insecure_permitted() {
-                    return Err(CurlError::Transport(format!(
+                    return Err(CurlError::Usage(format!(
                         "'{argv_flag}' is not permitted here. This embedder requires TLS certificates to verify; reach the service over http:// instead, or ask the embedder to allow it."
                     )));
                 }
@@ -450,14 +450,14 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
                     .filter(|b| !b.starts_with('-'))
                     .and_then(|b| b.chars().find(|c| VALUE_SHORTS.contains(c)))
                 {
-                    return Err(CurlError::Transport(format!(
+                    return Err(CurlError::Usage(format!(
                         "'{other}' cannot be written as one word, because '-{bad}' takes a value. Write the flags separately, as in '-s -{bad} <value>'."
                     )));
                 }
                 // Silently ignoring an unknown flag is the failure mode this
                 // whole surface exists to avoid: the agent believes it asked
                 // for something.
-                return Err(CurlError::Transport(format!(
+                return Err(CurlError::Usage(format!(
                     "'{other}' is not a flag curl accepts here; see `help curl` for the ones it does."
                 )));
             }
@@ -466,9 +466,8 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         i += 1;
     }
 
-    let url = url.ok_or_else(|| CurlError::MalformedUrl {
-        url: "<missing>".into(),
-        reason: "URL is required — one positional argument or --url must specify the target".into(),
+    let url = url.ok_or_else(|| {
+        CurlError::Usage("no URL was given (exit 2), and no request was sent. Pass one as the last argument or with '--url <url>'.".into())
     })?;
 
     if !url.starts_with("http://") && !url.starts_with("https://") {
@@ -558,10 +557,10 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     }
 
     if head_only && !get && !bodies.is_empty() {
-        return Err(CurlError::MalformedUrl {
-            url: url.clone(),
-            reason: "--head discards the response body; providing --data is meaningless".into(),
-        });
+        return Err(CurlError::Usage(
+            "'-I' (--head) cannot be combined with a data flag (exit 2), and no request was sent, because '-I' discards the response body and a HEAD carries no request body. Drop '-I', or add '-G' to send the data on the query string."
+                .into(),
+        ));
     }
 
     if let Some(r) = referer {
@@ -679,7 +678,7 @@ fn remote_file_name(url: &str) -> Result<String, CurlError> {
 /// ignoring the rest.
 fn set_once(existing: Option<String>, candidate: String) -> Result<String, CurlError> {
     match existing {
-        Some(first) => Err(CurlError::Transport(format!(
+        Some(first) => Err(CurlError::Usage(format!(
             "only one URL per invocation is supported, and both '{first}' and '{candidate}' were given. Run curl once per URL."
         ))),
         None => Ok(candidate),
@@ -786,7 +785,7 @@ fn trim_argv(args: &ToolArgs) -> Result<Vec<String>, CurlError> {
             Value::Bool(b) => Ok(b.to_string()),
             // A structured or binary value has no argv spelling. Refusing
             // beats picking one and pretending the caller meant it.
-            other => Err(CurlError::Transport(format!(
+            other => Err(CurlError::Usage(format!(
                 "an argument of this kind cannot be part of a command line: {other:?}. Pass a string."
             ))),
         })
@@ -1043,11 +1042,11 @@ mod tests {
 
     #[test]
     fn a_refusal_names_the_tool_exactly_once() {
-        // `CurlError::Transport`'s Display already prefixes "curl: ", and
+        // `CurlError::Usage`'s Display already prefixes "curl: ", and
         // every message here used to carry its own — so every refusal an
         // agent read began "curl: curl:".
         for (flag, message) in REFUSED_FLAGS {
-            let rendered = CurlError::Transport((*message).to_string()).to_string();
+            let rendered = CurlError::Usage((*message).to_string()).to_string();
             assert!(rendered.starts_with("curl: "), "{flag}: {rendered}");
             assert!(!rendered.contains("curl: curl:"), "{flag}: {rendered}");
             assert!(
