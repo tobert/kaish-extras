@@ -10,7 +10,7 @@ Baseline: main at 926edd4, before any of the fixes it motivated. Replay used `cr
 (write verbs refused as read-only). Item 9 was fixed upstream: kaish 0.18.0
 parses `HEAD~2:README.md` unquoted. Item 11 (`--format`) is Q3 in
 docs/issues.md. The findings below describe main at 926edd4, before any of
-it; re-running the survey is Q4.
+it; the re-run against main is the last section.
 
 ## Method
 
@@ -91,3 +91,111 @@ Priority = runs x how basic the task is x how wrong the current answer is.
 - Warm steers wrong in two places: (a) it says range `A..B` is unsupported but never gives the substitute for `log`, so models fall back to `log feature/x` (SILENT-WRONG, T12); (b) it recommends `--path`, which K-a breaks silently (haiku). Item 7 and item 12 fix these.
 - Warm does not fix `git show <commit>` (item 3): models believe it shows changes because the help says "shows the commit".
 - Warm run variance (deepseek x2) was small on spellings (same verbs; differ in `--limit` vs `-n` and `log feature/x` vs `log main`), but the cold-vs-warm gap dwarfs it. Single run per other model.
+
+## Re-run against main (2026-11-06)
+
+Main at 372c7f5 (kaish 0.18.1, default features including `textdiff`). Same
+fixture (`setup.sh`, kaish-extras at 926edd4), same probe, same bins, same cell
+basis as Totals above (first command per run x task; baseline reproduces
+exactly: 105 / 67 / 16 / 6 / 63). Every spelling in `tables.md` was replayed
+(81, plus 9 compound or `command git` write spellings) and the read-only ones
+checked against real git on a copy of the fixture. Replay data:
+`git-survey-2026-10/replay-2026-11.jsonl` (task, spelling, runs, baseline bin,
+exit, first 400 bytes of output, bin, note).
+
+Differences from the baseline replay:
+
+- `HEAD~N`, `HEAD^`, `X~1`, `X^` and `HEAD~2:README.md` ran unquoted, no
+  manual quoting. All parsed (kaish 0.18 holds).
+- The survey's `abc1234` does not exist in the fixture and errors ("does not
+  name a commit", accurate). `37f3c1e` (HEAD~2) stands in for it in the three
+  T9 spellings.
+- Counts of runs in `tables.md` are per spelling and include later commands, so
+  they sum to more than the cell totals here.
+
+### Totals
+
+| bin | baseline | now |
+|---|---|---|
+| WORKS | 105 | 166 |
+| USELESS-ERROR | 67 | 5 |
+| SILENT-WRONG | 16 | 3 |
+| USEFUL-REFUSAL | 6 | 20 |
+| WRITE-REFUSED | 63 | 63 |
+
+Read-only tasks 1-17 (187 cells): WORKS 100 -> 159. WRITE-REFUSED is
+unchanged because the task is a write; the message is what changed. Every one
+now says the tool is read-only and names `status`/`diff` (the 7 `command git
+...` cells excepted, see Q9). No cell moved to a worse bin.
+
+Spellings: 53 WORKS, 8 USEFUL-REFUSAL, 2 USELESS-ERROR, 2 SILENT-WRONG among
+the 65 read-only; the write spellings are all WRITE-REFUSED.
+
+### Per task
+
+| task | baseline | now |
+|---|---|---|
+| T2 short status | 7 U | 11 W (`status -s` is tab-separated `XY<TAB>path`, same letters as git) |
+| T5 | 1 U | 11 W (`--cached`) |
+| T6 last 10 | 7 U | 8 W, 3 UR (`--oneline -10`) |
+| T7 file history | 10 U, 1 SW | 7 W, 4 U (`--follow`); `log -- FILE`, `log FILE`, `--path` match real git's 8 commits |
+| T8 who/when | 10 U, 1 SW | 5 W, 5 UR, 1 U |
+| T9 show commit | 11 SW | 11 W (file list with status letters; merge commits list none and say so on stderr) |
+| T10, T11, T14 | 8 U | all W (`--list`, `-a`, `--show-current`) |
+| T12 not on main | 7 U, 3 SW | 8 W, 3 SW; `log [--oneline] main..feature/x` matches git |
+| T13 diff A..B | 6 UR | 11 W (`A..B`, `A B`) |
+| T15 root, T16 files | 12 U | 12 UR (`rev-parse`, `ls-files`) |
+| T22, T23 | 2 U | 2 W (`diff [--staged] -- FILE`) |
+| rest | | unchanged |
+
+`diff` is file-level by default; `--patch` now gives hunks (textdiff). Its
++/- counts follow histogram diff, not git's Myers default: for 37f3c1e~1..37f3c1e
+ours says 158/139, `git diff --shortstat` says 162/143, and git with
+`--histogram` says 158/139. Not wrong, but a model comparing the two will see it.
+
+### Remaining USELESS-ERROR (5 cells, 2 spellings plus 1)
+
+- `git log --follow -- README.md` (3), `git log --oneline --follow -- README.md`
+  (1), exit 2:
+  `git log: --follow is not supported. git log accepts --rev, --limit (-n), --path, --since, --until, --author, --merges, --no-merges, --first-parent, --body, --oneline, --stat, --patch (-p), --repo, --json. See 'help git'`
+  Names no substitute and does not say renames are not followed. Q5.
+- `git log -1 --format=%an,%ad -- Cargo.toml` (1), kernel error, never reaches
+  the tool:
+  `parse error: 1:21 [parse]: lexer error: unexpected character | git log -1 --format=%an,%ad -- Cargo.toml`
+  Q3.
+
+### Remaining SILENT-WRONG (3 cells, 1 spelling)
+
+- `git log feature/x` (T12), exit 0: the whole history of feature/x, starting
+  `ed81e5c 2026-11-06 T feature: extra commit` then `926edd4 ... merge:
+  test/git-p10-semantics`. Identical to real git, and the wrong answer to
+  "commits on feature/x that are not on main". The baseline's `log main` (2
+  table runs) is the same shape but was not a first command in any cell. Q7.
+
+No new SILENT-WRONG. One near miss: `git log -n 1 -- Cargo.toml --json` prints
+text, because `--json` after `--` is a pathspec (as in git). The answer is
+right, so it is not counted. Q8.
+
+### Remaining USEFUL-REFUSAL (20 cells)
+
+`-N` forms (8 cells: `--oneline -10`, `-1 --format=...`, `-1 Cargo.toml`) get
+`git log: -1 is not supported. Write the count as '-n 1'.`; `--format` gets
+`--format is not supported. This git has two text layouts, the default table and
+--oneline, and --json carries every field by name.`; `rev-parse` (7) and
+`ls-files` (6) name `git info`, `git log -n 1 --json <rev>` and `git ls
+--recursive`. These cost one retry each. `-1 --format='%an %ad'` costs two
+(one refusal per run).
+
+### What is left, ranked by cells
+
+1. T15/T16 `rev-parse`, `ls-files` (12 UR). Refused with a next step; only an
+   alias or a built verb removes the retry. `ls-files` vs `ls HEAD` differ
+   (index vs commit), so the earlier call to refuse stands.
+2. `-N` and `--format` (8 + 4 UR, 1 U). Q6, Q3.
+3. `log --follow` (4 U). Q5.
+4. `log <branch>` (3 SW). Q7.
+5. `command git ...` (7 WRITE-REFUSED with a misleading kaish message). Q9.
+
+The commit-path tasks stay out of scope. Cold-arm first-try WORKS on tasks 1-17
+is now 159 of 187 cells over all runs (baseline 100); the warm/cold split was
+not re-measured because no model re-ran, only the replay.
