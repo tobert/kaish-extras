@@ -71,11 +71,10 @@ pub(crate) const HONORED_FLAGS: &[&str] = &[
     "--show-error",
 ];
 
-/// Flags refused at parse time, each with the message an agent reads.
-///
-/// Two kinds live here: out of the 80/20 cut (`-O`, `--form`, …), and not
-/// implemented by the backend (`-k`, `--unix-socket`). Both refuse, because
-/// the alternative is a flag that quietly does nothing.
+/// Flags refused at parse time, each with the message an agent reads. They are
+/// out of this build's scope, and a flag that quietly does nothing is worse
+/// than a refusal. (`-k` and `--unix-socket` are not here: they are
+/// implemented, `-k` only where the embedder permits it.)
 pub(crate) const REFUSED_FLAGS: &[(&str, &str)] = &[
     ("-J", "'-J' is not supported, and no request was sent. A server-chosen filename from Content-Disposition is not trusted. '-O' names the file after the last segment of the URL path, or choose the name with '-o <file>'."),
     ("--remote-header-name", "'--remote-header-name' is not supported, and no request was sent. A server-chosen filename from Content-Disposition is not trusted. '-O' names the file after the last segment of the URL path, or choose the name with '-o <file>'."),
@@ -92,6 +91,9 @@ pub(crate) const REFUSED_FLAGS: &[(&str, &str)] = &[
     ("--config", "'--config' is not supported. Pass flags on the command line."),
     ("-K", "'-K' is not supported. Pass flags on the command line."),
     ("--netrc", "'--netrc' is not supported. Use '--user <user[:pass]>' for credentials."),
+    ("--parallel", "'--parallel' is not supported, and no request was sent. This build makes one request per invocation. Run curl once per URL."),
+    ("-Z", "'-Z' (--parallel) is not supported, and no request was sent. This build makes one request per invocation. Run curl once per URL."),
+    ("--next", "'--next' is not supported, and no request was sent. This build makes one request per invocation. Run curl once per URL."),
     ("--resolve", "'--resolve' is not supported. To reach a specific address with a different Host, request the IP and set the header: curl -H 'Host: example.com' http://<ip>/."),
 ];
 
@@ -220,7 +222,7 @@ pub enum BodyPart {
 ///
 /// Refused shorts are here too, so `-kL` refuses `-k` rather than reporting
 /// the whole cluster as unknown.
-const BOOLEAN_SHORTS: &[char] = &['i', 'I', 'f', 'L', 's', 'S', 'k', 'O', 'v', 'G', 'J'];
+const BOOLEAN_SHORTS: &[char] = &['i', 'I', 'f', 'L', 's', 'S', 'k', 'O', 'v', 'G', 'J', 'Z'];
 
 /// Short flags that take a value, and so cannot appear inside a cluster.
 const VALUE_SHORTS: &[char] = &['X', 'd', 'H', 'o', 'u', 'A', 'e', 'w', 'b', 'x', 'K', 'F', 'm', 'T', 'C'];
@@ -716,13 +718,29 @@ fn remote_file_name(url: &str) -> Result<String, CurlError> {
 
 /// One URL per invocation, and say so rather than fetching the first and
 /// ignoring the rest.
+///
+/// A word that opens with `{` or `[` is almost always a JSON body typed for
+/// curl's own `--json <data>`, which kaish's global `--json` took the place
+/// of; saying so is more use than "only one URL".
 fn set_once(existing: Option<String>, candidate: String) -> Result<String, CurlError> {
+    if looks_like_json_body(&candidate) {
+        return Err(CurlError::Usage(format!(
+            "'{candidate}' is not a valid http or https URL; it looks like a request body (exit 2), and no request was sent. \
+             '--json' here is kaish's output flag, not curl's request-body shorthand. Put the body in '--data <body>' and the URL last, or send JSON with \
+             '-H Content-Type:application/json --data <body>'."
+        )));
+    }
     match existing {
         Some(first) => Err(CurlError::Usage(format!(
             "only one URL per invocation is supported, and both '{first}' and '{candidate}' were given. Run curl once per URL."
         ))),
         None => Ok(candidate),
     }
+}
+
+fn looks_like_json_body(word: &str) -> bool {
+    let w = word.trim_start();
+    w.starts_with('{') || w.starts_with('[')
 }
 
 /// Parse a seconds value, naming the flag when it isn't a number. `0` is
@@ -1064,8 +1082,8 @@ mod tests {
         let req = parse(&["-d=a=1", "http://x.com"]);
         assert_eq!(req.bodies, vec![BodyPart::Literal("=a=1".to_string())]);
         // A letter this build does not know still refuses the word.
-        let err = parse_args(&argv(&["-sZ", "http://x.com"]), &CurlConfig::default()).unwrap_err();
-        assert!(format!("{err}").contains("-sZ"), "{err}");
+        let err = parse_args(&argv(&["-sQ", "http://x.com"]), &CurlConfig::default()).unwrap_err();
+        assert!(format!("{err}").contains("-sQ"), "{err}");
     }
 
     #[test]

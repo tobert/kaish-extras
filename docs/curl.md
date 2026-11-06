@@ -12,22 +12,25 @@ cross-model review before it is built.
 
 ## Status
 
-**Building MVP.** The cross-model review blockers have been resolved:
+**Built and under review.** The cross-model review blockers have been resolved:
 
 1. **Egress policy — `AllowEgress` trait (CU8).** An embedder-supplied trait
    the tool calls per-request-per-hop. Default: deny-by-empty allowlist with
    opt-in loopback/link-local. No method widens the set past what the
    constructor grants — subtractive like `GitConfig`.
-2. **Exit codes (CU11).** Malformed URL now maps to **exit 7** ("could not
-   connect") with a literate error naming the real cause. The kernel does not
+2. **Exit codes (CU11).** A malformed URL maps to **exit 7** ("could not
+   connect") with a literate error naming the real cause; a refused command
+   line is exit 2, as in curl. The kernel does not
    own a fixed set of numeric codes; that's repl policy. See kaish note below.
 3. **Literate-refusal posture (CU14–CU18).** Unsupported flags are parsed
    at construction and refused with clear messages — no silent no-ops.
    This keeps the door open for later implementation when need arises.
 
-Built so far: the crate skeleton, test harness, and `CurlConfig` with egress
-and redirect controls. The HTTP surface (argument parsing, ureq backend, Tool
-impl, renderers) follows.
+Built: the native tool (argument parsing, the ureq backend, the `Tool` impl,
+the renderers), `CurlConfig` with egress, redirect and header controls, and the
+test harness. The wasm backend is not built. Tests compare this tool with real
+curl on a loopback server where curl is installed (`tests/compat.rs`,
+`tests/features.rs`, `tests/review.rs`).
 
 The wasm section is **corrected** — see CU3. Sync XHR in a Web Worker permits
 both `timeout` and `responseType`, so the limits asserted there are overstated
@@ -98,7 +101,7 @@ the last positional unless `--url` is used.
 | `-m, --max-time <s>` | Whole-request timeout, applied to the ureq agent. Always set: the `CurlConfig` default (30s) applies when the flag is omitted, and the flag is **clamped to the embedder's ceiling** — it can lower the budget, never raise it. `-m 0` is curl's "no timeout": no limit of its own, so the embedder's ceiling still applies. A deadline that fires is exit **28**, not exit 7. | WASM: refuses with literate error (no `tokio::time`). |
 | `--connect-timeout <s>` | Connect-phase timeout; `0` means no connect-phase limit of its own. | WASM: refuses with literate error. |
 | `--unix-socket <path>` | Connect to an AF_UNIX socket instead of the URL host; the host in the URL is a placeholder the `Host` header still needs (e.g. `http://localhost/`). The path is resolved through `ToolCtx::resolve_path`, mapped by `backend().resolve_real_path()`, and **canonicalized** before it is required to fall inside the mount it was reached through — so a symlink out of the mount is refused, which a lexical prefix test would not catch. | Native, unix-family targets only; wasm and non-unix refuse with a literate error. `--abstract-unix-socket` deferred (CU5). |
-| `--json` | **Not curl's request-body shorthand.** It is kaish's global output flag for every tool (see next section). Combined with `-o` or `-O` it exits 2 with no request, because the object and the file would each hold half the answer. | curl 7.82 `--json` (request body) refused with literate error. |
+| `--json` | **Not curl's request-body shorthand.** It is kaish's global output flag for every tool (see next section). Combined with `-o` or `-O` it exits 2 with no request, because the object and the file would each hold half the answer. | curl 7.82 `--json <data>` (request body) is not carried; a JSON body typed for it is refused with a message that says what to type instead (see "Literate errors"). |
 
 
 ### Egress: names and addresses
@@ -166,12 +169,12 @@ Short flags combine, and a short flag's value may be attached, as in curl:
 takes the rest of the word, or the next word when nothing is attached: `-so out.txt`.
 
 This build refuses the following flags at parse time with literate errors:
-`-J`, `--compressed`, `--proxy`/SOCKS,
-`--cookie`, `--verbose`, `--retry`, `--cert`/`--key`,
-`--resolve`, `--config`, `--netrc`, `--parallel`, `--next`, and — because the backend
-does not implement them rather than because they are out of scope — `-k`/`--insecure`
-and `--unix-socket`. Each carries a message
-that names the unsupported flag and the supported alternative. See "Literate errors" below.
+`-J`, `--remote-header-name`, `--compressed`, `--proxy`/`-x`,
+`--cookie`/`-b`, `--verbose`/`-v`, `--retry`, `--cert`, `--key`,
+`--resolve`, `--config`/`-K`, `--netrc`, `--parallel`/`-Z`, and `--next`. Each
+message names the flag and the supported alternative (see "Literate errors"
+below). `-k`/`--insecure` is implemented but refused unless the embedder
+permits it, and `--unix-socket` is implemented on unix-family targets.
 A flag this build does not recognize is **refused**, not ignored: an agent
 that typed something must never be left believing it took effect. So is a
 second URL — one per invocation, and curl says so rather than fetching the
@@ -238,20 +241,21 @@ supported alternative. These strings are full weight (see
 `~/src/kaish/docs/style.md`): the constraint comes first, the fix follows, and
 they never name a mechanism the reader cannot act on.
 
-Non-http scheme:
+Non-http scheme (exit 7):
 
 ```
-curl: 'ftp://example.com/' uses scheme 'ftp', which this build does not support.
-kaish-tools-curl speaks http and https only. Read a local file with 'cat <path>'.
+curl: 'ftp://example.com/' is not a valid http or https URL: only http and https schemes are supported
 ```
 
-curl's `--json` request body (triggered by the URL-parse path when the first
-positional looks like a JSON object or array):
+curl's `--json` request body (kaish's `--json` took the flag's name, so the
+JSON text is read as a second URL; a word that opens with `{` or `[` gets this
+message instead of "only one URL"):
 
 ```
-curl: '{"a":1}' is not a valid http or https URL; it looks like a request body.
-Put the body in '--data <body>' and the URL last, or send JSON with
-'-H Content-Type:application/json --data <body>'.
+curl: '{"a":1}' is not a valid http or https URL; it looks like a request body
+(exit 2), and no request was sent. '--json' here is kaish's output flag, not
+curl's request-body shorthand. Put the body in '--data <body>' and the URL
+last, or send JSON with '-H Content-Type:application/json --data <body>'.
 ```
 
 Proxy and SOCKS:
@@ -267,10 +271,18 @@ Cookies:
 curl: '--cookie' is not supported. Send cookies with '-H Cookie:<value>'.
 ```
 
-Multiple URLs, `--next`, `--parallel`:
+A second URL:
 
 ```
-curl: only one URL per invocation is supported. Call curl once for each URL.
+curl: only one URL per invocation is supported, and both 'http://a/' and
+'http://b/' were given. Run curl once per URL.
+```
+
+`--parallel`, `-Z` and `--next`:
+
+```
+curl: '--parallel' is not supported, and no request was sent. This build makes
+one request per invocation. Run curl once per URL.
 ```
 
 `--verbose`:
@@ -344,11 +356,13 @@ Probed against the published crate and the source at `~/src/research/ureq`
   that is the deliberate ring-vs-aws-lc tradeoff kaibo already accepted. A CI
   `cargo tree -i` tripwire asserts `aws-lc-sys`, `openssl-sys`, and `curl` stay
   out, the same guard the git crate keeps.
-- **Redirects are inverted.** ureq follows redirects up to `max_redirects` by
-  default; curl does not follow unless `-L`. The build sets `max_redirects = 0`
-  unless `-L` is given, then lifts it to `--max-redirs` (default 50). ureq's
-  `max_redirects_will_error` controls whether an over-cap is an error (curl's
-  default) or a last-response return; this build errors, to match curl.
+- **Redirects are driven here, not by ureq.** The agent is built with
+  `max_redirects(0)` and `max_redirects_will_error(false)`, so ureq hands every
+  3xx back, and the hop loop in `backend/ureq.rs` follows it under `-L` up to
+  `--max-redirs` (default 50, the embedder's ceiling applies). That is what
+  lets the egress policy see every hop, and what lets this build apply curl's
+  method and body rules: 301/302 turn a POST into a GET and 303 turns any
+  non-HEAD request into one, dropping the body; 307/308 keep both.
 - **Timeouts map directly.** `--max-time` is `timeout_global(Some(d))`;
   `--connect-timeout` is `timeout_connect(Some(d))`. Native only; the wasm
   backend cannot honor these and says so.
@@ -376,8 +390,9 @@ Probed against the published crate and the source at `~/src/research/ureq`
 - **Errors map to exit codes.** ureq's `ErrorKind` lines up with the table
   above: `HostNotFound` is 6, `ConnectionFailed` and connect `Io` are 7,
   `Timeout` is 28, `Tls` is 35, `Rustls`/`Pem` cert failures are 60,
-  `TooManyRedirects` is 47, `BadUri` is 3, and `StatusCode` under `--fail` is
-  22. Everything else is 1.
+  `TooManyRedirects` is 47, and `BadUri` is 7 (curl's 3 is kernel-reserved,
+  CU11). `--fail` is decided by this build at the response headers, not by
+  ureq's `StatusCode` error, and is 22. Everything else is 1.
 
 ## Wasm: designed in, not built
 
@@ -438,28 +453,37 @@ Modeled on `kaish-tools-git`, minus the git-specific containment and plumbing.
 crates/kaish-tools-curl/
   Cargo.toml
   src/
-    lib.rs          # Tool impl, argv routing, cfg split; compile_error! only if both backends are off
-    config.rs       # CurlConfig (embedder-supplied: tool name, defaults, limits)
-    error.rs        # CurlError -> exit code mapping, literate messages
-    model.rs        # Response model (status, headers, body, url)
-    render.rs       # text (--include/--head) and the --json object
-    args.rs         # the clap struct, flattened GlobalFlags, the unsupported-flag refusals
+    lib.rs          # re-exports
+    tool.rs         # the Tool impl, the clap schema, -o / -O / -C delivery, -f and -w
+    config.rs       # CurlConfig, Limits, AllowEgress / AllowByList (embedder-supplied)
+    args.rs         # the one parser: flags, refusals, Request
+    input.rs        # reads the files the command line names, through the VFS
+    form.rs         # -F multipart bodies
+    write_out.rs    # -w formats
+    render.rs       # text (-i / -I / -o bytes) and the --json object
+    model.rs        # Response (status, headers, body, url, redirect history)
+    error.rs        # CurlError -> exit code mapping
+    util.rs         # block_in_place_compat
     backend/
-      mod.rs        # trait Backend { fn fetch(...) -> Response }
-      ureq.rs       # cfg(not(wasm))
-      xhr.rs        # cfg(wasm) — stubbed in cut 1, built later
+      mod.rs        # the cfg split; compile_error! on wasm until an XHR backend exists
+      ureq.rs       # cfg(not(wasm)): redirects, egress vetting, body read
+      unix.rs       # cfg(unix): the --unix-socket transport
   tests/
-    support.rs      # the local server harness: 127.0.0.1 TCP + a unix-domain socket
-    surface.rs       # GET/POST/headers/-i/-o/-L/--fail/exit codes over TCP
-    unix_socket.rs   # the same surface over a unix-domain socket (--unix-socket)
-    errors.rs        # the literate-error catalog, asserted verbatim
-    compat.rs        # real kernel + loopback server; compares with real curl where installed
-    tls.rs          # -k against a self-signed cert (optional fourth)
+    support.rs         # the local server harness, the real-curl oracle, the Pair comparison
+    surface.rs         # GET/POST/headers/-i/-o/-L/--fail/exit codes over TCP
+    unix_socket.rs     # the same surface over a unix-domain socket (--unix-socket)
+    errors.rs          # the literate-error catalog, asserted verbatim
+    compat.rs          # real kernel + loopback server; compares with real curl where installed
+    features.rs        # -d @file, -G, -F, -O, -T, -C -, each against real curl
+    review.rs          # the 2026-11 cross-model review's findings, each against real curl
+    kaish_behavior_canary.rs  # kaish behaviors this crate's callers depend on
 ```
 
 `CurlConfig` mirrors `GitConfig`: embedder-supplied, with a `tool_name` for
 embedders who want a different name. The `Tool` impl declares `operations`:
-`net.request` always, plus `fs.overwrite` (declared for `-o` and `-O`). The ids
+`net.request` and `fs.overwrite`, always — the schema is per tool, not per
+call, so it cannot declare `fs.overwrite` only for the calls that use `-o`,
+`-O` or `-C`. The ids
 are free-form dotted strings (kaish `ToolSchema::operations`), so this is
 correct without a `kaish-kernel` dep, the same call `kaish-tools-git` makes
 for the read profile.

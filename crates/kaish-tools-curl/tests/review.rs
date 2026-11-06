@@ -498,3 +498,27 @@ fn a_missing_curl_is_a_skip_unless_the_gate_requires_it() {
 fn a_missing_curl_panics_where_the_gate_requires_it() {
     support::oracle_policy(false, true);
 }
+
+// ── 18. Messages docs/curl.md promises ──────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_json_body_typed_for_curls_json_flag_gets_the_request_body_message() {
+    let server = redirector();
+    let p = compare(&server, "--json '{\"a\":1}' \"$URL/echo\"", &[]).await;
+    assert_eq!(p.ours.code, 2, "{}", p.ours.err);
+    for needle in ["looks like a request body", "--data", "Content-Type:application/json"] {
+        assert!(p.ours.err.contains(needle), "{needle}: {}", p.ours.err);
+    }
+    assert!(p.ours_req.is_empty(), "no request was sent");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn parallel_and_next_are_refused_naming_the_flag_and_the_way_forward() {
+    let server = redirector();
+    for flag in ["--parallel", "-Z", "--next"] {
+        let p = compare(&server, &format!("{flag} \"$URL/echo\""), &[]).await;
+        assert_eq!(p.ours.code, 2, "{flag}: {}", p.ours.err);
+        assert!(p.ours.err.contains(flag) && p.ours.err.contains("once per URL"), "{flag}: {}", p.ours.err);
+        assert!(p.ours_req.is_empty(), "{flag}");
+    }
+}
