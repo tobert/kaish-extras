@@ -1516,7 +1516,11 @@ impl GitTool {
                 let all = ops.all();
                 match all.first() {
                     Some(first) if first == "HEAD" => (Some(first.clone()), all[1..].to_vec()),
-                    Some(first) if !first.starts_with(':') && repo.read().resolve_commit(first).is_ok() => {
+                    Some(first)
+                        if !first.starts_with(':')
+                            && (first.contains(['~', '^', '@', '{', '}'])
+                                || repo.read().resolve_commit(first).is_ok()) =>
+                    {
                         (Some(first.clone()), all[1..].to_vec())
                     }
                     _ => (None, all),

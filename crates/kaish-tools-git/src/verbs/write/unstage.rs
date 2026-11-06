@@ -145,6 +145,17 @@ struct Plan {
 pub(crate) fn run(repo: &WriteRepo, opts: &UnstageOptions) -> Result<Outcome, GitError> {
     let op = opts.operation;
     ensure_writable(repo, &opts.command)?;
+    // `git reset` treats an unborn HEAD as the empty tree; `git restore
+    // --staged` has no commit to restore from and fails.
+    if op == "restore" && repo.read().head_tree_id()?.is_none() {
+        return refuse(
+            1,
+            &opts.command,
+            "HEAD does not name a commit yet, so there is nothing to restore the index from.",
+            "To remove paths from the index, run: git rm --cached <path>.",
+            Override::Repository,
+        );
+    }
     let head_map = head::flatten(repo, op)?;
     let snap = Snapshot::read(repo, &opts.command)?;
     let mut plan = build(&snap.state, &head_map, opts)?;

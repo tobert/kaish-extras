@@ -114,9 +114,33 @@ impl Pair {
         assert_eq!(status_v2(&self.ours), status_v2(&self.twin), "[{label}] status differs");
         let (code, _, err) = git_raw(&self.ours, &["fsck", "--strict"]);
         assert_eq!(code, 0, "[{label}] fsck --strict failed on ours: {err}");
+        assert_eq!(tree_listing(&self.ours), tree_listing(&self.twin), "[{label}] working trees differ");
         let leftovers = lockfiles(&self.ours.join(".git"));
         assert!(leftovers.is_empty(), "[{label}] stray lock or temp files: {leftovers:?}");
     }
+}
+
+/// Every path in the working tree outside `.git`, directories included.
+fn tree_listing(root: &Path) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).expect("read_dir") {
+            let e = e.expect("entry");
+            let p = e.path();
+            if p.file_name().is_some_and(|n| n == ".git") {
+                continue;
+            }
+            let m = std::fs::symlink_metadata(&p).expect("lstat");
+            let rel = p.strip_prefix(root).expect("under root").display().to_string();
+            out.push(if m.is_dir() { format!("{rel}/") } else { rel });
+            if m.is_dir() {
+                walk(root, &p, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
 }
 
 fn lockfiles(git_dir: &Path) -> Vec<String> {
@@ -394,4 +418,746 @@ async fn a_stale_index_lock_refuses_and_is_not_removed() {
     assert!(r.err.trim_end().ends_with("Nothing was changed."), "{}", r.err);
     assert!(support::Fingerprint::take(&p.ours).differences_from(&fp).is_empty());
     assert_eq!(std::fs::read(p.ours.join(".git/index.lock")).expect("lock"), b"other process");
+}
+
+
+// ── rm ──────────────────────────────────────────────────────────────────────
+
+/// Run `args` in both repositories after `setup`, and compare.
+async fn both(setup: &dyn Fn(&Path), args: &[&str], label: &str) -> (kaish_types::ExecResult, (i32, String, String), Pair) {
+    let p = Pair::new(setup);
+    let r = p.ours("", args).await;
+    let t = p.twin(args);
+    let _ = label;
+    (r, t, p)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rm_matches_git_for_clean_files() {
+    for (label, args) in [
+        ("file", vec!["rm", "a.txt"]),
+        ("two files", vec!["rm", "a.txt", "b.txt"]),
+        ("cached", vec!["rm", "--cached", "a.txt"]),
+        ("dir -r", vec!["rm", "-r", "d"]),
+        ("dir -r --cached", vec!["rm", "-r", "--cached", "d"]),
+        ("nested file empties parents", vec!["rm", "d/e/f.txt"]),
+        ("glob", vec!["rm", "d/*.txt"]),
+    ] {
+        let (r, t, p) = both(&base, &args, label).await;
+        assert_eq!(r.code, 0, "[{label}] {}", r.err);
+        assert_eq!(t.0, 0, "[{label}] {}", t.2);
+        p.assert_same(label);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rm_prints_what_git_prints() {
+    let (r, t, _p) = both(&base, &["rm", "a.txt", "b.txt"], "out").await;
+    assert_eq!(r.text_out(), t.1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rm_of_a_directory_needs_dash_r() {
+    let (r, t, p) = both(&base, &["rm", "d"], "no -r").await;
+    assert_eq!(r.code, 1, "{}", r.err);
+    assert_ne!(t.0, 0);
+    assert!(r.err.contains("git rm -r d"), "{}", r.err);
+    assert!(r.err.trim_end().ends_with("Nothing was changed."), "{}", r.err);
+    p.assert_same("rm d refused");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rm_keeps_gits_safety_checks_and_force_overrides_them() {
+    // (label, setup, args that git refuses, text our refusal must carry)
+    type Setup = fn(&Path);
+    let cases: Vec<(&str, Setup, &str)> = vec![
+        ("local modification", |d| {
+            base(d);
+            support::write_file(d, "a.txt", "changed\n");
+        }, "local modifications: a.txt"),
+        ("staged change", |d| {
+            base(d);
+            support::write_file(d, "a.txt", "changed\n");
+            support::git(d, &["add", "a.txt"]);
+        }, "changes staged in the index: a.txt"),
+        ("staged and different from the file", |d| {
+            base(d);
+            support::write_file(d, "a.txt", "changed\n");
+            support::git(d, &["add", "a.txt"]);
+            support::write_file(d, "a.txt", "changed again\n");
+        }, "staged content different from both the file and the HEAD: a.txt"),
+        ("new file staged", |d| {
+            base(d);
+            support::write_file(d, "n.txt", "n\n");
+            support::git(d, &["add", "n.txt"]);
+        }, "changes staged in the index: n.txt"),
+    ];
+    for (label, setup, text) in cases {
+        let target = if label == "new file staged" { "n.txt" } else { "a.txt" };
+        let p = Pair::new(&setup);
+        let fp = support::Fingerprint::take(&p.ours);
+        let r = p.ours("", &["rm", target]).await;
+        assert_eq!(r.code, 1, "[{label}] {}", r.err);
+        assert!(r.err.contains(text), "[{label}] {}", r.err);
+        assert!(r.err.contains(&format!("git rm -f {target}")), "[{label}] {}", r.err);
+        assert!(r.err.trim_end().ends_with("Nothing was changed."), "[{label}] {}", r.err);
+        assert_ne!(p.twin(&["rm", target]).0, 0, "[{label}] git must refuse too");
+        assert!(support::Fingerprint::take(&p.ours).differences_from(&fp).is_empty(), "[{label}] a refusal changed the repository");
+        p.assert_same(&format!("{label}: both refused"));
+
+        // -f removes in both.
+        let r = p.ours("", &["rm", "-f", target]).await;
+        assert_eq!(r.code, 0, "[{label}] {}", r.err);
+        assert_eq!(p.twin(&["rm", "-f", target]).0, 0);
+        p.assert_same(&format!("{label}: -f"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rm_cached_allows_an_index_that_matches_head_and_refuses_one_that_does_not() {
+    // File modified in the worktree only: --cached is allowed (index == HEAD).
+    let (r, t, p) = both(&|d| {
+        base(d);
+        support::write_file(d, "a.txt", "changed\n");
+    }, &["rm", "--cached", "a.txt"], "cached local").await;
+    assert_eq!((r.code, t.0), (0, 0), "{}", r.err);
+    p.assert_same("rm --cached with a local edit");
+
+    // Staged change with the file equal to the index: --cached is allowed.
+    let (r, t, p) = both(&|d| {
+        base(d);
+        support::write_file(d, "a.txt", "changed\n");
+        support::git(d, &["add", "a.txt"]);
+    }, &["rm", "--cached", "a.txt"], "cached staged").await;
+    assert_eq!((r.code, t.0), (0, 0), "{}", r.err);
+    p.assert_same("rm --cached with a staged change");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rm_of_an_untracked_path_is_a_pathspec_error() {
+    let (r, t, _p) = both(&|d| {
+        base(d);
+        support::write_file(d, "u.txt", "u\n");
+    }, &["rm", "u.txt"], "untracked").await;
+    assert_eq!(r.code, 1, "{}", r.err);
+    assert_ne!(t.0, 0);
+    assert!(r.err.contains("'u.txt' did not match"), "{}", r.err);
+}
+
+// ── mv ──────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mv_matches_git() {
+    for (label, args) in [
+        ("rename", vec!["mv", "a.txt", "z.txt"]),
+        ("into a directory", vec!["mv", "a.txt", "d"]),
+        ("several into a directory", vec!["mv", "a.txt", "b.txt", "d"]),
+        ("rename a directory", vec!["mv", "d", "dd"]),
+        ("directory into a directory", vec!["mv", "d/e", "."]),
+        ("a file out of a directory", vec!["mv", "d/c.txt", "c.txt"]),
+    ] {
+        let (r, t, p) = both(&base, &args, label).await;
+        assert_eq!(r.code, 0, "[{label}] {}", r.err);
+        assert_eq!(t.0, 0, "[{label}] {}", t.2);
+        p.assert_same(label);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mv_keeps_staged_changes_and_untracked_files_of_a_directory() {
+    let setup = |d: &Path| {
+        base(d);
+        support::write_file(d, "d/c.txt", "staged edit\n");
+        support::git(d, &["add", "d/c.txt"]);
+        support::write_file(d, "d/untracked.txt", "u\n");
+    };
+    let (r, t, p) = both(&setup, &["mv", "d", "moved"], "dir").await;
+    assert_eq!((r.code, t.0), (0, 0), "{}", r.err);
+    p.assert_same("mv keeps staged content");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mv_refuses_what_git_refuses_and_changes_nothing() {
+    let setup = |d: &Path| {
+        base(d);
+        support::write_file(d, "u.txt", "untracked\n");
+    };
+    for (label, args, text) in [
+        ("untracked source", vec!["mv", "u.txt", "x.txt"], "not under version control"),
+        ("missing source", vec!["mv", "gone.txt", "x.txt"], "does not exist"),
+        ("existing destination", vec!["mv", "a.txt", "b.txt"], "'b.txt' exists"),
+        ("into itself", vec!["mv", "d", "d/e/d"], "into itself"),
+        ("several sources, destination is a file", vec!["mv", "a.txt", "b.txt", "u.txt"], "not a directory"),
+        ("missing parent", vec!["mv", "a.txt", "nodir/a.txt"], "'nodir' does not exist"),
+    ] {
+        let p = Pair::new(&setup);
+        let fp = support::Fingerprint::take(&p.ours);
+        let r = p.ours("", &args).await;
+        assert_eq!(r.code, 1, "[{label}] {}", r.err);
+        assert!(r.err.contains(text), "[{label}] {}", r.err);
+        assert!(r.err.trim_end().ends_with("Nothing was changed."), "[{label}] {}", r.err);
+        assert_ne!(p.twin(&args).0, 0, "[{label}] git must refuse too");
+        assert!(support::Fingerprint::take(&p.ours).differences_from(&fp).is_empty(), "[{label}] a refusal changed the repository");
+        p.assert_same(label);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mv_force_replaces_an_existing_file() {
+    let (r, t, p) = both(&base, &["mv", "-f", "a.txt", "b.txt"], "force").await;
+    assert_eq!((r.code, t.0), (0, 0), "{} / {}", r.err, t.2);
+    p.assert_same("mv -f");
+}
+
+// ── restore --staged, reset ─────────────────────────────────────────────────
+
+fn staged_edits(d: &Path) {
+    base(d);
+    support::write_file(d, "a.txt", "alpha two\n");
+    support::write_file(d, "d/c.txt", "charlie two\n");
+    support::write_file(d, "new.txt", "new\n");
+    support::git(d, &["add", "-A"]);
+    // An unstaged edit on top, which unstaging must leave alone.
+    support::write_file(d, "a.txt", "alpha three\n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_staged_and_reset_match_git() {
+    for (label, args) in [
+        ("restore --staged file", vec!["restore", "--staged", "a.txt"]),
+        ("restore --staged .", vec!["restore", "--staged", "."]),
+        ("restore --staged dir", vec!["restore", "--staged", "d"]),
+        ("restore -S new file", vec!["restore", "-S", "new.txt"]),
+        ("reset", vec!["reset"]),
+        ("reset --mixed", vec!["reset", "--mixed"]),
+        ("reset HEAD", vec!["reset", "HEAD"]),
+        ("reset -- path", vec!["reset", "--", "a.txt"]),
+        ("reset path", vec!["reset", "a.txt", "new.txt"]),
+        ("reset HEAD path", vec!["reset", "HEAD", "d/c.txt"]),
+        ("reset HEAD -- path", vec!["reset", "HEAD", "--", "d"]),
+    ] {
+        let (r, t, p) = both(&staged_edits, &args, label).await;
+        assert_eq!(r.code, 0, "[{label}] {}", r.err);
+        assert_eq!(t.0, 0, "[{label}] {}", t.2);
+        p.assert_same(label);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unstaging_leaves_untouched_entries_with_their_stat() {
+    let p = Pair::new(&staged_edits);
+    let before = support::git(&p.ours, &["ls-files", "-s", "--debug", "b.txt"]);
+    let r = p.ours("", &["restore", "--staged", "a.txt"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(before, support::git(&p.ours, &["ls-files", "-s", "--debug", "b.txt"]), "an untouched entry lost its stat");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unstaging_in_a_repository_with_no_commits_matches_git() {
+    let setup = |d: &Path| {
+        support::write_file(d, "one.txt", "1\n");
+        support::write_file(d, "sub/two.txt", "2\n");
+        support::git(d, &["add", "-A"]);
+    };
+    for args in [vec!["reset"], vec!["reset", "--", "one.txt"], vec!["restore", "--staged", "."]] {
+        let (r, t, p) = both(&setup, &args, "unborn").await;
+        assert_eq!(r.code == 0, t.0 == 0, "{args:?}: ours {} {} / git {} {}", r.code, r.err, t.0, t.2);
+        if t.0 == 0 {
+            p.assert_same(&format!("unborn {args:?}"));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_without_staged_and_reset_revision_forms_refuse() {
+    let p = Pair::new(&staged_edits);
+    for (args, code, text, next) in [
+        (vec!["restore", "a.txt"], 2, "overwrites file content", "git restore --staged <path>"),
+        (vec!["restore", "--worktree", "a.txt"], 2, "overwrites file content", "git restore --staged <path>"),
+        (vec!["restore", "--staged", "--worktree", "a.txt"], 2, "overwrites file content", "git restore --staged <path>"),
+        (vec!["reset", "--hard"], 2, "discards working-tree changes", "git reset -- <path>"),
+        (vec!["reset", "--hard", "HEAD~1"], 2, "discards working-tree changes", "git reset -- <path>"),
+        (vec!["reset", "--soft", "HEAD~1"], 2, "moves the branch", "git reset -- <path>"),
+        (vec!["reset", "--mixed", "HEAD~1"], 2, "moves the branch", "git reset -- <path>"),
+        (vec!["reset", "HEAD~1"], 2, "moves the branch", "git reset -- <path>"),
+        (vec!["reset", "main"], 2, "moves the branch", "git reset -- <path>"),
+        (vec!["reset", "-p"], 2, "terminal", "git reset -- <path>"),
+    ] {
+        let fp = support::Fingerprint::take(&p.ours);
+        let r = p.ours("", &args).await;
+        assert_eq!(r.code, code, "{args:?}: {}", r.err);
+        assert!(r.err.contains(": refused."), "{args:?}: {}", r.err);
+        assert!(r.err.contains(text), "{args:?}: {}", r.err);
+        assert!(r.err.contains(next), "{args:?}: {}", r.err);
+        assert!(r.err.trim_end().ends_with("Nothing was changed."), "{args:?}: {}", r.err);
+        assert!(support::Fingerprint::take(&p.ours).differences_from(&fp).is_empty(), "{args:?} changed the repository");
+    }
+    // `--hard` says it never happens; the others name the embedder.
+    let r = p.ours("", &["reset", "--hard"]).await;
+    assert!(r.err.contains("this shell never does it"), "{}", r.err);
+}
+
+// ── repository states ───────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn writes_refuse_in_repository_states_they_must_not_run_in() {
+    type Setup = fn(&Path);
+    let cases: Vec<(&str, Setup, &str)> = vec![
+        ("merge in progress", |d| { base(d); std::fs::write(d.join(".git/MERGE_HEAD"), "0".repeat(40) + "\n").expect("w"); }, "a merge is in progress"),
+        ("cherry-pick", |d| { base(d); std::fs::write(d.join(".git/CHERRY_PICK_HEAD"), "0".repeat(40) + "\n").expect("w"); }, "a cherry-pick is in progress"),
+        ("revert", |d| { base(d); std::fs::write(d.join(".git/REVERT_HEAD"), "0".repeat(40) + "\n").expect("w"); }, "a revert is in progress"),
+        ("rebase-merge", |d| { base(d); std::fs::create_dir(d.join(".git/rebase-merge")).expect("w"); }, "a rebase is in progress"),
+        ("rebase-apply", |d| { base(d); std::fs::create_dir(d.join(".git/rebase-apply")).expect("w"); }, "a rebase or patch application is in progress"),
+        ("sequencer", |d| { base(d); std::fs::create_dir(d.join(".git/sequencer")).expect("w"); }, "a cherry-pick or revert sequence is in progress"),
+        ("bisect", |d| { base(d); std::fs::write(d.join(".git/BISECT_LOG"), "x\n").expect("w"); }, "a bisect is in progress"),
+        ("core.symlinks=false", |d| { base(d); support::git(d, &["config", "core.symlinks", "false"]); }, "core.symlinks=false"),
+        ("core.ignorecase=true", |d| { base(d); support::git(d, &["config", "core.ignorecase", "true"]); }, "core.ignorecase=true"),
+        ("core.splitIndex", |d| { base(d); support::git(d, &["config", "core.splitIndex", "true"]); }, "core.splitIndex=true"),
+        ("core.sparseCheckout", |d| { base(d); support::git(d, &["config", "core.sparseCheckout", "true"]); }, "core.sparseCheckout=true"),
+        ("core.attributesFile", |d| { base(d); support::git(d, &["config", "core.attributesFile", "/tmp/x"]); }, "core.attributesFile"),
+        ("post-index-change hook", |d| {
+            base(d);
+            let h = d.join(".git/hooks/post-index-change");
+            std::fs::write(&h, "#!/bin/sh\n").expect("hook");
+        }, "post-index-change hook"),
+        ("hooksPath outside the tree", |d| { base(d); support::git(d, &["config", "core.hooksPath", "/elsewhere"]); }, "core.hooksPath points outside"),
+    ];
+    for (label, setup, text) in cases {
+        let p = Pair::new(&|d| { setup(d); support::write_file(d, "a.txt", "changed\n"); });
+        for args in [vec!["add", "a.txt"], vec!["rm", "-f", "b.txt"], vec!["mv", "b.txt", "bb.txt"], vec!["restore", "--staged", "a.txt"], vec!["reset"]] {
+            let fp = support::Fingerprint::take(&p.ours);
+            let r = p.ours("", &args).await;
+            assert_eq!(r.code, 4, "[{label}] {args:?}: {}", r.err);
+            assert!(r.err.contains(text), "[{label}] {args:?}: {}", r.err);
+            assert!(r.err.trim_end().ends_with("Nothing was changed."), "[{label}] {}", r.err);
+            assert!(support::Fingerprint::take(&p.ours).differences_from(&fp).is_empty(), "[{label}] {args:?} changed the repository");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_split_index_and_unmerged_entries_refuse() {
+    // Split index: created by real git, then written to by us would lose entries.
+    let p = Pair::new(&|d| {
+        base(d);
+        support::git(d, &["update-index", "--split-index"]);
+        support::write_file(d, "a.txt", "changed\n");
+    });
+    let fp = support::Fingerprint::take(&p.ours);
+    let r = p.ours("", &["add", "a.txt"]).await;
+    assert_eq!(r.code, 4, "{}", r.err);
+    assert!(r.err.contains("split index"), "{}", r.err);
+    assert!(support::Fingerprint::take(&p.ours).differences_from(&fp).is_empty());
+
+    // Unmerged entries: a real conflict, then the merge state removed so only
+    // the index says so.
+    let p = Pair::new(&|d| {
+        base(d);
+        support::git(d, &["checkout", "-qb", "side"]);
+        support::write_file(d, "a.txt", "side\n");
+        support::git(d, &["commit", "-qam", "side"]);
+        support::git(d, &["checkout", "-q", "main"]);
+        support::write_file(d, "a.txt", "main\n");
+        support::git(d, &["commit", "-qam", "main"]);
+        let (code, _, _) = git_raw(d, &["merge", "side"]);
+        assert_ne!(code, 0, "the merge must conflict");
+        std::fs::remove_file(d.join(".git/MERGE_HEAD")).expect("rm MERGE_HEAD");
+    });
+    let fp = support::Fingerprint::take(&p.ours);
+    let r = p.ours("", &["add", "b.txt"]).await;
+    assert_eq!(r.code, 4, "{}", r.err);
+    assert!(r.err.contains("'a.txt' has unresolved merge conflict entries"), "{}", r.err);
+    assert!(support::Fingerprint::take(&p.ours).differences_from(&fp).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sha256_repository_refuses_before_anything_is_written() {
+    let fx = Fixture::empty();
+    let dir = fx.path("ours");
+    std::fs::create_dir_all(&dir).expect("dir");
+    support::git(&dir, &["init", "-q", "--object-format=sha256", "-b", "main"]);
+    support::write_file(&dir, "a.txt", "a\n");
+    let fp = support::Fingerprint::take(&dir);
+    let r = run_tool(&fx.root(), "/mnt/ours", &["add", "a.txt"]).await;
+    assert_eq!(r.code, 4, "{}", r.err);
+    assert!(support::Fingerprint::take(&dir).differences_from(&fp).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bare_repository_has_no_worktree_to_write() {
+    let fx = Fixture::empty();
+    let dir = fx.path("bare.git");
+    std::fs::create_dir_all(&dir).expect("dir");
+    support::git(&dir, &["init", "-q", "--bare", "-b", "main"]);
+    let r = run_tool(&fx.root(), "/mnt/bare.git", &["add", "-A"]).await;
+    assert_eq!(r.code, 1, "{}", r.err);
+    assert!(r.err.contains("bare"), "{}", r.err);
+}
+
+// ── content conversion: blob ids against `git hash-object` ──────────────────
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Expect {
+    /// Staged, with git's blob id. A refusal here fails the test: the profile
+    /// would be unusable for this common configuration.
+    Pass,
+    /// Refused with exit 4. Staging fails the test: git's blob would differ.
+    Refuse,
+    /// Either; a staged blob must still equal git's.
+    Either,
+}
+
+struct Case {
+    name: &'static str,
+    /// `.gitattributes` at the root.
+    attrs: &'static str,
+    /// Extra `git config` pairs.
+    config: &'static [(&'static str, &'static str)],
+    /// (path, bytes) of extra attribute files: `sub/.gitattributes` etc.
+    extra: &'static [(&'static str, &'static str)],
+    path: &'static str,
+    bytes: &'static [u8],
+    expect: Expect,
+}
+
+const LF: &[u8] = b"one\ntwo\n";
+const CRLF: &[u8] = b"one\r\ntwo\r\n";
+
+const CASES: &[Case] = &[
+    Case { name: "text=auto with LF", attrs: "* text=auto\n", config: &[], extra: &[], path: "f.txt", bytes: LF, expect: Expect::Pass },
+    Case { name: "text=auto with CRLF", attrs: "* text=auto\n", config: &[], extra: &[], path: "f.txt", bytes: CRLF, expect: Expect::Refuse },
+    Case { name: "no attributes with CRLF", attrs: "", config: &[], extra: &[], path: "f.txt", bytes: CRLF, expect: Expect::Pass },
+    Case { name: "text eol=crlf with LF", attrs: "* text eol=crlf\n", config: &[], extra: &[], path: "f.txt", bytes: LF, expect: Expect::Pass },
+    Case { name: "text with CRLF", attrs: "* text\n", config: &[], extra: &[], path: "f.txt", bytes: CRLF, expect: Expect::Refuse },
+    Case { name: "-text overrides text=auto", attrs: "* text=auto\n*.bin -text\n", config: &[], extra: &[], path: "x.bin", bytes: CRLF, expect: Expect::Pass },
+    Case { name: "binary macro overrides text=auto", attrs: "* text=auto\n*.bin binary\n", config: &[], extra: &[], path: "x.bin", bytes: CRLF, expect: Expect::Pass },
+    Case { name: "filter on LF bytes", attrs: "* filter=lfs\n", config: &[], extra: &[], path: "f.txt", bytes: LF, expect: Expect::Refuse },
+    Case { name: "filter that does not match", attrs: "*.txt filter=x\n", config: &[], extra: &[], path: "f.md", bytes: LF, expect: Expect::Pass },
+    Case { name: "-filter", attrs: "* filter=x\n*.md -filter\n", config: &[], extra: &[], path: "f.md", bytes: LF, expect: Expect::Pass },
+    Case { name: "working-tree-encoding", attrs: "* working-tree-encoding=utf-16\n", config: &[], extra: &[], path: "f.txt", bytes: LF, expect: Expect::Refuse },
+    Case { name: "ident with $Id", attrs: "* ident\n", config: &[], extra: &[], path: "f.txt", bytes: b"$Id: 1 $\n", expect: Expect::Refuse },
+    Case { name: "ident without $Id", attrs: "* ident\n", config: &[], extra: &[], path: "f.txt", bytes: LF, expect: Expect::Pass },
+    Case { name: "autocrlf=true with CRLF", attrs: "", config: &[("core.autocrlf", "true")], extra: &[], path: "f.txt", bytes: CRLF, expect: Expect::Refuse },
+    Case { name: "autocrlf=true with LF", attrs: "", config: &[("core.autocrlf", "true")], extra: &[], path: "f.txt", bytes: LF, expect: Expect::Pass },
+    Case { name: "autocrlf=input with CRLF", attrs: "", config: &[("core.autocrlf", "input")], extra: &[], path: "f.txt", bytes: CRLF, expect: Expect::Refuse },
+    Case { name: "autocrlf=false with CRLF", attrs: "", config: &[("core.autocrlf", "false")], extra: &[], path: "f.txt", bytes: CRLF, expect: Expect::Pass },
+    Case { name: "core.eol with CRLF", attrs: "", config: &[("core.eol", "crlf")], extra: &[], path: "f.txt", bytes: CRLF, expect: Expect::Either },
+    Case { name: "macro that sets text", attrs: "[attr]conv text\n* conv\n", config: &[], extra: &[], path: "f.txt", bytes: CRLF, expect: Expect::Refuse },
+    Case { name: "nested attributes file", attrs: "", config: &[], extra: &[("sub/.gitattributes", "* text\n")], path: "sub/f.txt", bytes: CRLF, expect: Expect::Refuse },
+    Case { name: "nested attributes file, file outside it", attrs: "", config: &[], extra: &[("sub/.gitattributes", "* text\n")], path: "f.txt", bytes: CRLF, expect: Expect::Pass },
+    Case { name: "info/attributes", attrs: "", config: &[], extra: &[(".git/info/attributes", "* text=auto\n")], path: "f.txt", bytes: CRLF, expect: Expect::Refuse },
+    Case { name: "anchored pattern, same level", attrs: "/top.txt text\n", config: &[], extra: &[], path: "top.txt", bytes: CRLF, expect: Expect::Refuse },
+    Case { name: "anchored pattern, deeper file", attrs: "/top.txt text\n", config: &[], extra: &[], path: "sub/top.txt", bytes: CRLF, expect: Expect::Pass },
+    Case { name: "later line wins", attrs: "*.txt -text\n*.txt text\n", config: &[], extra: &[], path: "f.txt", bytes: CRLF, expect: Expect::Refuse },
+    Case { name: "later -text wins", attrs: "*.txt text\n*.txt -text\n", config: &[], extra: &[], path: "f.txt", bytes: CRLF, expect: Expect::Pass },
+    Case { name: "directory-only pattern", attrs: "sub/ text\n", config: &[], extra: &[], path: "sub/f.txt", bytes: CRLF, expect: Expect::Pass },
+    Case { name: "double star", attrs: "**/deep.txt text\n", config: &[], extra: &[], path: "a/b/deep.txt", bytes: CRLF, expect: Expect::Refuse },
+    Case { name: "eol=lf", attrs: "* eol=lf\n", config: &[], extra: &[], path: "f.txt", bytes: CRLF, expect: Expect::Either },
+    Case { name: "crlf attribute", attrs: "* crlf\n", config: &[], extra: &[], path: "f.txt", bytes: CRLF, expect: Expect::Refuse },
+    Case { name: "text=auto and a file with a lone CR", attrs: "* text=auto\n", config: &[], extra: &[], path: "f.txt", bytes: b"a\rb\n", expect: Expect::Refuse },
+    Case { name: "quoted pattern", attrs: "\"a b.txt\" text\n", config: &[], extra: &[], path: "a b.txt", bytes: CRLF, expect: Expect::Refuse },
+    Case { name: "negated pattern is ignored by git", attrs: "!*.txt text\n", config: &[], extra: &[], path: "f.txt", bytes: CRLF, expect: Expect::Pass },
+    Case { name: "comment line", attrs: "# * text\n", config: &[], extra: &[], path: "f.txt", bytes: CRLF, expect: Expect::Pass },
+    Case { name: "bracket class", attrs: "[ab].txt text\n", config: &[], extra: &[], path: "a.txt", bytes: CRLF, expect: Expect::Refuse },
+    Case { name: "text on a symlink-free binary with NUL", attrs: "* text=auto\n", config: &[], extra: &[], path: "f.bin", bytes: b"\0\r\n\0", expect: Expect::Refuse },
+];
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staged_blobs_equal_git_hash_object_over_the_attribute_matrix() {
+    support::require_git();
+    let mut staged = 0;
+    let mut refused = 0;
+    for case in CASES {
+        let fx = Fixture::empty();
+        let dir = fx.path("ours");
+        std::fs::create_dir_all(&dir).expect("dir");
+        support::git(&dir, &["init", "-q", "-b", "main"]);
+        for (k, v) in case.config {
+            support::git(&dir, &["config", k, v]);
+        }
+        if !case.attrs.is_empty() {
+            std::fs::write(dir.join(".gitattributes"), case.attrs).expect("attrs");
+        }
+        for (path, text) in case.extra {
+            let p = dir.join(path);
+            std::fs::create_dir_all(p.parent().expect("parent")).expect("dir");
+            std::fs::write(&p, text).expect("attrs");
+        }
+        let file = dir.join(case.path);
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("dir");
+        std::fs::write(&file, case.bytes).expect("file");
+
+        let (code, oracle, err) = git_raw(&dir, &["hash-object", case.path]);
+        assert_eq!(code, 0, "[{}] hash-object: {err}", case.name);
+        let oracle = oracle.trim().to_string();
+
+        let r = run_tool(&fx.root(), "/mnt/ours", &["add", "--", case.path]).await;
+        if r.code == 0 {
+            staged += 1;
+            let line = support::git(&dir, &["ls-files", "-s", "--", case.path]);
+            let got = line.split_whitespace().nth(1).unwrap_or_default().to_string();
+            assert_eq!(got, oracle, "[{}] the staged blob differs from `git hash-object`", case.name);
+            assert_ne!(case.expect, Expect::Refuse, "[{}] must refuse, but staged", case.name);
+        } else {
+            refused += 1;
+            assert_eq!(r.code, 4, "[{}] {}", case.name, r.err);
+            assert_ne!(case.expect, Expect::Pass, "[{}] must stage, but refused: {}", case.name, r.err);
+            assert!(r.err.contains("would be stored differently by real git") || r.err.contains("cannot match exactly"), "[{}] {}", case.name, r.err);
+            // A refusal wrote nothing.
+            assert!(support::git(&dir, &["ls-files"]).is_empty(), "[{}] a refusal staged something", case.name);
+            assert!(lockfiles(&dir.join(".git")).is_empty());
+        }
+    }
+    // The matrix has both outcomes, so a verb that refused (or staged)
+    // everything cannot pass it.
+    assert!(staged >= 10 && refused >= 10, "staged {staged}, refused {refused}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_symlinked_attributes_file_is_refused_not_followed() {
+    let fx = Fixture::empty();
+    let dir = fx.path("ours");
+    std::fs::create_dir_all(&dir).expect("dir");
+    support::git(&dir, &["init", "-q", "-b", "main"]);
+    let outside = fx.path("outside-attrs");
+    std::fs::write(&outside, "* text\n").expect("outside");
+    std::os::unix::fs::symlink(&outside, dir.join(".gitattributes")).expect("link");
+    support::write_file(&dir, "f.txt", "x\n");
+    let r = run_tool(&fx.root(), "/mnt/ours", &["add", "f.txt"]).await;
+    assert_eq!(r.code, 4, "{}", r.err);
+    assert!(r.err.contains("'.gitattributes'") && r.err.contains("symbolic link"), "{}", r.err);
+    assert!(!r.err.contains(&fx.root().display().to_string()), "{}", r.err);
+}
+
+// ── racy-git smudging ───────────────────────────────────────────────────────
+
+/// The scenario `ce_smudge_racily_clean_entry` exists for: an entry recorded in
+/// the same second as the index, whose file then changes without changing its
+/// stat, and a later index write that moves the index's timestamp past it.
+/// Git smudges the entry on that write; without it `git status` would call
+/// the file clean.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_same_second_edit_is_not_hidden_by_a_later_index_write() {
+    use filetime::FileTime;
+    // The scenario needs the entry's mtime second to equal the index's; retry
+    // if the clock ticked between the two writes.
+    for attempt in 0..20 {
+        let setup = |d: &Path| {
+            base(d);
+            support::git(d, &["config", "core.trustctime", "false"]);
+            support::git(d, &["config", "core.checkstat", "minimal"]);
+            support::write_file(d, "x.txt", "aaaa\n");
+            support::git(d, &["add", "x.txt"]);
+            // Same size, new content, and the stat the index recorded.
+            let recorded = support::git(d, &["ls-files", "--debug", "x.txt"]);
+            let line = recorded.lines().find(|l| l.trim_start().starts_with("mtime:")).expect("mtime line").to_string();
+            let (secs, nanos) = line.trim_start().trim_start_matches("mtime:").trim().split_once(':').expect("s:n");
+            support::write_file(d, "x.txt", "bbbb\n");
+            filetime::set_file_mtime(d.join("x.txt"), FileTime::from_unix_time(secs.parse().expect("secs"), nanos.parse().expect("nanos"))).expect("set mtime");
+            support::write_file(d, "other.txt", "other\n");
+        };
+        let p = Pair::new(&setup);
+        let index_secs = FileTime::from_last_modification_time(&std::fs::metadata(p.ours.join(".git/index")).expect("index")).unix_seconds();
+        let debug = support::git(&p.ours, &["ls-files", "--debug", "x.txt"]);
+        let entry_secs: i64 = debug.lines().find(|l| l.trim_start().starts_with("mtime:")).expect("mtime").trim_start().trim_start_matches("mtime:").trim().split_once(':').expect("s:n").0.parse().expect("secs");
+        if entry_secs != index_secs {
+            assert!(attempt < 19, "never got the entry and the index into one second");
+            continue;
+        }
+        // Move the clock past the recorded second, so the next index is newer.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let r = p.ours("", &["add", "other.txt"]).await;
+        assert_eq!(r.code, 0, "{}", r.err);
+        assert_eq!(p.twin(&["add", "other.txt"]).0, 0);
+
+        let ours_x = index_view_of(&p.ours, "x.txt");
+        let twin_x = index_view_of(&p.twin, "x.txt");
+        assert!(twin_x.contains("size: 0"), "the scenario must make real git smudge, or the test proves nothing: {twin_x}");
+        assert_eq!(ours_x, twin_x, "we must smudge exactly the entry git smudges");
+        let status = support::git(&p.ours, &["status", "--porcelain"]);
+        assert!(status.contains("M x.txt"), "git status must see the edit: {status}");
+        p.assert_same("racy");
+        return;
+    }
+}
+
+fn index_view_of(repo: &Path, path: &str) -> String {
+    index_view(repo).into_iter().find(|l| l.contains(&format!("\t{path} "))).unwrap_or_default()
+}
+
+/// The negative control for the smudge: an entry that is NOT racy keeps its
+/// recorded size, so smudging everything would fail here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_entry_older_than_the_index_is_not_smudged() {
+    let p = Pair::new(&|d| {
+        base(d);
+        support::write_file(d, "other.txt", "other\n");
+    });
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // Rewrite the index so it is a second newer than every entry.
+    support::git(&p.ours, &["update-index", "--really-refresh"]);
+    support::git(&p.twin, &["update-index", "--really-refresh"]);
+    let r = p.ours("", &["add", "other.txt"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(p.twin(&["add", "other.txt"]).0, 0);
+    let view = index_view(&p.ours).join("\n");
+    assert!(view.contains("a.txt size: 6"), "{view}");
+    p.assert_same("not racy");
+}
+
+// ── containment through the real verbs ──────────────────────────────────────
+
+struct Hostile {
+    fx: Fixture,
+    repo: PathBuf,
+    outside: PathBuf,
+}
+
+fn hostile() -> Hostile {
+    support::require_git();
+    let fx = Fixture::empty();
+    let repo = fx.path("mounted/repo");
+    let outside = fx.path("elsewhere-7f3a");
+    std::fs::create_dir_all(&repo).expect("repo");
+    std::fs::create_dir_all(&outside).expect("outside");
+    support::write_file(&outside, "keep.txt", "keep\n");
+    support::git(&repo, &["init", "-q", "-b", "main"]);
+    base(&repo);
+    Hostile { fx, repo, outside }
+}
+
+fn outside_snapshot(h: &Hostile) -> Vec<(String, Vec<u8>)> {
+    let mut v: Vec<_> = std::fs::read_dir(&h.outside)
+        .expect("read")
+        .map(|e| {
+            let e = e.expect("entry");
+            (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap_or_default())
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+async fn hostile_run(h: &Hostile, cwd: &str, argv: &[&str]) -> kaish_types::ExecResult {
+    run_tool(&h.fx.path("mounted"), &format!("/mnt/repo/{cwd}"), argv).await
+}
+
+fn assert_contained(h: &Hostile, r: &kaish_types::ExecResult, what: &str, before: &[(String, Vec<u8>)]) {
+    assert_eq!(r.code, 4, "[{what}] {}", r.err);
+    assert!(!r.err.contains(&h.fx.root().display().to_string()), "[{what}] leaked a host path: {}", r.err);
+    assert!(!r.err.contains("elsewhere-7f3a"), "[{what}] leaked the link target: {}", r.err);
+    assert_eq!(outside_snapshot(h), before, "[{what}] the outside directory changed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_planted_objects_fanout_link_stops_add() {
+    let h = hostile();
+    // Whatever the new blob's id starts with, its fan-out directory is a link.
+    for n in 0..=255u32 {
+        let dir = h.repo.join(format!(".git/objects/{n:02x}"));
+        if !dir.exists() {
+            std::os::unix::fs::symlink(&h.outside, &dir).expect("plant");
+        }
+    }
+    support::write_file(&h.repo, "fresh.txt", "a brand new blob\n");
+    let before = outside_snapshot(&h);
+    let r = hostile_run(&h, "", &["add", "fresh.txt"]).await;
+    assert_contained(&h, &r, "objects/xx", &before);
+    assert!(r.err.contains("in the common git directory is a symbolic link"), "{}", r.err);
+    assert!(!h.repo.join(".git/index.lock").exists(), "the lock must be released");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_planted_index_link_and_a_hard_link_stop_every_verb() {
+    let h = hostile();
+    support::write_file(&h.repo, "a.txt", "changed\n");
+    let real = h.repo.join(".git/index");
+    let saved = std::fs::read(&real).expect("index");
+
+    // Symbolic link.
+    std::fs::remove_file(&real).expect("rm");
+    std::fs::write(h.outside.join("index"), &saved).expect("outside index");
+    std::os::unix::fs::symlink(h.outside.join("index"), &real).expect("plant");
+    let before = outside_snapshot(&h);
+    for args in [vec!["add", "a.txt"], vec!["rm", "-f", "b.txt"], vec!["mv", "b.txt", "bb.txt"], vec!["restore", "--staged", "a.txt"], vec!["reset"]] {
+        let r = hostile_run(&h, "", &args).await;
+        assert_contained(&h, &r, &format!("index link {args:?}"), &before);
+        assert!(r.err.contains("'index' in the git directory is a symbolic link"), "{}", r.err);
+    }
+
+    // Hard link: a second name for the same inode, outside the mount.
+    std::fs::remove_file(&real).expect("rm");
+    std::fs::write(h.outside.join("index"), &saved).expect("outside index");
+    std::fs::hard_link(h.outside.join("index"), &real).expect("hard link");
+    let before = outside_snapshot(&h);
+    for args in [vec!["add", "a.txt"], vec!["rm", "-f", "b.txt"], vec!["mv", "b.txt", "bb.txt"], vec!["restore", "--staged", "a.txt"], vec!["reset"]] {
+        let r = hostile_run(&h, "", &args).await;
+        assert_contained(&h, &r, &format!("index hard link {args:?}"), &before);
+        assert!(r.err.contains("more than one hard link"), "{}", r.err);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_planted_index_lock_link_is_a_stale_lock_and_is_not_followed() {
+    let h = hostile();
+    support::write_file(&h.repo, "a.txt", "changed\n");
+    std::os::unix::fs::symlink(h.outside.join("keep.txt"), h.repo.join(".git/index.lock")).expect("plant");
+    let before = outside_snapshot(&h);
+    let r = hostile_run(&h, "", &["add", "a.txt"]).await;
+    // Refused by the walk (a link) or by the exclusive create (it exists); either way not written.
+    assert_eq!(r.code, 4, "{}", r.err);
+    assert_eq!(outside_snapshot(&h), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_symlinked_working_tree_directory_stops_add_rm_and_mv() {
+    let h = hostile();
+    support::write_file(&h.outside, "c.txt", "outside copy\n");
+    std::fs::remove_dir_all(h.repo.join("d")).expect("rm d");
+    std::os::unix::fs::symlink(&h.outside, h.repo.join("d")).expect("plant");
+    let before = outside_snapshot(&h);
+    for args in [
+        vec!["add", "d/c.txt"],
+        vec!["add", "-u", "d"],
+        vec!["rm", "-f", "d/c.txt"],
+        vec!["mv", "a.txt", "d/a.txt"],
+        vec!["mv", "d/c.txt", "c.txt"],
+    ] {
+        let r = hostile_run(&h, "", &args).await;
+        assert_contained(&h, &r, &format!("{args:?}"), &before);
+        assert!(r.err.contains("'d' in the working tree is a symbolic link"), "{args:?}: {}", r.err);
+    }
+    assert!(h.repo.join("a.txt").exists(), "mv must not have moved the source");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_linked_worktree_checks_the_roots_it_writes_into() {
+    let h = hostile();
+    let linked = h.fx.path("mounted/wt");
+    support::git(&h.repo, &["worktree", "add", "-q", "-b", "side", linked.to_str().expect("utf-8")]);
+    support::write_file(&linked, "fresh.txt", "linked blob\n");
+    // Objects live in the common directory: plant there.
+    for n in 0..=255u32 {
+        let dir = h.repo.join(format!(".git/objects/{n:02x}"));
+        if !dir.exists() {
+            std::os::unix::fs::symlink(&h.outside, &dir).expect("plant");
+        }
+    }
+    let before = outside_snapshot(&h);
+    let r = hostile_run(&h, "../wt", &["add", "fresh.txt"]).await;
+    assert_contained(&h, &r, "linked objects", &before);
+    assert!(r.err.contains("in the common git directory"), "{}", r.err);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_linked_worktree_writes_its_own_index() {
+    let h = hostile();
+    let linked = h.fx.path("mounted/wt");
+    support::git(&h.repo, &["worktree", "add", "-q", "-b", "side", linked.to_str().expect("utf-8")]);
+    support::write_file(&linked, "fresh.txt", "linked blob\n");
+    let r = hostile_run(&h, "../wt", &["add", "fresh.txt"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(support::git(&linked, &["ls-files"]).contains("fresh.txt"));
+    assert!(!support::git(&h.repo, &["ls-files"]).contains("fresh.txt"), "the main index must not change");
+    assert_eq!(git_raw(&linked, &["fsck", "--strict"]).0, 0);
 }
