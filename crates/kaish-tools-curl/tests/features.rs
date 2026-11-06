@@ -16,8 +16,7 @@
 #[path = "support.rs"]
 mod support;
 
-use kaish_types::ExecResult;
-use support::{compare, compare_with, loopback_config, CapturedRequest, Fixture, Oracle, Pair, Response, Server, TcpGuard, Wire};
+use support::{compare, compare_with, loopback_config, CapturedRequest, Fixture, Pair, Response, Server, TcpGuard, Wire};
 
 use kaish_tools_curl::Limits;
 
