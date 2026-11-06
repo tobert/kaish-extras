@@ -368,3 +368,53 @@ async fn refused_command_lines_exit_2_like_curl() {
         assert_eq!(p.ours.code, 2, "{args}: {}", p.ours.err);
     }
 }
+
+// ── 12. A short flag's value may be attached ────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attached_short_values_parse_like_curl() {
+    let server = redirector();
+    for args in [
+        "-s -dfoo=1 \"$URL/echo\"",
+        // curl takes everything after the flag letter, '=' included.
+        "-s '-d=a=1' \"$URL/echo\"",
+        "-s -XPUT \"$URL/echo\"",
+        "-s -m5 \"$URL/echo\"",
+        "-s -uuser:pass \"$URL/echo\"",
+        "-s '-HX-A: b' \"$URL/echo\"",
+        "-sd x=1 \"$URL/echo\"",
+        // A value-taking flag at the end of a cluster takes the rest, or the next word.
+        "-sdx=1 \"$URL/echo\"",
+        "-sXPUT \"$URL/echo\"",
+    ] {
+        let p = compare(&server, args, &[]).await;
+        assert_eq!(p.ours.code, 0, "{args}: {}", p.ours.err);
+        if p.theirs.is_some() {
+            assert_eq!(
+                p.ours_req.iter().map(Wire::of).collect::<Vec<_>>(),
+                p.theirs_req.iter().map(Wire::of).collect::<Vec<_>>(),
+                "{args}: differs from real curl"
+            );
+            assert_eq!(
+                p.ours_req[0].header("X-A"),
+                p.theirs_req[0].header("X-A"),
+                "{args}"
+            );
+            assert_eq!(
+                p.ours_req[0].header("Authorization"),
+                p.theirs_req[0].header("Authorization"),
+                "{args}"
+            );
+        }
+    }
+    let p = compare(&server, "-s '-oattached.txt' \"$URL/echo\"", &[]).await;
+    assert_eq!(p.ours.code, 0, "{}", p.ours.err);
+    assert_eq!(p.fx.file("attached.txt").await.as_deref(), Some(b"landed".as_slice()));
+    let p = compare(&server, "-so out.txt \"$URL/echo\"", &[]).await;
+    assert_eq!(p.fx.file("out.txt").await.as_deref(), Some(b"landed".as_slice()), "{}", p.ours.err);
+    // The literal assertions, for a box without curl.
+    let p = compare(&server, "-dfoo=1 \"$URL/echo\"", &[]).await;
+    assert_eq!(p.ours_req[0].body, b"foo=1");
+    let p = compare(&server, "'-d=a=1' \"$URL/echo\"", &[]).await;
+    assert_eq!(p.ours_req[0].body, b"=a=1");
+}

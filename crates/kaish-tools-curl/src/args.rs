@@ -219,25 +219,40 @@ const BOOLEAN_SHORTS: &[char] = &['i', 'I', 'f', 'L', 's', 'S', 'k', 'O', 'v', '
 /// Short flags that take a value, and so cannot appear inside a cluster.
 const VALUE_SHORTS: &[char] = &['X', 'd', 'H', 'o', 'u', 'A', 'e', 'w', 'b', 'x', 'K', 'F', 'm', 'T', 'C'];
 
-/// Expand `-sSL` into `-s -S -L`.
+/// Expand a run of short flags into one token per flag: `-sSL` into
+/// `-s -S -L`, and a value-taking flag's attached value into its own token,
+/// as curl reads it: `-dfoo` into `-d foo`, `-m5` into `-m 5`, `-d=a=1` into
+/// `-d =a=1`, `-sXPUT` into `-s -X PUT`. A value-taking flag at the end of a
+/// run takes the next word, as `-so out.txt` does.
 ///
 /// Agents type `curl -sSL <url>` from muscle memory — it is one of the most
-/// common shapes in the training corpus — and it used to be refused whole as
-/// an unknown flag. Only called at flag position, never on a value: `-d -iL`
-/// is a body, and a preprocessing pass over all of argv could not tell the
-/// difference.
+/// common shapes in the training corpus. Only called at flag position, never
+/// on a value: `-d -iL` is a body, and a preprocessing pass over all of argv
+/// could not tell the difference.
 ///
-/// `None` means this is not a cluster of value-free shorts, and the caller
-/// reports it rather than guessing.
-fn expand_short_cluster(token: &str) -> Option<Vec<String>> {
+/// `None` means a letter in the run is not a short flag this build knows, and
+/// the caller reports it rather than guessing.
+fn expand_short_run(token: &str) -> Option<Vec<String>> {
     let body = token.strip_prefix('-')?;
     if body.starts_with('-') || body.chars().count() < 2 {
         return None;
     }
-    if !body.chars().all(|c| BOOLEAN_SHORTS.contains(&c)) {
-        return None;
+    let mut out = Vec::new();
+    for (at, c) in body.char_indices() {
+        if BOOLEAN_SHORTS.contains(&c) {
+            out.push(format!("-{c}"));
+        } else if VALUE_SHORTS.contains(&c) {
+            out.push(format!("-{c}"));
+            let attached = &body[at + c.len_utf8()..];
+            if !attached.is_empty() {
+                out.push(attached.to_string());
+            }
+            return Some(out);
+        } else {
+            return None;
+        }
     }
-    Some(body.chars().map(|c| format!("-{c}")).collect())
+    Some(out)
 }
 
 /// Split a `--flag=value` token, which is the one composed shape the kaish
@@ -312,7 +327,15 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             })
         };
 
-        match argv[i].as_str().split('=').next().unwrap_or(&argv[i]) {
+        // `--flag=value` names its flag before the `=`; a short flag's
+        // attached value (`-d=a=1`) is part of the token, and is split off by
+        // `expand_short_run` below.
+        let key = if argv[i].starts_with("--") {
+            argv[i].split('=').next().unwrap_or(&argv[i])
+        } else {
+            argv[i].as_str()
+        };
+        match key {
             "-d" | "--data" | "--data-binary" | "--data-raw" => {
                 let val = value(&mut i)?;
                 // curl sends the form Content-Type for every one of these, the
@@ -439,20 +462,11 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
                 break;
             }
             other if other.starts_with('-') && other.len() > 1 => {
-                if let Some(expanded) = expand_short_cluster(other) {
-                    // Splice the cluster in where it stood, so each flag is
+                if let Some(expanded) = expand_short_run(other) {
+                    // Splice the run in where it stood, so each flag is
                     // read in the position it was written.
                     argv.splice(i..=i, expanded);
                     continue;
-                }
-                if let Some(bad) = other
-                    .strip_prefix('-')
-                    .filter(|b| !b.starts_with('-'))
-                    .and_then(|b| b.chars().find(|c| VALUE_SHORTS.contains(c)))
-                {
-                    return Err(CurlError::Usage(format!(
-                        "'{other}' cannot be written as one word, because '-{bad}' takes a value. Write the flags separately, as in '-s -{bad} <value>'."
-                    )));
                 }
                 // Silently ignoring an unknown flag is the failure mode this
                 // whole surface exists to avoid: the agent believes it asked
@@ -1013,12 +1027,19 @@ mod tests {
     }
 
     #[test]
-    fn a_cluster_containing_a_value_flag_says_so() {
-        let err = parse_args(&argv(&["-so", "/tmp/out", "http://x.com"]), &CurlConfig::default())
-            .expect_err("-o takes a value and cannot be clustered");
-        let msg = format!("{err}");
-        assert!(msg.contains("-o"), "name the flag that broke it: {msg}");
-        assert!(msg.contains("separately"), "say what to do instead: {msg}");
+    fn a_value_flag_ends_a_run_and_takes_the_rest_or_the_next_word() {
+        let req = parse(&["-so", "/tmp/out", "http://x.com"]);
+        assert_eq!(req.output_file.as_deref(), Some("/tmp/out"));
+        let req = parse(&["-so/tmp/out", "http://x.com"]);
+        assert_eq!(req.output_file.as_deref(), Some("/tmp/out"));
+        let req = parse(&["-m5", "-XPUT", "-uu:p", "http://x.com"]);
+        assert_eq!((req.method.as_str(), req.user.as_deref(), req.password.as_deref()), ("PUT", Some("u"), Some("p")));
+        assert_eq!(req.max_time, 5.0);
+        let req = parse(&["-d=a=1", "http://x.com"]);
+        assert_eq!(req.bodies, vec![BodyPart::Literal("=a=1".to_string())]);
+        // A letter this build does not know still refuses the word.
+        let err = parse_args(&argv(&["-sZ", "http://x.com"]), &CurlConfig::default()).unwrap_err();
+        assert!(format!("{err}").contains("-sZ"), "{err}");
     }
 
     #[test]

@@ -160,9 +160,10 @@ cannot see a failure cannot act on it. `curl -sSL <url>` therefore behaves
 exactly as an agent expects, and `curl -s <url>` still prints the error when
 one happens.
 
-Short flags combine: `-sSL`, `-iL`, `-fL` are read as the flags they spell.
-A cluster containing a value-taking flag (`-so out.txt`) is refused, naming
-the flag that broke it.
+Short flags combine, and a short flag's value may be attached, as in curl:
+`-sSL`, `-iL`, `-fL`, `-dfoo=1`, `-XPUT`, `-m5`, `-oout.txt`, `-uuser:pass`,
+`-d=a=1` (the body is `=a=1`, as in curl). A value-taking flag ends a run and
+takes the rest of the word, or the next word when nothing is attached: `-so out.txt`.
 
 This build refuses the following flags at parse time with literate errors:
 `-J`, `--compressed`, `--proxy`/SOCKS,
