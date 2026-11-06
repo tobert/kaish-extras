@@ -135,7 +135,7 @@ async fn data_urlencode_percent_encodes_only_the_value() {
 
     let req = server.last_request().expect("request received");
     assert_eq!(req.method, "POST");
-    assert_eq!(req.body_str(), "q=a%20b%26c");
+    assert_eq!(req.body_str(), "q=a+b%26c");
 }
 
 #[tokio::test]
@@ -175,7 +175,7 @@ async fn dash_i_prints_the_status_line_and_headers_above_the_body() {
 
     let text = result.text_out();
     let lower = text.to_lowercase();
-    assert!(text.starts_with("HTTP/1.1 200\r\n"), "should lead with the status line: {text:?}");
+    assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "should lead with the status line: {text:?}");
     assert!(lower.contains("content-type: text/plain"), "headers should be printed: {text:?}");
     assert!(text.ends_with("body-text"), "body should follow the headers: {text:?}");
     let headers_pos = text.find("HTTP/1.1").unwrap();
@@ -194,7 +194,7 @@ async fn dash_capital_i_issues_head_and_prints_headers_with_no_body() {
     assert_eq!(result.code, 0, "{}", result.err);
 
     let text = result.text_out();
-    assert!(text.starts_with("HTTP/1.1 200\r\n"));
+    assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(
         !text.contains("should-never-appear"),
         "-I must discard the body: {text:?}"
@@ -246,7 +246,7 @@ async fn dash_i_dash_o_together_put_the_headers_in_the_file_too() {
         .written(Path::new("/out/file.txt"))
         .expect("-o should have written through the backend");
     let text = String::from_utf8(written).expect("headers+body are valid utf-8 here");
-    assert!(text.starts_with("HTTP/1.1 200\r\n"), "headers should lead the file: {text:?}");
+    assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "headers should lead the file: {text:?}");
     assert!(text.ends_with("file-contents"), "body should still be in the file: {text:?}");
 }
 
@@ -331,7 +331,7 @@ async fn a_json_body_arrives_as_an_object_not_a_string() {
         .route("/api", Response::json(200, r#"{"status":"ok","count":3}"#))
         .start_tcp();
 
-    let result = curl(loopback_config(), argv(&[&server.url("/api")])).await;
+    let result = curl(loopback_config(), argv(&["--json", &server.url("/api")])).await;
     assert_eq!(result.code, 0, "{}", result.err);
 
     let Some(kaish_types::Value::Json(obj)) = result.data else {
@@ -349,7 +349,7 @@ async fn a_text_body_stays_text_even_when_it_parses_as_json() {
         .route("/plain", Response::text(200, "42"))
         .start_tcp();
 
-    let result = curl(loopback_config(), argv(&[&server.url("/plain")])).await;
+    let result = curl(loopback_config(), argv(&["--json", &server.url("/plain")])).await;
     let Some(kaish_types::Value::Json(obj)) = result.data else {
         panic!("--json payload should be structured");
     };

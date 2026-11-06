@@ -3,6 +3,17 @@
 
 use std::collections::BTreeMap;
 
+/// The status and headers of a redirect response that `-L` followed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hop {
+    /// The HTTP status code of the redirect.
+    pub status: u16,
+    /// The standard reason phrase for `status`.
+    pub reason: String,
+    /// The redirect's headers, shaped as in [`Response::headers`].
+    pub headers: BTreeMap<String, Vec<String>>,
+}
+
 /// The result of one HTTP request-response cycle, backend-agnostic.
 ///
 /// Headers are a `BTreeMap`: a stable iteration order keeps `-i` output
@@ -14,16 +25,40 @@ pub struct Response {
     pub url: String,
     /// The HTTP status code.
     pub status: u16,
+    /// The standard reason phrase for `status` (`Not Found` for 404), empty
+    /// for a code with none. The backend cannot see the phrase the server
+    /// sent: ureq drops it while parsing the status line.
+    pub reason: String,
     /// Response headers, lower-cased names, **every** value the server sent
     /// under each name. A `BTreeMap<String, String>` kept only the last of
-    /// three `Set-Cookie`s and silently dropped the rest (CU37); `-i` is
-    /// documented to print what the server actually sent.
+    /// three `Set-Cookie`s and silently dropped the rest (CU37). The server's
+    /// own case and order are not kept: ureq lower-cases names while parsing
+    /// (docs/curl.md, `-i`).
     pub headers: BTreeMap<String, Vec<String>>,
+    /// How many redirects were followed to reach this response.
+    pub redirects: u32,
+    /// The redirect responses followed on the way, in order, which `-i`
+    /// prints ahead of the final head as curl does. Their bodies are not read.
+    pub history: Vec<Hop>,
     /// The response body, exactly as received.
     pub body: Vec<u8>,
 }
 
 impl Response {
+    /// What `-w` reports when the request failed before any response:
+    /// status 0 (printed `000`), nothing downloaded, the URL as asked for.
+    pub fn unanswered(url: String) -> Self {
+        Self {
+            url,
+            status: 0,
+            reason: String::new(),
+            headers: BTreeMap::new(),
+            redirects: 0,
+            history: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
     /// Whether the server labelled this body as JSON.
     ///
     /// The `Content-Type` is the only authority worth trusting here: sniffing

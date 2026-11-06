@@ -1214,11 +1214,11 @@ were settled against git 2.55 and pinned in tests/log.rs: ours matches.
   config.
 - **CU5 — features not in the 80/20 cut.** Multiple URLs, `--next`,
   `--parallel`, `--retry`/`--retry-*`, `--resolve`/`--connect-to`, proxies and
-  SOCKS, `--cookie`/`--cookie-jar` (a jar), `-F`/`--form` (multipart),
-  `-G`/`--get`, `-w`/`--write-out`, `-v`/`--verbose`, `-K`/`--config`,
+  SOCKS, `--cookie`/`--cookie-jar` (a jar), `-v`/`--verbose`, `-K`/`--config`,
   `--netrc`, `--abstract-unix-socket`, `--cert`/`--key`/`--cacert`/`--capath`. Each is a
   parse-time refusal with a literate error today (see `docs/curl.md`); graduate
-  one to support only when an agent need is real. `--unix-socket` (filesystem)
+  one to support only when an agent need is real. `-w`/`--write-out` graduated
+  2026-11 as a subset, `-G`, `-F`, `-O`, `-T` and `-C -` on 2026-11-06 (docs/curl.md). `--unix-socket` (filesystem)
   moved into the buildout; `--abstract-unix-socket` (Linux abstract namespace)
   stays here as the same transport with abstract addressing.
 - **CU6 — curl's `--json` request-body shorthand.** Refused to keep kaish's
@@ -1265,21 +1265,29 @@ reference only; they no longer block work.
   `with_operations(["net.request", "fs.overwrite"])`, asserted by
   `schema_declares_what_the_tool_actually_does`. Only `fs.` can drift.
 - **CU13 — kernel byte budget invisible.** DECIDED: embedder supplies limits
-  via `CurlConfig`. `-o` streams, stdout reads into `max_response_bytes`.
-- **CU14 — accepted no-op flags.** DECIDED: refuse `-s`, `-S`, `--compressed`
-  at parse time with literate errors. Keeps the door open for later implementation.
+  via `CurlConfig`. `-o` and stdout both buffer the whole body in memory under
+  `max_response_bytes`; nothing streams.
+- **CU14 — accepted no-op flags.** DECIDED: refuse `--compressed` at parse
+  time with a literate error, which keeps the door open for later
+  implementation. `-s` and `-S` are accepted: there is no progress meter, so
+  they have nothing to silence, and `curl -sSL` is what agents type. Errors
+  still print under `-s` (docs/curl.md).
 - **CU15 — `--max-time` default.** DECIDED: `CurlConfig` carries a default
   (30s). Opt-in override via flag. Prevents silent hang on current-thread runtime.
 - **CU16 — `--json` collision.** DECIDED: kaish convention wins. Curl request-body
   `--json` refused with literate error. Document false-negative honestly.
 - **CU17 — `--data-urlencode` grammar.** DECIDED: encode only the value after
-  first `=`. `@filename` and `name@filename` forms deferred to CU5.
+  first `=`. `@filename` and `name@filename` landed 2026-11-06, with curl's
+  grammar and its `+` for a space (docs/curl.md).
 - **CU18 — `-d` stripping and `-i`+`-o`.** DECIDED: match curl for `-i`+`-o`
-  (headers go into the file). Diverge on `-d` (no newline stripping); documented.
+  (headers go into the file). The `-d` divergence is gone as of 2026-11-06:
+  `-d @file` strips every CR and LF like curl, and inline `-d` text is sent
+  as typed, which is what curl does too.
 - **CU19 — delete xhr stub.** DECIDED: carry `compile_error!` on wasm until
   the backend is real. No dual representation.
 - **CU20 — agent ergonomics.** Three rulings implemented:
-  - `-O` dropped (literate error naming `-o`)
+  - `-O` dropped (literate error naming `-o`). Reversed 2026-11-06 (Amy): `-O`
+    is supported, named from the URL's last path segment, and `-J` stays refused.
   - Redirects stay opt-in (`-L` flag) with `follow_redirects` config default
   - `--retry` moved in minimally: transient failures with exponential backoff.
     Not retrying non-idempotent methods without stating so.
@@ -1313,6 +1321,37 @@ standalone before being written down.
   of touch; there is no bulk pass.
 
 ## curl — the embedder boundary, still open
+
+- **CU48 — `--unix-socket` is not seen by the egress policy.** Found by the
+  2026-11 deepseek-flash review. `AllowEgress::permit` is asked about the
+  request URL, whose host is a placeholder under `--unix-socket`, and
+  `permit_address` is never asked at all, because the unix transport does no
+  DNS. The socket path is checked only by `resolve_unix_socket` in `tool.rs`:
+  it must resolve (symlinks followed) inside a mount the shell can reach.
+  So an embedder whose policy allows the placeholder name (`localhost`, say)
+  has allowed every socket under every mount, and a policy author reading
+  `AllowEgress` has no hook to say otherwise. Not changed here.
+  **Question for Amy:** is the mount check the intended whole of the policy,
+  or should the embedder see the path? Options: (a) leave it, and state in
+  `AllowEgress`'s docs that unix sockets are bounded by mounts, not by the
+  policy; (b) a `permit_unix_socket(&Path) -> bool` hook, default deny, so an
+  embedder opts in; (c) refuse `--unix-socket` unless `CurlConfig` names
+  allowed socket paths, as `-k` is refused unless permitted.
+  **Probe to write first:** an `AllowEgress` that records every call and
+  denies everything but `localhost`; run `--unix-socket <path in a mount>
+  http://localhost/`; assert the recorded calls are the one `permit` with the
+  placeholder URL and zero `permit_address`, and that the request succeeds.
+  Then a second socket in the same mount, which the policy cannot tell apart.
+
+- **CU47 — stdin as a request body (`-d @-`, `--data-binary @-`,
+  `--data-urlencode @-`, `-T -`).** `ToolCtx` (kaish-tool-api 0.18.1) has no
+  stdin accessor. The kernel's `ExecContext` has one, reachable only by
+  downcasting through `as_any_mut`, which needs a `kaish-kernel` dependency
+  that this crate must never take (the honest-embedder rule). All four forms
+  exit 2 with the file form named. **Needs a kaish PR**, e.g. a
+  `ToolCtx::read_stdin(limit) -> Result<Vec<u8>>` that honors the pipe's byte
+  budget. Question for Amy: the PR's shape (bytes vs. a reader; who owns the
+  budget). A bare `-` after `-d` is the literal body `-`, as in curl.
 
 - **CU46b — proxy and custom TLS roots.** `CurlConfig` gained injected headers
   on 2026-08-20; the other two the review asked for did not land. An embedder
@@ -1411,11 +1450,6 @@ we owe other people, or things they do better than us.
   of an open-ended wait, because it is an event both sides can observe. By then
   they will know whether the work laptop — the only place a corporate
   TLS-inspecting CA would appear — is actually in play.
-- **X6 — curl has no substitution test.** git's canary and
-  `tests/patch_renderer.rs` pin that `$(git …)` binds text while `.data` is
-  set; curl sets `.data` on every response and nothing pins `$(curl …)`.
-  Adding `with_typed_substitution()` to curl's schema would flip it to the
-  JSON value with the suite green. Copy git's kernel-driven check.
 
 ## kaish-tools-image — a proposed third tool crate
 
