@@ -110,9 +110,23 @@ impl CurlTool {
             #[arg(short = 'f', long)]
             fail: bool,
 
+            /// Like --fail, but print the response body too (to stdout, or to
+            /// the --output file) before exiting 22.
+            #[arg(long)]
+            fail_with_body: bool,
+
+            /// After the body, print this text on stdout. Variables:
+            /// %{http_code}, %{response_code}, %{time_total} (seconds, six
+            /// decimals), %{size_download}, %{url_effective}, %{content_type},
+            /// %{redirect_url}, %{num_redirects}. Escapes: \n \r \t and
+            /// %% for a percent sign. Anything else exits 2. Cannot be combined
+            /// with --json.
+            #[arg(short = 'w', long)]
+            write_out: Option<String>,
+
             /// Give up after this many seconds. Default 30; may lower the
             /// embedder's ceiling, never raise it. Exceeding it exits 28.
-            #[arg(long)]
+            #[arg(short = 'm', long)]
             max_time: Option<f64>,
 
             /// Connect to this filesystem socket instead of the URL's host,
@@ -191,26 +205,23 @@ impl Tool for CurlTool {
         };
 
         let output_file = req.output_file.clone();
-        let include_headers = req.include_headers;
-        let head_only = req.head_only;
-        let json_output = req.json_output;
+        let render = Render {
+            include_headers: req.include_headers,
+            head_only: req.head_only,
+            json_output: req.json_output,
+            fail_on_error: req.fail_on_error,
+            fail_with_body: req.fail_with_body,
+            write_out: req.write_out.clone(),
+        };
 
+        let started = std::time::Instant::now();
         let result = crate::util::block_in_place_compat(move || {
             crate::backend::fetch(&req, &self.config)
         });
+        let elapsed = started.elapsed();
 
         match result {
-            Ok(response) => {
-                handle_success(
-                    output_file.as_deref(),
-                    response,
-                    include_headers,
-                    head_only,
-                    json_output,
-                    ctx,
-                )
-                .await
-            }
+            Ok(response) => handle_success(output_file.as_deref(), response, render, elapsed, ctx).await,
             Err(err) => error_result(err),
         }
     }
@@ -325,7 +336,19 @@ fn failure(err: CurlError) -> ExecResult {
     r
 }
 
-/// Render the response to stdout, or write it to a VFS path for `-o`.
+/// How to present one response: the flags that shape stdout, the file, and
+/// the exit code.
+struct Render {
+    include_headers: bool,
+    head_only: bool,
+    json_output: bool,
+    fail_on_error: bool,
+    fail_with_body: bool,
+    write_out: Option<crate::write_out::WriteOut>,
+}
+
+/// Render the response to stdout, or write it to a VFS path for `-o`, then
+/// apply `-f` / `--fail-with-body` and `-w`.
 ///
 /// `-o` goes through `ToolCtx::resolve_path` + `backend().write()`, never
 /// `std::fs`. Writing to the host filesystem would let `curl -o /etc/passwd`
@@ -334,11 +357,58 @@ fn failure(err: CurlError) -> ExecResult {
 async fn handle_success(
     output_file: Option<&str>,
     response: crate::model::Response,
-    include_headers: bool,
-    head_only: bool,
-    json_output: bool,
+    render: Render,
+    elapsed: std::time::Duration,
     ctx: &mut dyn ToolCtx,
 ) -> ExecResult {
+    let status = response.status;
+    let failed = status >= 400 && (render.fail_on_error || render.fail_with_body);
+    let write_out_text = render
+        .write_out
+        .as_ref()
+        .map(|w| w.render(&response, elapsed))
+        .unwrap_or_default();
+    let failure = || CurlError::HttpFailure { status };
+
+    // `-f`: the body is dropped, the exit is 22, and `-w` still prints, as
+    // in curl. Nothing is written to the `-o` file.
+    if failed && !render.fail_with_body {
+        let mut r = ExecResult::success(write_out_text);
+        r.code = failure().exit_code();
+        r.err = failure().to_string();
+        return r;
+    }
+
+    let mut result = deliver(output_file, response, &render, ctx).await;
+    if result.code != 0 {
+        return result;
+    }
+    if !write_out_text.is_empty() {
+        let body = result.text_out().into_owned();
+        // Replace the output rather than append to it, so the result keeps one
+        // text channel. `--json` is refused with `-w`, so `.data` is unset.
+        let mut with_w = ExecResult::with_output(OutputData::text(format!("{body}{write_out_text}")));
+        with_w.baggage = std::mem::take(&mut result.baggage);
+        result = with_w;
+    }
+    if failed {
+        // `--fail-with-body`: the body is out; the exit still says it failed.
+        result.code = failure().exit_code();
+        result.err = failure().to_string();
+    }
+    result
+}
+
+/// Put the body where the caller asked: stdout, or a VFS path for `-o`.
+async fn deliver(
+    output_file: Option<&str>,
+    response: crate::model::Response,
+    render: &Render,
+    ctx: &mut dyn ToolCtx,
+) -> ExecResult {
+    let include_headers = render.include_headers;
+    let head_only = render.head_only;
+    let json_output = render.json_output;
     let status = response.status;
     let url = response.url.clone();
 

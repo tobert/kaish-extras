@@ -87,7 +87,9 @@ the last positional unless `--url` is used.
 | `-e, --referer <url>` | `Referer`. | None. |
 | `-k, --insecure` | Skip TLS certificate verification. **Off unless the embedder sets `CurlConfig::with_insecure_permitted(true)`**, and refused with a literate error while it is off — an agent that can silence verification can be talked into it. `help curl` lists the flag only where it is permitted. | Gated by the embedder rather than always available. |
 | `-f, --fail` | Exit on HTTP status >= 400 instead of printing the body. Uses curl-compatible exit codes. | None. |
-| `--max-time <s>` | Whole-request timeout, applied to the ureq agent. Always set: the `CurlConfig` default (30s) applies when the flag is omitted, and the flag is **clamped to the embedder's ceiling** — it can lower the budget, never raise it. A deadline that fires is exit **28**, not exit 7. | WASM: refuses with literate error (no `tokio::time`). |
+| `--fail-with-body` | Like `-f`: exit 22 on status >= 400 (stderr `curl: the requested URL returned error: 404`), and the body prints to stdout, or goes to the `-o` file. | Real curl's stderr has a `(22)` in it. |
+| `-w, --write-out <fmt>` | Text printed on stdout after the body. Variables: `%{http_code}`, `%{response_code}`, `%{time_total}` (seconds, six decimals, whole request), `%{size_download}` (decoded body bytes), `%{url_effective}`, `%{content_type}`, `%{redirect_url}`, `%{num_redirects}`. Escapes `\n \r \t` and `%%`. Printed even when `-f` stops the body. `-o /dev/null` discards the body (the kernel's `/dev/null` device). | Any other variable, `%header{}`, and `@file` exit 2 with the supported set, where curl warns and prints nothing. Refused with `--json` (exit 2). Compared against real curl 8.23 in `tests/compat.rs`. |
+| `-m, --max-time <s>` | Whole-request timeout, applied to the ureq agent. Always set: the `CurlConfig` default (30s) applies when the flag is omitted, and the flag is **clamped to the embedder's ceiling** — it can lower the budget, never raise it. A deadline that fires is exit **28**, not exit 7. | WASM: refuses with literate error (no `tokio::time`). |
 | `--connect-timeout <s>` | Connect-phase timeout. | WASM: refuses with literate error. |
 | `--unix-socket <path>` | Connect to an AF_UNIX socket instead of the URL host; the host in the URL is a placeholder the `Host` header still needs (e.g. `http://localhost/`). The path is resolved through `ToolCtx::resolve_path`, mapped by `backend().resolve_real_path()`, and **canonicalized** before it is required to fall inside the mount it was reached through — so a symlink out of the mount is refused, which a lexical prefix test would not catch. | Native, unix-family targets only; wasm and non-unix refuse with a literate error. `--abstract-unix-socket` deferred (CU5). |
 | `--json` | **Not curl's request-body shorthand.** It is kaish's global output flag for every tool (see next section). | curl 7.82 `--json` (request body) refused with literate error. |
@@ -155,7 +157,7 @@ the flag that broke it.
 
 This build refuses the following flags at parse time with literate errors:
 `-O` (use `-o <file>`), `--compressed`, `--proxy`/SOCKS, `--form`,
-`--cookie`, `--write-out`, `--verbose`, `--retry`, `--get`, `--cert`/`--key`,
+`--cookie`, `--verbose`, `--retry`, `--get`, `--cert`/`--key`,
 `--resolve`, `--config`, `--netrc`, `--parallel`, `--next`, and — because the backend
 does not implement them rather than because they are out of scope — `-k`/`--insecure`
 and `--unix-socket`. Each carries a message
@@ -208,7 +210,7 @@ the rest to 1. State the number so an agent can branch on it.
 | 2 | A flag combination refused before any request: `--data-binary -` (stdin bodies are not supported). |
 | 6 | Host not found. |
 | 7 | Could not connect — **and** URL malformed (bad scheme, bad syntax). curl uses 3 for a malformed URL; kaish's kernel reserves 3, so this build maps malformed URLs here with an error naming the real cause (CU11). |
-| 22 | `--fail` and HTTP status >= 400. |
+| 22 | `--fail` or `--fail-with-body` and HTTP status >= 400. |
 | 28 | `--max-time` or `--connect-timeout` exceeded. |
 | 35 | TLS handshake failed. |
 | 47 | Too many redirects. |
@@ -272,11 +274,13 @@ Multiple URLs, `--next`, `--parallel`:
 curl: only one URL per invocation is supported. Call curl once for each URL.
 ```
 
-`--write-out`, `--verbose`:
+`--verbose` (and `--form`, with the multipart body to build by hand):
 
 ```
-curl: '--write-out' is not supported. Use kaish '--json' for a structured
-response object, or '-i' to print headers above the body.
+curl: '--verbose' is not supported, and no request was sent. This build prints
+no request or connection trace. Use 'curl -i <url>' to print the response
+headers above the body. The request headers are the ones you set with '-H'
+plus 'User-Agent: kaish-curl'.
 ```
 
 Retry:
@@ -449,6 +453,7 @@ crates/kaish-tools-curl/
     surface.rs       # GET/POST/headers/-i/-o/-L/--fail/exit codes over TCP
     unix_socket.rs   # the same surface over a unix-domain socket (--unix-socket)
     errors.rs        # the literate-error catalog, asserted verbatim
+    compat.rs        # real kernel + loopback server; compares with real curl where installed
     tls.rs          # -k against a self-signed cert (optional fourth)
 ```
 

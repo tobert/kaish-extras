@@ -62,13 +62,8 @@ fn oracle(server: &TcpGuard, args: &str) -> Option<(String, i32)> {
         .current_dir(std::env::temp_dir())
         .output()
         .ok()?;
-    if out.status.code().is_none() {
-        return None;
-    }
-    Some((
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        out.status.code().unwrap_or(-1),
-    ))
+    let code = out.status.code()?;
+    Some((String::from_utf8_lossy(&out.stdout).into_owned(), code))
 }
 
 fn api() -> TcpGuard {
@@ -267,4 +262,228 @@ async fn the_at_path_refusal_names_the_working_form_not_data_binary_dash() {
         );
     }
     assert!(server.requests().is_empty());
+}
+
+// ── -w / --write-out ────────────────────────────────────────────────────
+
+/// Replace the `time_total` value, which differs per run, so the rest of a
+/// `-w` line can be compared with real curl's byte for byte.
+fn is_seconds(s: &str) -> bool {
+    s.split_once('.').is_some_and(|(whole, frac)| {
+        !whole.is_empty()
+            && whole.bytes().all(|b| b.is_ascii_digit())
+            && frac.len() == 6
+            && frac.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn write_out_variables_match_real_curl() {
+    let server = api();
+    let fmt = "%{http_code}|%{response_code}|%{size_download}|%{url_effective}|%{content_type}|[%{redirect_url}]|%{num_redirects}\\n";
+    for (flags, path) in [
+        ("", "/json"),
+        ("", "/status/404"),
+        ("", "/go"),
+        ("-L", "/go"),
+        ("-I", "/text"),
+    ] {
+        let ours = run_at(
+            &server,
+            &format!("curl -s {flags} -o /dev/null -w '{fmt}' \"$URL{path}\""),
+        )
+        .await;
+        assert_eq!(ours.code, 0, "{flags} {path}: {}", ours.err);
+        let theirs = oracle(&server, &format!("-s {flags} -o /dev/null -w '{fmt}' \"$URL{path}\""));
+        if let Some((stdout, code)) = theirs {
+            assert_eq!(code, 0);
+            assert_eq!(ours.text_out(), stdout, "{flags} {path}");
+        }
+        assert!(ours.text_out().ends_with('\n'), "{flags} {path}: `\\n` must expand");
+    }
+    // Control: the line really carries values, not an empty format.
+    let r = run_at(&server, &format!("curl -s -o /dev/null -w '{fmt}' \"$URL/json\"")).await;
+    assert!(r.text_out().starts_with("200|200|"), "{}", r.text_out());
+    assert!(r.text_out().contains("|application/json|"), "{}", r.text_out());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn write_out_time_total_is_seconds_with_six_decimals() {
+    let server = api();
+    let r = run_at(&server, "curl -s -o /dev/null -w '%{time_total}' \"$URL/json\"").await;
+    assert!(is_seconds(r.text_out().trim()), "got {:?}", r.text_out());
+    if let Some((stdout, _)) = oracle(&server, "-s -o /dev/null -w '%{time_total}' \"$URL/json\"") {
+        assert!(is_seconds(stdout.trim()), "the oracle's own shape: {stdout:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn write_out_follows_the_body_on_stdout() {
+    let server = api();
+    let r = run_at(&server, "curl -s -w '[%{http_code}]' \"$URL/text\"").await;
+    assert_eq!(r.text_out(), "plain body\n[200]");
+    // Escapes, as curl: %% is one %, \t a tab; `\\` stays two backslashes.
+    let r = run_at(&server, "curl -s -o /dev/null -w '100%%\\t\\\\' \"$URL/text\"").await;
+    assert_eq!(r.text_out(), "100%\t\\\\");
+    if let Some((stdout, _)) = oracle(&server, "-s -o /dev/null -w '100%%\\t\\\\' \"$URL/text\"") {
+        assert_eq!(stdout, "100%\t\\\\");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn write_out_with_dev_null_discards_the_body_and_creates_no_file() {
+    // /dev/null is a device in the kernel's filesystem, so the write is
+    // discarded there. The listing is compared whole: a stray file under
+    // /dev, or a `null` replaced by one holding the body, would change it.
+    let server = api();
+    let before = run("ls /dev").await;
+    let r = run_at(
+        &server,
+        "curl -s -o /dev/null -w '%{http_code}' \"$URL/text\"\necho '|'\ncat /dev/null\nls /dev",
+    )
+    .await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(r.text_out(), format!("200|\n{}", before.text_out()), "stderr: {}", r.err);
+    assert!(before.text_out().contains("null"), "control: the device is listed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn write_out_refuses_an_unsupported_variable_naming_the_supported_set() {
+    let server = api();
+    let r = run_at(&server, "curl -s -w '%{speed_download}' \"$URL/text\"").await;
+    assert_eq!(r.code, 2, "stderr: {}", r.err);
+    for name in [
+        "speed_download",
+        "http_code",
+        "response_code",
+        "time_total",
+        "size_download",
+        "url_effective",
+        "content_type",
+        "redirect_url",
+        "num_redirects",
+    ] {
+        assert!(r.err.contains(name), "the refusal must name {name}: {}", r.err);
+    }
+    assert!(server.requests().is_empty(), "refusal comes before the request");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn write_out_is_refused_with_json_output() {
+    let server = api();
+    let r = run_at(&server, "curl --json -w '%{http_code}' \"$URL/text\"").await;
+    assert_eq!(r.code, 2, "stderr: {}", r.err);
+    assert!(r.err.contains("--json"), "{}", r.err);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn write_out_still_prints_when_fail_stops_the_body() {
+    let server = api();
+    let ours = run_at(&server, "curl -s -f -o /dev/null -w '%{http_code}' \"$URL/status/404\"").await;
+    assert_eq!(ours.code, 22, "{}", ours.err);
+    assert_eq!(ours.text_out(), "404");
+    if let Some((stdout, code)) =
+        oracle(&server, "-s -f -o /dev/null -w '%{http_code}' \"$URL/status/404\"")
+    {
+        assert_eq!((stdout.as_str(), code), ("404", 22));
+    }
+}
+
+// ── --fail-with-body ────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fail_with_body_exits_22_and_prints_the_body() {
+    let server = api();
+    let ours = run_at(&server, "curl -s --fail-with-body \"$URL/status/404\"").await;
+    assert_eq!(ours.code, 22, "{}", ours.err);
+    assert_eq!(ours.text_out(), "{\"error\":\"status 404\"}\n");
+    assert!(ours.err.contains("returned error: 404"), "stderr: {}", ours.err);
+    if let Some((stdout, code)) = oracle(&server, "-s --fail-with-body \"$URL/status/404\"") {
+        assert_eq!((stdout.as_str(), code), (ours.text_out().as_ref(), 22));
+    }
+
+    // Controls: -f drops the body (same exit), and a 200 is plain success.
+    let f = run_at(&server, "curl -s -f \"$URL/status/404\"").await;
+    assert_eq!((f.code, f.text_out().as_ref()), (22, ""));
+    let ok = run_at(&server, "curl -s --fail-with-body \"$URL/text\"").await;
+    assert_eq!((ok.code, ok.text_out().as_ref()), (0, "plain body\n"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fail_with_body_writes_the_error_body_to_the_output_file() {
+    let server = api();
+    let r = run_at(
+        &server,
+        "curl -s --fail-with-body -o /tmp/err.json \"$URL/status/404\"\ncat /tmp/err.json",
+    )
+    .await;
+    // The `cat` is the last command, so the script ends 0; the file is what matters.
+    assert_eq!(r.text_out(), "{\"error\":\"status 404\"}\n", "{}", r.err);
+}
+
+// ── -m ──────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dash_m_is_max_time() {
+    let server = Server::builder()
+        .route_fn("/slow", |_| {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            Response::text(200, "late")
+        })
+        .start_tcp();
+    let r = run_at(&server, "curl -s -m 0.3 \"$URL/slow\"").await;
+    assert_eq!(r.code, 28, "stderr: {}", r.err);
+    // Control: without the deadline the same route answers.
+    let r = run_at(&server, "curl -s -m 5 \"$URL/slow\"").await;
+    assert_eq!((r.code, r.text_out().as_ref()), (0, "late"), "{}", r.err);
+}
+
+// ── Refusals that lead with the consequence and name a working form ─────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn verbose_refusal_names_the_substitute_and_sends_nothing() {
+    let server = api();
+    for flag in ["-v", "--verbose"] {
+        let r = run_at(&server, &format!("curl {flag} \"$URL/text\"")).await;
+        assert_ne!(r.code, 0);
+        assert!(r.err.contains("no request was sent"), "{flag}: {}", r.err);
+        assert!(r.err.contains("curl -i"), "{flag}: {}", r.err);
+        assert!(r.err.contains("User-Agent"), "{flag} must say what request headers are known: {}", r.err);
+    }
+    assert!(server.requests().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn form_refusal_does_not_offer_data_for_files() {
+    let server = Server::builder()
+        .route_fn("/upload", |req| {
+            Response::text(200, format!("{}\n{}", req.header("Content-Type").unwrap_or(""), req.body_str()))
+        })
+        .start_tcp();
+    for flag in ["-F", "--form"] {
+        let r = run_at(&server, &format!("curl {flag} file=@/work/upload.txt \"$URL/upload\"")).await;
+        assert_ne!(r.code, 0);
+        assert!(r.err.contains("no request was sent"), "{flag}: {}", r.err);
+        assert!(r.err.contains("boundary"), "{flag} must show the working multipart form: {}", r.err);
+        assert!(
+            !r.err.contains("Use '--data'"),
+            "{flag}: --data cannot send a file: {}",
+            r.err
+        );
+    }
+    assert!(server.requests().is_empty());
+
+    // The form the message shows works, so the substitute is not folklore.
+    let r = run_at(
+        &server,
+        "printf 'hello upload\\n' > /work/upload.txt\n\
+         curl -s -H 'Content-Type: multipart/form-data; boundary=XXXX' --data-binary \
+         \"$(printf -- '--XXXX\\r\\nContent-Disposition: form-data; name=\"file\"; filename=\"upload.txt\"\\r\\n\\r\\n%s\\r\\n--XXXX--\\r\\n' \"$(cat /work/upload.txt)\")\" \
+         \"$URL/upload\"",
+    )
+    .await;
+    assert_eq!(r.code, 0, "stderr: {}", r.err);
+    assert!(r.text_out().starts_with("multipart/form-data; boundary=XXXX\n"), "{}", r.text_out());
+    assert!(r.text_out().contains("filename=\"upload.txt\""), "{}", r.text_out());
+    assert!(r.text_out().contains("hello upload"), "{}", r.text_out());
 }

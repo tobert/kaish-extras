@@ -274,10 +274,6 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
             continue;
         }
 
-        if req.fail_on_error && status >= 400 {
-            return Err(CurlError::HttpFailure { status });
-        }
-
         let body = read_body_within(&mut resp, limits.max_response_bytes, &current)?;
         return Ok(CurlResponse {
             // The URL the response actually came from, after any hops — which
@@ -291,6 +287,7 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
                 .unwrap_or_default()
                 .to_string(),
             headers: resp_headers(resp.headers()),
+            redirects: hops,
             body,
         });
     }

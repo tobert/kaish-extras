@@ -113,6 +113,23 @@ Priority = runs x how basic the task x how wrong the current answer. Run counts 
 12. **`time`** (3 runs, T20): a kaish gap, not a curl gap. File against kaish; it blocks the one timing answer left once `-w` stays refused.
 13. **Docs drift**: `docs/curl.md` states `-d @path` reads files (refused), lists `-s`/`-S` as accepted while `docs/issues.md` CU14 says refuse (they are accepted), and CU20 says `--retry` is implemented (refused). Groom at the point of touch.
 
+## Status after `fix/curl-compat`
+
+Each fix has a test in `tests/compat.rs` that runs through a real kernel, and compares with real curl 8.23 where it is installed.
+
+| item | state |
+|---|---|
+| SW-1 `curl URL \| jq` printed `null` | fixed: `.data` is set only under `--json`; X6 closed |
+| SW-2 status line without reason phrase | fixed: `HTTP/1.1 404 Not Found` (the standard phrase; ureq drops the server's) |
+| SW-3 `-o` confirmation on stdout | fixed: `-o` prints nothing on stdout, as curl does |
+| `--data-binary -` sent the literal `-` | fixed: refused, exit 2; the `@path` message names `-d "$(cat <path>)"` |
+| 3. `-w` | fixed for `http_code`, `response_code`, `time_total`, `size_download`, `url_effective`, `content_type`, `redirect_url`, `num_redirects` |
+| 4. `--fail-with-body` | fixed: exit 22 and the body prints |
+| 5. `-F` message | fixed: no longer offers `--data`; shows the hand-built multipart form (text files only). `-F` itself is open |
+| 7. `-v` message | fixed: says what is and is not available. `-v` itself stays refused |
+| 9. `-m` | fixed. `-T` open |
+| open | `-d @file`, stdin bodies, `-O`, `-F`, `-T`, `-C -`, `-G`, `content-length: 0` on bodyless requests, lowercase sorted header names |
+
 ## Evidence: every USELESS-ERROR and SILENT-WRONG spelling
 
 Output is trimmed to 200 characters. K = kaish probe, C = real curl 8.23.0.

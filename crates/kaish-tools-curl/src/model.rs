@@ -23,6 +23,8 @@ pub struct Response {
     /// three `Set-Cookie`s and silently dropped the rest (CU37); `-i` is
     /// documented to print what the server actually sent.
     pub headers: BTreeMap<String, Vec<String>>,
+    /// How many redirects were followed to reach this response.
+    pub redirects: u32,
     /// The response body, exactly as received.
     pub body: Vec<u8>,
 }

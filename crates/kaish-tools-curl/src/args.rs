@@ -56,6 +56,8 @@ pub(crate) const HONORED_FLAGS: &[&str] = &[
     "--user-agent",
     "--referer",
     "--fail",
+    "--fail-with-body",
+    "--write-out",
     "--max-time",
     "--connect-timeout",
     "--unix-socket",
@@ -69,14 +71,12 @@ pub(crate) const HONORED_FLAGS: &[&str] = &[
 pub(crate) const REFUSED_FLAGS: &[(&str, &str)] = &[
     ("-O", "'-O' is not supported. Use '-o <file>' for an explicit output path."),
     ("--compressed", "'--compressed' is not supported. Responses are decompressed already — drop the flag."),
-    ("--form", "'--form' (multipart) is not supported. Use '--data' for application/x-www-form-urlencoded."),
-    ("-F", "'-F' (multipart) is not supported. Use '--data' for application/x-www-form-urlencoded."),
+    ("--form", "'--form' (multipart) is not supported, and no request was sent. '--data' cannot send a file, so it is not a substitute. For a text file, build the multipart body in the shell: curl -H 'Content-Type: multipart/form-data; boundary=XXXX' --data-binary \"$(printf -- '--XXXX\\r\\nContent-Disposition: form-data; name=\"file\"; filename=\"upload.txt\"\\r\\n\\r\\n%s\\r\\n--XXXX--\\r\\n' \"$(cat upload.txt)\")\" <url>. A binary file cannot be sent this way."),
+    ("-F", "'-F' (multipart) is not supported, and no request was sent. '--data' cannot send a file, so it is not a substitute. For a text file, build the multipart body in the shell: curl -H 'Content-Type: multipart/form-data; boundary=XXXX' --data-binary \"$(printf -- '--XXXX\\r\\nContent-Disposition: form-data; name=\"file\"; filename=\"upload.txt\"\\r\\n\\r\\n%s\\r\\n--XXXX--\\r\\n' \"$(cat upload.txt)\")\" <url>. A binary file cannot be sent this way."),
     ("--cookie", "'--cookie' is not supported. Send cookies with '-H Cookie:<value>'."),
     ("-b", "'-b' is not supported. Send cookies with '-H Cookie:<value>'."),
-    ("--verbose", "'--verbose' is not supported. Use '-i' to see response headers; request tracing is not available in this build."),
-    ("-v", "'-v' is not supported. Use '-i' to see response headers; request tracing is not available in this build."),
-    ("--write-out", "'--write-out' is not supported. Use kaish '--json' for a structured response object."),
-    ("-w", "'-w' is not supported. Use kaish '--json' for a structured response object."),
+    ("--verbose", "'--verbose' is not supported, and no request was sent. This build prints no request or connection trace. Use 'curl -i <url>' to print the response headers above the body. The request headers are the ones you set with '-H' plus 'User-Agent: kaish-curl'."),
+    ("-v", "'-v' is not supported, and no request was sent. This build prints no request or connection trace. Use 'curl -i <url>' to print the response headers above the body. The request headers are the ones you set with '-H' plus 'User-Agent: kaish-curl'."),
     ("--retry", "'--retry' is not supported. Retry from the shell: 'for i in 1 2 3; do curl ... && break; done'."),
     ("--get", "'--get' is not supported. Put the query string in the URL."),
     ("-G", "'-G' is not supported. Put the query string in the URL."),
@@ -124,7 +124,12 @@ pub struct Request {
     /// applies regardless.
     pub max_redirects: Option<u32>,
     /// `-f`: fail with exit 22 on status >= 400 instead of printing the body.
+    /// Applied by the tool after the fetch, so `-w` can still print.
     pub fail_on_error: bool,
+    /// `--fail-with-body`: exit 22 on status >= 400, and print the body.
+    pub fail_with_body: bool,
+    /// `-w`: text printed on stdout after the body.
+    pub write_out: Option<crate::write_out::WriteOut>,
     /// Whole-request deadline in seconds. Always set — the `CurlConfig`
     /// default applies when the caller omits `--max-time`, so an agent cannot
     /// hang the embedder by leaving it off. The backend clamps it to the
@@ -153,7 +158,7 @@ pub struct Request {
 const BOOLEAN_SHORTS: &[char] = &['i', 'I', 'f', 'L', 's', 'S', 'k', 'O', 'v', 'G'];
 
 /// Short flags that take a value, and so cannot appear inside a cluster.
-const VALUE_SHORTS: &[char] = &['X', 'd', 'H', 'o', 'u', 'A', 'e', 'w', 'b', 'x', 'K', 'F'];
+const VALUE_SHORTS: &[char] = &['X', 'd', 'H', 'o', 'u', 'A', 'e', 'w', 'b', 'x', 'K', 'F', 'm'];
 
 /// Expand `-sSL` into `-s -S -L`.
 ///
@@ -207,6 +212,8 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let mut include_headers = false;
     let mut head_only = false;
     let mut fail_on_error = false;
+    let mut fail_with_body = false;
+    let mut write_out: Option<crate::write_out::WriteOut> = None;
     let mut follow_redirects = false;
     let mut insecure = false;
     let mut unix_socket: Option<String> = None;
@@ -314,6 +321,8 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             "-s" | "--silent" | "-S" | "--show-error" => {}
             "-I" | "--head" => head_only = true,
             "-f" | "--fail" => fail_on_error = true,
+            "--fail-with-body" => fail_with_body = true,
+            "-w" | "--write-out" => write_out = Some(crate::write_out::parse(&value(&mut i)?)?),
             "-L" | "--location" => follow_redirects = true,
             "--unix-socket" => {
                 if cfg!(not(unix)) {
@@ -340,7 +349,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
                     ))
                 })?);
             }
-            "--max-time" => max_time = Some(seconds(&value(&mut i)?, "--max-time")?),
+            "-m" | "--max-time" => max_time = Some(seconds(&value(&mut i)?, &argv_flag)?),
             "--connect-timeout" => {
                 connect_timeout = Some(seconds(&value(&mut i)?, "--connect-timeout")?)
             }
@@ -398,6 +407,13 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         });
     }
 
+    if write_out.is_some() && json_output {
+        return Err(CurlError::Usage(
+            "'-w' cannot be combined with '--json' (exit 2), because '--json' prints the response object and '-w' text would be lost. Read the fields with jq instead: curl --json <url> | jq -r .status"
+                .into(),
+        ));
+    }
+
     if head_only && !bodies.is_empty() {
         return Err(CurlError::MalformedUrl {
             url: url.clone(),
@@ -443,6 +459,8 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         follow_redirects,
         max_redirects,
         fail_on_error,
+        fail_with_body,
+        write_out,
         max_time: max_time.unwrap_or_else(|| config.limits().max_time),
         connect_timeout,
         insecure,
