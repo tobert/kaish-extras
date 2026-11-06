@@ -178,7 +178,7 @@ right, so it is not counted. Q8.
 
 ### Remaining USEFUL-REFUSAL (20 cells)
 
-`-N` forms (8 cells: `--oneline -10`, `-1 --format=...`, `-1 Cargo.toml`) get
+`-N` forms (7 cells: `--oneline -10` x3, `-1 --format='...'` x3, `-1 Cargo.toml`, plus the `--date` one) get
 `git log: -1 is not supported. Write the count as '-n 1'.`; `--format` gets
 `--format is not supported. This git has two text layouts, the default table and
 --oneline, and --json carries every field by name.`; `rev-parse` (7) and
@@ -191,11 +191,11 @@ right, so it is not counted. Q8.
 1. T15/T16 `rev-parse`, `ls-files` (12 UR). Refused with a next step; only an
    alias or a built verb removes the retry. `ls-files` vs `ls HEAD` differ
    (index vs commit), so the earlier call to refuse stands.
-2. `-N` and `--format` (8 + 4 UR, 1 U). Q6, Q3.
+2. `-N` forms (7 UR; the 8th, `-1 --format=%an,%ad`, is the U above). Q6, Q3.
 3. `log --follow` (4 U). Q5.
 4. `log <branch>` (3 SW). Q7.
 5. `command git ...` (7 WRITE-REFUSED with a misleading kaish message). Q9.
 
-The commit-path tasks stay out of scope. Cold-arm first-try WORKS on tasks 1-17
-is now 159 of 187 cells over all runs (baseline 100); the warm/cold split was
-not re-measured because no model re-ran, only the replay.
+The commit-path tasks stay out of scope. WORKS on tasks 1-17 is now 159 of 187
+cells over all runs (baseline 100). The warm/cold split was not re-measured:
+no model re-ran, only the replay.
