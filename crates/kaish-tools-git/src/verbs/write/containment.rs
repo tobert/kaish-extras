@@ -21,6 +21,7 @@
 //! echoed where a link points would let a hostile repository ask "does this
 //! host path exist?" and read the answer.
 
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 use crate::error::GitError;
@@ -57,8 +58,15 @@ pub(crate) enum Leaf {
     /// A directory a write will create entries in.
     Dir,
     /// A file a write will replace or append to. A link, a directory or
-    /// anything not a regular file refuses.
+    /// anything not a regular file refuses, and so does a regular file with
+    /// more than one hard link: `lstat` cannot tell where the other names
+    /// are, and a write that reaches the inode reaches all of them, one of
+    /// which may be outside the mount.
     File,
+    /// A name the walk only reads, deletes or renames: a regular file or a
+    /// symbolic link, never followed. The link count does not matter, because
+    /// unlink and rename change the directory entry and not the inode.
+    Entry,
 }
 
 /// Which root a path under the git directory lands in.
@@ -179,7 +187,7 @@ pub(crate) fn check_beneath(
             Err(_) => return Err(refuse(&seen, "not accessible")),
         };
         let ty = meta.file_type();
-        if ty.is_symlink() {
+        if ty.is_symlink() && !(last && leaf == Leaf::Entry) {
             return Err(refuse(&seen, "a symbolic link"));
         }
         if !last && !ty.is_dir() {
@@ -189,6 +197,13 @@ pub(crate) fn check_beneath(
             match leaf {
                 Leaf::Dir if !ty.is_dir() => return Err(refuse(&seen, "not a directory")),
                 Leaf::File if !ty.is_file() => return Err(refuse(&seen, "not a regular file")),
+                Leaf::File if meta.nlink() > 1 => {
+                    return Err(refuse(&seen, "a file with more than one hard link"))
+                }
+                Leaf::Entry if ty.is_dir() => return Err(refuse(&seen, "a directory")),
+                Leaf::Entry if !ty.is_file() && !ty.is_symlink() => {
+                    return Err(refuse(&seen, "neither a regular file nor a symbolic link"))
+                }
                 _ => {}
             }
         }

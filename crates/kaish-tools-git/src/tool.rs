@@ -12,6 +12,8 @@ use kaish_types::{ExecResult, OutputData, ParamSchema, ToolArgs, ToolSchema, Val
 
 #[cfg(feature = "commit")]
 use crate::config::{WritableGitConfig, WriteSettings};
+#[cfg(feature = "commit")]
+use crate::verbs::write::repo::{WriteRepo, WriteToken};
 use crate::config::{ConfigError, GitConfig, Verb};
 use crate::error::GitError;
 use crate::model::{Capabilities, LimitsReport};
@@ -27,10 +29,9 @@ use crate::verbs;
 #[derive(Debug)]
 pub struct GitTool {
     config: GitConfig,
-    /// Set when the embedder installed the commit profile. Read by the write
-    /// verbs from phase 1b on; nothing reads it yet.
+    /// Set when the embedder installed the commit profile. Every write path
+    /// keys on its presence: no settings, no `WriteRepo`.
     #[cfg(feature = "commit")]
-    #[allow(dead_code)]
     write: Option<WriteSettings>,
 }
 
@@ -1232,6 +1233,326 @@ impl GitTool {
     }
 }
 
+impl GitTool {
+    /// Whether the embedder installed the commit profile's settings.
+    fn is_writable(&self) -> bool {
+        #[cfg(feature = "commit")]
+        {
+            self.write.is_some()
+        }
+        #[cfg(not(feature = "commit"))]
+        {
+            false
+        }
+    }
+
+    /// The tool's description. A tool with write settings says what it writes
+    /// and what it never does; the read-only text must not be shown to it.
+    fn description(&self) -> String {
+        #[cfg(feature = "commit")]
+        if self.write.is_some() {
+            return COMMIT_DESCRIPTION.to_string();
+        }
+        DESCRIPTION.to_string()
+    }
+}
+
+/// The effect ids a write verb declares (git-write-profile.md §2). `plan`
+/// reports a statement's argv and not the leaf it resolves to, so the leaf
+/// declares what any of its spellings can do, and the root lists the union.
+#[cfg(feature = "commit")]
+fn operations_of(verb: &str) -> &'static [&'static str] {
+    match verb {
+        "add" | "restore" | "reset" => &["git.index"],
+        // `rm` deletes the working-tree file unless --cached.
+        "rm" => &["git.index", "fs.remove"],
+        "mv" => &["git.index", "fs.rename"],
+        _ => &[],
+    }
+}
+
+#[cfg(feature = "commit")]
+impl GitTool {
+    fn declare_operations(&self, mut schema: ToolSchema) -> ToolSchema {
+        if self.write.is_none() {
+            return schema;
+        }
+        let mut union: Vec<&'static str> = Vec::new();
+        for child in &mut schema.subcommands {
+            let ops = operations_of(&child.name);
+            if ops.is_empty() {
+                continue;
+            }
+            child.operations = ops.iter().map(|o| o.to_string()).collect();
+            for op in ops {
+                if !union.contains(op) {
+                    union.push(op);
+                }
+            }
+        }
+        schema.operations = union.iter().map(|o| o.to_string()).collect();
+        schema
+    }
+}
+
+/// The write verbs (git-write-profile.md §4). Each parses its own argv, then
+/// hands a closure to [`GitTool::with_write_repo`], which resolves the
+/// repository, builds the `WriteRepo` from the embedder's settings, and turns
+/// the result into an `ExecResult`.
+#[cfg(feature = "commit")]
+impl GitTool {
+    fn with_write_repo(
+        &self,
+        op: &'static str,
+        ctx: &dyn ToolCtx,
+        repo_arg: Option<&str>,
+        f: impl FnOnce(&WriteRepo, &PathBase) -> Result<verbs::write::spec::Outcome, GitError>,
+    ) -> ExecResult {
+        let Some(settings) = &self.write else {
+            return failure(GitError::VerbNotEnabled { operation: op });
+        };
+        let resolved = match resolve_repo_paths(op, ctx, repo_arg) {
+            Ok(r) => r,
+            Err(e) => return failure(e),
+        };
+        let token = WriteToken::from_settings(settings);
+        let outcome = block_in_place_compat(move || {
+            let read = ReadRepo::discover(op, &resolved.real, &resolved.ceiling)?;
+            let base = PathBase::new(&resolved, &read);
+            let root = read.root().display().to_string();
+            let repo = WriteRepo::open(read, token)?;
+            f(&repo, &base).map(|o| (o, root))
+        });
+        match outcome {
+            Ok((o, root)) => {
+                let mut result =
+                    ExecResult::with_output(OutputData::text(o.text).with_rich_json(o.json));
+                result.baggage.insert("git.repo".to_string(), root);
+                result
+            }
+            Err(e) => failure(e),
+        }
+    }
+
+    async fn run_add(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
+        const OP: &str = "add";
+        if let Err(e) = verb_enabled(&self.config, Verb::Add, OP) {
+            return failure(e);
+        }
+        let parsed = match parse_leaf::<verbs::write::add::AddArgs>(argv, OP, &self.config) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+        let command = command_text(OP, argv);
+        if parsed.patch || parsed.interactive {
+            let flag = if parsed.patch { "-p" } else { "-i" };
+            return failure(
+                verbs::write::refusal::Refusal::new(
+                    2,
+                    command,
+                    format!("git add {flag} asks questions on a terminal, and this shell has none."),
+                    "Stage whole files instead, for example: git add <path>.",
+                    verbs::write::refusal::Override::Repository,
+                )
+                .into_error(),
+            );
+        }
+        let ops = operands(&parsed.operands, argv).all();
+        self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, base| {
+            let specs = base.repo_paths(OP, &ops)?;
+            verbs::write::add::run(
+                repo,
+                &verbs::write::add::AddOptions {
+                    specs,
+                    all: parsed.all,
+                    update: parsed.update,
+                    force: parsed.force,
+                    command,
+                },
+            )
+        })
+    }
+
+    async fn run_rm(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
+        const OP: &str = "rm";
+        if let Err(e) = verb_enabled(&self.config, Verb::Rm, OP) {
+            return failure(e);
+        }
+        let parsed = match parse_leaf::<verbs::write::rm::RmArgs>(argv, OP, &self.config) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+        let command = command_text(OP, argv);
+        let ops = operands(&parsed.operands, argv).all();
+        self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, base| {
+            let specs = base.repo_paths(OP, &ops)?;
+            verbs::write::rm::run(
+                repo,
+                &verbs::write::rm::RmOptions {
+                    specs,
+                    cached: parsed.cached,
+                    recursive: parsed.recursive,
+                    force: parsed.force,
+                    command,
+                },
+            )
+        })
+    }
+
+    async fn run_mv(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
+        const OP: &str = "mv";
+        if let Err(e) = verb_enabled(&self.config, Verb::Mv, OP) {
+            return failure(e);
+        }
+        let parsed = match parse_leaf::<verbs::write::mv::MvArgs>(argv, OP, &self.config) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+        let command = command_text(OP, argv);
+        let ops = operands(&parsed.operands, argv).all();
+        self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, base| {
+            let paths = base.repo_paths(OP, &ops)?;
+            verbs::write::mv::run(
+                repo,
+                &verbs::write::mv::MvOptions { paths, force: parsed.force, command },
+            )
+        })
+    }
+
+    async fn run_restore(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
+        const OP: &str = "restore";
+        if let Err(e) = verb_enabled(&self.config, Verb::Restore, OP) {
+            return failure(e);
+        }
+        let parsed = match parse_leaf::<verbs::write::unstage::RestoreArgs>(argv, OP, &self.config) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+        let command = command_text(OP, argv);
+        if parsed.patch {
+            return failure(
+                verbs::write::refusal::Refusal::new(
+                    2,
+                    command,
+                    "git restore -p asks questions on a terminal, and this shell has none.",
+                    "Unstage whole files instead, for example: git restore --staged <path>.",
+                    verbs::write::refusal::Override::Repository,
+                )
+                .into_error(),
+            );
+        }
+        if !parsed.staged || parsed.worktree {
+            return failure(verbs::write::unstage::refuse_restore_worktree::<()>(&command).unwrap_err());
+        }
+        let ops = operands(&parsed.operands, argv).all();
+        if ops.is_empty() {
+            return failure(
+                verbs::write::refusal::Refusal::new(
+                    2,
+                    command,
+                    "No path was given to restore.",
+                    "Name the paths, or use . for everything, for example: git restore --staged .",
+                    verbs::write::refusal::Override::Repository,
+                )
+                .into_error(),
+            );
+        }
+        self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, base| {
+            let specs = base.repo_paths(OP, &ops)?;
+            verbs::write::unstage::run(
+                repo,
+                &verbs::write::unstage::UnstageOptions { specs, operation: OP, command },
+            )
+        })
+    }
+
+    async fn run_reset(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
+        const OP: &str = "reset";
+        if let Err(e) = verb_enabled(&self.config, Verb::Reset, OP) {
+            return failure(e);
+        }
+        let parsed = match parse_leaf::<verbs::write::unstage::ResetArgs>(argv, OP, &self.config) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+        let command = command_text(OP, argv);
+        let refused = if parsed.hard {
+            Some(verbs::write::unstage::refuse_reset_hard::<()>(&command))
+        } else if parsed.soft || parsed.merge || parsed.keep {
+            let flag = if parsed.soft { "--soft" } else if parsed.merge { "--merge" } else { "--keep" };
+            Some(verbs::write::unstage::refuse_reset_revision::<()>(&command, &format!("git reset {flag}")))
+        } else if parsed.patch {
+            Some(verbs::write::refusal::refuse::<()>(
+                2,
+                &command,
+                "git reset -p asks questions on a terminal, and this shell has none.",
+                "Unstage whole files instead, for example: git reset -- <path>.",
+                verbs::write::refusal::Override::Repository,
+            ))
+        } else {
+            None
+        };
+        if let Some(Err(e)) = refused {
+            return failure(e);
+        }
+        let ops = operands(&parsed.operands, argv);
+        self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, base| {
+            // `HEAD` may lead the operands, as in `git reset HEAD file`. Any
+            // other word that names a revision is the revision form.
+            let (rev, paths): (Option<String>, Vec<String>) = if ops.marked {
+                if ops.before.len() > 1 {
+                    return Err(GitError::Usage {
+                        operation: OP,
+                        message: "takes at most one revision before '--'".to_string(),
+                    });
+                }
+                (ops.before.first().cloned(), ops.after.clone())
+            } else {
+                let all = ops.all();
+                match all.first() {
+                    Some(first) if first == "HEAD" => (Some(first.clone()), all[1..].to_vec()),
+                    Some(first) if !first.starts_with(':') && repo.read().resolve_commit(first).is_ok() => {
+                        (Some(first.clone()), all[1..].to_vec())
+                    }
+                    _ => (None, all),
+                }
+            };
+            if let Some(rev) = rev {
+                if rev != "HEAD" {
+                    return verbs::write::unstage::refuse_reset_revision(
+                        &command,
+                        &format!("git reset {rev}"),
+                    );
+                }
+            }
+            let specs = base.repo_paths(OP, &paths)?;
+            verbs::write::unstage::run(
+                repo,
+                &verbs::write::unstage::UnstageOptions { specs, operation: OP, command },
+            )
+        })
+    }
+}
+
+/// The command as the caller typed it, bounded so a refusal stays readable.
+#[cfg(feature = "commit")]
+fn command_text(op: &str, argv: &[String]) -> String {
+    let mut text = format!("git {op}");
+    for word in argv {
+        text.push(' ');
+        text.push_str(word);
+    }
+    if text.chars().count() > 100 {
+        text = text.chars().take(99).collect::<String>() + "…";
+    }
+    text
+}
+
 /// How a caller's pathspec becomes repo-relative, the way git reads one:
 /// relative to the cwd (from `src/`, `lib.rs` is `src/lib.rs`), with `.` and
 /// `..` resolved, and an absolute path accepted when it names something
@@ -1328,7 +1649,7 @@ impl Tool for GitTool {
         // from ONLY the verbs this config enables — so a disabled verb is not
         // merely rejected, it is unroutable because `select_leaf` has nothing
         // to route to.
-        let mut cmd = clap::Command::new(self.config.tool_name().to_string()).about(DESCRIPTION);
+        let mut cmd = clap::Command::new(self.config.tool_name().to_string()).about(self.description());
         if self.config.has(Verb::Info) {
             cmd = cmd.subcommand(verbs::info::InfoArgs::command().name("info"));
         }
@@ -1375,10 +1696,28 @@ impl Tool for GitTool {
                     .subcommand(verbs::worktree::WorktreeListArgs::command().name("list")),
             );
         }
-        schema_tree_from_clap(
+        #[cfg(feature = "commit")]
+        if self.write.is_some() {
+            if self.config.has(Verb::Add) {
+                cmd = cmd.subcommand(verbs::write::add::AddArgs::command().name("add"));
+            }
+            if self.config.has(Verb::Rm) {
+                cmd = cmd.subcommand(verbs::write::rm::RmArgs::command().name("rm"));
+            }
+            if self.config.has(Verb::Mv) {
+                cmd = cmd.subcommand(verbs::write::mv::MvArgs::command().name("mv"));
+            }
+            if self.config.has(Verb::Restore) {
+                cmd = cmd.subcommand(verbs::write::unstage::RestoreArgs::command().name("restore"));
+            }
+            if self.config.has(Verb::Reset) {
+                cmd = cmd.subcommand(verbs::write::unstage::ResetArgs::command().name("reset"));
+            }
+        }
+        let schema = schema_tree_from_clap(
             &cmd,
             self.config.tool_name(),
-            DESCRIPTION,
+            &self.description(),
             examples_for(&self.config),
         )
         // The true argv, `--` included; see `execute`.
@@ -1393,7 +1732,10 @@ impl Tool for GitTool {
                     "List the verbs (`git --help`), or show one verb's flags and \
                      examples (`git log --help`)",
                 ),
-        )
+        );
+        #[cfg(feature = "commit")]
+        let schema = self.declare_operations(schema);
+        schema
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -1445,15 +1787,15 @@ impl Tool for GitTool {
                     }),
                 };
             }
-            let verbs: Vec<&str> = Verb::ALL
-                .iter()
-                .filter(|v| self.config.has(**v))
+            let verbs: Vec<&str> = Verb::known()
+                .filter(|v| self.config.has(*v))
                 .map(|v| v.as_str())
                 .collect();
             return ExecResult::with_output(OutputData::text(format!(
-                "{} — {DESCRIPTION}\n\nVerbs: {}\n\n'{} <verb> --help' shows one verb's flags \
+                "{} — {}\n\nVerbs: {}\n\n'{} <verb> --help' shows one verb's flags \
                  and examples; 'help {}' shows them all.\n",
                 schema.name,
+                self.description(),
                 verbs.join(", "),
                 schema.name,
                 schema.name
@@ -1467,7 +1809,9 @@ impl Tool for GitTool {
                 // and what to type instead.
                 let known = argv
                     .first()
-                    .and_then(|word| crate::spelling::unsupported_verb(&schema.name, word, &self.config));
+                    .and_then(|word| {
+                        crate::spelling::unsupported_verb(&schema.name, word, &self.config, self.is_writable())
+                    });
                 return failure(known.unwrap_or(e));
             }
         };
@@ -1494,6 +1838,16 @@ impl Tool for GitTool {
             "branch" => self.run_branch(leaf, ctx).await,
             "tag" => self.run_tag(leaf, ctx).await,
             "worktree list" => self.run_worktree_list(leaf, ctx).await,
+            #[cfg(feature = "commit")]
+            "add" => self.run_add(leaf, ctx).await,
+            #[cfg(feature = "commit")]
+            "rm" => self.run_rm(leaf, ctx).await,
+            #[cfg(feature = "commit")]
+            "mv" => self.run_mv(leaf, ctx).await,
+            #[cfg(feature = "commit")]
+            "restore" => self.run_restore(leaf, ctx).await,
+            #[cfg(feature = "commit")]
+            "reset" => self.run_reset(leaf, ctx).await,
             // A node with no subcommand word after it. Routing stops at the
             // node, which is correct — the caller named a group, not a verb —
             // and the answer names what the group holds rather than guessing
@@ -1566,6 +1920,14 @@ fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
 const DESCRIPTION: &str =
     "Read a git repository — shallow, safety-first, and read-only by construction";
 
+/// The description of a tool built with the commit profile.
+#[cfg(feature = "commit")]
+const COMMIT_DESCRIPTION: &str = "Read a git repository, and change its index — shallow, safety-first. \
+Reads change nothing. The write verbs are add, rm, mv, restore --staged and reset (no revision): \
+they write the index, and rm and mv also delete or rename the working-tree files they name. \
+This git never runs hooks, filters or signing, and never reads user-level git configuration, \
+whatever the host's git is set up to do; a path that real git would convert (filters, line endings, $Id) is refused, not staged";
+
 /// The `worktree` node's own description. It is a group rather than a verb,
 /// and the read profile carries one member of it.
 const WORKTREE_DESCRIPTION: &str = "Work with the repository's working trees";
@@ -1581,7 +1943,7 @@ const WORKTREE_DESCRIPTION: &str = "Work with the repository's working trees";
 /// (`kaish-help`'s `tool_help`) shows only params and examples, never a bare
 /// subcommand list, so a verb with no example here would never be named in
 /// `help git` at all, enabled or not.
-const EXAMPLES: [(&str, &str); 19] = [
+const EXAMPLES: [(&str, &str); 27] = [
     ("What repository is this", "git info"),
     ("Inspect a specific repository", "git info --repo /mnt/repos/kaish"),
     ("Structured, for a script", "git info --json"),
@@ -1601,6 +1963,14 @@ const EXAMPLES: [(&str, &str); 19] = [
     ("List the tags", "git tag"),
     ("Find which tags carry a fix", "git tag --contains 1a2b3c4"),
     ("List every working tree", "git worktree list"),
+    ("Stage one file", "git add src/main.rs"),
+    ("Stage every change, new files included", "git add -A"),
+    ("Stage changes to tracked files only", "git add -u"),
+    ("Remove a file from the index and the working tree", "git rm old.txt"),
+    ("Remove from the index and keep the file", "git rm --cached notes.txt"),
+    ("Rename a tracked file", "git mv old.txt new.txt"),
+    ("Unstage one file", "git restore --staged src/main.rs"),
+    ("Unstage everything", "git reset"),
 ];
 
 /// [`EXAMPLES`], narrowed to the ones whose verb this config still enables.
@@ -1624,15 +1994,13 @@ fn examples_for(config: &GitConfig) -> impl Iterator<Item = (&'static str, &'sta
 /// exist.
 fn verb_of(code: &str) -> Option<Verb> {
     let rest = code.strip_prefix("git ")?;
-    Verb::ALL
-        .iter()
+    Verb::known()
         .filter(|verb| {
             let name = verb.as_str();
             rest.strip_prefix(name)
                 .is_some_and(|tail| tail.is_empty() || tail.starts_with(' '))
         })
         .max_by_key(|verb| verb.as_str().len())
-        .copied()
 }
 
 /// Wrap a [`GitError`] as an [`ExecResult`] carrying its taxonomy code.

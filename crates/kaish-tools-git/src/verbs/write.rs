@@ -12,9 +12,22 @@
 //!
 //! No `mod.rs`, by house rule.
 
+pub(crate) mod add;
+pub(crate) mod attributes;
 pub(crate) mod containment;
 pub(crate) mod reflog;
+pub(crate) mod head;
+pub(crate) mod ignore;
+pub(crate) mod indexfile;
+pub(crate) mod mv;
+pub(crate) mod objects;
+pub(crate) mod refusal;
+pub(crate) mod rm;
 pub(crate) mod repo;
+pub(crate) mod spec;
+pub(crate) mod stage;
+pub(crate) mod state;
+pub(crate) mod unstage;
 
 #[cfg(test)]
 mod fixtures;

@@ -46,8 +46,9 @@ pub enum Profile {
     /// The read profile: every verb is proven read-only by the `.git`
     /// fingerprint test (architecture.md D.4).
     Read,
-    /// The commit profile (docs/design/git-write-profile.md). Phase 1a
-    /// installs the profile and enables no write verb.
+    /// The commit profile (docs/design/git-write-profile.md). Phase 1b
+    /// enables the index verbs: `add`, `rm`, `mv`, `restore --staged` and
+    /// `reset` with no revision. `commit` is not built yet.
     #[cfg(feature = "commit")]
     Commit,
 }
@@ -99,6 +100,25 @@ pub enum Verb {
     /// writes nothing. Create, remove, lock and prune wait on the ledger
     /// (architecture.md B.11).
     WorktreeList,
+    /// `git add` — stage working-tree content (commit profile).
+    #[cfg(feature = "commit")]
+    Add,
+    /// `git rm` — remove paths from the index, and from the working tree
+    /// unless `--cached` (commit profile).
+    #[cfg(feature = "commit")]
+    Rm,
+    /// `git mv` — rename a tracked path in the working tree and the index
+    /// (commit profile).
+    #[cfg(feature = "commit")]
+    Mv,
+    /// `git restore --staged` — put the index entries for paths back to
+    /// HEAD's (commit profile). `restore` without `--staged` would write file
+    /// content into the working tree and refuses (git-write-profile.md W6).
+    #[cfg(feature = "commit")]
+    Restore,
+    /// `git reset` with no revision — unstage paths (commit profile).
+    #[cfg(feature = "commit")]
+    Reset,
 }
 
 impl Verb {
@@ -114,6 +134,21 @@ impl Verb {
         Verb::Tag,
         Verb::WorktreeList,
     ];
+
+    /// The verbs the commit profile adds, in the order phase 1b built them.
+    /// Not part of [`Verb::ALL`]: the read profile never has them, and
+    /// `GitConfig::read_only` publishes exactly `ALL`.
+    #[cfg(feature = "commit")]
+    pub const WRITE: &'static [Verb] = &[Verb::Add, Verb::Rm, Verb::Mv, Verb::Restore, Verb::Reset];
+
+    /// Every verb this build knows, read and write.
+    pub fn known() -> impl Iterator<Item = Verb> {
+        #[cfg(feature = "commit")]
+        let write = Verb::WRITE.iter().copied();
+        #[cfg(not(feature = "commit"))]
+        let write = std::iter::empty();
+        Verb::ALL.iter().copied().chain(write)
+    }
 
     /// The verb's argv spelling — the words an agent types after `git`.
     ///
@@ -131,6 +166,16 @@ impl Verb {
             Verb::Branch => "branch",
             Verb::Tag => "tag",
             Verb::WorktreeList => "worktree list",
+            #[cfg(feature = "commit")]
+            Verb::Add => "add",
+            #[cfg(feature = "commit")]
+            Verb::Rm => "rm",
+            #[cfg(feature = "commit")]
+            Verb::Mv => "mv",
+            #[cfg(feature = "commit")]
+            Verb::Restore => "restore",
+            #[cfg(feature = "commit")]
+            Verb::Reset => "reset",
         }
     }
 
@@ -146,6 +191,8 @@ impl Verb {
             | Verb::Branch
             | Verb::Tag
             | Verb::WorktreeList => Profile::Read,
+            #[cfg(feature = "commit")]
+            Verb::Add | Verb::Rm | Verb::Mv | Verb::Restore | Verb::Reset => Profile::Commit,
         }
     }
 }
@@ -256,11 +303,13 @@ impl GitConfig {
     /// enables and carries no authorization: per-command approval stays with
     /// the embedder, through kaish `plan` (git-write-profile.md §2).
     ///
-    /// In phase 1a the profile enables no verb: `git info` reports the
-    /// `commit` profile and the verb set does not change.
+    /// Phase 1b adds the index verbs (`Verb::WRITE`): `add`, `rm`, `mv`,
+    /// `restore --staged` and `reset` with no revision. A read verb the
+    /// config already subtracted stays subtracted.
     #[cfg(feature = "commit")]
     pub fn with_commit_profile(mut self) -> WritableGitConfig {
         self.profiles.insert(Profile::Commit);
+        self.verbs.extend(Verb::WRITE.iter().copied());
         WritableGitConfig {
             read: self,
             write: WriteSettings {
