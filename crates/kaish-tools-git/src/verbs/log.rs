@@ -117,7 +117,10 @@ pub(crate) struct LogArgs {
 
     /// One line per commit: the short oid, a space, and the summary, as
     /// `git log --oneline` prints them. With `--stat` the counts follow on the
-    /// same line. `--json` is unchanged by it.
+    /// next line, in the shape of `git log --oneline --shortstat`. The counts
+    /// differ from git's for a rename (here one deletion and one addition, so
+    /// two files), a mode-only change and a submodule move. `--json` is
+    /// unchanged by it.
     #[arg(long = "oneline", default_value_t = false, conflicts_with = "body")]
     pub oneline: bool,
 
@@ -141,7 +144,9 @@ pub(crate) struct LogArgs {
     pub global: GlobalFlags,
 
     /// A revision or an `A..B` range, then paths: `git log 'HEAD~5' --
-    /// src/lib.rs`. A tracked path before `--` is a path too, as in git. At
+    /// src/lib.rs`. `git log feature` lists feature's whole history; to list
+    /// only the commits feature has that main lacks, write `git log
+    /// main..feature`. A tracked path before `--` is a path too, as in git. At
     /// most one revision or range. Omit it to start from `HEAD`.
     // Every operand, in order, on both sides of the caller's `--`: the tool is
     // bound verbatim, so this argv is the caller's own. `tool.rs`'s
@@ -575,7 +580,7 @@ pub(crate) fn run(repo: &ReadRepo, opts: &LogOptions) -> Result<LogReport, GitEr
 
         commits.push(CommitInfo {
             oid: oid.to_string(),
-            short_oid: oid.to_string()[..7].to_string(),
+            short_oid: repo.short_oid(&oid)?,
             parents: parents.iter().map(|p| p.to_string()).collect(),
             author,
             committer,

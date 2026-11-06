@@ -101,17 +101,17 @@ fixture asserted against real `git status --porcelain` before fixing.
 
 - **L1 — `--stat` does not detect renames.** A renamed file is counted as one
   deletion plus one addition, so `files` is 2 and the line counts are the whole
-  file twice. `status` has exact-match rename pairing and `log` does not,
-  because the tree comparison here is per-commit and pairing would need the same
-  oid-reappearance pass run against every commit walked. Git's own default
-  (`git log --stat` without `-M`) also does not detect renames, so this matches
-  the tool an agent is comparing against — but it is a divergence from `status`
-  within our own surface, which is the part worth closing. PR 5 did factor the
-  pairing out — it is `diffcore::pair_exact_renames`, shared by `status` and
-  `diff` — so what remains is deciding whether `log --stat` should run it per
-  commit at all, which costs an add/delete pass over every commit walked and
-  diverges from git's own default (`git log --stat` without `-M` does not
-  detect renames either).
+  file twice. Git pairs renames by default (`diff.renames` is true since git
+  2.9; real git 2.56 prints `1 file changed` for a pure rename), so this is a
+  divergence from the tool an agent is comparing against, as well as from
+  `status` within our own surface. `--oneline --stat` therefore matches
+  `--shortstat` in shape only; its published text says so, and
+  `log_oneline_stat_counts_a_rename_as_two_files_where_git_counts_one` pins the
+  difference. `diffcore::pair_exact_renames` is shared by `status` and `diff`;
+  what remains is running it per commit, which costs an add/delete pass over
+  every commit walked, and exact pairing still differs from git's similarity
+  pairing of edited renames. (An earlier version of this entry said git's
+  default does not detect renames. It does.)
 
 - **L2 — a filtered `log` walks history rather than stopping at `--limit`.**
   No filter (`--author`, `--path`, a date window) is sorted along ancestry, so
@@ -1120,24 +1120,13 @@ repository size, not result size.
 
 ## git — from the 2026-10-11 deepseek review of the spellings branch
 
-- **R5 — `--oneline` prints a fixed 7-character oid.** git's `core.abbrev=auto`
-  prints the shortest unambiguous prefix and grows with the object count:
-  kaijutsu's `git log --oneline` prints `c6eba240`, ours `c6eba24`. Same
-  shape as T4 for the patch `index` line. Harmless until two prefixes
-  collide; then two commits print one oid.
-- **R6 — `git branch -a` names remote rows `origin/main`; git's `-a` prints
-  `remotes/origin/main`** (its `-r` prints `origin/main`). docs/git.md calls
-  the strip a choice; `tests/spellings.rs`'s `-a` test uses `contains`, which
-  cannot tell the two apart. Compare against git's `-a` output and decide.
-- **R7 — small refusal gaps.** `git status -uno` may miss the `-u` hint,
-  depending on the token clap reports for a clustered short (unpinned).
-  `git log -p` is refused naming `--patch`, a flag the caller did not type.
-  `--oneline --stat` puts the counts on the same line, where git puts them on
-  the lines after.
-- **R8 — no test pins the text surface of the table verbs.** Only
-  `log --oneline`'s text is asserted exactly; status, branch, tag and
-  worktree list are asserted through the typed table, so an agent-visible
-  string in `render.rs` can change with every test green.
+- **R5 — the text tables still print a fixed 7-character oid.** `log` and
+  `show` abbreviate as git's `core.abbrev=auto` does (the shortest prefix no
+  other object shares, with a floor that grows with the packed object count;
+  `core.abbrev=N` and `no` are honored; `tests/abbrev.rs`). `branch`, `tag`,
+  `worktree list` and the patch `index` line (`patch.rs`) still cut at 7, so
+  two oids that share 7 characters print the same text there. The floor also
+  ignores objects in an alternate store, which git counts.
 
 ## git — from the 2026-10-11 survey (docs/design/git-survey-2026-10.md)
 
@@ -1146,23 +1135,6 @@ repository size, not result size.
   of what models typed. Still open on kaish 0.18: an unquoted `%` in a word
   (`--format=%an,%ad`) is a kernel lexer error that never reaches the tool
   (1 cell in the 2026-11-06 re-run); the quoted form reaches the refusal.
-- **Q5 — `log --follow` is refused without a substitute.** 4 cells (T7). The
-  text lists the accepted flags and does not say what to type for file history
-  (`git log -- FILE`) or that renames are not followed. `--date` gets the same
-  generic text.
-- **Q6 — `-N` is refused, one error per retry.** 8 cells (`--oneline -10` x3,
-  `-1 ...` x5). The refusal is exact ("Write the count as '-n 10'"), and it is
-  the only complaint, so `-1 --format='%an %ad'` costs two retries: `-1`, then
-  `--format`. Decide whether to accept `-N` (git does) or report every refused
-  flag at once.
-- **Q7 — `log <branch>` answers a different question.** 3 cells (T12,
-  `log feature/x`). Output is the branch's whole history, identical to git's.
-  The range spelling now works, so the gap is only that nothing steers a model
-  from `log feature/x` to `log main..feature/x`. `help git` could say so.
-- **Q8 — `--json` after `--` is a path.** `git log -n 1 -- Cargo.toml --json`
-  prints text, exit 0, because the token is a pathspec; git does the same. A
-  model that typed it expected JSON. Not counted as SILENT-WRONG (the answer
-  was right); a stderr notice when a pathspec starts with `--` would close it.
 - **Q9 — `command git ...` misdiagnoses.** 7 cells across T18-T24 typed
   `command git ...`; kaish's `command` builtin answers "only -v and -V are
   supported" or "-c is not supported" and never says git is read-only. That
@@ -1212,14 +1184,6 @@ were settled against git 2.55 and pinned in tests/log.rs: ours matches.
   Cost disclosure belongs in `docs/embedding-git.md` regardless, and is in
   scope for PR 8.
 
-- **G11 — stderr notes end without a newline.** Every `result.err = format!(…)`
-  in `tool.rs` leaves the note unterminated, so in a pipeline the next stage's
-  stderr runs onto the same line — seen in `tests/patch_renderer.rs` while
-  mutation-testing: `…'lines_capped' says which file in --jsonjq: invalid
-  JSON input`. kaish 0.17's `ExecResult::err` line contract (#363) covers
-  the messages kaish mints and calls tool stderr pass-through, so this is a
-  readability fix, not a contract breach. Terminate each note; check whether
-  any test compares stderr exactly first.
 
 ## curl — deferred (see docs/curl.md)
 

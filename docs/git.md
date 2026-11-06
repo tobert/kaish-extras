@@ -474,9 +474,15 @@ BRANCH          OID      UPSTREAM
   old           26c410d  origin/main
 ```
 
-**A branch row** is `{name, kind, oid, is_head, upstream, upstream_gone,
-ahead, behind}`. `kind` is `local` or `remote`, and the name has its namespace
-prefix removed — `main`, `origin/main`. `upstream` is the short name git's
+With `--all` the text names a remote-tracking branch `remotes/origin/main`, as
+git's `-a` does, and `--remote` names it `origin/main`. A symbolic ref prints
+its target and no oid: `remotes/origin/HEAD -> origin/main`.
+
+**A branch row** is `{name, kind, oid, is_head, symref, upstream,
+upstream_gone, ahead, behind}`. `kind` is `local` or `remote`, and the name has
+its namespace prefix removed — `main`, `origin/main`, in `--json` under every
+flag. `symref` is the short name a symbolic ref such as `origin/HEAD` points
+at, or `null`. `upstream` is the short name git's
 `branch.<name>.remote` plus `branch.<name>.merge` plus the remote's `fetch`
 refspec resolve to; it is reported whether or not that ref exists, and
 `upstream_gone` says which, the way git renders `[gone]`.

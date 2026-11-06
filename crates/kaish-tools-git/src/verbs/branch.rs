@@ -46,7 +46,9 @@ const REMOTES: &str = "refs/remotes/";
 pub(crate) struct BranchArgs {
     /// List remote-tracking branches beside the local ones. A remote-tracking
     /// branch is a record of what a fetch last saw; this build performs no
-    /// fetch, so it is as old as the last one someone else ran.
+    /// fetch, so it is as old as the last one someone else ran. The text names
+    /// them `remotes/origin/main`, as git's `-a` does; `--remote` and `--json`
+    /// name them `origin/main`.
     #[arg(short = 'a', long = "all", default_value_t = false, conflicts_with = "remote")]
     pub all: bool,
 
@@ -242,6 +244,10 @@ pub(crate) fn run(repo: &ReadRepo, opts: &BranchOptions) -> Result<BranchReport,
                 is_head: kind == BranchKind::Local && head_branch.as_deref() == Some(name.as_str()),
                 upstream: upstream_ref.map(|r| shorten(r)),
                 upstream_gone: upstream_ref.is_some() && upstream_oid.is_none(),
+                symref: reference
+                    .target
+                    .try_name()
+                    .map(|target| shorten(&target.as_bstr().to_str_lossy())),
                 ahead: None,
                 behind: None,
             },
