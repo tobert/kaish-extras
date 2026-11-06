@@ -31,8 +31,9 @@ pub struct Response {
     pub reason: String,
     /// Response headers, lower-cased names, **every** value the server sent
     /// under each name. A `BTreeMap<String, String>` kept only the last of
-    /// three `Set-Cookie`s and silently dropped the rest (CU37); `-i` is
-    /// documented to print what the server actually sent.
+    /// three `Set-Cookie`s and silently dropped the rest (CU37). The server's
+    /// own case and order are not kept: ureq lower-cases names while parsing
+    /// (docs/curl.md, `-i`).
     pub headers: BTreeMap<String, Vec<String>>,
     /// How many redirects were followed to reach this response.
     pub redirects: u32,
