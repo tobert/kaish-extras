@@ -348,25 +348,32 @@ async fn run_the_whole_matrix_under(repo: &RichRepo, name: &str, make: &dyn Fn()
     }
 }
 
-/// The matrix must actually run under the commit profile when the feature is
-/// on. A `configs()` that silently lost its second entry would leave test 1
-/// green over nothing.
+/// Pins the helper's list of configs, nothing more. It cannot tell whether
+/// the matrix ran under each one; every assertion the matrix makes names its
+/// `[config]`, which is what shows a row ran under the commit profile. What
+/// this catches is `configs()` losing its second entry, the one edit that
+/// would leave the matrix green over a single config.
 #[cfg(feature = "commit")]
 #[test]
-fn the_matrix_runs_under_the_commit_profile_too() {
+fn the_config_list_the_matrix_iterates_names_both_profiles() {
     let names: Vec<&str> = configs().iter().map(|(n, _)| *n).collect();
     assert_eq!(names, ["read-only", "commit profile"]);
 }
 
-/// `GitConfig::read_only()` publishes exactly the read verbs and the read
-/// profile, with `commit` compiled in or not: the feature adds no verb to the
-/// schema, and a `WritableGitConfig` adds none yet either (phase 1a).
+/// `GitConfig::read_only()` publishes exactly these verbs and the read
+/// profile, with `commit` compiled in or not. The list is a literal, so a
+/// verb added to the read set (or to `Verb::ALL` without a decision) breaks
+/// it; comparing `cfg.verbs()` to `Verb::ALL`, as this test did, compared the
+/// constructor to the constant it is built from.
 #[test]
 fn read_only_publishes_exactly_the_read_verbs() {
     let cfg = GitConfig::read_only();
-    assert_eq!(cfg.verbs().collect::<Vec<_>>().len(), Verb::ALL.len());
+    let names: Vec<&str> = cfg.verbs().map(|v| v.as_str()).collect();
+    assert_eq!(
+        names,
+        ["info", "status", "log", "ls", "show", "diff", "branch", "tag", "worktree list"]
+    );
     for verb in cfg.verbs() {
-        assert!(Verb::ALL.contains(&verb));
         assert_eq!(verb.profile(), kaish_tools_git::Profile::Read, "{verb:?}");
     }
     assert_eq!(

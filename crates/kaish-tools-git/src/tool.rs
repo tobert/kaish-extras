@@ -27,10 +27,13 @@ use crate::verbs;
 #[derive(Debug)]
 pub struct GitTool {
     config: GitConfig,
-    /// Set when the embedder installed the commit profile. Read by the write
-    /// verbs from phase 1b on; nothing reads it yet.
+    /// Set when the embedder installed the commit profile. This is the one
+    /// gate: a write verb checks that it is `Some` through
+    /// [`GitTool::write_settings`], and `git info` reports the `commit`
+    /// profile from the same value. Neither reads `config.profiles()` for it,
+    /// because a clone of `WritableGitConfig::read_config()` lists `Commit`
+    /// and builds a tool with no settings.
     #[cfg(feature = "commit")]
-    #[allow(dead_code)]
     write: Option<WriteSettings>,
 }
 
@@ -102,11 +105,35 @@ pub fn tool(config: impl Into<ToolConfig>) -> Result<GitTool, ConfigError> {
 }
 
 impl GitTool {
+    /// The write settings, if the embedder installed the commit profile.
+    ///
+    /// The only thing that may gate a write. `config.profiles()` is not that
+    /// gate: see the `write` field.
+    #[cfg(feature = "commit")]
+    #[allow(dead_code)]
+    pub(crate) fn write_settings(&self) -> Option<&WriteSettings> {
+        self.write.as_ref()
+    }
+
+    /// The profiles `git info` reports: `read`, plus `commit` only when
+    /// write settings are behind this tool.
+    fn reported_profiles(&self) -> Vec<String> {
+        self.config
+            .profiles()
+            .filter(|p| match p {
+                crate::config::Profile::Read => true,
+                #[cfg(feature = "commit")]
+                crate::config::Profile::Commit => self.write.is_some(),
+            })
+            .map(|p| p.as_str().to_string())
+            .collect()
+    }
+
     /// What this build will let the caller ask for (B.1's `capabilities`).
     fn capabilities(&self) -> Capabilities {
         let limits = self.config.limits();
         Capabilities {
-            profiles: self.config.profiles().map(|p| p.as_str().to_string()).collect(),
+            profiles: self.reported_profiles(),
             verbs: self.config.verbs().map(|v| v.as_str().to_string()).collect(),
             features: crate::enabled_features(),
             limits: LimitsReport {
