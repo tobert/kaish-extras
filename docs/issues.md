@@ -1146,10 +1146,6 @@ repository size, not result size.
   of what models typed. Still open on kaish 0.18: an unquoted `%` in a word
   (`--format=%an,%ad`) is a kernel lexer error that never reaches the tool
   (1 cell in the 2026-11-06 re-run); the quoted form reaches the refusal.
-- **Q7 — `log <branch>` answers a different question.** 3 cells (T12,
-  `log feature/x`). Output is the branch's whole history, identical to git's.
-  The range spelling now works, so the gap is only that nothing steers a model
-  from `log feature/x` to `log main..feature/x`. `help git` could say so.
 - **Q8 — `--json` after `--` is a path.** `git log -n 1 -- Cargo.toml --json`
   prints text, exit 0, because the token is a pathspec; git does the same. A
   model that typed it expected JSON. Not counted as SILENT-WRONG (the answer

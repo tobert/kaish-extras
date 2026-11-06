@@ -277,6 +277,25 @@ async fn log_date_points_at_json() {
     assert!(err.contains("YYYY-MM-DD") && err.contains("author.time"), "{err}");
 }
 
+// --- Q7: steering `log <branch>` toward a range ----------------------------
+
+/// Whole lines of `help git` and `help git log` as an agent reads them.
+#[tokio::test]
+async fn help_steers_log_of_a_branch_toward_a_range() {
+    let (_f, root) = repo();
+    for topic in ["help git", "help git log"] {
+        let r = run(&root, topic).await;
+        assert_eq!(r.code, 0, "{topic}: {}", r.err);
+        assert!(
+            r.out.contains("git log main..feature")
+                && r.out.contains("whole history"),
+            "{topic} must say that 'git log <branch>' is the branch's whole history and \
+             that 'git log main..feature' lists what it adds: {}",
+            r.out
+        );
+    }
+}
+
 // --- verbatim binding, through the kernel -----------------------------------
 
 /// `--json` is the kernel's: under verbatim binding it lifts the flag out of

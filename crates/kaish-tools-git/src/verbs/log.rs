@@ -141,7 +141,9 @@ pub(crate) struct LogArgs {
     pub global: GlobalFlags,
 
     /// A revision or an `A..B` range, then paths: `git log 'HEAD~5' --
-    /// src/lib.rs`. A tracked path before `--` is a path too, as in git. At
+    /// src/lib.rs`. `git log feature` lists feature's whole history; to list
+    /// only the commits feature has that main lacks, write `git log
+    /// main..feature`. A tracked path before `--` is a path too, as in git. At
     /// most one revision or range. Omit it to start from `HEAD`.
     // Every operand, in order, on both sides of the caller's `--`: the tool is
     // bound verbatim, so this argv is the caller's own. `tool.rs`'s
