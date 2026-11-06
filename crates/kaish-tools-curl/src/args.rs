@@ -408,15 +408,21 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             }
             "--max-redirs" => {
                 let raw = value(&mut i)?;
-                max_redirects = Some(raw.parse::<u32>().map_err(|_| {
-                    CurlError::Transport(format!(
-                        "'--max-redirs' wants a whole number of redirects, got '{raw}'."
-                    ))
-                })?);
+                // `-1` is curl's "unlimited": no cap of the caller's own, so
+                // the embedder's ceiling is the only one.
+                max_redirects = match raw.parse::<i64>() {
+                    Ok(-1) => None,
+                    Ok(n) if n >= 0 => Some(u32::try_from(n).unwrap_or(u32::MAX)),
+                    _ => {
+                        return Err(CurlError::Usage(format!(
+                            "'--max-redirs' wants a whole number of redirects, or -1 for no cap of your own (exit 2), got '{raw}'."
+                        )))
+                    }
+                };
             }
-            "-m" | "--max-time" => max_time = Some(seconds(&value(&mut i)?, &argv_flag)?),
+            "-m" | "--max-time" => max_time = seconds(&value(&mut i)?, &argv_flag)?,
             "--connect-timeout" => {
-                connect_timeout = Some(seconds(&value(&mut i)?, "--connect-timeout")?)
+                connect_timeout = seconds(&value(&mut i)?, "--connect-timeout")?
             }
             // kaish's global output flag, not curl's request-body `--json`
             // (CU16). The kernel has already applied it via
@@ -680,16 +686,20 @@ fn set_once(existing: Option<String>, candidate: String) -> Result<String, CurlE
     }
 }
 
-/// Parse a seconds value, naming the flag when it isn't a number.
-fn seconds(raw: &str, flag: &str) -> Result<f64, CurlError> {
-    raw.parse::<f64>()
+/// Parse a seconds value, naming the flag when it isn't a number. `0` is
+/// curl's "no timeout": `None`, meaning no limit of the caller's own, so the
+/// embedder's ceiling still applies.
+fn seconds(raw: &str, flag: &str) -> Result<Option<f64>, CurlError> {
+    let n = raw
+        .parse::<f64>()
         .ok()
-        .filter(|s| *s > 0.0 && s.is_finite())
+        .filter(|s| *s >= 0.0 && s.is_finite())
         .ok_or_else(|| {
-            CurlError::Transport(format!(
-                "'{flag}' wants a positive number of seconds, got '{raw}'."
+            CurlError::Usage(format!(
+                "'{flag}' wants a number of seconds, 0 or more (exit 2), got '{raw}'. 0 means no limit of your own; the embedder's ceiling still applies."
             ))
-        })
+        })?;
+    Ok((n > 0.0).then_some(n))
 }
 
 /// What `-d`, `--data`, `--data-binary` and `--data-raw` take as a value.

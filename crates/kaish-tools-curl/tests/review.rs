@@ -294,3 +294,50 @@ async fn include_with_location_prints_each_hops_status_and_headers() {
     let p = compare(&server, "-s -i \"$URL/r301\"", &[]).await;
     assert_eq!(p.ours.text_out().matches("HTTP/1.1").count(), 1);
 }
+
+// ── 10. 0 and -1 mean "no limit of your own" ────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_timeouts_and_unlimited_redirects_are_accepted_like_curl() {
+    let server = redirector();
+    for args in [
+        "-s -m 0 \"$URL/echo\"",
+        "-s --max-time 0 \"$URL/echo\"",
+        "-s --connect-timeout 0 \"$URL/echo\"",
+        "-s -L --max-redirs -1 \"$URL/r302\"",
+    ] {
+        let p = compare(&server, args, &[]).await;
+        assert_eq!(p.ours.code, 0, "{args}: {}", p.ours.err);
+        if let Some(theirs) = &p.theirs {
+            assert_eq!(theirs.code, 0, "{args}: real curl accepts it");
+        }
+    }
+    // -L -1 really follows.
+    let p = compare(&server, "-s -L --max-redirs -1 \"$URL/r302\"", &[]).await;
+    assert_eq!(p.ours.text_out(), "landed");
+    // Controls: other negatives and junk are still refused, as in curl.
+    for args in ["-s -m -1 \"$URL/echo\"", "-s --max-redirs -2 \"$URL/echo\"", "-s --connect-timeout -3 \"$URL/echo\""] {
+        let p = compare(&server, args, &[]).await;
+        assert_eq!(p.ours.code, 2, "{args}: {}", p.ours.err);
+        assert!(p.ours_req.is_empty(), "{args}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_max_time_leaves_the_embedders_ceiling_in_force() {
+    // `-m 0` means "no limit of my own", not "raise the ceiling": the
+    // embedder's max_time still bounds the request.
+    let server = Server::builder()
+        .route_fn("/slow", |_| {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            Response::text(200, "late")
+        })
+        .start_tcp();
+    let config = support::loopback_config().with_limits(kaish_tools_curl::Limits {
+        max_time: 0.3,
+        ..kaish_tools_curl::Limits::default()
+    });
+    let fx = support::Fixture::new(config, &[]).await;
+    let r = fx.run(&server.url(""), "curl -s -m 0 \"$URL/slow\"").await;
+    assert_eq!(r.code, 28, "{}", r.err);
+}
