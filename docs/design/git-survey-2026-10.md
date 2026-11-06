@@ -178,10 +178,10 @@ right, so it is not counted. Q8.
 
 ### Remaining USEFUL-REFUSAL (20 cells)
 
-`-N` forms (7 cells: `--oneline -10` x3, `-1 --format='...'` x3, `-1 Cargo.toml`, plus the `--date` one) get
+`-N` forms (8 cells: `--oneline -10` x3, `-1 --format='...'` x4 with the `--date` one, `-1 Cargo.toml`) get
 `git log: -1 is not supported. Write the count as '-n 1'.`; `--format` gets
 `--format is not supported. This git has two text layouts, the default table and
---oneline, and --json carries every field by name.`; `rev-parse` (7) and
+--oneline, and --json carries every field by name.`; `rev-parse` (6) and
 `ls-files` (6) name `git info`, `git log -n 1 --json <rev>` and `git ls
 --recursive`. These cost one retry each. `-1 --format='%an %ad'` costs two
 (one refusal per run).
@@ -191,7 +191,7 @@ right, so it is not counted. Q8.
 1. T15/T16 `rev-parse`, `ls-files` (12 UR). Refused with a next step; only an
    alias or a built verb removes the retry. `ls-files` vs `ls HEAD` differ
    (index vs commit), so the earlier call to refuse stands.
-2. `-N` forms (7 UR; the 8th, `-1 --format=%an,%ad`, is the U above). Q6, Q3.
+2. `-N` forms (8 UR) and the unquoted-`%` lexer error (1 U). Q6, Q3.
 3. `log --follow` (4 U). Q5.
 4. `log <branch>` (3 SW). Q7.
 5. `command git ...` (7 WRITE-REFUSED with a misleading kaish message). Q9.
