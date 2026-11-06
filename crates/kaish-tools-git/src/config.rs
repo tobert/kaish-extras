@@ -321,9 +321,9 @@ impl GitConfig {
     /// enables and carries no authorization: per-command approval stays with
     /// the embedder, through kaish `plan` (git-write-profile.md §2).
     ///
-    /// Phase 1b adds the index verbs (`Verb::WRITE`): `add`, `rm`, `mv`,
-    /// `restore --staged` and `reset` with no revision. A read verb the
-    /// config already subtracted stays subtracted.
+    /// Adds the write verbs (`Verb::WRITE`): `add`, `rm`, `mv`,
+    /// `restore --staged`, `reset` with no revision, `commit` and `var`. A read
+    /// verb the config already subtracted stays subtracted.
     #[cfg(feature = "commit")]
     pub fn with_commit_profile(mut self) -> WritableGitConfig {
         self.profiles.insert(Profile::Commit);

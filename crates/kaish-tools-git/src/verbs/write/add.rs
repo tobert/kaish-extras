@@ -93,9 +93,9 @@ pub(crate) struct Plan {
     pub(crate) files: Vec<Staged>,
     pub(crate) removals: Vec<String>,
     pub(crate) gitlinks: Vec<(String, ObjectId, Stat)>,
-    added: Vec<String>,
-    modified: Vec<String>,
-    refreshed: usize,
+    pub(crate) added: Vec<String>,
+    pub(crate) modified: Vec<String>,
+    pub(crate) refreshed: usize,
 }
 
 impl Plan {

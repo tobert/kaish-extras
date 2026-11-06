@@ -2818,3 +2818,53 @@ async fn add_never_runs_a_filter_or_a_hook_and_refuses_the_hostile_repository() 
         repo.fired()
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 2 — `commit` against the same hostile repository
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// `commit` against a repository whose hooks directory holds armed scripts.
+/// Without a hook provider it refuses, naming the hook, and nothing fires.
+/// Both ways in are covered: `core.hooksPath` pointing outside the tree (this
+/// shell cannot look there, so it refuses by name), and the scripts copied
+/// into `.git/hooks`. The control runs real git on the same repository and
+/// the hooks fire, so an empty sentinel directory is a statement about this
+/// build.
+#[cfg(feature = "commit")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_never_runs_a_hook_and_refuses_the_hostile_repository() {
+    let repo = PwnRepo::build();
+    let before = support::Fingerprint::take(&repo.root.join(".git"));
+
+    for args in [vec!["commit", "-am", "x"], vec!["commit", "--no-verify", "-am", "x"], vec!["commit", "--allow-empty", "-m", "x"]] {
+        let r = pwn_write(&repo, &args).await;
+        assert_eq!(r.code, 4, "{args:?}: {}", r.err);
+        assert!(r.err.contains("core.hooksPath points outside the working tree"), "{args:?}: {}", r.err);
+        assert!(repo.fired().is_empty(), "{args:?}: a sentinel fired: {:?}", repo.fired());
+    }
+    assert!(support::Fingerprint::take(&repo.root.join(".git")).differences_from(&before).is_empty());
+
+    // Now the scripts are in the repository's own hooks directory.
+    git(&repo.root, &["config", "--unset", "core.hooksPath"]);
+    let hooks = repo.root.join(".git/hooks");
+    for kind in ["pre-commit", "post-commit", "reference-transaction", "post-index-change"] {
+        std::fs::copy(repo.fixture.path("hooks").join(kind), hooks.join(kind)).expect("copy hook");
+    }
+    let before = support::Fingerprint::take(&repo.root.join(".git"));
+    for args in [vec!["commit", "-am", "x"], vec!["commit", "--no-verify", "-am", "x"], vec!["commit", "-m", "x"]] {
+        let r = pwn_write(&repo, &args).await;
+        assert_eq!(r.code, 4, "{args:?}: {}", r.err);
+        assert!(r.err.contains("pre-commit"), "{args:?}: {}", r.err);
+        assert!(!r.err.contains(PWN_MARKER), "{}", r.err);
+        assert!(repo.fired().is_empty(), "{args:?}: a sentinel fired: {:?}", repo.fired());
+    }
+    assert!(support::Fingerprint::take(&repo.root.join(".git")).differences_from(&before).is_empty());
+
+    // The control: real git commits this repository and the hooks fire.
+    git(&repo.root, &["commit", "-qam", "real commit"]);
+    let fired = repo.fired();
+    assert!(
+        fired.contains(&"pre-commit".to_string()) && fired.contains(&"post-commit".to_string()),
+        "real git must run the commit hooks on this repository, or the fixture is not hostile: {fired:?}"
+    );
+}

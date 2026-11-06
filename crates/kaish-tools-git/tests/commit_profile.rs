@@ -40,10 +40,10 @@ fn the_commit_profile_is_added_by_name_and_only_by_name() {
     assert_eq!(Profile::Commit.as_str(), "commit");
 }
 
-/// The commit profile adds exactly the index verbs, and the read profile
-/// never has them. Phase 2 and later change this assertion on purpose.
+/// The commit profile adds exactly the write verbs, and the read profile
+/// never has them. Each later phase changes this assertion on purpose.
 #[test]
-fn the_commit_profile_adds_exactly_the_index_verbs() {
+fn the_commit_profile_adds_exactly_the_write_verbs() {
     let read: BTreeSet<Verb> = GitConfig::read_only().verbs().collect();
     assert_eq!(read, Verb::ALL.iter().copied().collect::<BTreeSet<_>>(), "the read profile publishes exactly Verb::ALL");
     for v in Verb::WRITE {
@@ -54,7 +54,7 @@ fn the_commit_profile_adds_exactly_the_index_verbs() {
     let want: BTreeSet<Verb> = read.iter().chain(Verb::WRITE.iter()).copied().collect();
     assert_eq!(writable, want);
     let names: Vec<&str> = Verb::WRITE.iter().map(|v| v.as_str()).collect();
-    assert_eq!(names, ["add", "rm", "mv", "restore", "reset"]);
+    assert_eq!(names, ["add", "rm", "mv", "restore", "reset", "commit", "var"]);
     for v in Verb::WRITE {
         assert_eq!(v.profile(), Profile::Commit);
     }
@@ -210,9 +210,11 @@ fn write_leaves_declare_operations_and_the_root_lists_the_union() {
     assert_eq!(ops("reset"), ["git.index"]);
     assert_eq!(ops("rm"), ["git.index", "fs.remove"]);
     assert_eq!(ops("mv"), ["git.index", "fs.rename"]);
+    assert_eq!(ops("commit"), ["git.index", "git.commit", "git.ref", "git.rewrite"]);
+    assert!(ops("var").is_empty(), "var reads an identity and writes nothing");
     let mut root = schema.operations.clone();
     root.sort();
-    assert_eq!(root, ["fs.remove", "fs.rename", "git.index"]);
+    assert_eq!(root, ["fs.remove", "fs.rename", "git.commit", "git.index", "git.ref", "git.rewrite"]);
     for read in ["info", "status", "log", "ls", "show", "diff", "branch", "tag"] {
         assert!(ops(read).is_empty(), "{read} must declare no effect");
     }
@@ -228,8 +230,17 @@ fn a_subtracted_write_verb_leaves_the_union() {
     let schema = kaish_tools_git::tool(GitConfig::read_only().with_commit_profile().without_verb(Verb::Rm).without_verb(Verb::Mv))
         .expect("tool")
         .schema();
-    assert_eq!(schema.operations, ["git.index"]);
+    let mut root = schema.operations.clone();
+    root.sort();
+    assert_eq!(root, ["git.commit", "git.index", "git.ref", "git.rewrite"]);
     assert!(schema.subcommands.iter().all(|c| c.name != "rm" && c.name != "mv"));
+    // And with commit gone as well, only the index verbs' id is left.
+    let schema = kaish_tools_git::tool(
+        GitConfig::read_only().with_commit_profile().without_verb(Verb::Rm).without_verb(Verb::Mv).without_verb(Verb::Commit),
+    )
+    .expect("tool")
+    .schema();
+    assert_eq!(schema.operations, ["git.index"]);
 }
 
 /// The description a tool with write verbs publishes must not claim to be
@@ -238,7 +249,7 @@ fn a_subtracted_write_verb_leaves_the_union() {
 fn the_commit_profile_description_is_not_the_read_only_one() {
     let w = kaish_tools_git::tool(GitConfig::read_only().with_commit_profile()).expect("tool").schema();
     assert!(!w.description.contains("read-only by construction"), "{}", w.description);
-    for must in ["never runs hooks", "user-level git configuration", "add, rm, mv, restore --staged and reset"] {
+    for must in ["never runs hooks", "user-level git configuration", "add, rm, mv, restore --staged, reset (no revision) and commit", "never rewrites a commit", "git var GIT_AUTHOR_IDENT"] {
         assert!(w.description.contains(must), "{must:?} missing: {}", w.description);
     }
     let r = kaish_tools_git::tool(GitConfig::read_only()).expect("tool").schema();

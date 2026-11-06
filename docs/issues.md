@@ -1642,8 +1642,73 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   folding). The hard-link refusal (`st_nlink > 1` on in-place targets) is
   unix-only. None reachable on the Linux CI today; each wants a fixture on the
   platform it names before a fix.
-- **W12 — `gix-lock` is a renamed dev-dependency.** Phase 1a added
-  `lock = { package = "gix-lock", version = "=24.0.0" }` for tests only, renamed
-  so `pins_match_the_manifest` does not count it as linked. Phase 2's ref
-  transactions link it for real: promote it to a pinned, `commit`-gated
-  dependency with a `GIX_PINS` row then.
+
+## git write — phase 2 (commit), what is left
+
+- **W13 — gix-ref 0.66.0 hangs on a branch lock under a symbolic HEAD.**
+  `Transaction::prepare_inner` (`store/file/transaction/prepare.rs:401`,
+  `while let Some(parent_idx) = cursor`) never advances `cursor` when the
+  lock for the *child* of a split `HEAD` edit cannot be taken, and spins at
+  100% CPU. Found by `a_stale_ref_lock_fails_the_commit_and_is_left_alone`.
+  `refmove::precheck` looks at `<ref>.lock`, `HEAD.lock` and
+  `packed-refs.lock` with `lstat` first and refuses with exit 4, before any
+  object is written. A lock that appears between that look and the
+  transaction still reaches the loop. No upstream work yet (local guard,
+  as with G5/R4); the guard goes when the pin moves to a fixed gix-ref.
+- **W14 — the summary shows a rename as a delete and a create.** Git's commit
+  summary runs rename detection (`rename a => b (100%)`, and inexact
+  renames); here the shortstat counts two files and prints a `delete mode`
+  and a `create mode` line. The commit object is unaffected. Line counts are
+  `gix-imara-diff` Myers (the L-series imprecision on log `--stat` applies),
+  and a side over 16 MiB is left out of them with a note on stderr.
+- **W15 — a leftover loose object after a hook rejection.** `commit -a` and
+  `--only` write their blobs and trees before `pre_commit` runs (the hook is
+  given the tree oid). A rejection or a lost compare-and-swap leaves those
+  objects unreachable; the index and branch are untouched. `git gc` prunes
+  them.
+- **W16 — `--trailer` is stricter than git.** A trailer with no `:`/`=`, no
+  value, or a key outside letters, digits and `-` is refused (git writes
+  `Key:`). `trailer.*` configuration (`trailer.<token>.key`, `.command`,
+  `.ifexists`) is not read; a repository that configures it gets git's
+  defaults here, which differ from its own git. Trailer-block detection is
+  the subject-paragraph rule, the all-trailers rule and the `Signed-off-by` /
+  `(cherry picked from commit` 25% rule; the `git-generated` and comment
+  rules of `interpret-trailers` are not implemented.
+- **W17 — identity details.** A date with no offset, and the clock, are UTC
+  (`+0000`); git uses the local zone. The committer date is the clock unless
+  `GIT_COMMITTER_DATE` is set: it does not default to the author's date as
+  the architecture.md E.6 table says, because git does not either, and the
+  oracle test compares with git. RFC 2822 dates, `YYYY-MM-DD` alone and
+  relative dates ("2 weeks ago") are refused. Git strips "crud" characters
+  from the ends of a name and an email; this trims whitespace only and
+  refuses `<`, `>` and line breaks (`Identity::new`).
+- **W18 — path validation is ours.** The tree writer refuses an index path
+  whose component is empty, `.`, `..` or `.git` in any case. It does not use
+  `gix-validate`'s fuller rule (NTFS and HFS spellings of `.git`, trailing
+  dots and spaces). A hostile index naming `.git ` can be committed; real
+  git's `verify_path` would refuse it.
+- **W19 — commit settings checked, not all of git's.** Refused: `commit.gpgSign`,
+  `tag.gpgSign`, `i18n.commitEncoding`, `commit.cleanup` other than
+  `default`/`whitespace`, `core.logAllRefUpdates=false`. Ignored without
+  saying so: `commit.template` (no editor), `commit.status`, `commit.verbose`,
+  `core.commentChar`, `user.useConfigOnly`, `trailer.*`. User-level
+  configuration is never read, as everywhere.
+- **W20 — a plain `commit` does not rewrite the index.** Git writes the
+  index after a commit (new cache-tree, refreshed stat). A plain commit here
+  leaves the file untouched; `-a` and `--only` rewrite it without the
+  cache-tree extension, as the index verbs do.
+- **W21 — hook accounting.** `prepare-commit-msg` and `reference-transaction`
+  have no `GitHooks` method: with a provider they appear in
+  `HookContext::hooks_present` and the provider decides. `post-rewrite` and
+  `post-checkout` belong to later verbs. `pre_commit` and `commit_msg` run
+  while `index.lock` is held for `-a` and `--only`, so a provider that runs a
+  real hook script which itself writes the index will find it locked.
+  `--no-verify` is passed to the provider and the provider decides.
+- **W22 — `-F -` and a non-UTF-8 message.** The message file is read through
+  the kernel's filesystem, capped at 1 MiB, and must be UTF-8. Standard input
+  is not read. Git accepts any bytes.
+- **W23 — `commit --only` and special entries.** SKIP_WORKTREE and
+  ASSUME_VALID entries named by `--only` keep the index's value silently
+  (add's rule for a spec that matches many); a nested repository that is
+  already a gitlink is updated to its HEAD. Intent-to-add entries are left
+  out of the tree and stay in the index, as git does.

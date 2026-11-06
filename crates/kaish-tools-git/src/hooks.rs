@@ -7,7 +7,12 @@
 //! [`GitHooks`] through `WritableGitConfig::with_hooks`: it may spawn the real
 //! scripts, run its own checks, or decline.
 //!
-//! Phase 1a defines the types only. No verb calls them yet.
+//! `commit` calls them, in git's order: `pre_commit` once the tree is written
+//! and before the commit object is, `commit_msg` on the message, `post_commit`
+//! after the branch moved. `prepare-commit-msg`, `reference-transaction` and
+//! `post-index-change` have no method: when a repository has one, its name is
+//! in [`HookContext::hooks_present`] and the provider decides what to do about
+//! it (docs/issues.md, W21).
 
 use std::path::Path;
 

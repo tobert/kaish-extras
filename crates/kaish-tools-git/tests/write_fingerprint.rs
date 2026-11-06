@@ -37,11 +37,6 @@ use support::{Fingerprint, RichRepo, StrictBackend, TestCtx};
 
 /// `(argv, exit code)`: refused by the router, whatever the profile.
 const ROUTER_REFUSED: &[(&[&str], i64)] = &[
-    (&["commit", "-m", "x"], 2),
-    (&["commit", "-am", "x"], 2),
-    (&["commit", "--amend", "-m", "x"], 2),
-    (&["commit", "--amend", "--no-edit"], 2),
-    (&["commit", "--no-verify", "-m", "x"], 2),
     (&["switch", "-c", "topic"], 2),
     (&["checkout", "-b", "topic"], 2),
     (&["update-ref", "HEAD", "HEAD"], 2),
@@ -56,6 +51,12 @@ const ROUTER_REFUSED: &[(&[&str], i64)] = &[
 
 /// The index verbs' spellings, under the read-only config.
 const READ_ONLY_REFUSED: &[(&[&str], i64)] = &[
+    (&["commit", "-m", "x"], 2),
+    (&["commit", "-am", "x"], 2),
+    (&["commit", "--amend", "-m", "x"], 2),
+    (&["commit", "--amend", "--no-edit"], 2),
+    (&["commit", "--no-verify", "-m", "x"], 2),
+    (&["var", "GIT_AUTHOR_IDENT"], 2),
     (&["add", "README.md"], 2),
     (&["add", "-A"], 2),
     (&["add", "."], 2),
@@ -75,6 +76,26 @@ const READ_ONLY_REFUSED: &[(&[&str], i64)] = &[
 /// an untracked file).
 #[cfg(feature = "commit")]
 const COMMIT_REFUSED: &[(&[&str], i64)] = &[
+    // No identity is seeded in this harness, so a well-formed commit refuses
+    // too (exit 2), after every other check has passed.
+    (&["commit", "-m", "x"], 2),
+    (&["commit", "-am", "x"], 2),
+    (&["commit", "--no-verify", "-m", "x"], 2),
+    (&["commit", "--allow-empty", "-m", "x"], 2),
+    (&["commit", "README.md", "-m", "x"], 2),
+    (&["var", "GIT_AUTHOR_IDENT"], 2),
+    (&["var", "GIT_COMMITTER_IDENT"], 2),
+    (&["commit", "--amend", "-m", "x"], 2),
+    (&["commit", "--amend", "--no-edit"], 2),
+    (&["commit", "--fixup", "HEAD"], 2),
+    (&["commit", "-S", "-m", "x"], 2),
+    (&["commit", "-p"], 2),
+    (&["commit"], 2),
+    (&["commit", "-v", "-m", "x"], 2),
+    (&["commit", "-m", "x", "--trailer", "bad"], 2),
+    (&["var"], 2),
+    (&["var", "GIT_EDITOR"], 2),
+    (&["config", "user.name"], 2),
     (&["add", "-p"], 2),
     (&["add", "-i", "README.md"], 2),
     (&["add", "--patch", "README.md"], 2),
@@ -183,7 +204,7 @@ async fn commit_profile_refusals_have_five_parts_and_the_router_does_not_say_rea
         }
     }
     // And the read-only config keeps its text for every router refusal.
-    for (argv, _) in ROUTER_REFUSED.iter().filter(|(a, _)| a[0] == "commit" || a[0] == "switch") {
+    for (argv, _) in ROUTER_REFUSED.iter().chain(READ_ONLY_REFUSED).filter(|(a, _)| a[0] == "commit" || a[0] == "switch") {
         let r = run(&repo, GitConfig::read_only().into(), argv).await;
         assert!(r.err.contains("read-only"), "git {argv:?}: {}", r.err);
     }

@@ -487,7 +487,8 @@ allowed-tree entry to cover it.
 ## The commit profile (in progress)
 
 Design: `docs/design/git-write-profile.md`. This section says what exists as of
-phase 1b: **the index verbs write; `commit` does not exist yet.**
+phase 2: **the index verbs write, and `commit` and `var` exist. Amending a
+commit, `reset <rev>`, `branch <name>`, `tag <name>` and `switch -c` do not.**
 
 A build with the `commit` cargo feature (off by default) has:
 
@@ -495,12 +496,12 @@ A build with the `commit` cargo feature (off by default) has:
   `tool()` accepts either config. The write verbs exist only when `tool()` was
   given a `WritableGitConfig`: a clone of `read_config()` lists the `commit`
   profile but carries no write settings, and builds a tool with no write verbs.
-- Five write verbs, added to the verb set by `with_commit_profile()` and
+- Seven write verbs, added to the verb set by `with_commit_profile()` and
   removable one by one with `without_verb`: `add`, `rm`, `mv`,
-  `restore --staged` and `reset` with no revision (`Verb::WRITE`).
-  `GitConfig::read_only()` still publishes exactly `Verb::ALL`. Their text
-  surface is in `docs/git.md`, "`git add`, `rm`, `mv`, `restore --staged` and
-  `reset`".
+  `restore --staged`, `reset` with no revision, `commit` and `var`
+  (`Verb::WRITE`). `GitConfig::read_only()` still publishes exactly
+  `Verb::ALL`. Their text surface is in `docs/git.md`, "`git add`, `rm`, `mv`,
+  `restore --staged` and `reset`" and "`git commit` and `git var`".
 - Effect ids on the schema, for `plan`. Each write leaf declares what any of
   its spellings can do, and the root lists the union:
 
@@ -509,16 +510,60 @@ A build with the `commit` cargo feature (off by default) has:
   | `add`, `restore`, `reset` | `git.index` |
   | `rm` | `git.index`, `fs.remove` |
   | `mv` | `git.index`, `fs.rename` |
+  | `commit` | `git.index`, `git.commit`, `git.ref`, `git.rewrite` |
 
-  The read verbs declare none. The root of a read-only tool declares none.
-- `WritableGitConfig::with_rewrite_policy`, `with_hooks` and `with_identity`,
-  and the types they take (`RewritePolicy`, `GitHooks`, `Identity`). **No verb
-  reads them yet**; `commit` and the history rewrites are later phases.
+  `commit` declares `git.rewrite` although `--amend` is refused today: the
+  schema is reflected before argv is known. `var` declares none. The read
+  verbs declare none. The root of a read-only tool declares none.
+- `WritableGitConfig::with_hooks` and `with_identity`, and the types they take
+  (`GitHooks`, `Identity`), which `commit` and `var` read. `with_rewrite_policy`
+  and `RewritePolicy` are **not read by any verb yet**: `--amend` and
+  `reset <rev>` are a later phase and refuse regardless.
 - The per-profile router text. A tool without write settings answers `git add`
   with "this git is read-only". A tool with them never says that: for a git
   command it has no verb for (`commit`, `switch`, `checkout`, `stash`) it names
   the verbs it does have, and for a verb the embedder subtracted it says the
   embedder turned it off.
+
+**What `commit` does with your hooks and identity.**
+
+- *Identity.* `with_identity(author, committer)` pins both, and then no kernel
+  variable is read for identity, dates included (`--author` still sets the
+  author). Otherwise the kernel's `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL` are
+  required (seed them with `KernelConfig::with_var`; the kernel never copies
+  them from the process environment), `GIT_COMMITTER_NAME` and
+  `GIT_COMMITTER_EMAIL` fall back to the author's field by field, and
+  `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` are optional. With nothing to
+  use, `commit` and `var` exit 2 naming both variables and the pin. Repo-local
+  `user.name`/`user.email` are not read. A date with no offset and the clock
+  are UTC.
+- *Hooks.* This crate spawns nothing. Without a provider, a hook git would run
+  for a commit (`pre-commit`, `prepare-commit-msg`, `commit-msg`,
+  `post-commit`, `reference-transaction`, and `post-index-change` when `-a` or
+  `--only` writes the index) refuses the commit, exit 4, naming it; so does
+  `--no-verify` when one is present. "Present" is an executable regular file
+  or a link, not a `.sample`, in `<common dir>/hooks` or the directory
+  `core.hooksPath` names (any value counts; a path outside the working tree
+  refuses by name). With a `GitHooks` provider, `pre_commit` gets the tree oid
+  before the commit object is written (its `Err` aborts, exit 1),
+  `commit_msg` may rewrite the message (git cleans it again afterward), and
+  `post_commit` runs after the ref moved, its failures reported on stderr and
+  not fatal. The provider is told `no_verify` and decides what it means.
+- *Signing* is refused: `-S`, and `commit.gpgSign` or `tag.gpgSign` true in
+  the repository's own config. Host `~/.gitconfig` is never read, so a host
+  that signs by default still gets an unsigned commit from this tool; the
+  tool description says so.
+
+**Order of a commit.** Refusals first, from an unlocked read (a refusal leaves
+`.git` byte-identical, which `tests/write_commit.rs` asserts for every refused
+spelling); then, for `-a` and `--only`, `index.lock`; blobs, trees and the
+commit as loose objects, all fsynced; then one `gix-ref` transaction on `HEAD`
+(or on the branch it names), compare-and-swap against the oid read at the
+start, with reflog lines in git's format in the branch's log and in
+`logs/HEAD`; then the index rename. A branch that moved in between fails with
+exit 1 naming the ref and both oids. A stale lock is never removed (exit 4).
+gix-ref 0.66.0 hangs when the branch's lock exists under a symbolic HEAD, so
+the locks are looked at first (`docs/issues.md`, W13).
 
 What the verbs do not do, stated plainly:
 
@@ -568,8 +613,10 @@ Write safety, in the order it applies:
 5. The index is written with git's racy-entry rule applied to every entry (see
    `docs/issues.md`, "write: racy smudge").
 
-The `commit` feature adds no dependency: `cargo tree -i gix-command`,
-`gix-filter` and `gix-transport` stay empty with it on, and CI asserts that.
+The `commit` feature adds one dependency, `gix-lock` (pinned, optional, and
+already in the graph under `gix-ref`; `git info` reports it in `gix_pins` only
+when the feature is on). `cargo tree -i gix-command`, `gix-filter` and
+`gix-transport` stay empty with it on, and CI asserts that.
 
 ## What this tool does not protect you from
 
