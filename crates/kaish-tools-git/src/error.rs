@@ -622,6 +622,66 @@ pub enum GitError {
         /// The verb that was asked for.
         operation: &'static str,
     },
+
+    /// A write would pass through a symbolic link, a hard-linked file, or a
+    /// path component of the wrong type, inside the repository. Exit 4
+    /// (git-write-profile.md §6.1).
+    ///
+    /// `path` is relative to `store` and never absolute: it names a path
+    /// inside the mount, so it reveals nothing the caller could not already
+    /// list, and it never says where a link points. `found` says what the
+    /// component is and `then` says why that refuses the write and what to do
+    /// next; the pair is chosen by what was found and what the write needed
+    /// there (a directory or a file), so a refusal never claims git follows a
+    /// link when the component is not a link.
+    #[cfg(feature = "commit")]
+    #[error("git {operation}: nothing was written. '{path}' in {store} is {found}. {then}")]
+    WriteThroughLink {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// Which root the path is relative to, as a caller would name it.
+        store: &'static str,
+        /// The offending component, relative to `store`.
+        path: String,
+        /// What was found there, for example "a symbolic link".
+        found: &'static str,
+        /// Why that refuses the write, and the next step.
+        then: &'static str,
+    },
+
+    /// A root the write side was about to use is not a canonical directory
+    /// inside the mount. Exit 4.
+    ///
+    /// Names no path: the root came from the repository's own content
+    /// (`gitdir:`, `commondir`), so echoing it would answer "does this host
+    /// path exist" for a hostile repository.
+    #[cfg(feature = "commit")]
+    #[error(
+        "git {operation}: nothing was written. The repository's {what} is not \
+         a real directory inside the mount, and kaish-git writes nothing \
+         outside the mount. Mount the directory that holds the whole \
+         repository, or use a clean clone inside the mount"
+    )]
+    WriteRootOutsideMount {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// Which root, as a caller would name it.
+        what: &'static str,
+    },
+
+    /// A reflog message contained a line break, which would forge a second
+    /// reflog line. Exit 2.
+    #[cfg(feature = "commit")]
+    #[error(
+        "git {operation}: nothing was written. The reflog message would \
+         contain a line break, which git's reflog format cannot hold. Remove \
+         the line break (and any carriage return) from the first line of the \
+         commit message and run the command again"
+    )]
+    ReflogMessageLineBreak {
+        /// The verb that was asked for.
+        operation: &'static str,
+    },
 }
 
 impl GitError {
@@ -644,6 +704,8 @@ impl GitError {
             | GitError::AncestryBudgetExhausted { .. }
             | GitError::PatchRendererFailed { .. }
             | GitError::NoSuchPath { .. } => 1,
+            #[cfg(feature = "commit")]
+            GitError::ReflogMessageLineBreak { .. } => 2,
             GitError::Usage { .. }
             | GitError::NoVerb { .. }
             | GitError::UnsupportedVerb { .. }
@@ -660,6 +722,8 @@ impl GitError {
             | GitError::PatchNeedsTextdiff { .. }
             | GitError::PatchNotInThisVerb { .. }
             | GitError::UnsupportedIndexMode { .. } => 4,
+            #[cfg(feature = "commit")]
+            GitError::WriteThroughLink { .. } | GitError::WriteRootOutsideMount { .. } => 4,
             GitError::VerbNotEnabled { .. } => 5,
         }
     }

@@ -10,6 +10,8 @@ use kaish_tool_api::{schema_tree_from_clap, Tool, ToolCtx};
 use kaish_types::backend::MountInfo;
 use kaish_types::{ExecResult, OutputData, ParamSchema, ToolArgs, ToolSchema, Value};
 
+#[cfg(feature = "commit")]
+use crate::config::{WritableGitConfig, WriteSettings};
 use crate::config::{ConfigError, GitConfig, Verb};
 use crate::error::GitError;
 use crate::model::{Capabilities, LimitsReport};
@@ -25,6 +27,54 @@ use crate::verbs;
 #[derive(Debug)]
 pub struct GitTool {
     config: GitConfig,
+    /// Set when the embedder installed the commit profile. This is the one
+    /// gate: a write verb checks that it is `Some` through
+    /// [`GitTool::write_settings`], and `git info` reports the `commit`
+    /// profile from the same value. Neither reads `config.profiles()` for it,
+    /// because a clone of `WritableGitConfig::read_config()` lists `Commit`
+    /// and builds a tool with no settings.
+    #[cfg(feature = "commit")]
+    write: Option<WriteSettings>,
+}
+
+// By hand: the hook provider is not `Debug`.
+#[cfg(feature = "commit")]
+impl std::fmt::Debug for WriteSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WriteSettings")
+            .field("rewrite_policy", &self.rewrite_policy)
+            .field("hooks", &self.hooks.as_ref().map(|_| "<installed>"))
+            .field("identity", &self.identity)
+            .finish()
+    }
+}
+
+/// What [`tool`] accepts: a [`GitConfig`], or with the `commit` feature a
+/// [`crate::WritableGitConfig`]. Both convert with `.into()`; an embedder
+/// passes the config itself.
+#[derive(Debug)]
+pub struct ToolConfig {
+    read: GitConfig,
+    #[cfg(feature = "commit")]
+    write: Option<WriteSettings>,
+}
+
+impl From<GitConfig> for ToolConfig {
+    fn from(read: GitConfig) -> Self {
+        Self {
+            read,
+            #[cfg(feature = "commit")]
+            write: None,
+        }
+    }
+}
+
+#[cfg(feature = "commit")]
+impl From<WritableGitConfig> for ToolConfig {
+    fn from(config: WritableGitConfig) -> Self {
+        let (read, write) = config.into_parts();
+        Self { read, write: Some(write) }
+    }
 }
 
 /// Build a `git` tool from an embedder's config.
@@ -32,7 +82,12 @@ pub struct GitTool {
 /// Fails loudly at registration for a config that could never work, rather
 /// than at the first invocation, so an embedder finds out while wiring the
 /// kernel.
-pub fn tool(config: GitConfig) -> Result<GitTool, ConfigError> {
+pub fn tool(config: impl Into<ToolConfig>) -> Result<GitTool, ConfigError> {
+    let ToolConfig {
+        read: config,
+        #[cfg(feature = "commit")]
+        write,
+    } = config.into();
     let name = config.tool_name();
     if name.is_empty() || name.chars().any(char::is_whitespace) {
         return Err(ConfigError::UnusableToolName {
@@ -42,15 +97,43 @@ pub fn tool(config: GitConfig) -> Result<GitTool, ConfigError> {
     if config.verbs().next().is_none() {
         return Err(ConfigError::NoVerbsEnabled);
     }
-    Ok(GitTool { config })
+    Ok(GitTool {
+        config,
+        #[cfg(feature = "commit")]
+        write,
+    })
 }
 
 impl GitTool {
+    /// The write settings, if the embedder installed the commit profile.
+    ///
+    /// The only thing that may gate a write. `config.profiles()` is not that
+    /// gate: see the `write` field.
+    #[cfg(feature = "commit")]
+    #[allow(dead_code)]
+    pub(crate) fn write_settings(&self) -> Option<&WriteSettings> {
+        self.write.as_ref()
+    }
+
+    /// The profiles `git info` reports: `read`, plus `commit` only when
+    /// write settings are behind this tool.
+    fn reported_profiles(&self) -> Vec<String> {
+        self.config
+            .profiles()
+            .filter(|p| match p {
+                crate::config::Profile::Read => true,
+                #[cfg(feature = "commit")]
+                crate::config::Profile::Commit => self.write.is_some(),
+            })
+            .map(|p| p.as_str().to_string())
+            .collect()
+    }
+
     /// What this build will let the caller ask for (B.1's `capabilities`).
     fn capabilities(&self) -> Capabilities {
         let limits = self.config.limits();
         Capabilities {
-            profiles: self.config.profiles().map(|p| p.as_str().to_string()).collect(),
+            profiles: self.reported_profiles(),
             verbs: self.config.verbs().map(|v| v.as_str().to_string()).collect(),
             features: crate::enabled_features(),
             limits: LimitsReport {
@@ -2107,6 +2190,8 @@ mod tests {
         // `tool()` refuses an empty verb set, so exercise the schema builder
         // directly with a config that has every verb subtracted.
         let git = GitTool {
+            #[cfg(feature = "commit")]
+            write: None,
             config: GitConfig::read_only()
                 .without_verb(Verb::Info)
                 .without_verb(Verb::Status)

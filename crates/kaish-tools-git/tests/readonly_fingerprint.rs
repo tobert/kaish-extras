@@ -39,7 +39,7 @@ use std::sync::Arc;
 use kaish_tool_api::Tool;
 use kaish_types::{ExecResult, ToolArgs};
 
-use kaish_tools_git::{GitConfig, Verb};
+use kaish_tools_git::{GitConfig, ToolConfig, Verb};
 
 use support::{Fingerprint, RichRepo, StrictBackend, TestCtx};
 
@@ -283,34 +283,104 @@ fn tool_args(verb: &str, argv: &[&str]) -> ToolArgs {
 
 /// Run one invocation against the fixture, returning the result.
 async fn run(repo: &RichRepo, cwd: &str, verb: &str, argv: &[&str]) -> ExecResult {
+    run_with(repo, cwd, verb, argv, GitConfig::read_only().into()).await
+}
+
+/// [`run`] under an explicit config.
+async fn run_with(
+    repo: &RichRepo,
+    cwd: &str,
+    verb: &str,
+    argv: &[&str],
+    config: ToolConfig,
+) -> ExecResult {
     let backend = Arc::new(StrictBackend::single(PathBuf::from(MOUNT), repo.scratch()));
     let mut ctx = TestCtx::new(backend, cwd);
-    let git = kaish_tools_git::tool(GitConfig::read_only()).expect("read-only config builds");
+    let git = kaish_tools_git::tool(config).expect("config builds");
     git.execute(tool_args(verb, argv), &mut ctx).await
+}
+
+/// The configs the whole matrix runs under. The read-only config always; with
+/// `commit` compiled in, also a `WritableGitConfig`, because the claim is that
+/// the READ verbs stay read-only when the write profile is installed
+/// (feasibility §7, test 1).
+type MakeConfig = Box<dyn Fn() -> ToolConfig>;
+
+fn configs() -> Vec<(&'static str, MakeConfig)> {
+    #[cfg_attr(not(feature = "commit"), allow(unused_mut))]
+    let mut v: Vec<(&'static str, MakeConfig)> =
+        vec![("read-only", Box::new(|| GitConfig::read_only().into()))];
+    #[cfg(feature = "commit")]
+    v.push((
+        "commit profile",
+        Box::new(|| GitConfig::read_only().with_commit_profile().into()),
+    ));
+    v
 }
 
 /// Every invocation in the matrix, plus each verb run from a subdirectory cwd
 /// (which exercises `resolve_path` rather than `--repo`).
 async fn run_the_whole_matrix(repo: &RichRepo) {
+    for (name, make) in configs() {
+        run_the_whole_matrix_under(repo, name, &*make).await;
+    }
+}
+
+async fn run_the_whole_matrix_under(repo: &RichRepo, name: &str, make: &dyn Fn() -> ToolConfig) {
     #[cfg(feature = "textdiff")]
     for (verb, matrix) in TEXTDIFF_MATRIX {
         for argv in *matrix {
-            let result = run(repo, "/mnt/main", verb, argv).await;
-            assert_eq!(result.code, 0, "git {verb} {argv:?} failed: {}", result.err);
+            let result = run_with(repo, "/mnt/main", verb, argv, make()).await;
+            assert_eq!(result.code, 0, "[{name}] git {verb} {argv:?} failed: {}", result.err);
         }
     }
     for (verb, matrix) in VERB_MATRIX {
         for argv in *matrix {
-            let result = run(repo, "/mnt/main", verb, argv).await;
-            assert_eq!(result.code, 0, "git {verb} {argv:?} failed: {}", result.err);
+            let result = run_with(repo, "/mnt/main", verb, argv, make()).await;
+            assert_eq!(result.code, 0, "[{name}] git {verb} {argv:?} failed: {}", result.err);
         }
-        let result = run(repo, "/mnt/main/src", verb, &[]).await;
+        let result = run_with(repo, "/mnt/main/src", verb, &[], make()).await;
         assert_eq!(
             result.code, 0,
-            "git {verb} from a subdirectory failed: {}",
+            "[{name}] git {verb} from a subdirectory failed: {}",
             result.err
         );
     }
+}
+
+/// Pins the helper's list of configs, nothing more. It cannot tell whether
+/// the matrix ran under each one; every assertion the matrix makes names its
+/// `[config]`, which is what shows a row ran under the commit profile. What
+/// this catches is `configs()` losing its second entry, the one edit that
+/// would leave the matrix green over a single config.
+#[cfg(feature = "commit")]
+#[test]
+fn the_config_list_the_matrix_iterates_names_both_profiles() {
+    let names: Vec<&str> = configs().iter().map(|(n, _)| *n).collect();
+    assert_eq!(names, ["read-only", "commit profile"]);
+}
+
+/// `GitConfig::read_only()` publishes exactly these verbs and the read
+/// profile, with `commit` compiled in or not. The list is a literal, so a
+/// verb added to the read set (or to `Verb::ALL` without a decision) breaks
+/// it; comparing `cfg.verbs()` to `Verb::ALL`, as this test did, compared the
+/// constructor to the constant it is built from.
+#[test]
+fn read_only_publishes_exactly_the_read_verbs() {
+    let cfg = GitConfig::read_only();
+    let names: Vec<&str> = cfg.verbs().map(|v| v.as_str()).collect();
+    assert_eq!(
+        names,
+        ["info", "status", "log", "ls", "show", "diff", "branch", "tag", "worktree list"]
+    );
+    for verb in cfg.verbs() {
+        assert_eq!(verb.profile(), kaish_tools_git::Profile::Read, "{verb:?}");
+    }
+    assert_eq!(
+        cfg.profiles().collect::<Vec<_>>(),
+        [kaish_tools_git::Profile::Read],
+        "the read-only constructor must not carry the commit profile"
+    );
 }
 
 fn assert_unchanged(before: &Fingerprint, after: &Fingerprint, what: &str) {
