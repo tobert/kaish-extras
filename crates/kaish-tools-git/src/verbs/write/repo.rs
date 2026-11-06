@@ -112,7 +112,11 @@ impl WriteRepo {
         let root_kind = containment::root_for(rel);
         let root = match root_kind {
             Root::GitDir => self.git_dir(),
-            _ => self.common_dir(),
+            Root::CommonDir => self.common_dir(),
+            // `root_for` answers only for paths under a git directory. A
+            // work tree root coming back means that function changed; crash
+            // rather than check a path against the wrong root.
+            Root::WorkTree => unreachable!("root_for never returns the work tree"),
         };
         containment::check_beneath(
             self.read.operation(),
@@ -122,6 +126,37 @@ impl WriteRepo {
             rel,
             leaf,
         )
+    }
+
+    /// Check every file a ref move for `refname` touches, each against its
+    /// own root, and return the absolute paths checked (F7).
+    ///
+    /// A ref move is not one path. gix-ref's files backend, for a transaction
+    /// on `refs/heads/main`, takes `refs/heads/main.lock`, replaces
+    /// `refs/heads/main`, appends to `logs/refs/heads/main`, and reads (and on
+    /// a packed ref, rewrites through `packed-refs.lock`) `packed-refs`. A
+    /// symlink planted at any of them is a write primitive, and the reflog
+    /// is the one a check of the ref path alone misses. Set `also_head` when
+    /// the move also appends to `HEAD`'s reflog: a commit or branch switch
+    /// on the checked-out branch, where HEAD is symbolic. Moving `HEAD`
+    /// itself (`refname == "HEAD"`, a detach) already covers `HEAD`,
+    /// `HEAD.lock` and `logs/HEAD`.
+    ///
+    /// Each name goes through [`WriteRepo::check`], so a per-worktree name
+    /// (`refs/bisect/*`, `HEAD`, `logs/HEAD`) is checked under the
+    /// worktree's git directory and the rest under the common one.
+    pub(crate) fn check_ref_write(&self, refname: &str, also_head: bool) -> Result<Vec<PathBuf>, GitError> {
+        let mut rels = vec![
+            refname.to_string(),
+            format!("{refname}.lock"),
+            format!("logs/{refname}"),
+        ];
+        if also_head && refname != "HEAD" {
+            rels.push("logs/HEAD".to_string());
+        }
+        rels.push("packed-refs".to_string());
+        rels.push("packed-refs.lock".to_string());
+        rels.iter().map(|rel| self.check(Path::new(rel), Leaf::File)).collect()
     }
 
     /// Check a path under the work tree root (`mv`, `add`, `rm`).
@@ -137,7 +172,7 @@ impl WriteRepo {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::verbs::write::fixtures::Fixture;

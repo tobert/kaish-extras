@@ -162,6 +162,8 @@ pub(crate) struct Case {
     pub(crate) expect_path: &'static str,
     /// The root the refusal must name.
     pub(crate) expect_store: &'static str,
+    /// What the refusal must say it found there.
+    pub(crate) expect_found: &'static str,
 }
 
 fn plant_objects_ab(fx: &Fixture) {
@@ -174,6 +176,22 @@ fn plant_logs_head(fx: &Fixture) {
     let at = fx.common().join("logs/HEAD");
     std::fs::remove_file(&at).expect("main logs/HEAD exists after a commit");
     std::os::unix::fs::symlink(fx.outside.join("logs_head"), &at).expect("plant");
+}
+/// `logs/HEAD` becomes a second name for a file outside the mount. A hard
+/// link is not a symbolic link: `lstat` says "regular file", and an in-place
+/// append (gix-ref's reflog writer, `OpenOptions::append`) writes the other
+/// name's inode.
+fn plant_hardlinked_logs_head(fx: &Fixture) {
+    let at = fx.common().join("logs/HEAD");
+    std::fs::remove_file(&at).expect("main logs/HEAD exists after a commit");
+    std::fs::hard_link(fx.outside.join("logs_head"), &at).expect("hard link");
+}
+fn plant_linked_hardlinked_logs_head(fx: &Fixture) {
+    let dir = fx.linked_git_dir().join("logs");
+    std::fs::create_dir_all(&dir).expect("logs dir");
+    let at = dir.join("HEAD");
+    let _ = std::fs::remove_file(&at);
+    std::fs::hard_link(fx.outside.join("logs_head"), &at).expect("hard link");
 }
 fn plant_linked_logs_head(fx: &Fixture) {
     let dir = fx.linked_git_dir().join("logs");
@@ -190,9 +208,10 @@ pub(crate) const CASES: &[Case] = &[
         plant: plant_objects_ab,
         from_linked: false,
         rel: "objects/ab/cdef0123456789012345678901234567890a",
-        leaf: Leaf::File,
+        leaf: Leaf::Replaced,
         expect_path: "objects/ab",
         expect_store: "the common git directory",
+        expect_found: "a symbolic link",
     },
     Case {
         name: "refs/heads/sub symlinked out",
@@ -202,6 +221,7 @@ pub(crate) const CASES: &[Case] = &[
         leaf: Leaf::File,
         expect_path: "refs/heads/sub",
         expect_store: "the common git directory",
+        expect_found: "a symbolic link",
     },
     Case {
         name: "logs/HEAD symlinked out",
@@ -211,6 +231,7 @@ pub(crate) const CASES: &[Case] = &[
         leaf: Leaf::File,
         expect_path: "logs/HEAD",
         expect_store: "the git directory",
+        expect_found: "a symbolic link",
     },
     Case {
         name: "linked: refs/heads/sub in the common dir",
@@ -220,15 +241,17 @@ pub(crate) const CASES: &[Case] = &[
         leaf: Leaf::File,
         expect_path: "refs/heads/sub",
         expect_store: "the common git directory",
+        expect_found: "a symbolic link",
     },
     Case {
         name: "linked: objects/ab in the common dir",
         plant: plant_objects_ab,
         from_linked: true,
         rel: "objects/ab/cdef0123456789012345678901234567890a",
-        leaf: Leaf::File,
+        leaf: Leaf::Replaced,
         expect_path: "objects/ab",
         expect_store: "the common git directory",
+        expect_found: "a symbolic link",
     },
     Case {
         name: "linked: the worktree's own logs/HEAD",
@@ -238,5 +261,26 @@ pub(crate) const CASES: &[Case] = &[
         leaf: Leaf::File,
         expect_path: "logs/HEAD",
         expect_store: "the git directory",
+        expect_found: "a symbolic link",
+    },
+    Case {
+        name: "logs/HEAD hard-linked to an outside file",
+        plant: plant_hardlinked_logs_head,
+        from_linked: false,
+        rel: "logs/HEAD",
+        leaf: Leaf::File,
+        expect_path: "logs/HEAD",
+        expect_store: "the git directory",
+        expect_found: "a file with other hard links",
+    },
+    Case {
+        name: "linked: the worktree's logs/HEAD hard-linked out",
+        plant: plant_linked_hardlinked_logs_head,
+        from_linked: true,
+        rel: "logs/HEAD",
+        leaf: Leaf::File,
+        expect_path: "logs/HEAD",
+        expect_store: "the git directory",
+        expect_found: "a file with other hard links",
     },
 ];

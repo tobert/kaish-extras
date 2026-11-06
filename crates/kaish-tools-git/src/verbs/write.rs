@@ -16,5 +16,6 @@ pub(crate) mod containment;
 pub(crate) mod reflog;
 pub(crate) mod repo;
 
-#[cfg(test)]
+// Unix-only: the fixtures plant symbolic and hard links and run real git.
+#[cfg(all(test, unix))]
 mod fixtures;
