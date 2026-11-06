@@ -45,20 +45,22 @@ impl CurlTool {
 
             /// Request body. Repeatable; parts join with '&'. Implies POST and
             /// Content-Type: application/x-www-form-urlencoded unless -H sets one.
+            /// '@path' reads the file, removing every CR and LF byte; '@-'
+            /// (stdin) exits 2.
             #[arg(short = 'd', long, action = clap::ArgAction::Append)]
             data: Vec<String>,
 
-            /// Like --data, and sends no Content-Type of its own.
+            /// Like --data, and '@path' keeps every byte of the file.
             #[arg(long, action = clap::ArgAction::Append)]
             data_binary: Vec<String>,
 
-            /// Like --data, with '@' literal rather than a file read, and no
-            /// Content-Type of its own.
+            /// Like --data, with '@' literal rather than a file read.
             #[arg(long, action = clap::ArgAction::Append)]
             data_raw: Vec<String>,
 
-            /// Send 'name=value' as a body part, percent-encoding only the value.
-            /// Repeatable.
+            /// Send a body part percent-encoded (space as '+'). Forms: 'content',
+            /// '=content', 'name=content' (only the content is encoded), '@path'
+            /// and 'name@path' (encode the file's bytes). Repeatable.
             #[arg(long, action = clap::ArgAction::Append)]
             data_urlencode: Vec<String>,
 
@@ -203,6 +205,15 @@ impl Tool for CurlTool {
             Ok(req) => req,
             Err(err) => return failure(err),
         };
+
+        // Read the files the command line names (`-d @file`, ...) through the
+        // VFS, inside the byte budget, before any request is made.
+        let mut req = req;
+        if let Err(err) =
+            crate::input::prepare(&mut req, &*ctx, self.config.limits().max_response_bytes).await
+        {
+            return failure(err);
+        }
 
         let output_file = req.output_file.clone();
         let render = Render {

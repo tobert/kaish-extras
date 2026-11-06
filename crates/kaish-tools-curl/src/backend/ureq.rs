@@ -173,11 +173,7 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
     // the string ureq resolves — no parser sitting between the two.
     strip_userinfo(&mut current);
 
-    let body_bytes: Vec<u8> = if req.bodies.is_empty() {
-        Vec::new()
-    } else {
-        req.bodies.join("&").into_bytes()
-    };
+    let body_bytes: &[u8] = &req.body;
 
     let started = std::time::Instant::now();
     let start_host = current.host_str().map(str::to_string);
@@ -238,7 +234,7 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
         }
 
         let http_req = builder
-            .body(body_bytes.clone())
+            .body(body_bytes.to_vec())
             .map_err(|e| CurlError::MalformedUrl {
                 url: current.to_string(),
                 reason: format!("could not build request: {e}"),

@@ -1290,9 +1290,12 @@ reference only; they no longer block work.
 - **CU16 — `--json` collision.** DECIDED: kaish convention wins. Curl request-body
   `--json` refused with literate error. Document false-negative honestly.
 - **CU17 — `--data-urlencode` grammar.** DECIDED: encode only the value after
-  first `=`. `@filename` and `name@filename` forms deferred to CU5.
+  first `=`. `@filename` and `name@filename` landed 2026-11-06, with curl's
+  grammar and its `+` for a space (docs/curl.md).
 - **CU18 — `-d` stripping and `-i`+`-o`.** DECIDED: match curl for `-i`+`-o`
-  (headers go into the file). Diverge on `-d` (no newline stripping); documented.
+  (headers go into the file). The `-d` divergence is gone as of 2026-11-06:
+  `-d @file` strips every CR and LF like curl, and inline `-d` text is sent
+  as typed, which is what curl does too.
 - **CU19 — delete xhr stub.** DECIDED: carry `compile_error!` on wasm until
   the backend is real. No dual representation.
 - **CU20 — agent ergonomics.** Three rulings implemented:
@@ -1330,6 +1333,16 @@ standalone before being written down.
   of touch; there is no bulk pass.
 
 ## curl — the embedder boundary, still open
+
+- **CU47 — stdin as a request body (`-d @-`, `--data-binary @-`,
+  `--data-urlencode @-`, `-T -`).** `ToolCtx` (kaish-tool-api 0.18.1) has no
+  stdin accessor. The kernel's `ExecContext` has one, reachable only by
+  downcasting through `as_any_mut`, which needs a `kaish-kernel` dependency
+  that this crate must never take (the honest-embedder rule). All four forms
+  exit 2 with the file form named. **Needs a kaish PR**, e.g. a
+  `ToolCtx::read_stdin(limit) -> Result<Vec<u8>>` that honors the pipe's byte
+  budget. Question for Amy: the PR's shape (bytes vs. a reader; who owns the
+  budget). A bare `-` after `-d` is the literal body `-`, as in curl.
 
 - **CU46b — proxy and custom TLS roots.** `CurlConfig` gained injected headers
   on 2026-08-20; the other two the review asked for did not land. An embedder

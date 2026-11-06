@@ -135,7 +135,7 @@ async fn data_urlencode_percent_encodes_only_the_value() {
 
     let req = server.last_request().expect("request received");
     assert_eq!(req.method, "POST");
-    assert_eq!(req.body_str(), "q=a%20b%26c");
+    assert_eq!(req.body_str(), "q=a+b%26c");
 }
 
 #[tokio::test]

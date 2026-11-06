@@ -72,10 +72,10 @@ the last positional unless `--url` is used.
 | `<url>` (positional) | The URL to fetch. Required. | One URL only (curl takes many). |
 | `--url <url>` | Same as the positional. | None. |
 | `-X, --request <method>` | HTTP method. | None. |
-| `-d, --data <data>` | Body, `Content-Type: application/x-www-form-urlencoded` unless overridden, implies POST. Repeatable, joined with `&`. `@path` is refused, naming `-d "$(cat <path>)"` as the form that works. | `@path` file reads are deferred (CU5). Real curl strips trailing CR/LF from `-d` bodies; this build does not. |
-| `--data-binary <data>` | Like `-d`, and no Content-Type is implied — real curl sends none for this form either. | `@path` file reads are deferred (CU5). `--data-binary -` (stdin) is refused with exit 2; real curl would send the literal `-`. |
-| `--data-raw <data>` | Like `-d`, `@` is literal, and no Content-Type is implied. | None. |
-| `--data-urlencode <data>` | Accepts `name=value`; encodes only `value`, not the name or `=` separator. | Real curl also supports `@filename` and `name@filename` forms (deferred). |
+| `-d, --data <data>` | Body, `Content-Type: application/x-www-form-urlencoded` unless overridden, implies POST. Repeatable, joined with `&`. `@path` reads the file through the shell's filesystem (`ToolCtx::resolve_path` + `backend().read()`, never the host) and removes **every** CR and LF byte from it, as curl does. A file that cannot be read is exit 26 with no request. A body file over `Limits::max_response_bytes` (checked by `stat` before the read, and again on the joined body) is exit 1 with no request. | `@-` (stdin) is refused with exit 2: `ToolCtx` has no stdin (docs/issues.md CU47). A bare `-` is the literal body `-`, as in curl. |
+| `--data-binary <data>` | Like `-d`, and `@path` keeps every byte of the file. The Content-Type is the same form type as `-d`: curl 8.23 sends it for this flag too (an earlier version of this table said it did not; the oracle test in `tests/features.rs` disproves that). | `@-` (stdin) is refused like `-d @-`. A bare `-` is the literal body `-`, as in curl. |
+| `--data-raw <data>` | Like `-d` with `@` literal: `--data-raw @f` sends the four characters `@f`. Same form Content-Type. | None. |
+| `--data-urlencode <data>` | curl's grammar: `content`, `=content`, `name=content`, `@path`, `name@path`. The first `=` or `@` decides. Only the content is percent-encoded (a space is `+`, as in curl) and the name is sent as typed. The file forms encode the file's bytes, newlines included (`%0A`). | `@-` (stdin) is refused like `-d @-`. |
 | `-H, --header <h:v>` | Request header. Repeatable. | None. |
 | `-i, --include` | Print response headers above the body, starting with `HTTP/1.1 <code> <reason>` (the standard phrase for the code). With `-o <file>`, writes headers **into the file** alongside the body, matching curl's behavior. | None. |
 | `-I, --head` | HEAD; print headers only. | None. |
@@ -207,7 +207,8 @@ the rest to 1. State the number so an agent can branch on it.
 | Code | Cause |
 |---|---|
 | 0 | Success (any HTTP status unless `--fail`). |
-| 2 | A flag combination refused before any request: `--data-binary -` (stdin bodies are not supported). |
+| 2 | A flag combination refused before any request: `-d @-` and the other stdin forms (not supported). |
+| 26 | A file named by `-d @path` and its relatives could not be read (missing, a directory, unreadable). No request was sent. |
 | 6 | Host not found. |
 | 7 | Could not connect — **and** URL malformed (bad scheme, bad syntax). curl uses 3 for a malformed URL; kaish's kernel reserves 3, so this build maps malformed URLs here with an error naming the real cause (CU11). |
 | 22 | `--fail` or `--fail-with-body` and HTTP status >= 400. |

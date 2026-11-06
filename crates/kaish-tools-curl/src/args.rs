@@ -101,8 +101,12 @@ const DEFAULT_USER_AGENT: &str = "kaish-curl";
 pub struct Request {
     pub url: String,
     pub method: String,
-    /// Body parts, joined with `&` by the backend.
-    pub bodies: Vec<String>,
+    /// Body parts, joined with `&`. Files in them are read by `input::prepare`
+    /// (the parser has no filesystem), which fills [`Request::body`].
+    pub bodies: Vec<BodyPart>,
+    /// The request body as it goes on the wire. Empty until `input::prepare`
+    /// has resolved `bodies`; the backend sends this and nothing else.
+    pub body: Vec<u8>,
     /// Header name/value pairs, including the `User-Agent` (the caller's or
     /// [`DEFAULT_USER_AGENT`]) and any `Referer` from `-e`.
     pub headers: Vec<(String, String)>,
@@ -151,6 +155,29 @@ pub struct Request {
     pub json_output: bool,
 }
 
+/// One `-d`-family body part, before any file is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyPart {
+    /// Text to send as it stands (already percent-encoded for
+    /// `--data-urlencode`).
+    Literal(String),
+    /// `-d @path` or `--data-binary @path`.
+    File {
+        /// The path as typed, resolved against the shell's cwd.
+        path: String,
+        /// `-d` removes every CR and LF byte; `--data-binary` keeps them.
+        strip_line_breaks: bool,
+    },
+    /// `--data-urlencode @path` or `name@path`: the file's bytes,
+    /// percent-encoded.
+    EncodedFile {
+        /// Sent before the `=` when given.
+        name: Option<String>,
+        /// The path as typed.
+        path: String,
+    },
+}
+
 /// Short flags that carry no value, and can therefore be written together.
 ///
 /// Refused shorts are here too, so `-kL` refuses `-k` rather than reporting
@@ -197,7 +224,7 @@ fn split_inline_value(token: &str) -> (&str, Option<&str>) {
 pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlError> {
     let mut argv = trim_argv(args)?;
 
-    let mut bodies: Vec<String> = Vec::new();
+    let mut bodies: Vec<BodyPart> = Vec::new();
     let mut headers: Vec<(String, String)> = Vec::new();
     let mut output_file: Option<String> = None;
     let mut user: Option<String> = None;
@@ -219,10 +246,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let mut unix_socket: Option<String> = None;
     let mut json_output = false;
 
-    // Only `-d`/`--data`/`--data-urlencode` imply a form Content-Type; real
-    // curl sends none for `--data-binary`/`--data-raw`, so declaring
-    // `--data-binary '{"a":1}'` as form-urlencoded was a lie about the bytes
-    // on the wire (CU40).
+    // Every `-d`-family flag implies the form Content-Type, as in curl.
     let mut body_implies_form = false;
 
     let mut i = 0;
@@ -252,37 +276,18 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
 
         match argv[i].as_str().split('=').next().unwrap_or(&argv[i]) {
             "-d" | "--data" | "--data-binary" | "--data-raw" => {
-                let raw = argv_flag == "--data-raw";
                 let val = value(&mut i)?;
-                // `--data-raw` takes `@` literally; the others would read a
-                // file, which is deferred (CU5).
-                if !raw && val.starts_with('@') {
-                    return Err(CurlError::Transport(
-                        "'@path' body syntax is not supported, and no request was sent. Read the file in the shell instead: curl -d \"$(cat <path>)\" <url>"
-                            .into(),
-                    ));
-                }
-                if argv_flag == "--data-binary" && val == "-" {
-                    return Err(CurlError::Usage(
-                        "'--data-binary -' is refused (exit 2), because this build cannot read a request body from stdin and would send the one character '-'. No request was sent. Read the file in the shell instead: curl -d \"$(cat <path>)\" <url>"
-                            .into(),
-                    ));
-                }
-                if matches!(argv_flag.as_str(), "-d" | "--data") {
-                    body_implies_form = true;
-                }
-                bodies.push(val);
+                // curl sends the form Content-Type for every one of these, the
+                // `--data-binary` and `--data-raw` spellings included (checked
+                // against curl 8.23 on a loopback server; CU40 had assumed it
+                // did not).
+                body_implies_form = true;
+                bodies.push(data_part(&argv_flag, val)?);
             }
             "--data-urlencode" => {
                 let val = value(&mut i)?;
-                if val.starts_with('@') || (val.contains('@') && !val.contains('=')) {
-                    return Err(CurlError::Transport(
-                        "'--data-urlencode' file forms ('@file', 'name@file') are not supported. Pass 'name=value' instead."
-                            .into(),
-                    ));
-                }
                 body_implies_form = true;
-                bodies.push(urlencode_pair(&val));
+                bodies.push(urlencode_part(&val)?);
             }
             "-H" | "--header" => {
                 let hv = value(&mut i)?;
@@ -450,6 +455,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         url,
         method,
         bodies,
+        body: Vec::new(),
         headers,
         include_headers,
         head_only,
@@ -492,24 +498,67 @@ fn seconds(raw: &str, flag: &str) -> Result<f64, CurlError> {
         })
 }
 
-/// Percent-encode the value half of a `name=value` pair, leaving the name and
-/// the `=` alone (docs/curl.md's `--data-urlencode` row). A bare value with no
-/// `=` is encoded whole, as curl does.
-fn urlencode_pair(raw: &str) -> String {
-    match raw.split_once('=') {
-        Some((name, value)) => format!("{name}={}", percent_encode(value)),
-        None => percent_encode(raw),
-    }
+/// What `-d`, `--data`, `--data-binary` and `--data-raw` take as a value.
+///
+/// A leading `@` names a file, except under `--data-raw`. `-d` strips every CR
+/// and LF from the file; `--data-binary` keeps the bytes. A bare `-` is the
+/// one-character body `-` in curl, so it is one here.
+fn data_part(flag: &str, val: String) -> Result<BodyPart, CurlError> {
+    let Some(path) = val.strip_prefix('@').filter(|_| flag != "--data-raw") else {
+        return Ok(BodyPart::Literal(val));
+    };
+    refuse_stdin(path, flag)?;
+    Ok(BodyPart::File {
+        path: path.to_string(),
+        strip_line_breaks: flag != "--data-binary",
+    })
 }
 
-/// Percent-encode everything outside RFC 3986's unreserved set.
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
+/// `--data-urlencode`, in curl's grammar: `content`, `=content`,
+/// `name=content`, `@file`, `name@file`. The first `=` or `@` decides which.
+/// The name is sent as typed, so it has to be encoded already.
+fn urlencode_part(raw: &str) -> Result<BodyPart, CurlError> {
+    let Some(at) = raw.find(['=', '@']) else {
+        return Ok(BodyPart::Literal(percent_encode(raw)));
+    };
+    let (name, rest) = (&raw[..at], &raw[at + 1..]);
+    let name = (!name.is_empty()).then(|| name.to_string());
+    if raw.as_bytes()[at] == b'@' {
+        refuse_stdin(rest, "--data-urlencode")?;
+        return Ok(BodyPart::EncodedFile { name, path: rest.to_string() });
+    }
+    let encoded = percent_encode(rest);
+    Ok(BodyPart::Literal(match name {
+        Some(n) => format!("{n}={encoded}"),
+        None => encoded,
+    }))
+}
+
+/// A file operand of `-`, as in `-d @-`, means stdin in curl. A tool cannot
+/// read its stdin through `ToolCtx` (kaish-tool-api 0.18), so refuse it
+/// rather than read nothing and send an empty body.
+pub(crate) fn refuse_stdin(path: &str, flag: &str) -> Result<(), CurlError> {
+    if path == "-" {
+        return Err(CurlError::Usage(format!(
+            "'{flag} @-' (a request body from stdin) is not supported, and no request was sent. \
+             Write the input to a file first and name it: curl {flag} @<path> <url>"
+        )));
+    }
+    Ok(())
+}
+
+/// Percent-encode everything outside RFC 3986's unreserved set, with a space
+/// as `+`. That is curl's `--data-urlencode` form (checked against curl 8.23),
+/// and the one a form-urlencoded body expects.
+pub(crate) fn percent_encode(s: impl AsRef<[u8]>) -> String {
+    let bytes = s.as_ref();
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(b as char)
             }
+            b' ' => out.push('+'),
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -627,7 +676,7 @@ mod tests {
     #[test]
     fn data_urlencode_encodes_only_the_value() {
         let req = parse(&["--data-urlencode", "q=a b&c", "http://x.com"]);
-        assert_eq!(req.bodies, vec!["q=a%20b%26c".to_string()]);
+        assert_eq!(req.bodies, vec![BodyPart::Literal("q=a+b%26c".to_string())]);
         assert_eq!(req.method, "POST");
     }
 
@@ -642,10 +691,16 @@ mod tests {
     }
 
     #[test]
-    fn at_file_body_is_refused_not_silently_dropped() {
-        let err = parse_args(&argv(&["-d", "@/etc/passwd", "http://x.com"]), &CurlConfig::default())
-            .expect_err("@file bodies are deferred and must refuse");
-        assert!(format!("{err}").contains("@path"), "message should name the syntax: {err}");
+    fn at_file_body_is_a_file_part_not_text() {
+        let req = parse(&["-d", "@/work/p", "--data-binary", "@q", "--data-raw", "@r", "http://x.com"]);
+        assert_eq!(
+            req.bodies,
+            vec![
+                BodyPart::File { path: "/work/p".into(), strip_line_breaks: true },
+                BodyPart::File { path: "q".into(), strip_line_breaks: false },
+                BodyPart::Literal("@r".into()),
+            ]
+        );
     }
 
     #[test]
@@ -703,11 +758,11 @@ mod tests {
         // The old pre-scan swept all of argv for booleans, so `-d "-i"` set
         // --include and `-d "-O"` refused a flag nobody typed.
         let req = parse(&["-d", "-i", "http://x.com"]);
-        assert_eq!(req.bodies, vec!["-i".to_string()]);
+        assert_eq!(req.bodies, vec![BodyPart::Literal("-i".to_string())]);
         assert!(!req.include_headers, "a body must not set a flag");
 
         let req = parse(&["-d", "-O", "http://x.com"]);
-        assert_eq!(req.bodies, vec!["-O".to_string()]);
+        assert_eq!(req.bodies, vec![BodyPart::Literal("-O".to_string())]);
 
         // and a value beginning with `-` no longer desyncs the URL search
         let req = parse(&["-d", "-5", "http://x.com"]);
@@ -725,20 +780,15 @@ mod tests {
     }
 
     #[test]
-    fn only_the_form_body_flags_imply_a_form_content_type() {
-        // Real curl sends no Content-Type for --data-binary/--data-raw.
-        assert_eq!(
-            header(&parse(&["--data-binary", "{\"a\":1}", "http://x.com"]), "content-type"),
-            None
-        );
-        assert_eq!(
-            header(&parse(&["--data-raw", "x", "http://x.com"]), "content-type"),
-            None
-        );
-        assert_eq!(
-            header(&parse(&["-d", "a=1", "http://x.com"]), "content-type"),
-            Some("application/x-www-form-urlencoded")
-        );
+    fn every_data_flag_implies_the_form_content_type_like_curl() {
+        // Checked against curl 8.23: --data-binary and --data-raw send it too.
+        for flag in ["-d", "--data", "--data-binary", "--data-raw", "--data-urlencode"] {
+            assert_eq!(
+                header(&parse(&[flag, "a=1", "http://x.com"]), "content-type"),
+                Some("application/x-www-form-urlencoded"),
+                "{flag}"
+            );
+        }
     }
 
     #[test]
@@ -773,7 +823,7 @@ mod tests {
         // `-iL` here is a body. Expanding argv up front could not tell the
         // difference; expanding at flag position can.
         let req = parse(&["-d", "-iL", "http://x.com"]);
-        assert_eq!(req.bodies, vec!["-iL".to_string()]);
+        assert_eq!(req.bodies, vec![BodyPart::Literal("-iL".to_string())]);
         assert!(!req.include_headers);
         assert!(!req.follow_redirects);
     }

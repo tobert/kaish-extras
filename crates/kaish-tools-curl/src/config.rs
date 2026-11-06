@@ -242,8 +242,9 @@ pub struct Limits {
     /// `--max-redirs` default (50) is exactly this value until an
     /// invocation asks for fewer.
     pub max_redirects: u32,
-    /// Hard ceiling, in bytes, on a response body read into memory for a
-    /// stdout render. docs/curl.md ties this to "the kernel's output cap"
+    /// Hard ceiling, in bytes, on a request body assembled from `-d @file`
+    /// style files (each file and the joined body), and on a response body
+    /// read into memory for a stdout render. docs/curl.md ties this to "the kernel's output cap"
     /// (`ureq`'s own 10 MB `read_to_string` default, lowered) — this crate
     /// does not depend on `kaish-kernel`, so it cannot read that cap
     /// directly, and the embedder is expected to set this field to match

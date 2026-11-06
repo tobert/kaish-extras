@@ -115,3 +115,7 @@ path = "tests/kaish_behavior_canary.rs"
 [[test]]
 name = "compat"
 path = "tests/compat.rs"
+
+[[test]]
+name = "features"
+path = "tests/features.rs"

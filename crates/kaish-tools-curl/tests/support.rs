@@ -961,3 +961,132 @@ pub async fn curl_with_backend(
     let tool = kaish_tools_curl::tool(config);
     tool.execute(args, &mut ctx).await
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A real kernel over an in-memory filesystem, with real curl as the oracle
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A kernel whose filesystem the test can seed and read back, with curl
+/// registered under `config`. The cwd is `/work`.
+///
+/// The seed bytes are written through the kernel's own filesystem trait, so
+/// binary content (a NUL, a lone `0xff`) reaches the tool exactly, which a
+/// shell `printf` cannot promise.
+pub struct Fixture {
+    pub kernel: kaish_kernel::Kernel,
+    vfs: Arc<kaish_kernel::vfs::VfsRouter>,
+}
+
+impl Fixture {
+    pub async fn new(config: CurlConfig, files: &[(&str, &[u8])]) -> Self {
+        use kaish_kernel::vfs::{Filesystem, MemoryFs, VfsRouter};
+        use kaish_kernel::{Kernel, KernelConfig, LocalBackend};
+
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        let vfs = Arc::new(vfs);
+        for dir in ["/work", "/tmp"] {
+            vfs.mkdir(Path::new(dir)).await.expect("mkdir");
+        }
+        for (name, bytes) in files {
+            let path = Path::new("/work").join(name);
+            if let Some(parent) = path.parent() {
+                // `mkdir` on an existing directory is the only error to
+                // tolerate here; anything else is a broken fixture.
+                if let Err(e) = vfs.mkdir(parent).await {
+                    assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "mkdir {parent:?}: {e}");
+                }
+            }
+            vfs.write(&path, bytes).await.expect("seed file");
+        }
+        let backend: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::clone(&vfs)));
+        let mut cfg = KernelConfig::transient();
+        cfg.cwd = PathBuf::from("/work");
+        let curl = kaish_tools_curl::tool(config);
+        let kernel = Kernel::with_backend(backend, cfg, |_| {}, |tools| tools.register(curl))
+            .expect("kernel assembles");
+        Self { kernel, vfs }
+    }
+
+    /// Run a script; `$URL` stands for the server base (no trailing slash).
+    pub async fn run(&self, base: &str, script: &str) -> ExecResult {
+        let script = format!("URL='{}'\n{script}", base.trim_end_matches('/'));
+        self.kernel
+            .execute(&script)
+            .await
+            .unwrap_or_else(|e| panic!("kernel failed to execute {script:?}: {e}"))
+    }
+
+    /// The bytes at `name` under `/work` (or an absolute path), if present.
+    pub async fn file(&self, name: &str) -> Option<Vec<u8>> {
+        use kaish_kernel::vfs::Filesystem;
+        self.vfs.read(&Path::new("/work").join(name)).await.ok()
+    }
+}
+
+/// What real curl did with `args`, run in a scratch directory seeded with
+/// `files`: exit code, stdout, stderr, and the files it left behind.
+#[derive(Debug)]
+pub struct Oracle {
+    pub code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+    dir: tempfile::TempDir,
+}
+
+impl Oracle {
+    /// `None` when no curl is installed (the case still runs its own
+    /// assertions).
+    pub fn run(base: &str, args: &str, files: &[(&str, &[u8])]) -> Option<Self> {
+        let dir = tempfile::tempdir().ok()?;
+        for (name, bytes) in files {
+            let path = dir.path().join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok()?;
+            }
+            std::fs::write(path, bytes).ok()?;
+        }
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("URL='{}'; curl {args}", base.trim_end_matches('/')))
+            .current_dir(dir.path())
+            .output()
+            .ok()?;
+        Some(Self {
+            code: out.status.code()?,
+            stdout: out.stdout,
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            dir,
+        })
+    }
+
+    /// A file curl wrote.
+    pub fn file(&self, name: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.dir.path().join(name)).ok()
+    }
+}
+
+/// The parts of a request that must be the same whoever sent it: not the
+/// `User-Agent`, `Accept`, or `Host`, which differ by design.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Wire {
+    pub method: String,
+    pub path: String,
+    pub content_type: Option<String>,
+    pub content_length: Option<String>,
+    pub range: Option<String>,
+    pub body: Vec<u8>,
+}
+
+impl Wire {
+    pub fn of(req: &CapturedRequest) -> Self {
+        Self {
+            method: req.method.clone(),
+            path: req.path.clone(),
+            content_type: req.header("Content-Type").map(str::to_string),
+            content_length: req.header("Content-Length").map(str::to_string),
+            range: req.header("Range").map(str::to_string),
+            body: req.body.clone(),
+        }
+    }
+}
