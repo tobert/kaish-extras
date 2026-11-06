@@ -1153,3 +1153,14 @@ async fn every_refusal_ends_its_stderr_in_a_newline() {
         assert!(r.err.ends_with('\n'), "{name}: stderr must end in a newline: {:?}", r.err);
     }
 }
+
+#[tokio::test]
+async fn a_dashed_word_after_the_marker_is_a_pattern_for_branch_and_tag() {
+    let (_f, root) = repo();
+    for verb in ["branch", "tag"] {
+        let r = run(&root, &format!("git {verb} --list -- --all")).await;
+        assert_eq!(r.code, 0, "{verb}: {}", r.err);
+        assert!(r.err.contains("'--all' after '--' was read as a pattern"), "{verb}: {}", r.err);
+        assert!(!r.err.contains("read as a path"), "{verb}: {}", r.err);
+    }
+}

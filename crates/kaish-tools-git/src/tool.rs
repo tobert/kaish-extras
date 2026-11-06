@@ -1505,8 +1505,10 @@ fn dashed_pathspec_note(verb: &str, leaf: &[String]) -> Option<String> {
         return None;
     }
     let names = dashed.iter().map(|w| format!("'{w}'")).collect::<Vec<_>>().join(", ");
+    // `branch` and `tag` take a name pattern where the other verbs take a path.
+    let kind = if matches!(verb, "branch" | "tag") { "pattern" } else { "path" };
     Some(format!(
-        "git {verb}: {names} after '--' was read as a path, as git reads it. Write flags before '--'"
+        "git {verb}: {names} after '--' was read as a {kind}, as git reads it. Write flags before '--'"
     ))
 }
 
