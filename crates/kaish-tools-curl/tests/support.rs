@@ -1034,10 +1034,40 @@ pub struct Oracle {
     dir: tempfile::TempDir,
 }
 
+/// Whether real curl can serve as the oracle. A box without curl skips the
+/// comparison and runs the literal assertions; a gate that sets
+/// `KAISH_REQUIRE_CURL_ORACLE` (CI does) turns that skip into a panic, because
+/// a green run that compared nothing proves less than it appears to.
+pub fn oracle_available() -> bool {
+    let present = std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let required = std::env::var_os("KAISH_REQUIRE_CURL_ORACLE")
+        .is_some_and(|v| !v.is_empty() && v != "0");
+    oracle_policy(present, required)
+}
+
+/// The decision, apart from the environment: `present` curl is usable;
+/// absent, it is a skip, or a panic when `required`.
+pub fn oracle_policy(present: bool, required: bool) -> bool {
+    if !present && required {
+        panic!(
+            "KAISH_REQUIRE_CURL_ORACLE is set and no `curl` runs here: the tests that compare \
+             against real curl would silently skip. Install curl, or unset the variable"
+        );
+    }
+    present
+}
+
 impl Oracle {
     /// `None` when no curl is installed (the case still runs its own
-    /// assertions).
+    /// assertions), or a panic when `KAISH_REQUIRE_CURL_ORACLE` is set.
     pub fn run(base: &str, args: &str, files: &[(&str, &[u8])]) -> Option<Self> {
+        if !oracle_available() {
+            return None;
+        }
         let dir = tempfile::tempdir().ok()?;
         for (name, bytes) in files {
             let path = dir.path().join(name);

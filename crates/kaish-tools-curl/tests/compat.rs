@@ -55,6 +55,9 @@ async fn run_at(server: &TcpGuard, script: &str) -> ExecResult {
 /// `None` when no curl is installed, so the case still runs its own
 /// assertions.
 fn oracle(server: &TcpGuard, args: &str) -> Option<(String, i32)> {
+    if !support::oracle_available() {
+        return None;
+    }
     let base = server.url("");
     let out = Command::new("bash")
         .arg("-c")
@@ -73,7 +76,8 @@ fn api() -> TcpGuard {
         .route("/status/404", Response::json(404, "{\"error\":\"status 404\"}\n"))
         .route(
             "/teapot",
-            Response::text(418, "short and stout\n").reason("I'm a teapot"),
+            // Not the standard phrase for 418: the server's own words.
+            Response::text(418, "short and stout\n").reason("Short And Stout"),
         )
         .route("/go", Response::redirect(302, "/text"))
         .start_tcp()
@@ -206,9 +210,13 @@ async fn include_prints_the_status_line_with_its_reason_phrase() {
     if let Some((stdout, _)) = oracle(&server, "-i -s \"$URL/status/404\"") {
         assert_eq!(first_line(&stdout), "HTTP/1.1 404 Not Found");
     }
+    // The phrase is the one place `-i` cannot echo the server: ureq drops it
+    // while parsing the status line, so this build prints the standard phrase
+    // for the code (docs/curl.md, `-i`). Real curl prints the server's.
+    let ours = run_at(&server, "curl -i \"$URL/teapot\"").await;
+    assert_eq!(first_line(&ours.text_out()), "HTTP/1.1 418 I'm a teapot");
     if let Some((stdout, _)) = oracle(&server, "-i -s \"$URL/teapot\"") {
-        let ours = run_at(&server, "curl -i \"$URL/teapot\"").await;
-        assert_eq!(first_line(&ours.text_out()), first_line(&stdout));
+        assert_eq!(first_line(&stdout), "HTTP/1.1 418 Short And Stout", "the oracle echoes the server");
     }
 }
 

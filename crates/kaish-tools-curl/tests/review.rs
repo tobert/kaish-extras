@@ -484,3 +484,17 @@ async fn write_out_backslash_pairs_match_curl() {
     let p = compare(&server, "-s -o /dev/null -w '\\%{http_code}|\\\\n|\\q\\n' \"$URL/echo\"", &[]).await;
     assert_eq!(p.ours.text_out(), "\\%{http_code}|\\\\n|\\q\n");
 }
+
+// ── 16. A gate with curl must not skip the comparison ───────────────────
+
+#[test]
+fn a_missing_curl_is_a_skip_unless_the_gate_requires_it() {
+    assert!(support::oracle_policy(true, true) && support::oracle_policy(true, false));
+    assert!(!support::oracle_policy(false, false), "no curl, not required: skip");
+}
+
+#[test]
+#[should_panic(expected = "KAISH_REQUIRE_CURL_ORACLE")]
+fn a_missing_curl_panics_where_the_gate_requires_it() {
+    support::oracle_policy(false, true);
+}
