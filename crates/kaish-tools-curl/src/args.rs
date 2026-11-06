@@ -46,6 +46,7 @@ pub(crate) const HONORED_FLAGS: &[&str] = &[
     "--data-binary",
     "--data-raw",
     "--data-urlencode",
+    "--form",
     "--get",
     "--header",
     "--include",
@@ -72,8 +73,6 @@ pub(crate) const HONORED_FLAGS: &[&str] = &[
 pub(crate) const REFUSED_FLAGS: &[(&str, &str)] = &[
     ("-O", "'-O' is not supported. Use '-o <file>' for an explicit output path."),
     ("--compressed", "'--compressed' is not supported. Responses are decompressed already — drop the flag."),
-    ("--form", "'--form' (multipart) is not supported, and no request was sent. '--data' cannot send a file, so it is not a substitute. For a text file, build the multipart body in the shell: curl -H 'Content-Type: multipart/form-data; boundary=XXXX' --data-binary \"$(printf -- '--XXXX\\r\\nContent-Disposition: form-data; name=\"file\"; filename=\"upload.txt\"\\r\\n\\r\\n%s\\r\\n--XXXX--\\r\\n' \"$(cat upload.txt)\")\" <url>. A binary file cannot be sent this way."),
-    ("-F", "'-F' (multipart) is not supported, and no request was sent. '--data' cannot send a file, so it is not a substitute. For a text file, build the multipart body in the shell: curl -H 'Content-Type: multipart/form-data; boundary=XXXX' --data-binary \"$(printf -- '--XXXX\\r\\nContent-Disposition: form-data; name=\"file\"; filename=\"upload.txt\"\\r\\n\\r\\n%s\\r\\n--XXXX--\\r\\n' \"$(cat upload.txt)\")\" <url>. A binary file cannot be sent this way."),
     ("--cookie", "'--cookie' is not supported. Send cookies with '-H Cookie:<value>'."),
     ("-b", "'-b' is not supported. Send cookies with '-H Cookie:<value>'."),
     ("--verbose", "'--verbose' is not supported, and no request was sent. This build prints no request or connection trace. Use 'curl -i <url>' to print the response headers above the body. The request headers are the ones you set with '-H' plus 'User-Agent: kaish-curl'."),
@@ -108,6 +107,8 @@ pub struct Request {
     pub body: Vec<u8>,
     /// `-G`: `bodies` go on the query string instead of in a body.
     pub get: bool,
+    /// `-F` parts, in order. Files in them are read by `input::prepare`.
+    pub forms: Vec<crate::form::FormPart>,
     /// Header name/value pairs, including the `User-Agent` (the caller's or
     /// [`DEFAULT_USER_AGENT`]) and any `Referer` from `-e`.
     pub headers: Vec<(String, String)>,
@@ -256,6 +257,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let mut unix_socket: Option<String> = None;
     let mut json_output = false;
     let mut get = false;
+    let mut forms: Vec<crate::form::FormPart> = Vec::new();
 
     // Every `-d`-family flag implies the form Content-Type, as in curl.
     let mut body_implies_form = false;
@@ -329,6 +331,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             }
             "-A" | "--user-agent" => user_agent = Some(value(&mut i)?),
             "-e" | "--referer" => referer = Some(value(&mut i)?),
+            "-F" | "--form" => forms.push(crate::form::parse(&value(&mut i)?)?),
             "-G" | "--get" => get = true,
             "-i" | "--include" => include_headers = true,
             // curl's `-s` also silences *error* messages; this build always
@@ -431,6 +434,24 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         ));
     }
 
+    if !forms.is_empty() {
+        // curl refuses these mixes too (exit 2).
+        let with = if !bodies.is_empty() {
+            Some("a data flag ('-d', '--data-binary', '--data-raw', '--data-urlencode')")
+        } else if get {
+            Some("'-G'")
+        } else if head_only {
+            Some("'-I'")
+        } else {
+            None
+        };
+        if let Some(with) = with {
+            return Err(CurlError::Usage(format!(
+                "'-F' cannot be combined with {with} (exit 2), and no request was sent. A request has one body: multipart from '-F', or the data flags."
+            )));
+        }
+    }
+
     if head_only && !get && !bodies.is_empty() {
         return Err(CurlError::MalformedUrl {
             url: url.clone(),
@@ -460,7 +481,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let method = match method_override {
         Some(m) => m,
         None if head_only => "HEAD".to_string(),
-        None if !bodies.is_empty() && !get => "POST".to_string(),
+        None if (!bodies.is_empty() && !get) || !forms.is_empty() => "POST".to_string(),
         None => "GET".to_string(),
     };
 
@@ -470,6 +491,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         bodies,
         body: Vec::new(),
         get,
+        forms,
         headers,
         include_headers,
         head_only,
@@ -870,7 +892,7 @@ mod tests {
     #[test]
     fn a_refused_flag_names_itself_and_the_way_forward() {
         // Both kinds of refusal: out of the 80/20 cut, and gated by config.
-        for flag in ["-O", "--form", "--proxy"] {
+        for flag in ["--cert", "--retry", "--proxy"] {
             let err = parse_args(&argv(&[flag, "http://x.com"]), &CurlConfig::default())
                 .expect_err("must refuse a flag outside the cut");
             assert!(format!("{err}").contains(flag), "message should name {flag}: {err}");

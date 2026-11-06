@@ -19,6 +19,7 @@ mod args;
 mod backend;
 pub mod config;
 pub mod error;
+mod form;
 mod input;
 pub mod model;
 pub mod render;

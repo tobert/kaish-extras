@@ -334,3 +334,221 @@ async fn get_refuses_data_a_url_cannot_carry_and_sends_nothing() {
         assert!(p.theirs_req.is_empty());
     }
 }
+
+// ── 3. -F / --form ──────────────────────────────────────────────────────
+
+/// One multipart part as a server sees it.
+#[derive(Debug, PartialEq, Eq)]
+struct Part {
+    disposition: String,
+    content_type: Option<String>,
+    data: Vec<u8>,
+}
+
+/// Split a multipart body on the boundary named in its `Content-Type`. The
+/// boundary string itself differs between curl and this tool, and is allowed
+/// to; the parts must not.
+fn parts(req: &CapturedRequest) -> Vec<Part> {
+    let ct = req.header("Content-Type").expect("a multipart Content-Type");
+    assert!(ct.starts_with("multipart/form-data; boundary="), "Content-Type: {ct}");
+    let boundary = ct.split("boundary=").nth(1).unwrap();
+    let delim = format!("--{boundary}").into_bytes();
+    let body = &req.body;
+    assert!(body.starts_with(&delim), "body opens with the boundary");
+    assert!(body.ends_with(&[&delim[..], b"--\r\n"].concat()), "body closes with --boundary--");
+    let mut out = Vec::new();
+    let mut rest = &body[delim.len()..];
+    loop {
+        if rest.starts_with(b"--\r\n") {
+            assert_eq!(rest, b"--\r\n", "nothing after the closing boundary");
+            break;
+        }
+        rest = rest.strip_prefix(b"\r\n").expect("CRLF after a boundary");
+        let end = rest.windows(4).position(|w| w == b"\r\n\r\n").expect("blank line ends headers");
+        let head = String::from_utf8(rest[..end].to_vec()).expect("headers are text");
+        let after = &rest[end + 4..];
+        let close = [&b"\r\n"[..], &delim[..]].concat();
+        let stop = after.windows(close.len()).position(|w| w == close.as_slice()).expect("part ends at a boundary");
+        let mut disposition = String::new();
+        let mut content_type = None;
+        for line in head.split("\r\n") {
+            if let Some(v) = line.strip_prefix("Content-Disposition: ") {
+                disposition = v.to_string();
+            } else if let Some(v) = line.strip_prefix("Content-Type: ") {
+                content_type = Some(v.to_string());
+            } else {
+                panic!("unexpected part header {line:?}");
+            }
+        }
+        out.push(Part { disposition, content_type, data: after[..stop].to_vec() });
+        rest = &after[stop + close.len()..];
+    }
+    out
+}
+
+/// Both sides sent the same parts, and the same Content-Length as the body.
+fn assert_same_parts(p: &Pair, what: &str) {
+    assert_eq!(p.ours.code, 0, "{what}: {}", p.ours.err);
+    let ours = &p.ours_req[0];
+    assert_eq!(ours.method, p.theirs_req.first().map_or("POST", |r| r.method.as_str()), "{what}");
+    assert_eq!(
+        ours.header("Content-Length").map(str::to_string),
+        Some(ours.body.len().to_string()),
+        "{what}: Content-Length is the body's length"
+    );
+    if p.theirs.is_some() {
+        assert_eq!(parts(ours), parts(&p.theirs_req[0]), "{what}: parts differ from real curl's");
+    }
+}
+
+const FORM_FILES: &[(&str, &[u8])] = &[
+    ("up.txt", b"hello\n"),
+    ("up.json", b"{\"a\":1}"),
+    ("up.html", b"<p>"),
+    ("up.PNG", b"\x89PNG\r\n\x1a\n\0\xff"),
+    ("noext", b"plain"),
+    ("up.csv", b"a,b\n"),
+    ("sub/deep.txt", b"deep"),
+];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn form_parts_match_curl_part_for_part() {
+    let server = recorder();
+    for args in [
+        "-F a=1",
+        "-F 'a='",
+        "-F f=@up.txt",
+        "-F f=@up.json -F g=@up.html",
+        "-F f=@up.PNG",                          // binary bytes, extension case-folded
+        "-F f=@noext",                           // no extension: application/octet-stream
+        "-F f=@up.csv",                          // not in curl's table
+        "-F f=@sub/deep.txt",                    // filename is the basename
+        "-F 'f=@up.json;type=text/x-foo'",
+        "-F 'f=@up.txt;filename=zz.dat'",        // the shown name picks the type
+        "-F 'f=@noext;filename=zz.txt'",
+        "-F 'f=@up.json;type=text/x-foo;filename=zz.dat'",
+        "-F 'f=@up.txt;type=text/plain; charset=x'",
+        "-F 'f=<up.txt'",                        // contents as the value
+        "-F 'f=<up.json;type=application/json'",
+        "-F 'f=<up.txt;filename=ignored.txt'",
+        "-F 'f=x;type=text/plain'",              // type on plain text
+        "-F 'f=x;filename=n.txt'",               // filename on plain text
+        "-F 'f=x;filename=n.bin'",
+        "-F 'o=\"a;b\"'",                        // quotes protect a ';'
+        "-F 'o=\"x\\\"y\\\\z\"'",                // \" and \\ inside quotes
+        "-F 'p=@\"up.txt\";filename=\"q r.txt\"'",
+        "-F 'p=@up.txt;filename=a\"b'",          // " becomes %22
+        "-F 'n\"ame=v'",
+        "-F a=1 -F f=@up.txt -F b=2",            // order is kept
+        "-X PUT -F a=1",
+    ] {
+        let p = compare(&server, &format!("-s {args} \"$URL/echo\""), FORM_FILES).await;
+        assert_same_parts(&p, args);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn form_literal_parts_so_a_box_without_curl_still_checks_bytes() {
+    let server = recorder();
+    let p = compare(&server, "-s -F a=1 -F 'f=@up.txt' -F 'h=<up.txt' \"$URL/echo\"", FORM_FILES).await;
+    let got = parts(&p.ours_req[0]);
+    assert_eq!(got.len(), 3);
+    assert_eq!(got[0].disposition, "form-data; name=\"a\"");
+    assert_eq!((got[0].content_type.as_deref(), got[0].data.as_slice()), (None, &b"1"[..]));
+    assert_eq!(got[1].disposition, "form-data; name=\"f\"; filename=\"up.txt\"");
+    assert_eq!((got[1].content_type.as_deref(), got[1].data.as_slice()), (Some("text/plain"), &b"hello\n"[..]));
+    assert_eq!(got[2].disposition, "form-data; name=\"h\"");
+    assert_eq!((got[2].content_type.as_deref(), got[2].data.as_slice()), (None, &b"hello\n"[..]));
+    assert_eq!(Wire::of(&p.ours_req[0]).method, "POST");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_boundary_never_occurs_inside_a_part() {
+    // A file made of boundary-shaped lines cannot split the body, because the
+    // boundary is chosen so it appears in no part's data.
+    let server = recorder();
+    let hostile = [b"--------------------------".repeat(4), b"\r\n--x\r\n".to_vec()].concat();
+    let p = compare(&server, "-s -F f=@hostile \"$URL/echo\"", &[("hostile", &hostile)]).await;
+    assert_eq!(p.ours.code, 0, "{}", p.ours.err);
+    let got = parts(&p.ours_req[0]);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].data, hostile);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_request_gets_its_own_boundary() {
+    let server = recorder();
+    let fx = Fixture::new(loopback_config(), &[]).await;
+    fx.run(&server.url(""), "curl -s -F a=1 \"$URL/echo\"\ncurl -s -F a=1 \"$URL/echo\"").await;
+    let reqs = server.take_requests();
+    let b = |r: &CapturedRequest| r.header("Content-Type").unwrap().to_string();
+    assert_eq!(reqs.len(), 2);
+    assert_ne!(b(&reqs[0]), b(&reqs[1]), "a fixed boundary would be guessable by the data");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn form_file_errors_send_nothing_and_exit_like_curl() {
+    let server = recorder();
+    for (args, code) in [
+        ("-F f=@nope", 26),
+        ("-F 'f=<nope'", 26),
+        ("-F junk", 2),                   // no '='
+        ("-F f=@up.txt -d a=1", 2),       // -F and -d together
+        ("-F a=1 -I", 2),
+    ] {
+        let p = compare(&server, &format!("-s {args} \"$URL/echo\""), FORM_FILES).await;
+        assert_eq!(p.ours.code, code as i64, "{args}: {}", p.ours.err);
+        assert!(p.ours_req.is_empty(), "{args}: nothing is sent");
+        if let Some(t) = &p.theirs {
+            assert_eq!(t.code, code, "{args}: control, real curl");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_directory_is_not_a_form_file() {
+    // Real curl exits 0 here and sends something; a directory has no bytes to
+    // send, and this build says so.
+    let server = recorder();
+    let p = compare(&server, "-s -F f=@sub \"$URL/echo\"", FORM_FILES).await;
+    assert_eq!(p.ours.code, 26, "{}", p.ours.err);
+    assert!(p.ours_req.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn form_features_this_build_does_not_carry_are_refused_not_dropped() {
+    // curl accepts these; each would be a quiet difference if dropped.
+    let server = recorder();
+    for (args, needle) in [
+        ("-F 'f=@up.txt,up.json'", "one file"),          // multi-file part
+        ("-F 'f=@up.txt;headers=X-A: b'", "headers"),
+        ("-F 'f=x;foo=bar'", "foo"),                     // curl ignores unknown params
+        ("-F '=v'", "name"),                             // curl sends a nameless part
+        ("-F 'f=@up.txt;type='", "type"),
+        ("-F a=1 -G", "-G"),                             // curl ignores -G here
+        ("-F 'f=@-'", "stdin"),
+        ("-F 'f=<-'", "stdin"),
+    ] {
+        let p = compare(&server, &format!("-s {args} \"$URL/echo\""), FORM_FILES).await;
+        assert_eq!(p.ours.code, 2, "{args}: {}", p.ours.err);
+        assert!(p.ours.err.contains(needle), "{args}: names the problem ({needle}): {}", p.ours.err);
+        assert!(p.ours.err.contains("no request was sent"), "{args}: {}", p.ours.err);
+        assert!(p.ours_req.is_empty(), "{args}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn form_files_count_against_the_byte_limit() {
+    let server = recorder();
+    let big = vec![b'z'; 2000];
+    let config = loopback_config().with_limits(Limits { max_response_bytes: 1024, ..Limits::default() });
+    let p = compare_with(&server, "-s -F f=@big \"$URL/echo\"", &[("big", &big)], config).await;
+    assert_ne!(p.ours.code, 0);
+    assert!(p.ours.err.contains("1024"), "{}", p.ours.err);
+    assert!(p.ours_req.is_empty());
+    // Control: a roomier budget sends it.
+    let config = loopback_config().with_limits(Limits { max_response_bytes: 8192, ..Limits::default() });
+    let p = compare_with(&server, "-s -F f=@big \"$URL/echo\"", &[("big", &big)], config).await;
+    assert_eq!(p.ours.code, 0, "{}", p.ours.err);
+    assert_eq!(parts(&p.ours_req[0])[0].data, big);
+}

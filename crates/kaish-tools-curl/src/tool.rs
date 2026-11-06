@@ -64,6 +64,15 @@ impl CurlTool {
             #[arg(long, action = clap::ArgAction::Append)]
             data_urlencode: Vec<String>,
 
+            /// Send a multipart/form-data part. Repeatable; implies POST. Forms:
+            /// 'name=text', 'name=@file' (sent as a file: filename and a
+            /// Content-Type guessed from its extension), 'name=<file' (the
+            /// file's bytes as the value). Add ';type=MIME' or ';filename=NAME'.
+            /// A value in double quotes may hold a ';'. One file per part; cannot
+            /// be combined with -d, -G or -I.
+            #[arg(short = 'F', long, action = clap::ArgAction::Append)]
+            form: Vec<String>,
+
             /// Send a request header, 'Name: value'. Repeatable.
             #[arg(short = 'H', long, action = clap::ArgAction::Append)]
             header: Vec<String>,

@@ -77,6 +77,7 @@ the last positional unless `--url` is used.
 | `--data-raw <data>` | Like `-d` with `@` literal: `--data-raw @f` sends the four characters `@f`. Same form Content-Type. | None. |
 | `--data-urlencode <data>` | curl's grammar: `content`, `=content`, `name=content`, `@path`, `name@path`. The first `=` or `@` decides. Only the content is percent-encoded (a space is `+`, as in curl) and the name is sent as typed. The file forms encode the file's bytes, newlines included (`%0A`). | `@-` (stdin) is refused like `-d @-`. |
 | `-G, --get` | Sends the `-d`, `--data-binary`, `--data-raw` and `--data-urlencode` data on the URL's query string, joined with `&` and added after any query already there. The method stays GET (or `-X`, or HEAD with `-I`), no body and no Content-Type are sent. Data a URL cannot carry (a space, a control byte, `#`, non-ASCII) exits 2 with no request. | curl exits 3 for such data, and this build exits 2 and names `--data-urlencode`. A request with no data flag now sends no `Content-Length`, as curl does (it sent `0`). |
+| `-F, --form <name=content>` | One multipart/form-data part, repeatable, implies POST. `name=text`; `name=@path` sends the file with its basename as `filename` and a Content-Type from the name shown (`gif jpg jpeg png svg txt htm html pdf xml`, any case; otherwise `application/octet-stream`); `name=<path` sends the file's bytes as a plain value; `;type=MIME` and `;filename=NAME` follow, and a value in double quotes may hold a `;` (`\"` and `\\` inside quotes). A text part given `;filename=` is sent as a file part. Names and filenames escape `"` as `%22`. The boundary is random per request and checked against every part, so no file can contain it. A `Content-Type` set with `-H` wins, and gains `; boundary=` if it names a multipart type without one. Files are read through the VFS inside `Limits::max_response_bytes`, and the finished body is checked against it too. A file that cannot be read, or a directory, is exit 26. | One file per part: `@a,b` (curl sends nested multipart/mixed) exits 2. `;headers=`, `;encoder=`, `;format=`, an unknown `;key=`, a repeated or empty `;type=`, an empty field name, and stdin (`@-`, `<-`) exit 2, where curl ignores or accepts them. `-F` with a data flag, `-G`, or `-I` exits 2 (curl accepts `-G` and ignores it). A directory is exit 26 (curl sends something). The boundary text differs from curl's. Compared part by part against curl 8.23 in `tests/features.rs`. |
 | `-H, --header <h:v>` | Request header. Repeatable. | None. |
 | `-i, --include` | Print response headers above the body, starting with `HTTP/1.1 <code> <reason>` (the standard phrase for the code). With `-o <file>`, writes headers **into the file** alongside the body, matching curl's behavior. | None. |
 | `-I, --head` | HEAD; print headers only. | None. |
@@ -157,8 +158,8 @@ A cluster containing a value-taking flag (`-so out.txt`) is refused, naming
 the flag that broke it.
 
 This build refuses the following flags at parse time with literate errors:
-`-O` (use `-o <file>`), `--compressed`, `--proxy`/SOCKS, `--form`,
-`--cookie`, `--verbose`, `--retry`, `--get`, `--cert`/`--key`,
+`-O` (use `-o <file>`), `--compressed`, `--proxy`/SOCKS,
+`--cookie`, `--verbose`, `--retry`, `--cert`/`--key`,
 `--resolve`, `--config`, `--netrc`, `--parallel`, `--next`, and — because the backend
 does not implement them rather than because they are out of scope — `-k`/`--insecure`
 and `--unix-socket`. Each carries a message
@@ -250,20 +251,6 @@ curl: '--proxy' is not supported. kaish-tools-curl connects directly and has
 no proxy or SOCKS support.
 ```
 
-Multipart:
-
-```
-curl: '--form' (multipart) is not supported in this build. Use '--data' for
-application/x-www-form-urlencoded.
-```
-
-Force GET with query:
-
-```
-curl: '--get' is not supported. Put the query string in the URL, or build one
-with '--data-urlencode'.
-```
-
 Cookies:
 
 ```
@@ -276,7 +263,7 @@ Multiple URLs, `--next`, `--parallel`:
 curl: only one URL per invocation is supported. Call curl once for each URL.
 ```
 
-`--verbose` (and `--form`, with the multipart body to build by hand):
+`--verbose`:
 
 ```
 curl: '--verbose' is not supported, and no request was sent. This build prints

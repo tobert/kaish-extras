@@ -25,6 +25,9 @@ pub async fn prepare(
     ctx: &dyn ToolCtx,
     max_bytes: u64,
 ) -> Result<(), CurlError> {
+    if !req.forms.is_empty() {
+        return prepare_form(req, ctx, max_bytes).await;
+    }
     if req.bodies.is_empty() {
         return Ok(());
     }
@@ -133,4 +136,50 @@ pub async fn read_file(
         )));
     }
     Ok(bytes)
+}
+
+/// `-F`: read every file part, build the multipart body, and name its
+/// boundary in the Content-Type.
+async fn prepare_form(
+    req: &mut Request,
+    ctx: &dyn ToolCtx,
+    max_bytes: u64,
+) -> Result<(), CurlError> {
+    use crate::form::{build, FormSource, LoadedPart};
+
+    let mut loaded = Vec::with_capacity(req.forms.len());
+    let mut total: u64 = 0;
+    for part in &req.forms {
+        let data = match &part.source {
+            FormSource::Text(text) => text.as_bytes().to_vec(),
+            FormSource::File(path) | FormSource::FileContents(path) => {
+                read_file(ctx, path, max_bytes).await?
+            }
+        };
+        total += data.len() as u64;
+        check_total(total, max_bytes)?;
+        loaded.push(LoadedPart { part, data });
+    }
+    let (boundary, body) = build(&loaded);
+    check_total(body.len() as u64, max_bytes)?;
+    drop(loaded);
+
+    // A Content-Type the caller set wins, as in curl; when it names a
+    // multipart type without a boundary, ours is added so the body parses.
+    match req
+        .headers
+        .iter_mut()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+    {
+        Some((_, v)) => {
+            if v.to_ascii_lowercase().starts_with("multipart/") && !v.to_ascii_lowercase().contains("boundary=") {
+                v.push_str(&format!("; boundary={boundary}"));
+            }
+        }
+        None => req
+            .headers
+            .push(("Content-Type".into(), format!("multipart/form-data; boundary={boundary}"))),
+    }
+    req.body = body;
+    Ok(())
 }

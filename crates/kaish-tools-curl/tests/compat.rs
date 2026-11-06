@@ -400,38 +400,3 @@ async fn verbose_refusal_names_the_substitute_and_sends_nothing() {
     }
     assert!(server.requests().is_empty());
 }
-
-#[tokio::test(flavor = "multi_thread")]
-async fn form_refusal_does_not_offer_data_for_files() {
-    let server = Server::builder()
-        .route_fn("/upload", |req| {
-            Response::text(200, format!("{}\n{}", req.header("Content-Type").unwrap_or(""), req.body_str()))
-        })
-        .start_tcp();
-    for flag in ["-F", "--form"] {
-        let r = run_at(&server, &format!("curl {flag} file=@/work/upload.txt \"$URL/upload\"")).await;
-        assert_ne!(r.code, 0);
-        assert!(r.err.contains("no request was sent"), "{flag}: {}", r.err);
-        assert!(r.err.contains("boundary"), "{flag} must show the working multipart form: {}", r.err);
-        assert!(
-            !r.err.contains("Use '--data'"),
-            "{flag}: --data cannot send a file: {}",
-            r.err
-        );
-    }
-    assert!(server.requests().is_empty());
-
-    // The form the message shows works, so the substitute is not folklore.
-    let r = run_at(
-        &server,
-        "printf 'hello upload\\n' > /work/upload.txt\n\
-         curl -s -H 'Content-Type: multipart/form-data; boundary=XXXX' --data-binary \
-         \"$(printf -- '--XXXX\\r\\nContent-Disposition: form-data; name=\"file\"; filename=\"upload.txt\"\\r\\n\\r\\n%s\\r\\n--XXXX--\\r\\n' \"$(cat /work/upload.txt)\")\" \
-         \"$URL/upload\"",
-    )
-    .await;
-    assert_eq!(r.code, 0, "stderr: {}", r.err);
-    assert!(r.text_out().starts_with("multipart/form-data; boundary=XXXX\n"), "{}", r.text_out());
-    assert!(r.text_out().contains("filename=\"upload.txt\""), "{}", r.text_out());
-    assert!(r.text_out().contains("hello upload"), "{}", r.text_out());
-}

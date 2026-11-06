@@ -1230,12 +1230,11 @@ were settled against git 2.55 and pinned in tests/log.rs: ours matches.
   config.
 - **CU5 — features not in the 80/20 cut.** Multiple URLs, `--next`,
   `--parallel`, `--retry`/`--retry-*`, `--resolve`/`--connect-to`, proxies and
-  SOCKS, `--cookie`/`--cookie-jar` (a jar), `-F`/`--form` (multipart),
-  `-v`/`--verbose`, `-K`/`--config`,
+  SOCKS, `--cookie`/`--cookie-jar` (a jar), `-v`/`--verbose`, `-K`/`--config`,
   `--netrc`, `--abstract-unix-socket`, `--cert`/`--key`/`--cacert`/`--capath`. Each is a
   parse-time refusal with a literate error today (see `docs/curl.md`); graduate
   one to support only when an agent need is real. `-w`/`--write-out` graduated
-  2026-11 as a subset, and `-G` on 2026-11-06 (docs/curl.md). `--unix-socket` (filesystem)
+  2026-11 as a subset, `-G` and `-F` on 2026-11-06 (docs/curl.md). `--unix-socket` (filesystem)
   moved into the buildout; `--abstract-unix-socket` (Linux abstract namespace)
   stays here as the same transport with abstract addressing.
 - **CU6 — curl's `--json` request-body shorthand.** Refused to keep kaish's
