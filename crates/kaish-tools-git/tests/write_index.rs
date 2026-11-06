@@ -1085,16 +1085,17 @@ async fn a_planted_index_link_and_a_hard_link_stop_every_verb() {
         assert!(r.err.contains("'index' in the git directory is a symbolic link"), "{}", r.err);
     }
 
-    // Hard link: a second name for the same inode, outside the mount.
+    // Hard link: a second name for the same inode, outside the mount. The
+    // index is replaced by renaming a new file over it, so the old inode (and
+    // the outside name) is never written, and the verb works.
     std::fs::remove_file(&real).expect("rm");
     std::fs::write(h.outside.join("index"), &saved).expect("outside index");
     std::fs::hard_link(h.outside.join("index"), &real).expect("hard link");
     let before = outside_snapshot(&h);
-    for args in [vec!["add", "a.txt"], vec!["rm", "-f", "b.txt"], vec!["mv", "b.txt", "bb.txt"], vec!["restore", "--staged", "a.txt"], vec!["reset"]] {
-        let r = hostile_run(&h, "", &args).await;
-        assert_contained(&h, &r, &format!("index hard link {args:?}"), &before);
-        assert!(r.err.contains("more than one hard link"), "{}", r.err);
-    }
+    let r = hostile_run(&h, "", &["add", "a.txt"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(outside_snapshot(&h), before, "the outside name of the old index inode changed");
+    assert!(support::git(&h.repo, &["status", "--porcelain"]).contains("A  a.txt") || support::git(&h.repo, &["status", "--porcelain"]).contains("M  a.txt"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

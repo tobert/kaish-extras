@@ -10,8 +10,7 @@ use std::sync::Arc;
 
 use kaish_tool_api::Tool;
 use kaish_tools_git::{
-    GitConfig, GitHooks, HookContext, HookError, HookOutput, Identity, Profile, RewritePolicy,
-    Verb,
+    GitConfig, GitHooks, HookContext, HookError, HookOutput, Identity, Profile, RewritePolicy, Verb,
 };
 
 use support::{RichRepo, StrictBackend, TestCtx};
@@ -112,14 +111,6 @@ fn an_identity_git_would_rewrite_is_refused() {
     assert!(Identity::new("Ada Lovelace", "ada@example.com").is_ok());
 }
 
-#[test]
-fn rewrite_policy_has_the_three_designed_settings() {
-    // Compile-time exhaustiveness is off (non_exhaustive), so pin the names.
-    let all = [RewritePolicy::Refuse, RewritePolicy::Unpublished, RewritePolicy::Allow];
-    assert_eq!(all.len(), 3);
-    assert_eq!(RewritePolicy::default(), RewritePolicy::Unpublished);
-}
-
 async fn info(repo: &RichRepo, config: kaish_tools_git::ToolConfig) -> serde_json::Value {
     let backend = Arc::new(StrictBackend::single(std::path::PathBuf::from("/mnt"), repo.scratch()));
     let mut ctx = TestCtx::new(backend, "/mnt/main");
@@ -164,6 +155,32 @@ async fn git_info_shows_the_profile() {
             .collect()
     };
     assert!(features(&commit).contains(&"commit".to_string()), "{commit}");
+}
+
+/// F4: the profile `git info` reports comes from the same source a write
+/// would be gated on, the presence of the write settings, not from the
+/// profile set on the read config. `read_config()` hands out a `GitConfig`
+/// that lists `Commit`; a tool built from a clone of it has no write
+/// settings, so it cannot write and must not say it can.
+#[tokio::test]
+async fn a_tool_built_from_a_cloned_read_config_reports_read_only() {
+    let repo = RichRepo::build();
+    let writable = GitConfig::read_only().with_commit_profile();
+    let clone = writable.read_config().clone();
+    assert!(
+        clone.profiles().any(|p| p == Profile::Commit),
+        "the premise: the clone's own profile set lists Commit"
+    );
+
+    let from_clone = info(&repo, clone.into()).await;
+    assert_eq!(
+        from_clone["capabilities"]["profiles"],
+        serde_json::json!(["read"]),
+        "no write settings behind this tool, so it is a read tool"
+    );
+    // The control: the tool built from the writable config itself says commit.
+    let from_writable = info(&repo, writable.into()).await;
+    assert_eq!(from_writable["capabilities"]["profiles"], serde_json::json!(["read", "commit"]));
 }
 
 /// `tool()` takes either config, and a bad tool name is refused for both.

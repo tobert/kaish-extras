@@ -623,21 +623,19 @@ pub enum GitError {
         operation: &'static str,
     },
 
-    /// A write would pass through a symbolic link, or through a path
-    /// component that is not a directory, inside the repository. Exit 4
+    /// A write would pass through a symbolic link, a hard-linked file, or a
+    /// path component of the wrong type, inside the repository. Exit 4
     /// (git-write-profile.md §6.1).
     ///
     /// `path` is relative to `store` and never absolute: it names a path
     /// inside the mount, so it reveals nothing the caller could not already
-    /// list, and it never says where a link points.
+    /// list, and it never says where a link points. `found` says what the
+    /// component is and `then` says why that refuses the write and what to do
+    /// next; the pair is chosen by what was found and what the write needed
+    /// there (a directory or a file), so a refusal never claims git follows a
+    /// link when the component is not a link.
     #[cfg(feature = "commit")]
-    #[error(
-        "git {operation}: nothing was written. '{path}' in {store} is {found}, \
-         and writing through it could change files outside the mount. Real git \
-         follows such links; this shell does not. Replace it with a real \
-         directory using tools outside this repository's control, or use a \
-         clean clone"
-    )]
+    #[error("git {operation}: nothing was written. '{path}' in {store} is {found}. {then}")]
     WriteThroughLink {
         /// The verb that was asked for.
         operation: &'static str,
@@ -647,6 +645,28 @@ pub enum GitError {
         path: String,
         /// What was found there, for example "a symbolic link".
         found: &'static str,
+        /// Why that refuses the write, and the next step.
+        then: &'static str,
+    },
+
+    /// A root the write side was about to use is not a canonical directory
+    /// inside the mount. Exit 4.
+    ///
+    /// Names no path: the root came from the repository's own content
+    /// (`gitdir:`, `commondir`), so echoing it would answer "does this host
+    /// path exist" for a hostile repository.
+    #[cfg(feature = "commit")]
+    #[error(
+        "git {operation}: nothing was written. The repository's {what} is not \
+         a real directory inside the mount, and kaish-git writes nothing \
+         outside the mount. Mount the directory that holds the whole \
+         repository, or use a clean clone inside the mount"
+    )]
+    WriteRootOutsideMount {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// Which root, as a caller would name it.
+        what: &'static str,
     },
 
     /// A write verb refused. Carries the five parts every refusal names
@@ -720,7 +740,7 @@ impl GitError {
             | GitError::PatchNotInThisVerb { .. }
             | GitError::UnsupportedIndexMode { .. } => 4,
             #[cfg(feature = "commit")]
-            GitError::WriteThroughLink { .. } => 4,
+            GitError::WriteThroughLink { .. } | GitError::WriteRootOutsideMount { .. } => 4,
             GitError::VerbNotEnabled { .. } => 5,
         }
     }

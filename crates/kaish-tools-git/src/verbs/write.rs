@@ -29,5 +29,6 @@ pub(crate) mod stage;
 pub(crate) mod state;
 pub(crate) mod unstage;
 
-#[cfg(test)]
+// Unix-only: the fixtures plant symbolic and hard links and run real git.
+#[cfg(all(test, unix))]
 mod fixtures;

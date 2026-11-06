@@ -385,7 +385,10 @@ after our write on a fixture whose files share the index's mtime.**
   `Fail::Immediately` too (`gix-lock-24.0.0/src/acquire.rs:200-208`), and the
   message says "might need manual deletion" (`:53-57`). **Never delete a stale
   lock automatically**: staleness cannot be told from a concurrent git, and
-  git does not either. Surface it as exit 1 with the lock path named.
+  git does not either. Surface it as exit 4 (a repository state that refuses
+  the write, git-write-profile.md section 5), naming the lock path relative to
+  its root. gix gives no reason to differ: `PermanentlyLocked` is an ordinary
+  `Err` we map.
 - **`signals`.** Not needed. `gix-tempfile`'s `signals` feature is off in our
   graph (`cargo tree -e features -i gix-tempfile` shows only `default`/`hp-hashmap`;
   `signal-hook` is absent). Drop-based cleanup covers errors and unwinding;
@@ -625,7 +628,12 @@ call in `repo.rs` and watching the test stay green:
 | `//` inside a string literal (`"http://..."`) | `strip_line_comments` truncates the line and can hide code after it |
 
 Add those needles. Raise `files.len() >= 21` (`:96`) with the new modules.
-Keep `WRITE_ALLOWED = ["verbs/write"]` and the test that pins it (`:161-170`).
+Keep the allowlist to the `src/verbs/write/` directory and the
+`src/verbs/write.rs` module file, **matched by path component**, not by string
+prefix (a prefix match would exempt `verbs/write_extra.rs`), and keep the test
+that pins it (`:161-170`). Also scan for `#[path = ..]` and `include!` in every
+file, the write directory included, since either pulls in code the scan never
+reads.
 Add **two controls**: one planted source per new needle (as
 `the_scan_detects_a_write_shaped_identifier` does, `:133`), and an assertion
 that `src/verbs/write/` *does* contain at least one needle when the feature

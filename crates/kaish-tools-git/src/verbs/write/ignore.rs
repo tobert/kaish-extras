@@ -58,7 +58,7 @@ impl Ignore {
         let bstr: &BStr = rel.into();
         let platform = self
             .stack
-            .at_entry(bstr, mode, repo.objects())
+            .at_entry(bstr, mode, &repo.objects())
             .map_err(|e| GitError::repository(op, "consulting .gitignore", work_dir, e))?;
         Ok(platform.excluded_kind().is_some())
     }

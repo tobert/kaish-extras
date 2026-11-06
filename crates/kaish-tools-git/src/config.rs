@@ -523,6 +523,11 @@ impl WritableGitConfig {
     }
 
     /// The read config this was built from, with `Profile::Commit` added.
+    ///
+    /// A clone of it is still a read config: `tool(config.read_config().clone())`
+    /// builds a tool with no write settings, which cannot write and which
+    /// `git info` reports as `read` only, whatever this config's own
+    /// `profiles()` lists.
     pub fn read_config(&self) -> &GitConfig {
         &self.read
     }
@@ -700,5 +705,25 @@ mod tests {
                 verb.profile()
             );
         }
+    }
+
+    /// Pins `RewritePolicy`'s variants and its default. The `match` has no
+    /// wildcard (inside the defining crate `#[non_exhaustive]` does not ask
+    /// for one), so adding or removing a variant stops this compiling and
+    /// forces the design doc (git-write-profile.md section 3) to be read
+    /// again. Counting a slice's length, as the integration test did, only
+    /// ever counted the slice.
+    #[cfg(feature = "commit")]
+    #[test]
+    fn rewrite_policy_variants_are_pinned_by_an_exhaustive_match() {
+        for policy in [RewritePolicy::Refuse, RewritePolicy::Unpublished, RewritePolicy::Allow] {
+            let name = match policy {
+                RewritePolicy::Refuse => "refuse",
+                RewritePolicy::Unpublished => "unpublished",
+                RewritePolicy::Allow => "allow",
+            };
+            assert_eq!(format!("{policy:?}").to_lowercase(), name);
+        }
+        assert_eq!(RewritePolicy::default(), RewritePolicy::Unpublished);
     }
 }

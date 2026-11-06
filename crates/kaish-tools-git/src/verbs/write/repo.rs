@@ -1,11 +1,16 @@
 //! [`WriteRepo`]: a [`ReadRepo`] plus the one handle that can write refs
 //! (feasibility §7).
 //!
-//! `ReadRepo` keeps `WriteReflog::Disable` and never lends a transaction.
-//! `WriteRepo` builds its own ref store with `WriteReflog::Normal`, so a ref
-//! move through it appends a reflog line. Everything else (discovery,
-//! revision resolution, the object reader) is `ReadRepo`'s, reused through
-//! [`WriteRepo::read`].
+//! `ReadRepo` keeps `WriteReflog::Disable` and lends only [`OdbRead`] and
+//! [`RefsRead`] (feasibility F1), types with no write method, so read code
+//! cannot write whatever the scan misses. `WriteRepo` holds the real handles:
+//! its own ref store with `WriteReflog::Normal`, so a ref move through it
+//! appends a reflog line, and its own object store handle. Everything else
+//! (discovery, revision resolution, the object reader) is `ReadRepo`'s,
+//! reused through [`WriteRepo::read`].
+//!
+//! [`OdbRead`]: crate::repo::OdbRead
+//! [`RefsRead`]: crate::repo::RefsRead
 //!
 //! A `WriteRepo` needs a [`WriteToken`], and a token comes only from the
 //! commit profile's settings. A code path with no `WritableGitConfig` behind
@@ -44,6 +49,8 @@ pub(crate) struct WriteRepo {
     /// The ref store that writes reflogs. A second store beside `ReadRepo`'s;
     /// `write_shaped_identifiers` counts constructions outside this directory.
     refs: gix_ref::file::Store,
+    /// The real object store handle, the one that can write objects.
+    objects: gix_odb::Handle,
     _token: WriteToken,
 }
 
@@ -71,7 +78,8 @@ impl WriteRepo {
                 options,
             )
         };
-        Ok(Self { read, refs, _token: token })
+        let objects = crate::repo::open_object_store(op, read.common_dir(), read.ceiling())?;
+        Ok(Self { read, refs, objects, _token: token })
     }
 
     /// The read side: discovery, revisions, objects.
@@ -85,10 +93,9 @@ impl WriteRepo {
         &self.refs
     }
 
-    /// The object database handle blobs are written through. Goes through
-    /// here, not `read()`, so the write handle has one door.
+    /// The object store handle that can write objects.
     pub(crate) fn objects(&self) -> &gix_odb::Handle {
-        self.read.objects()
+        &self.objects
     }
 
     pub(crate) fn git_dir(&self) -> &Path {
@@ -105,7 +112,11 @@ impl WriteRepo {
         let root_kind = containment::root_for(rel);
         let root = match root_kind {
             Root::GitDir => self.git_dir(),
-            _ => self.common_dir(),
+            Root::CommonDir => self.common_dir(),
+            // `root_for` answers only for paths under a git directory. A
+            // work tree root coming back means that function changed; crash
+            // rather than check a path against the wrong root.
+            Root::WorkTree => unreachable!("root_for never returns the work tree"),
         };
         containment::check_beneath(
             self.read.operation(),
@@ -115,6 +126,37 @@ impl WriteRepo {
             rel,
             leaf,
         )
+    }
+
+    /// Check every file a ref move for `refname` touches, each against its
+    /// own root, and return the absolute paths checked (F7).
+    ///
+    /// A ref move is not one path. gix-ref's files backend, for a transaction
+    /// on `refs/heads/main`, takes `refs/heads/main.lock`, replaces
+    /// `refs/heads/main`, appends to `logs/refs/heads/main`, and reads (and on
+    /// a packed ref, rewrites through `packed-refs.lock`) `packed-refs`. A
+    /// symlink planted at any of them is a write primitive, and the reflog
+    /// is the one a check of the ref path alone misses. Set `also_head` when
+    /// the move also appends to `HEAD`'s reflog: a commit or branch switch
+    /// on the checked-out branch, where HEAD is symbolic. Moving `HEAD`
+    /// itself (`refname == "HEAD"`, a detach) already covers `HEAD`,
+    /// `HEAD.lock` and `logs/HEAD`.
+    ///
+    /// Each name goes through [`WriteRepo::check`], so a per-worktree name
+    /// (`refs/bisect/*`, `HEAD`, `logs/HEAD`) is checked under the
+    /// worktree's git directory and the rest under the common one.
+    pub(crate) fn check_ref_write(&self, refname: &str, also_head: bool) -> Result<Vec<PathBuf>, GitError> {
+        let mut rels = vec![
+            refname.to_string(),
+            format!("{refname}.lock"),
+            format!("logs/{refname}"),
+        ];
+        if also_head && refname != "HEAD" {
+            rels.push("logs/HEAD".to_string());
+        }
+        rels.push("packed-refs".to_string());
+        rels.push("packed-refs.lock".to_string());
+        rels.iter().map(|rel| self.check(Path::new(rel), Leaf::File)).collect()
     }
 
     /// Check a path under the work tree root (`mv`, `add`, `rm`).
@@ -144,7 +186,7 @@ impl WriteRepo {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::verbs::write::fixtures::Fixture;
@@ -169,9 +211,17 @@ mod tests {
             gix_ref::store::WriteReflog::Normal
         ));
         assert!(matches!(
-            repo.read().refs().write_reflog,
+            repo.read().refs().write_reflog(),
             gix_ref::store::WriteReflog::Disable
         ));
+    }
+
+    #[test]
+    fn the_write_repo_holds_a_handle_that_writes_objects() {
+        fn writes<T: gix_object::Write>(_: &T) {}
+        let fx = Fixture::new();
+        let repo = fx.write_repo(false);
+        writes(repo.objects());
     }
 
     #[test]

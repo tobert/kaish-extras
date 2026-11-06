@@ -399,7 +399,12 @@ objects land in the common dir, and `HEAD`, `index` and `logs/HEAD` in the
 per-worktree git dir, so the walk's root is chosen per target — checking
 `git_dir/refs/…` for a write that lands in `common_dir/refs/…` checks the
 wrong path. Both roots must themselves already be inside the mount (the read
-side's discovery screen proves that; the write side asserts it again). `mv`
+side's discovery screen proves that; the write side asserts it again). A ref
+move checks its whole write set, not the ref path alone: the ref, its `.lock`,
+its reflog, `logs/HEAD` when HEAD follows, and `packed-refs`, each under its
+own root (`WriteRepo::check_ref_write`). A file that is appended to in place
+(a reflog) also refuses when it has more than one hard link, since `lstat`
+calls it a regular file and the append reaches every name. `mv`
 applies the same walk to both working-tree paths. The threat is a hostile repository at rest, not a concurrent attacker
 racing us, and the doc says so. The planted-symlink fixture lands in PR 1,
 before any verb.
@@ -411,7 +416,10 @@ before any verb.
 - The D.4 fingerprint test runs every read verb with `commit` compiled in and
   a `WritableGitConfig` installed, and still asserts `.git` unchanged.
 - D.1's source scan widens: write-shaped plumbing may appear only under
-  `src/verbs/write/` and the `WriteRepo` type.
+  `src/verbs/write/` and `src/verbs/write.rs`, matched by path component (so
+  `verbs/write_extra.rs` is scanned). `WriteRepo` lives in that directory.
+  `ReadRepo` also lends only `OdbRead` and `RefsRead`, which have no write
+  method, so the scan is the second line.
 - A new fingerprint test runs every *refused* write spelling and asserts
   `.git` unchanged. A refusal that wrote half a transaction is the failure
   mode this catches.

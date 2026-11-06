@@ -272,9 +272,9 @@ fn parse_file(dir: &str, label: String, bytes: &[u8]) -> AttrFile {
             lines.push(Line { pattern: None, unreadable: false, attrs });
             continue;
         }
-        let (pat, rest, quoted) = if l.starts_with('"') {
+        let (pat, rest, quoted) = if let Some(after) = l.strip_prefix('"') {
             // A quoted pattern: not decoded here, so it is "maybe".
-            match l[1..].find('"') {
+            match after.find('"') {
                 Some(end) => (&l[..end + 2], &l[end + 2..], true),
                 None => (l, "", true),
             }

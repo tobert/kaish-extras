@@ -41,7 +41,7 @@ impl Snapshot {
     /// Read and vet the index. Takes no lock and writes nothing.
     pub(crate) fn read(repo: &WriteRepo, command: &str) -> Result<Self, GitError> {
         let op = repo.read().operation();
-        let path = repo.check(Path::new("index"), Leaf::File)?;
+        let path = repo.check(Path::new("index"), Leaf::Replaced)?;
         let (bytes, mtime) = match std::fs::read(&path) {
             Ok(b) => {
                 let m = std::fs::metadata(&path)
@@ -119,8 +119,8 @@ impl IndexTx {
     /// Create `index.lock` exclusively, then read the index under it.
     pub(crate) fn lock(repo: &WriteRepo, command: &str) -> Result<Self, GitError> {
         let op = repo.read().operation();
-        let lock_path = repo.check(Path::new("index.lock"), Leaf::File)?;
-        let index_path = repo.check(Path::new("index"), Leaf::File)?;
+        let lock_path = repo.check(Path::new("index.lock"), Leaf::Replaced)?;
+        let index_path = repo.check(Path::new("index"), Leaf::Replaced)?;
         let file = match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -171,7 +171,7 @@ impl IndexTx {
         lock.sync_all().map_err(|e| GitError::repository(op, "syncing index.lock", &self.lock_path, e))?;
         drop(lock);
         // The target may have changed since `lock()`; walk it again.
-        repo.check(Path::new("index"), Leaf::File)?;
+        repo.check(Path::new("index"), Leaf::Replaced)?;
         std::fs::rename(&self.lock_path, &self.index_path)
             .map_err(|e| GitError::repository(op, "renaming index.lock into place", &self.index_path, e))?;
         self.done = true;

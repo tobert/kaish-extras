@@ -29,8 +29,12 @@ use crate::verbs;
 #[derive(Debug)]
 pub struct GitTool {
     config: GitConfig,
-    /// Set when the embedder installed the commit profile. Every write path
-    /// keys on its presence: no settings, no `WriteRepo`.
+    /// Set when the embedder installed the commit profile. This is the one
+    /// gate: a write verb checks that it is `Some` through
+    /// [`GitTool::write_settings`], and `git info` reports the `commit`
+    /// profile from the same value. Neither reads `config.profiles()` for it,
+    /// because a clone of `WritableGitConfig::read_config()` lists `Commit`
+    /// and builds a tool with no settings.
     #[cfg(feature = "commit")]
     write: Option<WriteSettings>,
 }
@@ -103,11 +107,34 @@ pub fn tool(config: impl Into<ToolConfig>) -> Result<GitTool, ConfigError> {
 }
 
 impl GitTool {
+    /// The write settings, if the embedder installed the commit profile.
+    ///
+    /// The only thing that may gate a write. `config.profiles()` is not that
+    /// gate: see the `write` field.
+    #[cfg(feature = "commit")]
+    pub(crate) fn write_settings(&self) -> Option<&WriteSettings> {
+        self.write.as_ref()
+    }
+
+    /// The profiles `git info` reports: `read`, plus `commit` only when
+    /// write settings are behind this tool.
+    fn reported_profiles(&self) -> Vec<String> {
+        self.config
+            .profiles()
+            .filter(|p| match p {
+                crate::config::Profile::Read => true,
+                #[cfg(feature = "commit")]
+                crate::config::Profile::Commit => self.write.is_some(),
+            })
+            .map(|p| p.as_str().to_string())
+            .collect()
+    }
+
     /// What this build will let the caller ask for (B.1's `capabilities`).
     fn capabilities(&self) -> Capabilities {
         let limits = self.config.limits();
         Capabilities {
-            profiles: self.config.profiles().map(|p| p.as_str().to_string()).collect(),
+            profiles: self.reported_profiles(),
             verbs: self.config.verbs().map(|v| v.as_str().to_string()).collect(),
             features: crate::enabled_features(),
             limits: LimitsReport {
@@ -1238,7 +1265,7 @@ impl GitTool {
     fn is_writable(&self) -> bool {
         #[cfg(feature = "commit")]
         {
-            self.write.is_some()
+            self.write_settings().is_some()
         }
         #[cfg(not(feature = "commit"))]
         {
@@ -1250,7 +1277,7 @@ impl GitTool {
     /// and what it never does; the read-only text must not be shown to it.
     fn description(&self) -> String {
         #[cfg(feature = "commit")]
-        if self.write.is_some() {
+        if self.write_settings().is_some() {
             return COMMIT_DESCRIPTION.to_string();
         }
         DESCRIPTION.to_string()
@@ -1274,7 +1301,7 @@ fn operations_of(verb: &str) -> &'static [&'static str] {
 #[cfg(feature = "commit")]
 impl GitTool {
     fn declare_operations(&self, mut schema: ToolSchema) -> ToolSchema {
-        if self.write.is_none() {
+        if self.write_settings().is_none() {
             return schema;
         }
         let mut union: Vec<&'static str> = Vec::new();
@@ -1308,7 +1335,7 @@ impl GitTool {
         repo_arg: Option<&str>,
         f: impl FnOnce(&WriteRepo, &PathBase) -> Result<verbs::write::spec::Outcome, GitError>,
     ) -> ExecResult {
-        let Some(settings) = &self.write else {
+        let Some(settings) = self.write_settings() else {
             return failure(GitError::VerbNotEnabled { operation: op });
         };
         let resolved = match resolve_repo_paths(op, ctx, repo_arg) {
@@ -1701,7 +1728,7 @@ impl Tool for GitTool {
             );
         }
         #[cfg(feature = "commit")]
-        if self.write.is_some() {
+        if self.write_settings().is_some() {
             if self.config.has(Verb::Add) {
                 cmd = cmd.subcommand(verbs::write::add::AddArgs::command().name("add"));
             }

@@ -42,7 +42,7 @@ impl<'a> BlobWriter<'a> {
         }
         let hex = id.to_string();
         let rel = format!("objects/{}/{}", &hex[..2], &hex[2..]);
-        let abs = self.repo.check(Path::new(&rel), Leaf::File)?;
+        let abs = self.repo.check(Path::new(&rel), Leaf::Replaced)?;
         let written = self
             .repo
             .objects()

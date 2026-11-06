@@ -295,12 +295,17 @@ code that could write does not exist** — and the two facts below are what
 keep that from being a false sense of safety.
 
 1. **The code does not exist.** `ReadRepo` (`src/repo.rs`) assembles its
-   object store, ref store, and parsed config itself and never lends them
-   out; there is no facade `Repository` handle a caller could reach a ref
-   transaction or index writer through. Every write-shaped gitoxide
+   object store, ref store, and parsed config itself. It lends the first two
+   to the verbs only as `OdbRead` and `RefsRead`, borrowed wrappers that have
+   find, header, exists and iterate and no write trait, no transaction and
+   no `Deref` to the real handle (`the_handles_a_read_repo_lends_cannot_write`,
+   `src/repo.rs`). There is no facade `Repository` handle a caller could
+   reach a ref transaction or index writer through. Every write-shaped gitoxide
    identifier (`gix-ref`'s `transaction`/`prepare`/`commit`, `gix-index`'s
-   `write_to`/`write`, `gix_object::Write`) is asserted absent outside a
-   `verbs/write/` module that does not exist in this build
+   `write_to`/`write`, `gix_object::Write`) is asserted absent outside
+   `src/verbs/write/` and `src/verbs/write.rs`, which are compiled only with
+   the `commit` cargo feature; the scan reads source files, so it runs the
+   same with the feature on or off
    (`write_shaped_plumbing_appears_only_under_verbs_write`,
    `tests/write_shaped_identifiers.rs`).
 2. **Isolation by construction.** Nothing is loaded that this crate did not

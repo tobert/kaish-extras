@@ -73,6 +73,7 @@ const READ_ONLY_REFUSED: &[(&[&str], i64)] = &[
 /// Spellings the index verbs refuse under the commit profile, on `RichRepo`
 /// (which has a staged edit to README.md, an unstaged edit to src/lib.rs and
 /// an untracked file).
+#[cfg(feature = "commit")]
 const COMMIT_REFUSED: &[(&[&str], i64)] = &[
     (&["add", "-p"], 2),
     (&["add", "-i", "README.md"], 2),
