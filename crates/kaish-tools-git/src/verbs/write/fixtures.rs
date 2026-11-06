@@ -53,6 +53,19 @@ fn git(cwd: &Path, args: &[&str]) {
     );
 }
 
+/// Run real git in `cwd` and return its stdout, trimmed.
+pub(crate) fn git_stdout(cwd: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("git must be on PATH: the oracle is real git");
+    assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).expect("utf-8").trim_end().to_string()
+}
+
 impl Fixture {
     /// A repository with one commit, a linked worktree, and the sentinel.
     pub(crate) fn new() -> Self {

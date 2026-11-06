@@ -1655,6 +1655,7 @@ dependencies = [
  "gix-ignore",
  "gix-imara-diff",
  "gix-index",
+ "gix-lock",
  "gix-object",
  "gix-odb",
  "gix-pack",

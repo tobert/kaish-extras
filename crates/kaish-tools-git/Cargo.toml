@@ -191,6 +191,10 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 #   of this crate depends on but a compiler cannot check — what `$(git …)`
 #   binds, and what it carries.
 [dev-dependencies]
+# `gix-ref`'s `prepare` takes `gix_lock::acquire::Fail`; the unit test that
+# writes a real per-worktree ref names it. Already in the graph under gix-ref.
+# Phase 2 promotes it to a dependency of `commit` when a verb takes a lock.
+gix-lock = "=24.0.0"
 kaish-kernel = { workspace = true }
 sha2 = "0.10"
 tempfile = "3"

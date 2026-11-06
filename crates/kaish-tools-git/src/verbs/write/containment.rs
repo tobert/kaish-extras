@@ -63,33 +63,52 @@ pub(crate) enum Leaf {
 
 /// Which root a path under the git directory lands in.
 ///
-/// Per-worktree state is `HEAD`, `index`, the sequencer files, `logs/HEAD`,
-/// and the `refs/bisect`, `refs/worktree` and `refs/rewritten` namespaces
-/// (git's `gitrepository-layout`). Everything else, loose objects and the
-/// rest of `refs/` and `logs/`, is the common directory's. For a plain
-/// repository both are the same directory.
+/// Git's own rule (`path.c`, `common_list`), checked against
+/// `git rev-parse --git-path` in a linked worktree by
+/// `root_choice_matches_git_rev_parse_git_path`: a name is **per-worktree
+/// unless it is on the common list**. A new per-worktree file git invents
+/// (`MERGE_MSG`, `AUTO_MERGE`, `BISECT_START`, `config.worktree`) is
+/// therefore right by default, where a list of per-worktree names was wrong
+/// for each one it had not heard of.
+///
+/// Common: `branches`, `common`, `hooks`, `info`, `logs`, `lost-found`,
+/// `objects`, `refs`, `remotes`, `worktrees`, `rr-cache`, `svn`, `config`,
+/// `gc.pid`, `packed-refs`, `shallow`. Exceptions inside them that stay
+/// per-worktree: `info/sparse-checkout`, `logs/HEAD`, and the `bisect`,
+/// `worktree` and `rewritten` namespaces under both `refs/` and
+/// `logs/refs/`. A name matches a base when it is the base, the base plus
+/// `.lock`, or beneath the base; `refs/worktreex` is not `refs/worktree`.
+/// For a plain repository both roots are the same directory.
 pub(crate) fn root_for(rel: &Path) -> Root {
-    let names: Vec<&str> = rel
+    let joined = rel
         .components()
         .filter_map(|c| match c {
-            Component::Normal(n) => n.to_str(),
+            Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
             _ => None,
         })
-        .collect();
-    let in_worktree_ns = |name: Option<&&str>| matches!(name, Some(&("bisect" | "worktree" | "rewritten")));
-    let per_worktree = match names.as_slice() {
-        [
-            "HEAD" | "HEAD.lock" | "index" | "index.lock" | "ORIG_HEAD" | "MERGE_HEAD"
-            | "CHERRY_PICK_HEAD" | "REVERT_HEAD" | "REBASE_HEAD" | "BISECT_LOG" | "rebase-merge"
-            | "rebase-apply" | "sequencer",
-            ..,
-        ] => true,
-        ["logs", "HEAD" | "HEAD.lock", ..] => true,
-        ["logs", "refs", ns, ..] => in_worktree_ns(Some(ns)),
-        ["refs", ns, ..] => in_worktree_ns(Some(ns)),
-        _ => false,
+        .collect::<Vec<_>>()
+        .join("/");
+    let at = |base: &str| {
+        joined == base
+            || joined.strip_suffix(".lock") == Some(base)
+            || joined.strip_prefix(base).is_some_and(|rest| rest.starts_with('/'))
     };
-    if per_worktree {
+    const PER_WORKTREE_INSIDE_COMMON: &[&str] = &[
+        "info/sparse-checkout",
+        "logs/HEAD",
+        "logs/refs/bisect",
+        "logs/refs/worktree",
+        "logs/refs/rewritten",
+        "refs/bisect",
+        "refs/worktree",
+        "refs/rewritten",
+    ];
+    const COMMON: &[&str] = &[
+        "branches", "common", "hooks", "info", "logs", "lost-found", "objects", "refs",
+        "remotes", "worktrees", "rr-cache", "svn", "config", "gc.pid", "packed-refs",
+        "shallow",
+    ];
+    if PER_WORKTREE_INSIDE_COMMON.iter().any(|b| at(b)) || !COMMON.iter().any(|b| at(b)) {
         Root::GitDir
     } else {
         Root::CommonDir
@@ -207,7 +226,7 @@ fn shown(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verbs::write::fixtures::{Case, Fixture, CASES, SENTINEL};
+    use crate::verbs::write::fixtures::{git_stdout, Case, Fixture, CASES, SENTINEL};
     use std::path::Path;
 
     fn walk_outside(dir: &Path, out: &mut Vec<(String, u64, std::time::SystemTime)>) {
@@ -311,24 +330,109 @@ mod tests {
         assert!(err.to_string().contains("the common git directory"), "{err}");
     }
 
+    /// F6: the oracle is real git, not a table written from the same belief
+    /// as `root_for`. `git rev-parse --git-path <name>`, run inside a linked
+    /// worktree, says which directory git itself resolves each name to; the
+    /// per-worktree git directory (`.git/worktrees/wt`) or the common one.
     #[test]
-    fn root_choice_follows_git_s_layout() {
-        for (rel, want) in [
-            ("HEAD", Root::GitDir),
-            ("index", Root::GitDir),
-            ("index.lock", Root::GitDir),
-            ("logs/HEAD", Root::GitDir),
-            ("refs/bisect/bad", Root::GitDir),
-            ("refs/worktree/x", Root::GitDir),
-            ("logs/refs/bisect/bad", Root::GitDir),
-            ("refs/heads/main", Root::CommonDir),
-            ("refs/tags/v1", Root::CommonDir),
-            ("logs/refs/heads/main", Root::CommonDir),
-            ("objects/ab/cdef", Root::CommonDir),
-            ("packed-refs", Root::CommonDir),
-            ("config", Root::CommonDir),
-        ] {
-            assert_eq!(root_for(Path::new(rel)), want, "{rel}");
+    fn root_choice_matches_git_rev_parse_git_path() {
+        const NAMES: &[&str] = &[
+            "HEAD", "index", "ORIG_HEAD", "MERGE_HEAD", "MERGE_MSG", "SQUASH_MSG",
+            "COMMIT_EDITMSG", "AUTO_MERGE", "FETCH_HEAD", "BISECT_LOG", "BISECT_START",
+            "BISECT_TERMS", "BISECT_EXPECTED_REV", "BISECT_ANCESTORS_OK", "BISECT_RUN",
+            "BISECT_NAMES", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD",
+            "NOTES_MERGE_REF", "NOTES_MERGE_WORKTREE", "TAG_EDITMSG",
+            "rebase-merge", "rebase-merge/head-name", "rebase-apply", "sequencer",
+            "sequencer/todo", "logs/HEAD", "logs/HEAD.lock", "logs/refs/heads/x",
+            "logs/refs/heads/x.lock", "logs/refs/remotes/o/h", "refs/heads/x",
+            "refs/heads/x.lock", "refs/tags/v1", "refs/remotes/o/h", "refs/bisect/bad",
+            "refs/bisect/bad.lock", "refs/worktree/x", "refs/rewritten/x",
+            "logs/refs/bisect/x", "logs/refs/worktree/x", "logs/refs/rewritten/x",
+            "packed-refs", "packed-refs.lock", "objects/ab", "objects/info/alternates",
+            "objects/pack/x.pack", "config", "config.lock", "config.worktree", "shallow",
+            "shallow.lock", "info/exclude", "info/sparse-checkout", "hooks/pre-commit",
+            "HEAD.lock", "index.lock", "gc.pid", "gc.log", "modules/x/config",
+            "rr-cache", "worktrees/wt/HEAD", "description", "branches/x", "remotes/x",
+            "svn/x", "lost-found/x", "common/x", "logs", "refs", "logs/refs",
+            // Case and prefix near-misses: git compares exactly.
+            "refs/bisectx", "refs/Bisect/x", "logs/head", "logs/HEAD/x",
+        ];
+        let fx = Fixture::new();
+        let git_dir = fx.linked_git_dir();
+        let common = fx.common();
+        for name in NAMES {
+            let resolved = git_stdout(&fx.linked, &["rev-parse", "--git-path", name]);
+            let resolved = PathBuf::from(resolved).canonicalize().unwrap_or_else(|_| {
+                // The path may not exist; canonicalize the parent that does.
+                let p = PathBuf::from(git_stdout(&fx.linked, &["rev-parse", "--git-path", name]));
+                let mut up = p.clone();
+                let mut tail = Vec::new();
+                while !up.exists() {
+                    tail.push(up.file_name().expect("name").to_owned());
+                    up.pop();
+                }
+                let mut base = up.canonicalize().expect("canonical ancestor");
+                for t in tail.iter().rev() {
+                    base.push(t);
+                }
+                base
+            });
+            // Compare against `<root>/<name>` exactly: `worktrees/wt/HEAD` is
+            // beneath the linked git dir's path but is the common dir's name.
+            let want = if resolved == git_dir.join(name) {
+                Root::GitDir
+            } else {
+                assert_eq!(resolved, common.join(name), "{name}: git resolved outside both roots");
+                Root::CommonDir
+            };
+            assert_eq!(root_for(Path::new(name)), want, "{name}: git resolved it to {}", resolved.display());
+        }
+    }
+
+    /// Where gix-ref 0.66 itself writes refs/bisect/* for a linked worktree
+    /// (`file::Store::to_base_dir_and_relative_name`: `Bisect | Rewritten |
+    /// WorktreePrivate | PseudoRef => self.git_dir`), checked by a real
+    /// transaction rather than the source read: the loose ref and its reflog
+    /// land where `root_for` says.
+    #[test]
+    fn gix_writes_per_worktree_refs_where_root_for_says() {
+        use gix_ref::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
+        let fx = Fixture::new();
+        let repo = fx.write_repo(true);
+        let head = gix_index::hash::ObjectId::from_hex(repo.read().head().expect("head").oid.expect("born").as_bytes()).expect("hex");
+        for name in ["refs/bisect/bad", "refs/worktree/x", "refs/rewritten/x", "refs/heads/viagix"] {
+            let edit = RefEdit {
+                change: Change::Update {
+                    log: LogChange { mode: RefLog::AndReference, force_create_reflog: true, message: "t".into() },
+                    expected: PreviousValue::Any,
+                    new: gix_ref::Target::Object(head),
+                },
+                name: name.try_into().expect("name"),
+                deref: false,
+            };
+            repo.refs()
+                .transaction()
+                .prepare(
+                    [edit],
+                    gix_lock::acquire::Fail::Immediately,
+                    gix_lock::acquire::Fail::Immediately,
+                )
+                .expect("prepare")
+                .commit(Some(gix_actor::SignatureRef {
+                    name: "T".into(),
+                    email: "t@example.com".into(),
+                    time: "0 +0000",
+                }))
+                .expect("commit");
+            let root = match root_for(Path::new(name)) {
+                Root::GitDir => fx.linked_git_dir(),
+                _ => fx.common(),
+            };
+            assert!(root.join(name).is_file(), "{name}: the loose ref is not under {}", root.display());
+        }
+        // Per-worktree refs are not in the common directory at all.
+        for name in ["refs/bisect/bad", "refs/worktree/x", "refs/rewritten/x"] {
+            assert!(fx.common().join(name).symlink_metadata().is_err(), "{name} leaked into the common dir");
         }
     }
 
