@@ -82,8 +82,8 @@ the last positional unless `--url` is used.
 | `-C, --continue-at -` | Resume the `-o` / `-O` file: sends `Range: bytes=<size>-` for a file that exists and is not empty (no `Range`, and a normal download, for one that is missing or empty), and appends the body through `backend().append()` **only** for a 206 whose `Content-Range` starts at `<size>`. A 416 is exit 0 with the file unchanged, even under `-f` (curl treats it as already complete). A 200 (the server ignored Range) is exit 33, and so is any other status, or a 206 for different bytes; the file is left as it was in every one of these. Needs `-o` or `-O`. | Only `-C -`; `-C <offset>` exits 2. `-C -` without `-o` / `-O` exits 2 (curl starts over without saying so), as do `-i`, `-I` and `-H Range: ...` with it. A non-200 error status exits 33 where curl would append the error page. Compared against curl 8.23 for the 206, 200, 416, missing and empty cases in `tests/features.rs`. |
 | `-H, --header <h:v>` | Request header. Repeatable. | None. |
 | `-i, --include` | Print response headers above the body, starting with `HTTP/1.1 <code> <reason>` (the standard phrase for the code). With `-o <file>`, writes headers **into the file** alongside the body, matching curl's behavior. | None. |
-| `-I, --head` | HEAD; print headers only. | None. |
-| `-o, --output <file>` | Write body to a VFS path, through `ToolCtx::resolve_path` + `backend().write()` — never the host filesystem. Headers go into the same file if `-i` is also given. Prints nothing on stdout, as curl does (this build has no progress meter to print); the byte count and path are in the result's baggage as `curl.bytes` and `curl.file`. | None. |
+| `-I, --head` | HEAD; print headers only. With `-o <file>`, the headers are what the file holds. | None. |
+| `-o, --output <file>` | Write the body to a VFS path, through `ToolCtx::resolve_path` + `backend().write()` — never the host filesystem. Headers go into the same file if `-i` is also given (or alone, with `-I`), and the body is written byte for byte. `-o -` writes to stdout, not to a file named `-`. The whole body is held in memory before it is written, inside `Limits::max_response_bytes`; nothing streams. Prints nothing on stdout, as curl does (this build has no progress meter to print); the byte count and path are in the result's baggage as `curl.bytes` and `curl.file`. | None. |
 | `-O, --remote-name` | Write the body to a file named after the **last non-empty segment of the URL path** (query and fragment excluded; not percent-decoded, as in curl 8.23: `c%20d.txt` stays that) in the shell's cwd, replacing a file of that name, through the same VFS write as `-o`. The name comes from the URL as typed, not from a redirect target. Prints nothing on stdout. A URL with no such segment (`http://h/`) exits 2 with no request. `-O` with `-o` exits 2. | curl falls back to the name `curl_response` for a URL with no segment; this build refuses (Amy's ruling, 2026-11-06). `-J` / `--remote-header-name` stays refused: a server must not choose the file name. |
 | `--output-dir <dir>` | Puts the `-o` or `-O` file under `<dir>`, which must exist and be a directory: otherwise exit 23, naming the path. Without `-o` or `-O` it exits 2. | curl ignores it without `-o`/`-O`. |
 | `-L, --location` | Follow redirects, up to `--max-redirs` (default 50). Hops are driven by this build, not by ureq, so **the egress allowlist is evaluated on every one** — a redirect cannot leave the embedder's policy. User/password are dropped on a cross-host hop. | Opt-in (matches curl's `-L`). Embedder can set a config default for auto-follow. |
@@ -365,12 +365,13 @@ Probed against the published crate and the source at `~/src/research/ureq`
   URL host is a placeholder when `--unix-socket` is set, exactly as curl does
   it. `--abstract-unix-socket` (Linux abstract namespace) reuses the same
   transport with abstract addressing; it is deferred to CU5.
-- **Body read respects the budget.** `curl -o <file>` streams via
-  `Body::as_reader()` and writes through `ToolCtx::backend().write`, so the
-  embedder's VFS byte budget governs the download. `curl <url>` to stdout reads
-  into the `ExecResult` and is subject to the kernel output limits (and the
-  1 MB wasm clip). ureq's own 10 MB `read_to_string` default is lowered to the
-  kernel's output cap so a stdout fetch cannot blow the budget.
+- **Body read respects the budget.** Both `curl -o <file>` and `curl <url>`
+  read the body into memory through `Body::as_reader()`, bounded by
+  `Limits::max_response_bytes`: a body over it is exit 1 and nothing is
+  written. `-o` then writes the bytes through `ToolCtx::backend().write`, so
+  the embedder's VFS budget applies as well. Nothing streams, so the cap is
+  also the largest file `-o` can save. Stdout output is subject to the kernel
+  output limits (and the 1 MB wasm clip).
 - **Errors map to exit codes.** ureq's `ErrorKind` lines up with the table
   above: `HostNotFound` is 6, `ConnectionFailed` and connect `Io` are 7,
   `Timeout` is 28, `Tls` is 35, `Rustls`/`Pem` cert failures are 60,

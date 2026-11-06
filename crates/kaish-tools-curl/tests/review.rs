@@ -143,3 +143,60 @@ async fn an_injected_authorization_is_never_accompanied_by_an_agent_one() {
         assert_eq!(authorizations(&server), vec!["Bearer embedder"], "{args}");
     }
 }
+
+// ── 3, 4, 5. What -o writes ─────────────────────────────────────────────
+
+fn blob_server() -> TcpGuard {
+    Server::builder()
+        .route(
+            "/blob",
+            Response::new(200)
+                .header("Content-Type", "application/octet-stream")
+                .body(vec![0x00u8, 0xff, 0xfe, 0x80, b'\r', b'\n', 0x00]),
+        )
+        .route("/text", Response::text(200, "plain\n"))
+        .start_tcp()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn include_with_output_file_keeps_binary_bytes_intact() {
+    let server = blob_server();
+    let p = compare(&server, "-s -i -o out.bin \"$URL/blob\"", &[]).await;
+    assert_eq!(p.ours.code, 0, "{}", p.ours.err);
+    let ours = p.fx.file("out.bin").await.expect("the file was written");
+    let body = [0x00u8, 0xff, 0xfe, 0x80, b'\r', b'\n', 0x00];
+    assert!(ours.starts_with(b"HTTP/1.1 200 OK\r\n"), "headers lead: {:?}", String::from_utf8_lossy(&ours));
+    assert!(ours.ends_with(&body), "the body bytes are written as received, not through UTF-8: {ours:?}");
+    let split = ours.windows(4).position(|w| w == b"\r\n\r\n").expect("blank line") + 4;
+    assert_eq!(&ours[split..], body, "nothing but the body after the headers");
+    if let Some(theirs) = &p.theirs {
+        let theirs = theirs.file("out.bin").expect("curl wrote it");
+        assert!(theirs.ends_with(&body), "real curl agrees on the tail");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn head_with_output_file_writes_the_headers() {
+    let server = blob_server();
+    let p = compare(&server, "-s -I -o h.txt \"$URL/text\"", &[]).await;
+    assert_eq!(p.ours.code, 0, "{}", p.ours.err);
+    let ours = p.fx.file("h.txt").await.expect("the file was written");
+    assert!(ours.starts_with(b"HTTP/1.1 200 OK\r\n"), "{:?}", String::from_utf8_lossy(&ours));
+    assert!(ours.ends_with(b"\r\n\r\n"), "headers end at the blank line and nothing follows");
+    if let Some(theirs) = &p.theirs {
+        let theirs = theirs.file("h.txt").expect("curl wrote it");
+        assert!(theirs.starts_with(b"HTTP/1.1 200 OK\r\n") && theirs.ends_with(b"\r\n\r\n"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_dash_is_stdout_not_a_file_named_dash() {
+    let server = blob_server();
+    let p = compare(&server, "-s -o - \"$URL/text\"", &[]).await;
+    assert_eq!(p.ours.code, 0, "{}", p.ours.err);
+    assert_eq!(p.ours.text_out(), "plain\n");
+    assert!(p.fx.file("-").await.is_none(), "no file named '-'");
+    if let Some(theirs) = &p.theirs {
+        assert_eq!(theirs.stdout, b"plain\n");
+    }
+}

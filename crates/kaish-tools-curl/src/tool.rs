@@ -572,13 +572,10 @@ async fn deliver(
         return result;
     };
 
-    // With `-i`, headers go into the file alongside the body — curl's
-    // behavior, and what docs/curl.md's `-o` row promises.
-    let payload = if include_headers {
-        crate::render::render_text(&response, true, head_only).into_bytes()
-    } else {
-        response.body
-    };
+    // `-i` puts the headers in the file ahead of the body, and `-I` puts in
+    // the headers alone — curl's behavior, and what docs/curl.md's `-o` row
+    // promises.
+    let payload = crate::render::render_bytes(&response, include_headers || head_only, head_only);
     let written = payload.len();
 
     let vfs_path = ctx.resolve_path(path);

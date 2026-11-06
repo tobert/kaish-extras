@@ -479,7 +479,14 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         ));
     }
 
-    output_file = resolve_output(output_file, remote_name, output_dir.clone(), &url)?;
+    // `-o -` is stdout, as in curl (with `--output-dir` too), not a file
+    // named `-`.
+    if output_file.as_deref() == Some("-") && !remote_name {
+        output_file = None;
+        output_dir = None;
+    } else {
+        output_file = resolve_output(output_file, remote_name, output_dir.clone(), &url)?;
+    }
 
     if resume {
         let problem = if output_file.is_none() {
