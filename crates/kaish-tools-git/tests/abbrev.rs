@@ -45,6 +45,9 @@ fn init() -> (Fixture, PathBuf) {
     let root = fixture.path("repo");
     std::fs::create_dir_all(&root).expect("create repo dir");
     git(&root, &["init", "--initial-branch=main", "--quiet"]);
+    // A commit may start `gc --auto` in the background, which would collide
+    // with the explicit `gc` below and change which objects are packed.
+    git(&root, &["config", "gc.auto", "0"]);
     (fixture, root)
 }
 
@@ -92,7 +95,7 @@ async fn a_prefix_another_object_shares_is_lengthened_as_git_does() {
     let theirs = git(&root, &["log", "--oneline", "--no-decorate", "-n", "1000"]);
     let widths = oid_widths(&theirs);
     assert!(
-        widths.iter().any(|w| *w > 4) && widths.iter().any(|w| *w == 4),
+        widths.iter().any(|w| *w > 4) && widths.contains(&4),
         "negative control: git lengthened some prefixes and not all: {widths:?}"
     );
     let ours = oneline(&root, 1000).await;
