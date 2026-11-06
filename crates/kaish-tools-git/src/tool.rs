@@ -193,9 +193,9 @@ impl GitTool {
         // a successful answer that ran up against `--limit`.
         if model.truncated {
             result.err = format!(
-                "git status: output truncated at {} entries (--limit); \
+                "git status: output truncated at {} (--limit); \
                  'truncated' is true in --json",
-                model.entries.len()
+                counted(model.entries.len(), "entry", "entries")
             );
         }
         // A path that was not compared is reported the same way truncation is:
@@ -408,9 +408,9 @@ impl GitTool {
             // only have come from the budget.
             result.err = if model.commits.len() >= limit {
                 format!(
-                    "git log: output truncated at {} commits (--limit); \
+                    "git log: output truncated at {} (--limit); \
                      'truncated' is true in --json",
-                    model.commits.len()
+                    counted(model.commits.len(), "commit", "commits")
                 )
             } else {
                 format!(
@@ -509,9 +509,9 @@ impl GitTool {
         let mut result = ExecResult::with_output(crate::render::ls(&model));
         if model.truncated {
             result.err = format!(
-                "git ls: output truncated at {} entries (--limit); 'truncated' \
+                "git ls: output truncated at {} (--limit); 'truncated' \
                  is true in --json",
-                model.entries.len()
+                counted(model.entries.len(), "entry", "entries")
             );
         }
         result.baggage.insert("git.repo".to_string(), repo_root);
@@ -601,9 +601,9 @@ impl GitTool {
                     );
                 } else if show.files_truncated {
                     r.err = format!(
-                        "git show: file list truncated at {} files (--limit, or this \
+                        "git show: file list truncated at {} (--limit, or this \
                          build's max_rows); 'files_truncated' is true in --json",
-                        show.files.as_ref().map_or(0, Vec::len)
+                        counted(show.files.as_ref().map_or(0, Vec::len), "file", "files")
                     );
                 }
                 (r, "commit")
@@ -615,9 +615,9 @@ impl GitTool {
                 let mut r = ExecResult::with_output(crate::render::show_tree(&report));
                 if report.truncated {
                     r.err = format!(
-                        "git show: output truncated at {} entries (--limit); \
+                        "git show: output truncated at {} (--limit); \
                          'truncated' is true in --json",
-                        report.entries.len()
+                        counted(report.entries.len(), "entry", "entries")
                     );
                 }
                 (r, "tree")
@@ -942,9 +942,9 @@ impl GitTool {
         }
         if model.truncated {
             notes.push(format!(
-                "output truncated at {} files (--limit); 'truncated' is true \
+                "output truncated at {} (--limit); 'truncated' is true \
                  in --json",
-                model.files.len()
+                counted(model.files.len(), "file", "files")
             ));
         }
         if model.unmerged > 0 {
@@ -1047,9 +1047,9 @@ impl GitTool {
         let mut result = ExecResult::with_output(crate::render::branch(&model, all));
         if model.truncated {
             result.err = format!(
-                "git branch: output truncated at {} branches (--limit); \
+                "git branch: output truncated at {} (--limit); \
                  'truncated' is true in --json",
-                model.branches.len()
+                counted(model.branches.len(), "branch", "branches")
             );
         }
         result.baggage.insert("git.repo".to_string(), repo_root);
@@ -1110,9 +1110,9 @@ impl GitTool {
         let mut result = ExecResult::with_output(crate::render::tag(&model));
         if model.truncated {
             result.err = format!(
-                "git tag: output truncated at {} tags (--limit); 'truncated' \
+                "git tag: output truncated at {} (--limit); 'truncated' \
                  is true in --json",
-                model.tags.len()
+                counted(model.tags.len(), "tag", "tags")
             );
         }
         result.baggage.insert("git.repo".to_string(), repo_root);
@@ -1174,9 +1174,9 @@ impl GitTool {
         let mut result = ExecResult::with_output(crate::render::worktree_list(&model));
         if model.truncated {
             result.err = format!(
-                "git worktree list: output truncated at {} working trees \
+                "git worktree list: output truncated at {} \
                  (--limit); 'truncated' is true in --json",
-                model.worktrees.len()
+                counted(model.worktrees.len(), "working tree", "working trees")
             );
         }
         result.baggage.insert("git.repo".to_string(), repo_root);
@@ -1481,6 +1481,11 @@ impl Tool for GitTool {
         }
         result
     }
+}
+
+/// `1 commit`, `2 commits`: a count with its noun in the right number.
+fn counted(n: usize, singular: &str, plural: &str) -> String {
+    format!("{n} {}", if n == 1 { singular } else { plural })
 }
 
 /// Terminate a non-empty stderr string with a newline.

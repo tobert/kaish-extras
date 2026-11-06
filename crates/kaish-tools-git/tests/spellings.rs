@@ -385,7 +385,7 @@ async fn stderr_notes_end_with_a_newline() {
     let (_f, root) = repo();
     let r = run(&root, "git log -n 1").await;
     assert_eq!(r.code, 0, "{}", r.err);
-    assert!(r.err.starts_with("git log: output truncated at 1 commits"), "negative control: a note exists: {}", r.err);
+    assert!(r.err.starts_with("git log: output truncated at 1 commit ("), "negative control: a note exists: {}", r.err);
     assert!(r.err.ends_with('\n') && !r.err.ends_with("\n\n"), "one terminator: {:?}", r.err);
 }
 
@@ -1116,4 +1116,40 @@ async fn help_with_a_verb_is_that_verbs_help() {
     assert_eq!(r.code, 0, "{}", r.err);
     assert!(r.out.contains("git <verb> --help"), "{}", r.out);
     refused(&root, "git --help nosuchverb", &["nosuchverb", "git --help"]).await;
+}
+
+#[tokio::test]
+async fn a_truncation_note_counts_one_in_the_singular() {
+    let (_f, root) = repo();
+    let r = run(&root, "git log --limit 1 --oneline").await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.err.contains("truncated at 1 commit (--limit)"), "{}", r.err);
+    let r = run(&root, "git branch --limit 1").await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.err.contains("truncated at 1 branch (--limit)"), "{}", r.err);
+}
+
+/// Every early return in dispatch ends its stderr in a newline, so a pipeline's
+/// next stage does not run onto it. Run on the tool directly: a kernel may
+/// terminate the line itself.
+#[tokio::test]
+async fn every_refusal_ends_its_stderr_in_a_newline() {
+    let (_f, root) = repo();
+    let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), root.clone()));
+    let mut ctx = support::TestCtx::new(backend, "/mnt");
+    let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
+    let mut binary = support::words(&[]);
+    binary.words = Some(vec![kaish_types::Value::Bytes(vec![0xff, 0xfe])]);
+    let cases = [
+        ("bare git", support::words(&[])),
+        ("binary word", binary),
+        ("--help nosuchverb", support::words(&["--help", "nosuchverb"])),
+        ("route failure", support::words(&["nosuchverb"])),
+        ("write verb", support::words(&["commit"])),
+    ];
+    for (name, args) in cases {
+        let r = tool.execute(args, &mut ctx).await;
+        assert_ne!(r.code, 0, "{name}: {:?}", r.err);
+        assert!(r.err.ends_with('\n'), "{name}: stderr must end in a newline: {:?}", r.err);
+    }
 }
