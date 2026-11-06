@@ -129,7 +129,7 @@ fn build(
         }
     }
     // Git's order: names compared as bytes with `/` appended to a tree's.
-    entries.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+    entries.sort_by_cached_key(sort_key);
     if let Some(w) = entries.windows(2).find(|w| w[0].filename == w[1].filename) {
         return refuse(
             4,
@@ -175,8 +175,8 @@ mod tests {
             filename: BString::from(name),
             oid: ObjectId::null(gix_index::hash::Kind::Sha1),
         };
-        let mut entries = vec![mk("a", true), mk("a.b", false), mk("a-b", false), mk("a0", false), mk("b", false)];
-        entries.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+        let mut entries = [mk("a", true), mk("a.b", false), mk("a-b", false), mk("a0", false), mk("b", false)];
+        entries.sort_by_cached_key(sort_key);
         let names: Vec<String> = entries.iter().map(|e| e.filename.to_string()).collect();
         assert_eq!(names, ["a-b", "a.b", "a", "a0", "b"]);
     }
