@@ -185,6 +185,7 @@ async fn prepare_form(
                 v.push_str(&format!("; boundary={boundary}"));
             }
         }
+        None if req.suppressed.iter().any(|n| n == "content-type") => {}
         None => req
             .headers
             .push(("Content-Type".into(), format!("multipart/form-data; boundary={boundary}"))),

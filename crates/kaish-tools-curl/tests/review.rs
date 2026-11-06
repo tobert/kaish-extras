@@ -418,3 +418,46 @@ async fn attached_short_values_parse_like_curl() {
     let p = compare(&server, "'-d=a=1' \"$URL/echo\"", &[]).await;
     assert_eq!(p.ours_req[0].body, b"=a=1");
 }
+
+// ── 13. -H forms with an empty value ────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn header_forms_with_no_value_match_curl() {
+    let server = redirector();
+    // 'Name;' sends the header with an empty value.
+    let p = compare(&server, "-s -H 'X-Empty;' \"$URL/echo\"", &[]).await;
+    assert_eq!(p.ours.code, 0, "{}", p.ours.err);
+    assert_eq!(p.ours_req[0].header("X-Empty"), Some(""), "sent, empty");
+    if p.theirs.is_some() {
+        assert_eq!(p.theirs_req[0].header("X-Empty"), Some(""), "real curl agrees");
+    }
+
+    // 'Name:' removes a header the client would add itself.
+    for name in ["Accept", "User-Agent"] {
+        let p = compare(&server, &format!("-s -H '{name}:' \"$URL/echo\""), &[]).await;
+        assert_eq!(p.ours.code, 0, "{name}: {}", p.ours.err);
+        assert_eq!(p.ours_req[0].header(name), None, "{name} is not sent");
+        if p.theirs.is_some() {
+            assert_eq!(p.theirs_req[0].header(name), None, "{name}: real curl agrees");
+        }
+    }
+    // The body's own Content-Type goes too.
+    let p = compare(&server, "-s -d a=1 -H 'Content-Type:' \"$URL/echo\"", &[]).await;
+    assert_eq!(p.ours_req[0].header("Content-Type"), None);
+    if p.theirs.is_some() {
+        assert_eq!(p.theirs_req[0].header("Content-Type"), None);
+    }
+    // Controls: a header of the same name that the caller set stays (curl
+    // removes only what the client adds), and the defaults are there without the flag.
+    let p = compare(&server, "-s -H 'X-A: 1' -H 'X-A:' \"$URL/echo\"", &[]).await;
+    assert_eq!(p.ours_req[0].header("X-A"), Some("1"));
+    let p = compare(&server, "-s \"$URL/echo\"", &[]).await;
+    assert!(p.ours_req[0].header("Accept").is_some() && p.ours_req[0].header("User-Agent").is_some());
+
+    // 'Host:' cannot be removed here, and a bare name is not a header.
+    for args in ["-s -H 'Host:' \"$URL/echo\"", "-s -H 'Accept' \"$URL/echo\""] {
+        let p = compare(&server, args, &[]).await;
+        assert_eq!(p.ours.code, 2, "{args}: {}", p.ours.err);
+        assert!(p.ours_req.is_empty(), "{args}");
+    }
+}

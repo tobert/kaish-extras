@@ -108,6 +108,10 @@ pub struct Request {
     /// redirect, and derives it again from the request kind when none was
     /// named.
     pub method_explicit: bool,
+    /// Lower-cased names of headers the caller removed with `-H 'Name:'`. The
+    /// backend stops adding `Accept` and `User-Agent` for these; the body's
+    /// `Content-Type` was already left out.
+    pub suppressed: Vec<String>,
     /// The caller set a `Content-Type` with `-H`. One this build added for a
     /// body goes with the body when a redirect drops it; the caller's stays.
     pub caller_content_type: bool,
@@ -273,6 +277,8 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
 
     let mut bodies: Vec<BodyPart> = Vec::new();
     let mut headers: Vec<(String, String)> = Vec::new();
+    // Lower-cased names of headers `-H 'Name:'` removed.
+    let mut suppressed: Vec<String> = Vec::new();
     let mut output_file: Option<String> = None;
     let mut user: Option<String> = None;
     let mut password: Option<String> = None;
@@ -352,16 +358,31 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             }
             "-H" | "--header" => {
                 let hv = value(&mut i)?;
-                let Some((name, v)) = hv.split_once(':') else {
-                    return Err(CurlError::Usage(format!(
-                        "'-H {hv}' is not a header. Headers are 'Name: value'."
-                    )));
-                };
-                let name = name.trim();
-                if name.eq_ignore_ascii_case("user-agent") {
-                    user_agent = Some(v.trim().to_string());
+                // `Name: value` sets a header; `Name:` removes one the client
+                // would add itself (`Accept`, `User-Agent`, a body's
+                // `Content-Type`); `Name;` sends `Name` with no value. A bare
+                // `Name` is curl's silent no-op, which this build refuses.
+                if let Some((name, v)) = hv.split_once(':') {
+                    let (name, v) = (name.trim(), v.trim());
+                    if name.eq_ignore_ascii_case("host") && v.is_empty() {
+                        return Err(CurlError::Usage(
+                            "'-H Host:' cannot remove the Host header (exit 2), and no request was sent. HTTP/1.1 requires one. Set another with '-H \"Host: name\"'."
+                                .into(),
+                        ));
+                    }
+                    if v.is_empty() {
+                        suppressed.push(name.to_ascii_lowercase());
+                    } else if name.eq_ignore_ascii_case("user-agent") {
+                        user_agent = Some(v.to_string());
+                    } else {
+                        headers.push((name.to_string(), v.to_string()));
+                    }
+                } else if let Some(name) = hv.strip_suffix(';').map(str::trim).filter(|n| !n.is_empty()) {
+                    headers.push((name.to_string(), String::new()));
                 } else {
-                    headers.push((name.to_string(), v.trim().to_string()));
+                    return Err(CurlError::Usage(format!(
+                        "'-H {hv}' is not a header (exit 2), and no request was sent. Write 'Name: value', 'Name:' to remove a default header, or 'Name;' to send it empty."
+                    )));
                 }
             }
             "-o" | "--output" => output_file = Some(value(&mut i)?),
@@ -583,16 +604,18 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     // docs/curl.md's `-d` row: a body implies form encoding unless the caller
     // named a Content-Type themselves.
     let caller_content_type = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
-    if body_implies_form && !get && !caller_content_type {
+    if body_implies_form && !get && !caller_content_type && !suppressed.iter().any(|n| n == "content-type") {
         headers.push((
             "Content-Type".to_string(),
             "application/x-www-form-urlencoded".to_string(),
         ));
     }
-    headers.push((
-        "User-Agent".to_string(),
-        user_agent.unwrap_or_else(|| DEFAULT_USER_AGENT.to_string()),
-    ));
+    if !suppressed.iter().any(|n| n == "user-agent") || user_agent.is_some() {
+        headers.push((
+            "User-Agent".to_string(),
+            user_agent.unwrap_or_else(|| DEFAULT_USER_AGENT.to_string()),
+        ));
+    }
 
     let method_explicit = method_override.is_some();
     let method = match method_override {
@@ -608,6 +631,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         method,
         method_explicit,
         caller_content_type,
+        suppressed,
         bodies,
         body: Vec::new(),
         get,

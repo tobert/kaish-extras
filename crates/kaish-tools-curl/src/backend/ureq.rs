@@ -127,6 +127,16 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
         // The whole-request deadline is always set, clamped to the embedder's
         // ceiling above. An omitted `--max-time` must not mean "wait forever".
         .timeout_global(Some(Duration::from_secs_f64(max_time)));
+    // `-H 'Accept:'` and `-H 'User-Agent:'` remove what the client adds on its
+    // own, which ureq does unless told not to.
+    for name in &req.suppressed {
+        builder_cfg = match name.as_str() {
+            "accept" => builder_cfg.accept(ureq::config::AutoHeaderValue::None),
+            "user-agent" => builder_cfg.user_agent(ureq::config::AutoHeaderValue::None),
+            "accept-encoding" => builder_cfg.accept_encoding(ureq::config::AutoHeaderValue::None),
+            _ => builder_cfg,
+        };
+    }
     if req.insecure {
         // The parser only sets this when the embedder permitted it.
         builder_cfg = builder_cfg.tls_config(
