@@ -1,0 +1,26 @@
+1. Stage the file src/main.rs.
+2. Stage the two files src/lib.rs and Cargo.toml.
+3. Stage all changes, including new untracked files.
+4. Stage only modifications to files git already tracks (not new files).
+5. See exactly what will go into the next commit.
+6. Commit the staged changes with the message "fix parser".
+7. Commit the staged changes with a subject "fix parser" and a body paragraph "Handles empty input."
+8. Commit the staged changes with message "fix parser" and a "Co-authored-by: Ada <ada@example.com>" trailer.
+9. Stage and commit all changes to tracked files in one command, message "wip".
+10. Commit only src/lib.rs with message "lib only", leaving other staged changes staged.
+11. Fix the message of the last commit to "better message".
+12. You forgot to include docs/notes.md in the last commit. Add it to that commit, keeping its message.
+13. Undo the last commit but keep its changes staged.
+14. Undo the last commit but keep its changes unstaged in the working tree.
+15. Unstage src/main.rs (keep the edits).
+16. Unstage everything.
+17. Discard the unstaged changes to src/lib.rs.
+18. Delete the tracked file old.txt and commit that with message "remove old".
+19. Rename the tracked file a.txt to b.txt and commit with message "rename".
+20. Create a branch named topic without switching to it.
+21. Create a branch named topic and switch to it.
+22. Switch to the existing branch feature/x.
+23. Tag the current commit v1.0 (lightweight), and separately tag it v1.1 with an annotation "release 1.1".
+24. Check which author name and email a commit would use.
+25. You ran a commit and a pre-commit hook failed. Give the command(s) you would run next.
+26. Make a fixup commit for the earlier commit abc1234.
