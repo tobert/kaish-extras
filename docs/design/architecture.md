@@ -694,16 +694,19 @@ every verb, exactly as `grep` does it in kaish core.
 the default for agent-created worktrees, `remove` never takes `--force`, and
 `prune` defaults to `--dry-run`. **Depends on ledger** (except `list`).
 
-**Commit profile** — `add <paths>`, `commit -m <MSG>`, `branch create <NAME>
-[--rev REV]`, `tag create <NAME> [--rev REV] [-m MSG]`. **Depends on ledger.**
-The natural ledger scope for a commit is the state transition the safety
-inventory already identified as the right pattern: *approve `refs/heads/x`
-moving `old_oid → new_oid`, verify at redemption, fail loud if the ref moved.*
+**Commit profile** — **superseded 2026-11-06 by
+[git-write-profile.md](git-write-profile.md)**, which drops the ledger
+dependency (kaish removed the ledger before 0.14) and takes its verb set from
+the 2026-11 write survey. What survives from this sketch: every ref move is a
+compare-and-swap against the oid we read, failing loud if the ref moved.
 
 **Never** — `push`, `fetch`, `pull`, `clone` (until `remote`, if ever),
-`checkout`, `switch`, `restore`, `reset`, `clean`, `rebase`, `merge`,
-`cherry-pick`, `revert`, `stash`, `gc`, `commit --amend`, and anything spelled
-`--force`. Plumbing (`cat-file`, `rev-parse`, `update-ref`, `hash-object`) is out
+`reset --hard`, `clean`, `rebase`, `merge`, `cherry-pick`, `revert`, `stash`,
+`gc`, and anything spelled `--force`. *Changed 2026-11-06:* `commit --amend`,
+`switch -c`/`checkout -b`, `restore --staged`, and `reset` without `--hard`
+left this list on purpose — git-write-profile.md puts the rewrites under an
+embedder-set `RewritePolicy` and keeps worktree-content writes (`switch
+<existing>`, `restore <file>`) deferred rather than forbidden. Plumbing (`cat-file`, `rev-parse`, `update-ref`, `hash-object`) is out
 of scope permanently, not deferred.
 
 ---
@@ -768,6 +771,11 @@ the `Limits` above. An embedder that writes nothing gets the safe thing by
 typing nothing.
 
 ### C.3 Write profiles are type-gated
+
+> **Superseded 2026-11-06** by git-write-profile.md §2. The
+> `ctx.request_approval` call below never existed in a published kaish: the
+> ledger was removed before 0.14, and approval is now the embedder's, through
+> `plan` and the schema's `operations` ids. The type-gate half stands.
 
 `Profile::Worktree` and `Profile::Commit` are unreachable from the ordinary
 constructor. **The gate is a deliberate-opt-in marker, not an approvals

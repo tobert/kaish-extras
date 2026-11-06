@@ -140,6 +140,26 @@ async fn branch_a_is_branch_all() {
     assert!(out.contains("origin/main"), "-a includes the remote-tracking branch: {out}");
 }
 
+/// `-a` names a remote-tracking branch as git does, `remotes/origin/main`,
+/// where `-r` names it `origin/main`. The text is compared with git's own, and
+/// `contains` cannot tell the two apart.
+#[tokio::test]
+async fn branch_a_text_names_remote_rows_as_git_does() {
+    let (_f, root) = repo();
+    let names = |text: &str| -> Vec<String> {
+        text.lines().map(|l| l.split('\t').next().unwrap_or_default().to_string()).collect()
+    };
+    let ours_a = run(&root, "git branch -a").await;
+    let theirs_a = git(&root, &["branch", "-a", "--no-color"]);
+    assert_eq!(names(&ours_a.out), theirs_a.lines().map(String::from).collect::<Vec<_>>());
+    assert!(theirs_a.contains("  remotes/origin/main"), "negative control: git prefixes it: {theirs_a}");
+    let ours_r = run(&root, "git branch -r").await;
+    assert_eq!(names(&ours_r.out), vec!["  origin/main".to_string()]);
+    // The typed model keeps the short name, as git's %(refname:short) does.
+    let json = run(&root, "git branch -a --json").await;
+    assert!(json.out.contains("\"name\": \"origin/main\"") || json.out.contains("\"name\":\"origin/main\""), "{}", json.out);
+}
+
 #[tokio::test]
 async fn branch_r_is_branch_remote() {
     let (_f, root) = repo();
@@ -175,9 +195,9 @@ async fn log_oneline_leaves_json_unchanged() {
 async fn log_on_a_branch_with_a_limit_and_oneline() {
     let (_f, root) = repo();
     // The bench's exact words, with this fixture's branch name.
-    let r = run(&root, "git log main --limit 10 --oneline").await;
+    let r = run(&root, "git log main --limit 1 --oneline").await;
     assert_eq!(r.code, 0, "{}", r.err);
-    assert_eq!(r.out.lines().count(), 3, "{}", r.out);
+    assert_eq!(r.out.lines().count(), 1, "the limit cuts three commits to one: {}", r.out);
 }
 
 #[tokio::test]
@@ -187,12 +207,20 @@ async fn log_oneline_and_body_are_refused_together() {
 }
 
 #[tokio::test]
-async fn log_p_is_log_patch() {
+async fn log_p_is_refused_as_p_and_patch_as_patch() {
     let (_f, root) = repo();
     let p = run(&root, "git log -p").await;
     let patch = run(&root, "git log --patch").await;
     assert_ne!(patch.code, 0, "log --patch is refused in every build");
-    assert_eq!((p.code, &p.err), (patch.code, &patch.err), "-p must be refused exactly as --patch is");
+    assert_eq!(p.code, patch.code, "the same refusal class and exit code");
+    // Each names the flag the caller typed, and neither names the other.
+    // The wording past the flag differs with and without `textdiff` (that
+    // build refuses for the missing renderer first), so pin the flag name.
+    assert!(p.err.starts_with("git log: -p "), "{}", p.err);
+    assert!(!p.err.contains("--patch is"), "{}", p.err);
+    assert!(patch.err.starts_with("git log: --patch "), "{}", patch.err);
+    // Past the flag's name the two are one message.
+    assert_eq!(p.err.replacen("-p ", "--patch ", 1), patch.err);
 }
 
 #[tokio::test]
@@ -218,6 +246,198 @@ async fn an_unknown_flag_without_a_hint_lists_the_verbs_flags() {
     let err = refused(&root, "git log --frobnicate", &["--frobnicate is not supported", "git log accepts"]).await;
     assert!(err.contains("--limit (-n)"), "{err}");
     assert!(!err.contains("-- --frobnicate"), "clap's advice would make the flag a path: {err}");
+}
+
+// --- `-N`, and several refusals at once ----------------------------------
+
+#[tokio::test]
+async fn log_dash_n_is_log_limit_n() {
+    let (_f, root) = repo();
+    let one = same(&root, "git log -1 --oneline", "git log -n 1 --oneline").await;
+    assert_eq!(one.lines().count(), 1, "negative control: -1 limits to one commit: {one}");
+    let theirs = git(&root, &["log", "-2", "--oneline", "--no-decorate"]);
+    let ours = same(&root, "git log -2 --oneline", "git log --limit 2 --oneline").await;
+    assert_eq!(ours.trim_end(), theirs, "-2 selects what git's -2 selects");
+}
+
+#[tokio::test]
+async fn log_dash_n_takes_any_position_and_combines_with_other_flags() {
+    let (_f, root) = repo();
+    same(&root, "git log --oneline -2", "git log -n 2 --oneline").await;
+    same(&root, "git log --author Fixture -2 --json", "git log -n 2 --author Fixture --json").await;
+    same(&root, "git log -2 main -- src/lib.rs --oneline", "git log -n 2 main -- src/lib.rs --oneline").await;
+}
+
+#[tokio::test]
+async fn a_dash_number_after_the_marker_is_a_path_not_a_count() {
+    let (_f, root) = repo();
+    // After `--` everything is a pathspec, as in git: `-2` names no file.
+    let r = run(&root, "git log --oneline -- -2").await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(r.out.trim(), "", "no commit touches a file named -2: {}", r.out);
+}
+
+#[tokio::test]
+async fn every_refused_flag_is_reported_in_one_error() {
+    let (_f, root) = repo();
+    let err = refused(
+        &root,
+        "git log -1 --follow --graph --date=short --decorate",
+        &["--follow is not supported", "--graph is not supported", "--date is not supported", "--decorate is not supported"],
+    )
+    .await;
+    // Each flag's own next step is carried, not only the first one's.
+    assert!(err.contains("--first-parent"), "--graph's step: {err}");
+    assert!(err.contains("git tag"), "--decorate's step: {err}");
+    // A count the caller wrote as `-1` is expanded before it is refused, so
+    // it is never reported as a flag.
+    assert!(!err.contains("-1 is not supported"), "the count is not a refused flag: {err}");
+}
+
+#[tokio::test]
+async fn a_count_beside_an_unknown_flag_is_not_reported_as_unsupported() {
+    let (_f, root) = repo();
+    let err = refused(&root, "git log -1 --frobnicate", &["--frobnicate is not supported"]).await;
+    assert!(!err.contains("-1 is not"), "{err}");
+    assert!(!err.contains("-n is not"), "{err}");
+}
+
+#[tokio::test]
+async fn a_count_hint_names_only_a_spelling_the_verb_takes() {
+    let (_f, root) = repo();
+    // branch takes -n; status takes --limit only; info takes no count.
+    let err = refused(&root, "git branch -5", &["Write the count as '-n 5'"]).await;
+    assert!(!err.contains("--limit"), "{err}");
+    let err = refused(&root, "git status -5", &["-5 is not supported", "Write the count as '--limit 5'"]).await;
+    assert!(!err.contains("'-n 5'"), "status has no -n: {err}");
+    let err = refused(&root, "git info -5", &["-5 is not supported"]).await;
+    assert!(!err.contains("Write the count"), "info takes no count: {err}");
+}
+
+#[tokio::test]
+async fn a_digit_run_with_a_trailing_flag_names_the_whole_word() {
+    let (_f, root) = repo();
+    // git itself: `git log -5p` is "'5p' not an integer"; neither half works.
+    let err = refused(&root, "git log -5p", &["-5p is not supported"]).await;
+    assert!(!err.contains("'-n 5'"), "{err}");
+    let err = refused(&root, "git log -p5", &["-p"]).await;
+    assert!(!err.contains("-5 is not supported"), "{err}");
+}
+
+#[tokio::test]
+async fn log_follow_names_the_path_form_and_says_renames_are_not_followed() {
+    let (_f, root) = repo();
+    let err = refused(&root, "git log --follow a.txt", &["--follow is not supported", "git log -- FILE", "renames"]).await;
+    assert!(err.contains("does not follow renames"), "{err}");
+}
+
+#[tokio::test]
+async fn log_date_points_at_json() {
+    let (_f, root) = repo();
+    let err = refused(&root, "git log --date=short", &["--date is not supported", "--json"]).await;
+    assert!(err.contains("YYYY-MM-DD") && err.contains("author.time"), "{err}");
+}
+
+// --- Q7: steering `log <branch>` toward a range ----------------------------
+
+/// Whole lines of `help git` and `help git log` as an agent reads them.
+#[tokio::test]
+async fn help_steers_log_of_a_branch_toward_a_range() {
+    let (_f, root) = repo();
+    for topic in ["help git", "help git log"] {
+        let r = run(&root, topic).await;
+        assert_eq!(r.code, 0, "{topic}: {}", r.err);
+        assert!(
+            r.out.contains("git log main..feature")
+                && r.out.contains("whole history"),
+            "{topic} must say that 'git log <branch>' is the branch's whole history and \
+             that 'git log main..feature' lists what it adds: {}",
+            r.out
+        );
+    }
+}
+
+// --- Q8: a flag after `--` is a path, and the note says so ------------------
+
+#[tokio::test]
+async fn a_flag_after_the_marker_is_read_as_a_path_and_the_note_says_so() {
+    let (_f, root) = repo();
+    let r = run(&root, "git log -n 5 -- a.txt --oneline").await;
+    assert_eq!(r.code, 0, "the answer is still given: {}", r.err);
+    assert_eq!(
+        r.err,
+        "git log: '--oneline' after '--' was read as a path, as git reads it. Write flags before '--'\n"
+    );
+    // Negative control: a plain path after the marker says nothing.
+    let quiet = run(&root, "git log -n 5 -- a.txt").await;
+    assert_eq!(quiet.code, 0, "{}", quiet.err);
+    assert!(!quiet.err.contains("after '--'"), "{}", quiet.err);
+    // The notice is for log, status and diff alike.
+    let s = run(&root, "git status -- --json").await;
+    assert!(s.err.contains("'--json' after '--' was read as a path"), "{}", s.err);
+    // A note already on stderr keeps its own line.
+    let both = run(&root, "git log -n 1 -- a.txt --oneline").await;
+    assert_eq!(both.err.lines().count(), 2, "{:?}", both.err);
+}
+
+// --- G11: a stderr note is a whole line -------------------------------------
+
+#[tokio::test]
+async fn stderr_notes_end_with_a_newline() {
+    let (_f, root) = repo();
+    let r = run(&root, "git log -n 1").await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.err.starts_with("git log: output truncated at 1 commit ("), "negative control: a note exists: {}", r.err);
+    assert!(r.err.ends_with('\n') && !r.err.ends_with("\n\n"), "one terminator: {:?}", r.err);
+}
+
+#[tokio::test]
+async fn status_untracked_files_spellings_carry_the_mode_hint() {
+    let (_f, root) = repo();
+    let hint = "Write the untracked mode as '--untracked no'";
+    refused(&root, "git status -uno", &["-u is not supported", hint]).await;
+    refused(&root, "git status --untracked-files=no", &["--untracked-files is not supported", hint]).await;
+}
+
+/// `--oneline --stat` puts the counts on the line after the commit, where git
+/// puts them. This build counts files and lines per commit, not per file, so
+/// the line is git's `--shortstat` one, and that is what it is compared with.
+#[tokio::test]
+async fn log_oneline_stat_has_git_shortstat_line_structure() {
+    let (_f, root) = repo();
+    // A commit with one insertion and no deletion, and one with none to count.
+    write_file(&root, "new.txt", "x\ny\n");
+    git(&root, &["add", "new.txt"]);
+    git(&root, &["commit", "-m", "add", "--quiet"]);
+    git(&root, &["commit", "--allow-empty", "-m", "empty", "--quiet"]);
+    let ours = run(&root, "git log --oneline --stat -n 5").await;
+    assert_eq!(ours.code, 0, "{}", ours.err);
+    let theirs = git(&root, &["log", "--oneline", "--shortstat", "--no-decorate", "-n", "5"]);
+    // git separates a commit's line from its counts with nothing and the next
+    // commit with nothing too, under --oneline; compare line for line.
+    assert_eq!(ours.out.trim_end(), theirs.trim_end());
+    assert!(ours.out.contains(" 1 file changed, 1 insertion(+), 1 deletion(-)\n") && ours.out.contains(" 3 files changed, 3 insertions(+)"), "negative control: singular forms and a missing deletions part: {}", ours.out);
+}
+
+/// Where the counts differ from git's, pinned: git pairs a rename by default
+/// (`diff.renames`, true since git 2.9) and counts one file; this build counts
+/// a deletion and an addition, two files (docs/issues.md L1). When the pairing
+/// lands, this test fails and the published `--oneline` text changes with it.
+#[tokio::test]
+async fn log_oneline_stat_counts_a_rename_as_two_files_where_git_counts_one() {
+    let (_f, root) = repo();
+    write_file(&root, "notes.txt", "one\ntwo\nthree\nfour\n");
+    git(&root, &["add", "notes.txt"]);
+    git(&root, &["commit", "-m", "notes", "--quiet", "--", "notes.txt"]);
+    git(&root, &["mv", "notes.txt", "memo.txt"]);
+    git(&root, &["commit", "-m", "rename", "--quiet", "--", "notes.txt", "memo.txt"]);
+    let theirs = git(&root, &["log", "--oneline", "--shortstat", "--no-decorate", "-n", "1"]);
+    assert!(theirs.contains(" 1 file changed,"), "negative control: git pairs the rename: {theirs}");
+    let ours = run(&root, "git log --oneline --stat -n 1").await;
+    assert_eq!(ours.code, 0, "{}", ours.err);
+    assert!(ours.out.contains(" 2 files changed,"), "{}", ours.out);
+    let help = run(&root, "git log --help").await;
+    assert!(help.out.contains("differ from git's for a rename"), "the description says so: {}", help.out);
 }
 
 // --- verbatim binding, through the kernel -----------------------------------
@@ -919,4 +1139,70 @@ async fn help_with_a_verb_is_that_verbs_help() {
     assert_eq!(r.code, 0, "{}", r.err);
     assert!(r.out.contains("git <verb> --help"), "{}", r.out);
     refused(&root, "git --help nosuchverb", &["nosuchverb", "git --help"]).await;
+}
+
+#[tokio::test]
+async fn a_truncation_note_counts_one_in_the_singular() {
+    let (_f, root) = repo();
+    let r = run(&root, "git log --limit 1 --oneline").await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.err.contains("truncated at 1 commit (--limit)"), "{}", r.err);
+    let r = run(&root, "git branch --limit 1").await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.err.contains("truncated at 1 branch (--limit)"), "{}", r.err);
+}
+
+/// Every early return in dispatch ends its stderr in a newline, so a pipeline's
+/// next stage does not run onto it. Run on the tool directly: a kernel may
+/// terminate the line itself.
+#[tokio::test]
+async fn every_refusal_ends_its_stderr_in_a_newline() {
+    let (_f, root) = repo();
+    let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), root.clone()));
+    let mut ctx = support::TestCtx::new(backend, "/mnt");
+    let tool = kaish_tools_git::tool(GitConfig::read_only()).expect("config");
+    let mut binary = support::words(&[]);
+    binary.words = Some(vec![kaish_types::Value::Bytes(vec![0xff, 0xfe])]);
+    let cases = [
+        ("bare git", support::words(&[])),
+        ("binary word", binary),
+        ("--help nosuchverb", support::words(&["--help", "nosuchverb"])),
+        ("route failure", support::words(&["nosuchverb"])),
+        ("write verb", support::words(&["commit"])),
+    ];
+    for (name, args) in cases {
+        let r = tool.execute(args, &mut ctx).await;
+        assert_ne!(r.code, 0, "{name}: {:?}", r.err);
+        assert!(r.err.ends_with('\n'), "{name}: stderr must end in a newline: {:?}", r.err);
+    }
+}
+
+#[tokio::test]
+async fn a_dashed_word_after_the_marker_is_a_pattern_for_branch_and_tag() {
+    let (_f, root) = repo();
+    for verb in ["branch", "tag"] {
+        let r = run(&root, &format!("git {verb} --list -- --all")).await;
+        assert_eq!(r.code, 0, "{verb}: {}", r.err);
+        assert!(r.err.contains("'--all' after '--' was read as a pattern"), "{verb}: {}", r.err);
+        assert!(!r.err.contains("read as a path"), "{verb}: {}", r.err);
+    }
+}
+
+/// git prints a symbolic remote HEAD with its target and no oid:
+/// `remotes/origin/HEAD -> origin/main` under `-a`, `origin/HEAD -> origin/main`
+/// under `-r`. The line is compared with git's own.
+#[tokio::test]
+async fn branch_names_a_symbolic_remote_head_with_its_target() {
+    let (_f, root) = repo();
+    git(&root, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    for (flag, git_flag) in [("-a", "-a"), ("-r", "-r")] {
+        let theirs = git(&root, &["branch", git_flag]);
+        let theirs_line = theirs.lines().find(|l| l.contains("HEAD ->")).expect("git prints the arrow").trim().to_string();
+        let ours = run(&root, &format!("git branch {flag}")).await;
+        assert_eq!(ours.code, 0, "{}", ours.err);
+        let line = ours.out.lines().find(|l| l.contains("origin/HEAD")).expect("we list it").trim().to_string();
+        assert!(line.starts_with(&theirs_line), "git: {theirs_line:?}; ours: {line:?}");
+    }
+    let json = run(&root, "git branch -r --json").await;
+    assert!(json.out.contains("\"name\": \"origin/HEAD\"") || json.out.contains("\"name\":\"origin/HEAD\""), "{}", json.out);
 }

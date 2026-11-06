@@ -348,7 +348,9 @@ pub struct StatSummary {
 pub struct CommitInfo {
     /// The full commit oid.
     pub oid: String,
-    /// The abbreviated oid — the first seven hex characters, git's default.
+    /// The abbreviated oid, as `git log --oneline` prints it under
+    /// `core.abbrev=auto`: the shortest prefix no other object shares, at
+    /// least 7 characters and more in a repository with many packed objects.
     pub short_oid: String,
     /// Every parent oid, in order. The first is the mainline; a merge has two
     /// or more. Always the full parent set, even under `--first-parent`, which
@@ -770,6 +772,10 @@ pub struct BranchRow {
     /// from. A branch checked out in a *different* worktree is not marked —
     /// `git worktree list` is where that shows up.
     pub is_head: bool,
+    /// For a symbolic ref such as `origin/HEAD`, the short name of the branch
+    /// it points at (`origin/main`); `null` for an ordinary branch. The text
+    /// listing prints it as `origin/HEAD -> origin/main`, as git does.
+    pub symref: Option<String>,
     /// The configured upstream's short name (`origin/main`), or `null` when
     /// `branch.<name>.remote`/`.merge` name none. Reported whether or not the
     /// upstream ref exists; [`BranchRow::upstream_gone`] says which.
