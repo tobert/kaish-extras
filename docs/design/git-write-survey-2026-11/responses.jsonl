@@ -1,0 +1,383 @@
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 1, "seq": 1, "command": "git add src/main.rs"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 2, "seq": 1, "command": "git add src/lib.rs Cargo.toml"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 3, "seq": 1, "command": "git add -A"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 4, "seq": 1, "command": "git add -u"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 5, "seq": 1, "command": "git diff --cached"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 6, "seq": 1, "command": "git commit -m \"fix parser\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 7, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Handles empty input.\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 8, "seq": 1, "command": "git commit -m \"fix parser\" --trailer \"Co-authored-by: Ada <ada@example.com>\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 9, "seq": 1, "command": "git commit -am \"wip\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 10, "seq": 1, "command": "git commit -m \"lib only\" --only src/lib.rs"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 11, "seq": 1, "command": "git commit --amend -m \"better message\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 12, "seq": 1, "command": "git add docs/notes.md"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 12, "seq": 2, "command": "git commit --amend --no-edit"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 13, "seq": 1, "command": "git reset --soft HEAD^"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 14, "seq": 1, "command": "git reset HEAD^"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 15, "seq": 1, "command": "git restore --staged src/main.rs"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 16, "seq": 1, "command": "git reset"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 17, "seq": 1, "command": "git restore src/lib.rs"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 18, "seq": 1, "command": "git rm old.txt"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 18, "seq": 2, "command": "git commit -m \"remove old\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 19, "seq": 1, "command": "git mv a.txt b.txt"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 19, "seq": 2, "command": "git commit -m \"rename\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 20, "seq": 1, "command": "git branch topic"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 21, "seq": 1, "command": "git switch -c topic"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 22, "seq": 1, "command": "git switch feature/x"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 23, "seq": 1, "command": "git tag v1.0"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 23, "seq": 2, "command": "git tag -a v1.1 -m \"release 1.1\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 24, "seq": 1, "command": "git var GIT_AUTHOR_IDENT"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 25, "seq": 1, "command": "git commit --no-verify"}
+{"model": "deepseek-flash", "arm": "cold", "run": 1, "task": 26, "seq": 1, "command": "git commit --fixup abc1234"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 1, "seq": 1, "command": "git add src/main.rs"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 2, "seq": 1, "command": "git add src/lib.rs Cargo.toml"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 3, "seq": 1, "command": "git add -A"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 4, "seq": 1, "command": "git add -u"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 5, "seq": 1, "command": "git diff --cached"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 6, "seq": 1, "command": "git commit -m \"fix parser\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 7, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Handles empty input.\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 8, "seq": 1, "command": "git commit -m \"fix parser\" --trailer \"Co-authored-by: Ada <ada@example.com>\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 9, "seq": 1, "command": "git commit -am \"wip\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 10, "seq": 1, "command": "git commit -m \"lib only\" -- src/lib.rs"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 11, "seq": 1, "command": "git commit --amend -m \"better message\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 12, "seq": 1, "command": "git add docs/notes.md"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 12, "seq": 2, "command": "git commit --amend --no-edit"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 13, "seq": 1, "command": "git reset --soft HEAD~1"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 14, "seq": 1, "command": "git reset --mixed HEAD~1"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 15, "seq": 1, "command": "git restore --staged src/main.rs"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 16, "seq": 1, "command": "git reset"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 17, "seq": 1, "command": "git restore src/lib.rs"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 18, "seq": 1, "command": "git rm old.txt"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 18, "seq": 2, "command": "git commit -m \"remove old\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 19, "seq": 1, "command": "git mv a.txt b.txt"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 19, "seq": 2, "command": "git commit -m \"rename\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 20, "seq": 1, "command": "git branch topic"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 21, "seq": 1, "command": "git switch -c topic"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 22, "seq": 1, "command": "git switch feature/x"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 23, "seq": 1, "command": "git tag v1.0"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 23, "seq": 2, "command": "git tag -a v1.1 -m \"release 1.1\""}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 24, "seq": 1, "command": "git var GIT_AUTHOR_IDENT"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 25, "seq": 1, "command": "git commit --no-verify"}
+{"model": "deepseek-flash", "arm": "cold", "run": 2, "task": 26, "seq": 1, "command": "git commit --fixup abc1234"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 1, "seq": 1, "command": "git add src/main.rs"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 2, "seq": 1, "command": "git add src/lib.rs Cargo.toml"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 3, "seq": 1, "command": "git add -A"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 4, "seq": 1, "command": "git add -u"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 5, "seq": 1, "command": "git diff --staged"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 6, "seq": 1, "command": "git commit -m \"fix parser\""}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 7, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Handles empty input.\""}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 8, "seq": 1, "command": "git commit -m \"fix parser\" --trailer \"Co-authored-by: Ada <ada@example.com>\""}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 9, "seq": 1, "command": "git commit -am \"wip\""}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 10, "seq": 1, "command": "git commit -m \"lib only\" src/lib.rs"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 11, "seq": 1, "command": "git commit --amend -m \"better message\""}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 12, "seq": 1, "command": "git add docs/notes.md"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 12, "seq": 2, "command": "git commit --amend --no-edit"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 13, "seq": 1, "command": "git reset --soft HEAD~1"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 14, "seq": 1, "command": "git reset HEAD~1"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 15, "seq": 1, "command": "git restore --staged src/main.rs"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 16, "seq": 1, "command": "git restore --staged ."}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 17, "seq": 1, "command": "git restore src/lib.rs"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 18, "seq": 1, "command": "git rm old.txt"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 18, "seq": 2, "command": "git commit -m \"remove old\""}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 19, "seq": 1, "command": "git mv a.txt b.txt"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 19, "seq": 2, "command": "git commit -m \"rename\""}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 20, "seq": 1, "command": "git branch topic"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 21, "seq": 1, "command": "git switch -c topic"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 22, "seq": 1, "command": "git switch feature/x"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 23, "seq": 1, "command": "git tag v1.0"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 23, "seq": 2, "command": "git tag -a v1.1 -m \"release 1.1\""}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 24, "seq": 1, "command": "git config user.name"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 24, "seq": 2, "command": "git config user.email"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 25, "seq": 1, "command": "git commit --no-verify"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": 1, "task": 26, "seq": 1, "command": "git commit --fixup abc1234"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 1, "seq": 1, "command": "git add src/main.rs"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 2, "seq": 1, "command": "git add src/lib.rs Cargo.toml"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 3, "seq": 1, "command": "git add -A"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 4, "seq": 1, "command": "git add -u"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 5, "seq": 1, "command": "git diff --cached"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 6, "seq": 1, "command": "git commit -m \"fix parser\""}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 7, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Handles empty input.\""}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 8, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Co-authored-by: Ada <ada@example.com>\""}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 9, "seq": 1, "command": "git commit -am \"wip\""}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 10, "seq": 1, "command": "git commit src/lib.rs -m \"lib only\""}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 11, "seq": 1, "command": "git commit --amend -m \"better message\""}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 12, "seq": 1, "command": "git add docs/notes.md"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 12, "seq": 2, "command": "git commit --amend --no-edit"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 13, "seq": 1, "command": "git reset --soft HEAD~1"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 14, "seq": 1, "command": "git reset HEAD~1"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 15, "seq": 1, "command": "git restore --staged src/main.rs"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 16, "seq": 1, "command": "git restore --staged ."}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 17, "seq": 1, "command": "git restore src/lib.rs"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 18, "seq": 1, "command": "git rm old.txt"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 18, "seq": 2, "command": "git commit -m \"remove old\""}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 19, "seq": 1, "command": "git mv a.txt b.txt"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 19, "seq": 2, "command": "git commit -m \"rename\""}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 20, "seq": 1, "command": "git branch topic"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 21, "seq": 1, "command": "git switch -c topic"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 22, "seq": 1, "command": "git switch feature/x"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 23, "seq": 1, "command": "git tag v1.0"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 23, "seq": 2, "command": "git tag -a v1.1 -m \"release 1.1\""}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 24, "seq": 1, "command": "git config user.name"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 24, "seq": 2, "command": "git config user.email"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 25, "seq": 1, "command": "git commit --no-verify -m \"fix parser\""}
+{"model": "glm-5.3-flash", "arm": "cold", "run": 1, "task": 26, "seq": 1, "command": "git commit --fixup abc1234"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 1, "seq": 1, "command": "git add src/main.rs"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 2, "seq": 1, "command": "git add src/lib.rs Cargo.toml"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 3, "seq": 1, "command": "git add -A"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 4, "seq": 1, "command": "git add -u"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 5, "seq": 1, "command": "git diff --cached"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 6, "seq": 1, "command": "git commit -m 'fix parser'"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 7, "seq": 1, "command": "git commit -m 'fix parser' -m 'Handles empty input.'"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 8, "seq": 1, "command": "git commit -m 'fix parser' -m 'Co-authored-by: Ada <ada@example.com>'"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 9, "seq": 1, "command": "git commit -a -m 'wip'"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 10, "seq": 1, "command": "git commit --only src/lib.rs -m 'lib only'"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 11, "seq": 1, "command": "git commit --amend -m 'better message'"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 12, "seq": 1, "command": "git add docs/notes.md && git commit --amend --no-edit"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 13, "seq": 1, "command": "git reset --soft HEAD~1"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 14, "seq": 1, "command": "git reset HEAD~1"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 15, "seq": 1, "command": "git restore --staged src/main.rs"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 16, "seq": 1, "command": "git restore --staged ."}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 17, "seq": 1, "command": "git restore src/lib.rs"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 18, "seq": 1, "command": "git rm old.txt && git commit -m 'remove old'"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 19, "seq": 1, "command": "git mv a.txt b.txt && git commit -m 'rename'"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 20, "seq": 1, "command": "git branch topic"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 21, "seq": 1, "command": "git switch -c topic"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 22, "seq": 1, "command": "git switch feature/x"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 23, "seq": 1, "command": "git tag v1.0 && git tag -a v1.1 -m 'release 1.1'"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 24, "seq": 1, "command": "git var GIT_AUTHOR_IDENT"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 25, "seq": 1, "command": "git status"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": 1, "task": 26, "seq": 1, "command": "git commit --fixup=abc1234"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 1, "seq": 1, "command": "git add src/main.rs"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 2, "seq": 1, "command": "git add src/lib.rs Cargo.toml"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 3, "seq": 1, "command": "git add -A"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 4, "seq": 1, "command": "git add -u"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 5, "seq": 1, "command": "git diff --cached"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 6, "seq": 1, "command": "git commit -m \"fix parser\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 7, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Handles empty input.\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 8, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Co-authored-by: Ada <ada@example.com>\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 9, "seq": 1, "command": "git commit -a -m \"wip\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 10, "seq": 1, "command": "git commit -m \"lib only\" -- src/lib.rs"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 11, "seq": 1, "command": "git commit --amend -m \"better message\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 12, "seq": 1, "command": "git add docs/notes.md"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 12, "seq": 2, "command": "git commit --amend --no-edit"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 13, "seq": 1, "command": "git reset --soft HEAD~1"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 14, "seq": 1, "command": "git reset --mixed HEAD~1"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 15, "seq": 1, "command": "git restore --staged src/main.rs"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 16, "seq": 1, "command": "git reset"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 17, "seq": 1, "command": "git restore src/lib.rs"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 18, "seq": 1, "command": "git rm old.txt"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 18, "seq": 2, "command": "git commit -m \"remove old\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 19, "seq": 1, "command": "git mv a.txt b.txt"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 19, "seq": 2, "command": "git commit -m \"rename\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 20, "seq": 1, "command": "git branch topic"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 21, "seq": 1, "command": "git switch -c topic"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 22, "seq": 1, "command": "git switch feature/x"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 23, "seq": 1, "command": "git tag v1.0"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 23, "seq": 2, "command": "git tag -a v1.1 -m \"release 1.1\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 24, "seq": 1, "command": "git var GIT_AUTHOR_IDENT"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 25, "seq": 1, "command": "git status"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 1, "task": 26, "seq": 1, "command": "git commit --fixup=abc1234"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 1, "seq": 1, "command": "git add src/main.rs"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 2, "seq": 1, "command": "git add src/lib.rs Cargo.toml"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 3, "seq": 1, "command": "git add -A"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 4, "seq": 1, "command": "git add -u"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 5, "seq": 1, "command": "git diff --cached"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 6, "seq": 1, "command": "git commit -m \"fix parser\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 7, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Handles empty input.\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 8, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Co-authored-by: Ada <ada@example.com>\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 9, "seq": 1, "command": "git commit -a -m \"wip\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 10, "seq": 1, "command": "git commit -m \"lib only\" -- src/lib.rs"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 11, "seq": 1, "command": "git commit --amend -m \"better message\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 12, "seq": 1, "command": "git add docs/notes.md"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 12, "seq": 2, "command": "git commit --amend --no-edit"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 13, "seq": 1, "command": "git reset --soft HEAD~1"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 14, "seq": 1, "command": "git reset HEAD~1"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 15, "seq": 1, "command": "git restore --staged src/main.rs"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 16, "seq": 1, "command": "git reset"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 17, "seq": 1, "command": "git restore src/lib.rs"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 18, "seq": 1, "command": "git rm old.txt"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 18, "seq": 2, "command": "git commit -m \"remove old\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 19, "seq": 1, "command": "git mv a.txt b.txt"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 19, "seq": 2, "command": "git commit -m \"rename\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 20, "seq": 1, "command": "git branch topic"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 21, "seq": 1, "command": "git switch -c topic"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 22, "seq": 1, "command": "git switch feature/x"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 23, "seq": 1, "command": "git tag v1.0"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 23, "seq": 2, "command": "git tag -a v1.1 -m \"release 1.1\""}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 24, "seq": 1, "command": "git var GIT_AUTHOR_IDENT"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 25, "seq": 1, "command": "git status"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": 2, "task": 26, "seq": 1, "command": "git commit --fixup=abc1234"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 1, "seq": 1, "command": "git add src/main.rs"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 2, "seq": 1, "command": "git add src/lib.rs Cargo.toml"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 3, "seq": 1, "command": "git add -A"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 4, "seq": 1, "command": "git add -u"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 5, "seq": 1, "command": "git diff --cached"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 6, "seq": 1, "command": "git commit -m 'fix parser'"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 7, "seq": 1, "command": "git commit -m 'fix parser' -m 'Handles empty input.'"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 8, "seq": 1, "command": "git commit -m 'fix parser' --trailer 'Co-authored-by: Ada <ada@example.com>'"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 9, "seq": 1, "command": "git commit -am 'wip'"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 10, "seq": 1, "command": "git commit --only src/lib.rs -m 'lib only'"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 11, "seq": 1, "command": "git commit --amend -m 'better message'"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 12, "seq": 1, "command": "git add docs/notes.md && git commit --amend --no-edit"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 13, "seq": 1, "command": "git reset --soft HEAD~1"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 14, "seq": 1, "command": "git reset HEAD~1"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 15, "seq": 1, "command": "git restore --staged src/main.rs"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 16, "seq": 1, "command": "git reset"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 17, "seq": 1, "command": "git restore src/lib.rs"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 18, "seq": 1, "command": "git rm old.txt && git commit -m 'remove old'"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 19, "seq": 1, "command": "git mv a.txt b.txt && git commit -m 'rename'"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 20, "seq": 1, "command": "git branch topic"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 21, "seq": 1, "command": "git switch -c topic"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 22, "seq": 1, "command": "git switch feature/x"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 23, "seq": 1, "command": "git tag v1.0 && git tag -a v1.1 -m 'release 1.1'"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 24, "seq": 1, "command": "git var GIT_AUTHOR_IDENT"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 25, "seq": 1, "command": "git commit --no-verify"}
+{"model": "deepseek-flash", "arm": "policy", "run": 1, "task": 26, "seq": 1, "command": "git commit --fixup=abc1234"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 1, "seq": 1, "command": "git add src/main.rs"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 2, "seq": 1, "command": "git add src/lib.rs Cargo.toml"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 3, "seq": 1, "command": "git add -A"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 4, "seq": 1, "command": "git add -u"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 5, "seq": 1, "command": "git diff --cached"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 6, "seq": 1, "command": "git commit -m \"fix parser\""}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 7, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Handles empty input.\""}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 8, "seq": 1, "command": "git commit -m \"fix parser\" --trailer \"Co-authored-by: Ada <ada@example.com>\""}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 9, "seq": 1, "command": "git commit -am \"wip\""}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 10, "seq": 1, "command": "git commit -m \"lib only\" -- src/lib.rs"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 11, "seq": 1, "command": "git reset --soft HEAD~1 && git commit -m \"better message\""}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 12, "seq": 1, "command": "git reset --soft HEAD~1 && git add docs/notes.md && git commit -C ORIG_HEAD"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 13, "seq": 1, "command": "git reset --soft HEAD~1"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 14, "seq": 1, "command": "git reset HEAD~1"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 15, "seq": 1, "command": "git restore --staged src/main.rs"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 16, "seq": 1, "command": "git restore --staged ."}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 17, "seq": 1, "command": "git restore src/lib.rs"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 18, "seq": 1, "command": "git rm old.txt && git commit -m \"remove old\""}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 19, "seq": 1, "command": "git mv a.txt b.txt && git commit -m \"rename\""}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 20, "seq": 1, "command": "git branch topic"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 21, "seq": 1, "command": "git switch -c topic"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 22, "seq": 1, "command": "git switch feature/x"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 23, "seq": 1, "command": "git tag v1.0"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 23, "seq": 2, "command": "git tag -a v1.1 -m \"release 1.1\""}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 24, "seq": 1, "command": "git var GIT_AUTHOR_IDENT"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 25, "seq": 1, "command": "git status"}
+{"model": "deepseek-flash", "arm": "policy", "run": 2, "task": 26, "seq": 1, "command": "git commit --fixup abc1234"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 1, "seq": 1, "command": "git add src/main.rs"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 2, "seq": 1, "command": "git add src/lib.rs Cargo.toml"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 3, "seq": 1, "command": "git add ."}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 4, "seq": 1, "command": "git add -u"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 5, "seq": 1, "command": "git diff --staged"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 6, "seq": 1, "command": "git commit -m \"fix parser\""}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 7, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Handles empty input.\""}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 8, "seq": 1, "command": "git commit -m \"fix parser\" --trailer \"Co-authored-by: Ada <ada@example.com>\""}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 9, "seq": 1, "command": "git commit -am \"wip\""}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 10, "seq": 1, "command": "git commit src/lib.rs -m \"lib only\""}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 11, "seq": 1, "command": "git commit --amend -m \"better message\""}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 12, "seq": 1, "command": "git add docs/notes.md"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 12, "seq": 2, "command": "git commit --amend --no-edit"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 13, "seq": 1, "command": "git reset --soft HEAD~1"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 14, "seq": 1, "command": "git reset HEAD~1"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 15, "seq": 1, "command": "git restore --staged src/main.rs"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 16, "seq": 1, "command": "git reset"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 17, "seq": 1, "command": "git restore src/lib.rs"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 18, "seq": 1, "command": "git rm old.txt"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 18, "seq": 2, "command": "git commit -m \"remove old\""}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 19, "seq": 1, "command": "git mv a.txt b.txt"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 19, "seq": 2, "command": "git commit -m \"rename\""}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 20, "seq": 1, "command": "git branch topic"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 21, "seq": 1, "command": "git switch -c topic"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 22, "seq": 1, "command": "git switch feature/x"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 23, "seq": 1, "command": "git tag v1.0"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 23, "seq": 2, "command": "git tag -a v1.1 -m \"release 1.1\""}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 24, "seq": 1, "command": "git var GIT_AUTHOR_IDENT"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 25, "seq": 1, "command": "git commit --no-verify"}
+{"model": "gemini-3.5-flash", "arm": "policy", "run": 1, "task": 26, "seq": 1, "command": "git commit --fixup abc1234"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 1, "seq": 1, "command": "git add src/main.rs"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 2, "seq": 1, "command": "git add src/lib.rs Cargo.toml"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 3, "seq": 1, "command": "git add -A"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 4, "seq": 1, "command": "git add -u"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 5, "seq": 1, "command": "git status"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 6, "seq": 1, "command": "git commit -m \"fix parser\""}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 7, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Handles empty input.\""}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 8, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Co-authored-by: Ada <ada@example.com>\""}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 9, "seq": 1, "command": "git commit -a -m \"wip\""}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 10, "seq": 1, "command": "git commit src/lib.rs -m \"lib only\""}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 11, "seq": 1, "command": "git commit --amend -m \"better message\""}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 12, "seq": 1, "command": "git add docs/notes.md"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 12, "seq": 2, "command": "git commit --amend --no-edit"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 13, "seq": 1, "command": "git reset --soft HEAD~1"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 14, "seq": 1, "command": "git reset HEAD~1"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 15, "seq": 1, "command": "git restore --staged src/main.rs"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 16, "seq": 1, "command": "git restore --staged ."}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 17, "seq": 1, "command": "git restore src/lib.rs"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 18, "seq": 1, "command": "git rm old.txt"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 18, "seq": 2, "command": "git commit -m \"remove old\""}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 19, "seq": 1, "command": "git mv a.txt b.txt"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 19, "seq": 2, "command": "git commit -m \"rename\""}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 20, "seq": 1, "command": "git branch topic"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 21, "seq": 1, "command": "git switch -c topic"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 22, "seq": 1, "command": "git switch feature/x"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 23, "seq": 1, "command": "git tag v1.0"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 23, "seq": 2, "command": "git tag -a v1.1 -m \"release 1.1\""}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 24, "seq": 1, "command": "git config user.name"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 24, "seq": 2, "command": "git config user.email"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 25, "seq": 1, "command": "git commit --no-verify"}
+{"model": "glm-5.3-flash", "arm": "policy", "run": 1, "task": 26, "seq": 1, "command": "git commit --fixup=abc1234"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 1, "seq": 1, "command": "git add src/main.rs"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 2, "seq": 1, "command": "git add src/lib.rs Cargo.toml"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 3, "seq": 1, "command": "git add -A"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 4, "seq": 1, "command": "git add -u"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 5, "seq": 1, "command": "git diff --cached"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 6, "seq": 1, "command": "git commit -m \"fix parser\""}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 7, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Handles empty input.\""}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 8, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Co-authored-by: Ada <ada@example.com>\""}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 9, "seq": 1, "command": "git commit -a -m \"wip\""}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 10, "seq": 1, "command": "git commit --only src/lib.rs -m \"lib only\""}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 11, "seq": 1, "command": "git commit --amend -m \"better message\""}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 12, "seq": 1, "command": "git add docs/notes.md"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 12, "seq": 2, "command": "git commit --amend --no-edit"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 13, "seq": 1, "command": "git reset --soft HEAD~1"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 14, "seq": 1, "command": "git reset HEAD~1"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 15, "seq": 1, "command": "git restore --staged src/main.rs"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 16, "seq": 1, "command": "git reset"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 17, "seq": 1, "command": "git restore src/lib.rs"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 18, "seq": 1, "command": "git rm old.txt"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 18, "seq": 2, "command": "git commit -m \"remove old\""}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 19, "seq": 1, "command": "git mv a.txt b.txt"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 19, "seq": 2, "command": "git commit -m \"rename\""}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 20, "seq": 1, "command": "git branch topic"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 21, "seq": 1, "command": "git switch -c topic"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 22, "seq": 1, "command": "git switch feature/x"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 23, "seq": 1, "command": "git tag v1.0"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 23, "seq": 2, "command": "git tag -a v1.1 -m \"release 1.1\""}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 24, "seq": 1, "command": "git var GIT_AUTHOR_IDENT"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 25, "seq": 1, "command": "git status"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 25, "seq": 2, "command": "git diff --cached"}
+{"model": "qwen3.8-flash", "arm": "policy", "run": 1, "task": 26, "seq": 1, "command": "git commit --fixup abc1234"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 1, "seq": 1, "command": "git add src/main.rs"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 2, "seq": 1, "command": "git add src/lib.rs Cargo.toml"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 3, "seq": 1, "command": "git add -A"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 4, "seq": 1, "command": "git add -u"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 5, "seq": 1, "command": "git diff --cached"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 6, "seq": 1, "command": "git commit -m \"fix parser\""}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 7, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Handles empty input.\""}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 8, "seq": 1, "command": "git commit -m \"fix parser\" -m \"Co-authored-by: Ada <ada@example.com>\""}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 9, "seq": 1, "command": "git commit -a -m \"wip\""}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 10, "seq": 1, "command": "git commit -m \"lib only\" -- src/lib.rs"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 11, "seq": 1, "command": "git commit --amend -m \"better message\""}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 12, "seq": 1, "command": "git add docs/notes.md"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 12, "seq": 2, "command": "git commit --amend --no-edit"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 13, "seq": 1, "command": "git reset --soft HEAD~1"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 14, "seq": 1, "command": "git reset --mixed HEAD~1"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 15, "seq": 1, "command": "git restore --staged src/main.rs"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 16, "seq": 1, "command": "git reset"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 17, "seq": 1, "command": "git restore src/lib.rs"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 18, "seq": 1, "command": "git rm old.txt"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 18, "seq": 2, "command": "git commit -m \"remove old\""}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 19, "seq": 1, "command": "git mv a.txt b.txt"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 19, "seq": 2, "command": "git commit -m \"rename\""}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 20, "seq": 1, "command": "git branch topic"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 21, "seq": 1, "command": "git switch -c topic"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 22, "seq": 1, "command": "git switch feature/x"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 23, "seq": 1, "command": "git tag v1.0"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 23, "seq": 2, "command": "git tag -a v1.1 -m \"release 1.1\""}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 24, "seq": 1, "command": "git var GIT_AUTHOR_IDENT"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 25, "seq": 1, "command": "git status"}
+{"model": "claude-haiku-5.5", "arm": "policy", "run": 1, "task": 26, "seq": 1, "command": "git commit --fixup=abc1234"}
