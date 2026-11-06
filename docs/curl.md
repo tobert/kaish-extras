@@ -88,7 +88,7 @@ the last positional unless `--url` is used.
 | `--output-dir <dir>` | Puts the `-o` or `-O` file under `<dir>`, which must exist and be a directory: otherwise exit 23, naming the path. Without `-o` or `-O` it exits 2. | curl ignores it without `-o`/`-O`. |
 | `-L, --location` | Follow redirects, up to `--max-redirs` (default 50). Hops are driven by this build, not by ureq, so **the egress allowlist is evaluated on every one** — a redirect cannot leave the embedder's policy. User/password are dropped on a cross-host hop. | Opt-in (matches curl's `-L`). Embedder can set a config default for auto-follow. |
 | `--max-redirs <n>` | Redirect cap. | None. |
-| `-u, --user <user[:pass]>` | Basic auth, `Authorization: Basic`. | None. |
+| `-u, --user <user[:pass]>` | Basic auth, `Authorization: Basic`. A `-H Authorization:` from the caller wins over it, and an embedder-injected `Authorization` wins over both; one header goes out. | None. |
 | `-A, --user-agent <ua>` | `User-Agent`. | None. |
 | `-e, --referer <url>` | `Referer`. | None. |
 | `-k, --insecure` | Skip TLS certificate verification. **Off unless the embedder sets `CurlConfig::with_insecure_permitted(true)`**, and refused with a literate error while it is off — an agent that can silence verification can be talked into it. `help curl` lists the flag only where it is permitted. | Gated by the embedder rather than always available. |
@@ -144,7 +144,10 @@ fit.
 `CurlConfig::with_injected_headers` adds headers to every request that the
 agent can neither read nor remove — a credential for an internal API, a tenant
 header an audit trail needs. A caller `-H` naming the same header is dropped
-rather than sent beside it, so the far end never has to choose. Like `-u`
+rather than sent beside it, so the far end never has to choose. That includes
+`-u`: an injected `Authorization` replaces the `-u` credentials too, so one
+`Authorization` goes out. Without an injected one, a caller's `-H Authorization:`
+wins over `-u`, as in curl 8.23. Like `-u`
 credentials, injected headers stop at a change of host; so do
 `Authorization`, `Cookie`, and `Proxy-Authorization` set by the caller, because
 stripping only the `-u` form would leave `-H` as the way around the rule.

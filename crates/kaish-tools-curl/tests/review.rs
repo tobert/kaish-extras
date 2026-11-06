@@ -87,3 +87,59 @@ async fn redirect_method_rules_match_curl_for_x_t_and_f() {
         );
     }
 }
+
+// ── 2. One Authorization header, chosen by a rule ───────────────────────
+
+fn authorizations(server: &TcpGuard) -> Vec<String> {
+    server
+        .last_request()
+        .expect("a request arrived")
+        .headers_named("Authorization")
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_header_authorization_overrides_user_like_curl_and_goes_out_once() {
+    let server = redirector();
+    for args in [
+        "-s -u a:b -H 'Authorization: Bearer X' \"$URL/echo\"",
+        "-s -H 'Authorization: Bearer X' -u a:b \"$URL/echo\"",
+    ] {
+        let p = compare(&server, args, &[]).await;
+        assert_eq!(p.ours.code, 0, "{}", p.ours.err);
+        assert_eq!(
+            p.ours_req.last().unwrap().headers_named("Authorization"),
+            vec!["Bearer X"],
+            "{args}: exactly one, and it is the -H one"
+        );
+        if p.theirs.is_some() {
+            assert_eq!(
+                p.theirs_req.last().unwrap().headers_named("Authorization"),
+                vec!["Bearer X"],
+                "real curl agrees"
+            );
+        }
+    }
+    // Control: with no -H, -u is sent.
+    let p = compare(&server, "-s -u a:b \"$URL/echo\"", &[]).await;
+    assert_eq!(p.ours_req.last().unwrap().headers_named("Authorization"), vec!["Basic YTpi"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_injected_authorization_is_never_accompanied_by_an_agent_one() {
+    let server = redirector();
+    let config = support::loopback_config().with_injected_headers([("Authorization", "Bearer embedder")]);
+    let fx = support::Fixture::new(config, &[]).await;
+    for args in [
+        "-s -u a:b \"$URL/echo\"",
+        "-s -H 'Authorization: Bearer agent' \"$URL/echo\"",
+        "-s -u a:b -H 'authorization: Bearer agent' \"$URL/echo\"",
+        "-s -u a:b \"$URL/r302\" -L",
+    ] {
+        let r = fx.run(&server.url(""), &format!("curl {args}")).await;
+        assert_eq!(r.code, 0, "{args}: {}", r.err);
+        assert_eq!(authorizations(&server), vec!["Bearer embedder"], "{args}");
+    }
+}
