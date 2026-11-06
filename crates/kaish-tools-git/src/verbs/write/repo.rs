@@ -172,6 +172,20 @@ impl WriteRepo {
     }
 }
 
+impl WriteRepo {
+    /// Check a work-tree path that may be a file, a symbolic link or a
+    /// directory: the walk is the same, and the leaf kind is the one the disk
+    /// shows. Components above the leaf must be real directories either way.
+    pub(crate) fn check_worktree_any(&self, rel: &Path) -> Result<PathBuf, GitError> {
+        let is_dir = self
+            .read
+            .work_dir()
+            .map(|w| crate::worktree::join_repo_relative(w, &rel.to_string_lossy()))
+            .is_some_and(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()));
+        self.check_worktree(rel, if is_dir { Leaf::Dir } else { Leaf::Entry })
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

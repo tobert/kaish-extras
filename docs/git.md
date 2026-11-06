@@ -580,6 +580,69 @@ classified before it is traversed: a symlink that stays inside is followed, and
 one that escapes or dangles ends the walk with the identical answer, so neither
 can be told from the other.
 
+## `git add`, `rm`, `mv`, `restore --staged` and `reset` — what the built verbs do
+
+These exist only in a tool built with the `commit` feature and given a
+`WritableGitConfig` (`docs/embedding-git.md`, "The commit profile"). They write
+the index, and `rm` and `mv` also delete or rename the working-tree files they
+name. Nothing here writes file content into the working tree. Every refusal has
+five parts: the command, the reason, one exact next command, whether an
+override exists and who grants it, and "Nothing was changed."
+
+```sh
+kaish> git add src/main.rs
+kaish> git add -A                    # new, changed and deleted files
+kaish> git add -u                    # tracked files only
+kaish> git add -f build/out.o        # past an ignore rule
+kaish> git rm old.txt                # index and working tree
+kaish> git rm --cached notes.txt     # index only
+kaish> git rm -r old-dir
+kaish> git mv old.txt new.txt
+kaish> git mv a.txt b.txt dir        # several sources into a directory
+kaish> git restore --staged src/main.rs
+kaish> git reset                     # also: git reset HEAD, git reset -- <path>
+```
+
+Each returns its summary in `--json` (`added`, `modified`, `removed`,
+`refreshed`; `removed`, `cached`; `moved`; `unstaged`). The text surface is
+git's: `add`, `mv`, `restore` and `reset` print nothing on success; `rm`
+prints `rm 'path'` per path; `git add` with nothing to add prints `Nothing
+specified, nothing added.` and exits 0.
+
+What refuses, with the exit code:
+
+| Spelling | Exit | Why |
+|---|---|---|
+| `add -p`, `add -i`, `restore -p`, `reset -p` | 2 | no terminal |
+| `add <ignored path>` | 1 | git's hint: `git add -f <path>` |
+| `add` of a nested repository the index does not track | 4 | names it |
+| `add <file real git would convert>` | 4 | names the attribute or setting |
+| any pathspec that matches nothing | 1 | |
+| `rm` of a path with staged or local changes | 1 | `--cached` or `-f` |
+| `rm <dir>` without `-r` | 1 | |
+| `mv` untracked or missing source, existing destination without `-f`, a directory into itself, a missing destination parent | 1 | |
+| `restore` without `--staged`, or with `--worktree` | 2 | it would write file content |
+| `reset --hard` | 2 | never |
+| `reset <rev>`, `reset --soft`, `--merge`, `--keep` | 2 | moves the branch; a later phase, under the rewrite policy |
+| any of them in a merge, rebase, ... or with a split index, ... | 4 | design section 4 |
+
+`reset HEAD` and `reset HEAD -- <path>` are the unstage forms; any other first
+word that names a revision, or contains `~`, `^`, `@` or `{`, is the revision
+form and refuses.
+
+### Where it differs from git, on purpose
+
+- `add` refuses the whole command when a named path is ignored; git stages the
+  other paths and exits 1.
+- `reset` and `restore --staged` do not print "Unstaged changes after reset",
+  do not refresh the stat of entries they restore, and `reset` writes no
+  `ORIG_HEAD` or reflog line (HEAD does not move).
+- `restore --staged` and `reset` give a restored entry an all-zero stat, as git
+  does; an entry that already matches HEAD is left alone.
+- `add` reads whole files: a file over 128 MiB refuses (git streams).
+- `add` names a non-UTF-8 file name in a refusal and does not stage it.
+- `rm` and `mv` do not support `-n`, `-q`, `-v` or `-k`.
+
 ## Non-goals
 
 - Reimplementing git porcelain faithfully (use real git via `subprocess` for that).

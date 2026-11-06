@@ -323,3 +323,9 @@ path = "tests/write_fingerprint.rs"
 name = "commit_profile"
 path = "tests/commit_profile.rs"
 required-features = ["commit"]
+
+# Phase 1b: the index verbs against real git on a twin repository.
+[[test]]
+name = "write_index"
+path = "tests/write_index.rs"
+required-features = ["commit"]

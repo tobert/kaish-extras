@@ -379,9 +379,13 @@ Amy, 2026-11-06: the embedder pins, kernel variables are the fallback.
   `std::fs::Metadata`. *(review)* Racy-git smudging follows git's rule
   (`ce_smudge_racily_clean_entry` in `read-cache.c`) over **every** entry,
   the ones this write touched included, compared against the mtime of the
-  index file being written, not the old one: an entry whose mtime is not
-  older than the new index gets its size smudged so a same-second edit is
-  never hidden. Pinned by a same-second edit test against `git status`.
+  index file **as it was read** (`istate->timestamp`), which is git's
+  threshold: an entry whose mtime is not older than that gets its size
+  smudged, so a same-second edit is never hidden. *Corrected 2026-11-06:*
+  this said "the new index's mtime", from the review; git uses the old one,
+  and the old one is never later than the new, so it smudges a superset.
+  Found by the phase 1b implementer and checked against real git with a
+  same-second edit test against `git status`.
 - **A stale `.lock`** is not ours to remove. Exit 4 naming the lock path and
   saying another git process may be running.
 
