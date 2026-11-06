@@ -770,6 +770,10 @@ pub struct BranchRow {
     /// from. A branch checked out in a *different* worktree is not marked —
     /// `git worktree list` is where that shows up.
     pub is_head: bool,
+    /// For a symbolic ref such as `origin/HEAD`, the short name of the branch
+    /// it points at (`origin/main`); `null` for an ordinary branch. The text
+    /// listing prints it as `origin/HEAD -> origin/main`, as git does.
+    pub symref: Option<String>,
     /// The configured upstream's short name (`origin/main`), or `null` when
     /// `branch.<name>.remote`/`.merge` name none. Reported whether or not the
     /// upstream ref exists; [`BranchRow::upstream_gone`] says which.

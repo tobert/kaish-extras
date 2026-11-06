@@ -244,6 +244,10 @@ pub(crate) fn run(repo: &ReadRepo, opts: &BranchOptions) -> Result<BranchReport,
                 is_head: kind == BranchKind::Local && head_branch.as_deref() == Some(name.as_str()),
                 upstream: upstream_ref.map(|r| shorten(r)),
                 upstream_gone: upstream_ref.is_some() && upstream_oid.is_none(),
+                symref: reference
+                    .target
+                    .try_name()
+                    .map(|target| shorten(&target.as_bstr().to_str_lossy())),
                 ahead: None,
                 behind: None,
             },

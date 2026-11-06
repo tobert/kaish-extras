@@ -1164,3 +1164,22 @@ async fn a_dashed_word_after_the_marker_is_a_pattern_for_branch_and_tag() {
         assert!(!r.err.contains("read as a path"), "{verb}: {}", r.err);
     }
 }
+
+/// git prints a symbolic remote HEAD with its target and no oid:
+/// `remotes/origin/HEAD -> origin/main` under `-a`, `origin/HEAD -> origin/main`
+/// under `-r`. The line is compared with git's own.
+#[tokio::test]
+async fn branch_names_a_symbolic_remote_head_with_its_target() {
+    let (_f, root) = repo();
+    git(&root, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    for (flag, git_flag) in [("-a", "-a"), ("-r", "-r")] {
+        let theirs = git(&root, &["branch", git_flag]);
+        let theirs_line = theirs.lines().find(|l| l.contains("HEAD ->")).expect("git prints the arrow").trim().to_string();
+        let ours = run(&root, &format!("git branch {flag}")).await;
+        assert_eq!(ours.code, 0, "{}", ours.err);
+        let line = ours.out.lines().find(|l| l.contains("origin/HEAD")).expect("we list it").trim().to_string();
+        assert!(line.starts_with(&theirs_line), "git: {theirs_line:?}; ours: {line:?}");
+    }
+    let json = run(&root, "git branch -r --json").await;
+    assert!(json.out.contains("\"name\": \"origin/HEAD\"") || json.out.contains("\"name\":\"origin/HEAD\""), "{}", json.out);
+}

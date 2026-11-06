@@ -611,6 +611,10 @@ pub fn branch(report: &BranchReport, all: bool) -> OutputData {
                 },
                 (None, _) => String::new(),
             };
+            // git prints a symbolic ref with its target and no oid.
+            if let Some(target) = &b.symref {
+                return OutputNode::new(format!("{name} -> {target}")).with_cells(vec![String::new(), String::new()]);
+            }
             OutputNode::new(name).with_cells(vec![short(&b.oid), upstream])
         })
         .collect();
