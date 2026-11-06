@@ -267,7 +267,7 @@ async fn every_refused_flag_is_reported_in_one_error() {
 async fn log_follow_names_the_path_form_and_says_renames_are_not_followed() {
     let (_f, root) = repo();
     let err = refused(&root, "git log --follow a.txt", &["--follow is not supported", "git log -- FILE", "renames"]).await;
-    assert!(err.contains("not followed"), "{err}");
+    assert!(err.contains("does not follow renames"), "{err}");
 }
 
 #[tokio::test]
@@ -294,6 +294,40 @@ async fn help_steers_log_of_a_branch_toward_a_range() {
             r.out
         );
     }
+}
+
+// --- Q8: a flag after `--` is a path, and the note says so ------------------
+
+#[tokio::test]
+async fn a_flag_after_the_marker_is_read_as_a_path_and_the_note_says_so() {
+    let (_f, root) = repo();
+    let r = run(&root, "git log -n 5 -- a.txt --oneline").await;
+    assert_eq!(r.code, 0, "the answer is still given: {}", r.err);
+    assert_eq!(
+        r.err,
+        "git log: '--oneline' after '--' was read as a path, as git reads it. Write flags before '--'\n"
+    );
+    // Negative control: a plain path after the marker says nothing.
+    let quiet = run(&root, "git log -n 5 -- a.txt").await;
+    assert_eq!(quiet.code, 0, "{}", quiet.err);
+    assert!(!quiet.err.contains("after '--'"), "{}", quiet.err);
+    // The notice is for log, status and diff alike.
+    let s = run(&root, "git status -- --json").await;
+    assert!(s.err.contains("'--json' after '--' was read as a path"), "{}", s.err);
+    // A note already on stderr keeps its own line.
+    let both = run(&root, "git log -n 1 -- a.txt --oneline").await;
+    assert_eq!(both.err.lines().count(), 2, "{:?}", both.err);
+}
+
+// --- G11: a stderr note is a whole line -------------------------------------
+
+#[tokio::test]
+async fn stderr_notes_end_with_a_newline() {
+    let (_f, root) = repo();
+    let r = run(&root, "git log -n 1").await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.err.starts_with("git log: output truncated at 1 commits"), "negative control: a note exists: {}", r.err);
+    assert!(r.err.ends_with('\n') && !r.err.ends_with("\n\n"), "one terminator: {:?}", r.err);
 }
 
 // --- verbatim binding, through the kernel -----------------------------------

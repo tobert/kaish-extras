@@ -1146,10 +1146,6 @@ repository size, not result size.
   of what models typed. Still open on kaish 0.18: an unquoted `%` in a word
   (`--format=%an,%ad`) is a kernel lexer error that never reaches the tool
   (1 cell in the 2026-11-06 re-run); the quoted form reaches the refusal.
-- **Q8 — `--json` after `--` is a path.** `git log -n 1 -- Cargo.toml --json`
-  prints text, exit 0, because the token is a pathspec; git does the same. A
-  model that typed it expected JSON. Not counted as SILENT-WRONG (the answer
-  was right); a stderr notice when a pathspec starts with `--` would close it.
 - **Q9 — `command git ...` misdiagnoses.** 7 cells across T18-T24 typed
   `command git ...`; kaish's `command` builtin answers "only -v and -V are
   supported" or "-c is not supported" and never says git is read-only. That
@@ -1199,14 +1195,6 @@ were settled against git 2.55 and pinned in tests/log.rs: ours matches.
   Cost disclosure belongs in `docs/embedding-git.md` regardless, and is in
   scope for PR 8.
 
-- **G11 — stderr notes end without a newline.** Every `result.err = format!(…)`
-  in `tool.rs` leaves the note unterminated, so in a pipeline the next stage's
-  stderr runs onto the same line — seen in `tests/patch_renderer.rs` while
-  mutation-testing: `…'lines_capped' says which file in --jsonjq: invalid
-  JSON input`. kaish 0.17's `ExecResult::err` line contract (#363) covers
-  the messages kaish mints and calls tool stderr pass-through, so this is a
-  readability fix, not a contract breach. Terminate each note; check whether
-  any test compares stderr exactly first.
 
 ## curl — deferred (see docs/curl.md)
 

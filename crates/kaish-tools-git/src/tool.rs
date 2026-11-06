@@ -1425,7 +1425,7 @@ impl Tool for GitTool {
             return verb_help(&schema, &verb);
         }
 
-        match verb.as_str() {
+        let mut result = match verb.as_str() {
             "info" => self.run_info(leaf, ctx).await,
             "status" => self.run_status(leaf, ctx).await,
             "log" => self.run_log(leaf, ctx).await,
@@ -1461,8 +1461,40 @@ impl Tool for GitTool {
                      this is a bug in kaish-tools-git, not in your command line"
                 ),
             ),
+        };
+        // A note is a whole line: in a pipeline the next stage's stderr would
+        // otherwise run onto the end of it.
+        end_line(&mut result.err);
+        if result.code == 0 {
+            if let Some(note) = dashed_pathspec_note(&verb, leaf) {
+                result.err.push_str(&note);
+                end_line(&mut result.err);
+            }
         }
+        result
     }
+}
+
+/// Terminate a non-empty stderr string with a newline.
+fn end_line(err: &mut String) {
+    if !err.is_empty() && !err.ends_with('\n') {
+        err.push('\n');
+    }
+}
+
+/// The stderr note for a pathspec after `--` that starts with `--`, which git
+/// reads as a path and so does this tool. A caller who typed `--json` there
+/// meant a flag, and the answer in text would not say otherwise.
+fn dashed_pathspec_note(verb: &str, leaf: &[String]) -> Option<String> {
+    let marker = leaf.iter().position(|w| w == "--")?;
+    let dashed: Vec<&String> = leaf[marker + 1..].iter().filter(|w| w.starts_with("--") && w.len() > 2).collect();
+    if dashed.is_empty() {
+        return None;
+    }
+    let names = dashed.iter().map(|w| format!("'{w}'")).collect::<Vec<_>>().join(", ");
+    Some(format!(
+        "git {verb}: {names} after '--' was read as a path, as git reads it. Write flags before '--'"
+    ))
 }
 
 /// A renderer's answer, and how many files it got no content for.
