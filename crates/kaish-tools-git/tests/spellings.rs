@@ -220,6 +220,63 @@ async fn an_unknown_flag_without_a_hint_lists_the_verbs_flags() {
     assert!(!err.contains("-- --frobnicate"), "clap's advice would make the flag a path: {err}");
 }
 
+// --- `-N`, and several refusals at once ----------------------------------
+
+#[tokio::test]
+async fn log_dash_n_is_log_limit_n() {
+    let (_f, root) = repo();
+    let one = same(&root, "git log -1 --oneline", "git log -n 1 --oneline").await;
+    assert_eq!(one.lines().count(), 1, "negative control: -1 limits to one commit: {one}");
+    let theirs = git(&root, &["log", "-2", "--oneline", "--no-decorate"]);
+    let ours = same(&root, "git log -2 --oneline", "git log --limit 2 --oneline").await;
+    assert_eq!(ours.trim_end(), theirs, "-2 selects what git's -2 selects");
+}
+
+#[tokio::test]
+async fn log_dash_n_takes_any_position_and_combines_with_other_flags() {
+    let (_f, root) = repo();
+    same(&root, "git log --oneline -2", "git log -n 2 --oneline").await;
+    same(&root, "git log --author Fixture -2 --json", "git log -n 2 --author Fixture --json").await;
+    same(&root, "git log -2 main -- src/lib.rs --oneline", "git log -n 2 main -- src/lib.rs --oneline").await;
+}
+
+#[tokio::test]
+async fn a_dash_number_after_the_marker_is_a_path_not_a_count() {
+    let (_f, root) = repo();
+    // After `--` everything is a pathspec, as in git: `-2` names no file.
+    let r = run(&root, "git log --oneline -- -2").await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(r.out.trim(), "", "no commit touches a file named -2: {}", r.out);
+}
+
+#[tokio::test]
+async fn every_refused_flag_is_reported_in_one_error() {
+    let (_f, root) = repo();
+    let err = refused(
+        &root,
+        "git log -1 --follow --graph --date=short --decorate",
+        &["--follow is not supported", "--graph is not supported", "--date is not supported", "--decorate is not supported"],
+    )
+    .await;
+    // Each flag's own next step is carried, not only the first one's.
+    assert!(err.contains("--first-parent"), "--graph's step: {err}");
+    assert!(err.contains("git tag"), "--decorate's step: {err}");
+}
+
+#[tokio::test]
+async fn log_follow_names_the_path_form_and_says_renames_are_not_followed() {
+    let (_f, root) = repo();
+    let err = refused(&root, "git log --follow a.txt", &["--follow is not supported", "git log -- FILE", "renames"]).await;
+    assert!(err.contains("not followed"), "{err}");
+}
+
+#[tokio::test]
+async fn log_date_points_at_json() {
+    let (_f, root) = repo();
+    let err = refused(&root, "git log --date=short", &["--date is not supported", "--json"]).await;
+    assert!(err.contains("YYYY-MM-DD") && err.contains("author.time"), "{err}");
+}
+
 // --- verbatim binding, through the kernel -----------------------------------
 
 /// `--json` is the kernel's: under verbatim binding it lifts the flag out of
