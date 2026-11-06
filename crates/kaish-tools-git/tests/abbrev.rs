@@ -171,3 +171,26 @@ async fn core_abbrev_values_git_refuses_are_refused() {
         assert!(err.contains("core.abbrev"), "core.abbrev={value}: {err}");
     }
 }
+
+/// A multi-pack-index covers the same objects as the packs it indexes. The
+/// floor must count each object once, as git does.
+#[tokio::test]
+async fn a_multi_pack_index_does_not_double_count_objects() {
+    let (_f, root) = init();
+    // 33000 packed objects print 8 (16 bits); counted twice, 66000 is 17 bits
+    // and prints 9.
+    for dir in 0..33 {
+        for n in 0..1000 {
+            write_file(&root, &format!("d{dir}/f{n}.txt"), &format!("{dir}-{n}\n"));
+        }
+    }
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "many", "--quiet"]);
+    git(&root, &["repack", "-d", "--quiet"]);
+    git(&root, &["multi-pack-index", "write"]);
+    let midx = root.join(".git/objects/pack/multi-pack-index");
+    assert!(midx.exists(), "negative control: the fixture has a multi-pack-index");
+    let ours = oneline(&root, 5).await;
+    assert_eq!(ours, git(&root, &["log", "--oneline", "--no-decorate"]));
+    assert_eq!(oid_widths(&ours), vec![8], "33000 objects counted once print 8; counted twice would print 9");
+}
