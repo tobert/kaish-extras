@@ -172,7 +172,8 @@ tool. `curl` 7.82 added a `--json` that means **a JSON request body**. Same
 spelling, opposite meaning. This build keeps kaish's convention intact:
 
 - `curl` flattens `GlobalFlags` like every builtin, so `--json` sets the output
-  format. `curl --json <url>` returns a structured object:
+  format. `curl --json <url>` returns a structured object (and only then does
+  the result carry structured data; see below):
 
   ```json
   {"status": 200, "headers": {"content-type": "application/json"}, "body": "..."}
@@ -187,6 +188,14 @@ The rationale is the convention, not the shorthand. kaish's `--json` means
 input is the one crack in that rule. Send a JSON body with `-H
 Content-Type:application/json --data <body>`. Parse a JSON response with
 `curl <url> | jq`.
+
+Without `--json`, the output is the body text and the result carries no
+structured data. That is what makes `curl -s <url> | jq -r .name` read the
+body and `x=$(curl <url>)` bind the text. The result used to carry the
+response object on every response, and a pipe hands the next tool that object
+in place of the text, so `curl <url> | jq -r .name` printed `null` with exit 0
+(survey SW-1). Only `--json` sets it. `tests/compat.rs` pins all three
+(`| jq`, `$(...)`, and `--json | jq .status` as the control).
 
 ## Exit codes
 

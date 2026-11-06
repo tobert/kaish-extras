@@ -139,6 +139,11 @@ pub struct Request {
     /// `-k`: skip TLS certificate verification. Only reachable when the
     /// embedder set `CurlConfig::with_insecure_permitted`; refused otherwise.
     pub insecure: bool,
+    /// kaish's `--json`: the output is the response envelope, so the result
+    /// carries it as structured data. Without it the output is the body text
+    /// and carries no structured data, because a pipe hands the next tool
+    /// that data in place of the text (survey SW-1).
+    pub json_output: bool,
 }
 
 /// Short flags that carry no value, and can therefore be written together.
@@ -205,6 +210,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let mut follow_redirects = false;
     let mut insecure = false;
     let mut unix_socket: Option<String> = None;
+    let mut json_output = false;
 
     // Only `-d`/`--data`/`--data-urlencode` imply a form Content-Type; real
     // curl sends none for `--data-binary`/`--data-raw`, so declaring
@@ -338,7 +344,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             // raw-argv case — it reaches us only because a raw_argv binder
             // lifts nothing out of source order. Consume and move on;
             // refusing it as unknown would break `curl --json <url> | jq`.
-            "--json" => {}
+            "--json" => json_output = true,
             // End of options: everything after is an operand.
             "--" => {
                 for token in &argv[i + 1..] {
@@ -435,6 +441,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         connect_timeout,
         insecure,
         unix_socket,
+        json_output,
     })
 }
 

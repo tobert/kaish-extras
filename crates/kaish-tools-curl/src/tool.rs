@@ -193,6 +193,7 @@ impl Tool for CurlTool {
         let output_file = req.output_file.clone();
         let include_headers = req.include_headers;
         let head_only = req.head_only;
+        let json_output = req.json_output;
 
         let result = crate::util::block_in_place_compat(move || {
             crate::backend::fetch(&req, &self.config)
@@ -200,8 +201,15 @@ impl Tool for CurlTool {
 
         match result {
             Ok(response) => {
-                handle_success(output_file.as_deref(), response, include_headers, head_only, ctx)
-                    .await
+                handle_success(
+                    output_file.as_deref(),
+                    response,
+                    include_headers,
+                    head_only,
+                    json_output,
+                    ctx,
+                )
+                .await
             }
             Err(err) => error_result(err),
         }
@@ -328,6 +336,7 @@ async fn handle_success(
     response: crate::model::Response,
     include_headers: bool,
     head_only: bool,
+    json_output: bool,
     ctx: &mut dyn ToolCtx,
 ) -> ExecResult {
     let status = response.status;
@@ -339,7 +348,7 @@ async fn handle_success(
         // response. Say what it is and where it can go intact instead
         // (CU41) — `-o` writes the bytes through the VFS unchanged, and
         // `--json` base64s them.
-        if !head_only && std::str::from_utf8(&response.body).is_err() {
+        if !head_only && !json_output && std::str::from_utf8(&response.body).is_err() {
             return error_result(CurlError::Transport(format!(
                 "the response from {url} is {} bytes of binary, which cannot be printed. \
                  Save it with '-o <path>', or use '--json' to receive it base64-encoded.",
@@ -348,10 +357,16 @@ async fn handle_success(
         }
         // curl prints headers for `-I` whether or not `-i` was given.
         let text = crate::render::render_text(&response, include_headers || head_only, head_only);
-        let json_obj = crate::render::render_json(&response);
 
         let mut result = ExecResult::with_output(OutputData::text(text));
-        result.data = Some(Value::Json(json_obj));
+        // The structured value goes on the result only under `--json`, where
+        // the output is that envelope. A pipe hands the next tool `.data` in
+        // place of the text, so setting it on a plain response made
+        // `curl URL | jq .name` read the envelope and print `null` (survey
+        // SW-1). `$(curl ...)` binds text either way (X6).
+        if json_output {
+            result.data = Some(Value::Json(crate::render::render_json(&response)));
+        }
         result.baggage.insert("curl.url".to_string(), url);
         result.baggage.insert("curl.status".to_string(), status.to_string());
         return result;

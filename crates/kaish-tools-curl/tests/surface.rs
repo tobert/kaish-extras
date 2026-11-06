@@ -331,7 +331,7 @@ async fn a_json_body_arrives_as_an_object_not_a_string() {
         .route("/api", Response::json(200, r#"{"status":"ok","count":3}"#))
         .start_tcp();
 
-    let result = curl(loopback_config(), argv(&[&server.url("/api")])).await;
+    let result = curl(loopback_config(), argv(&["--json", &server.url("/api")])).await;
     assert_eq!(result.code, 0, "{}", result.err);
 
     let Some(kaish_types::Value::Json(obj)) = result.data else {
@@ -349,7 +349,7 @@ async fn a_text_body_stays_text_even_when_it_parses_as_json() {
         .route("/plain", Response::text(200, "42"))
         .start_tcp();
 
-    let result = curl(loopback_config(), argv(&[&server.url("/plain")])).await;
+    let result = curl(loopback_config(), argv(&["--json", &server.url("/plain")])).await;
     let Some(kaish_types::Value::Json(obj)) = result.data else {
         panic!("--json payload should be structured");
     };
