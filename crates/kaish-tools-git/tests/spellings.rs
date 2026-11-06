@@ -214,11 +214,13 @@ async fn log_p_is_refused_as_p_and_patch_as_patch() {
     assert_ne!(patch.code, 0, "log --patch is refused in every build");
     assert_eq!(p.code, patch.code, "the same refusal class and exit code");
     // Each names the flag the caller typed, and neither names the other.
-    assert!(p.err.starts_with("git log: -p is not available here"), "{}", p.err);
+    // The wording past the flag differs with and without `textdiff` (that
+    // build refuses for the missing renderer first), so pin the flag name.
+    assert!(p.err.starts_with("git log: -p "), "{}", p.err);
     assert!(!p.err.contains("--patch is"), "{}", p.err);
-    assert!(patch.err.starts_with("git log: --patch is not available here"), "{}", patch.err);
+    assert!(patch.err.starts_with("git log: --patch "), "{}", patch.err);
     // Past the flag's name the two are one message.
-    assert_eq!(p.err.replacen("-p is", "--patch is", 1), patch.err);
+    assert_eq!(p.err.replacen("-p ", "--patch ", 1), patch.err);
 }
 
 #[tokio::test]
