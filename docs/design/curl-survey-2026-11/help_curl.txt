@@ -1,0 +1,63 @@
+curl — Make one HTTP request — GET or POST a URL, set headers, send a body, save the response. Reaches only hosts the embedder permits; flags this build cannot honor are refused rather than ignored
+
+Parameters:
+  url : string (required)
+    The URL to fetch, positionally or as --url. Exactly one per invocation; http and https only
+  request : string (also: X)
+    Send this HTTP method. Default GET, or POST when a body is given
+  data : string (also: d)
+    Request body. Repeatable; parts join with '&'. Implies POST and Content-Type: application/x-www-form-urlencoded unless -H sets one
+  data-binary : string (also: data_binary)
+    Like --data, and sends no Content-Type of its own
+  data-raw : string (also: data_raw)
+    Like --data, with '@' literal rather than a file read, and no Content-Type of its own
+  data-urlencode : string (also: data_urlencode)
+    Send 'name=value' as a body part, percent-encoding only the value. Repeatable
+  header : string (also: H)
+    Send a request header, 'Name: value'. Repeatable
+  include : bool (also: i)
+    Print the response headers above the body; with -o they go into the file instead
+  head : bool (also: I)
+    Send HEAD and print the response headers only. Cannot be combined with a request body
+  output : string (also: o)
+    Write the body to this path in the shell's filesystem instead of stdout. Required for a binary response, which stdout cannot carry
+  location : bool (also: L)
+    Follow redirects; off by default. Every hop is checked against the embedder's egress policy, and user/password are dropped when the host changes
+  max-redirs : string (also: max_redirs)
+    Stop after this many redirects. Default 50, and the embedder's own ceiling still applies. Exceeding it exits 47
+  user : string (also: u)
+    Basic auth, 'user' or 'user:password'. Dropped on a redirect to a different host
+  user-agent : string (also: A, user_agent)
+    Set the User-Agent. Default kaish-curl
+  referer : string (also: e)
+    Set the Referer header
+  fail : bool (also: f)
+    Exit 22 on an HTTP status of 400 or more instead of printing the body. Without it, any status is exit 0 and the body prints
+  max-time : string (also: max_time)
+    Give up after this many seconds. Default 30; may lower the embedder's ceiling, never raise it. Exceeding it exits 28
+  unix-socket : string (also: unix_socket)
+    Connect to this filesystem socket instead of the URL's host, which becomes a placeholder the Host header still needs. The path must resolve inside a mount this shell can reach
+  connect-timeout : string (also: connect_timeout)
+    Give up on connecting after this many seconds. No connect-phase limit of its own by default; --max-time still bounds the whole request. Exceeding it exits 28
+
+Examples:
+  # Fetch a URL
+  curl https://api.example.com/status
+
+  # Post JSON and read the reply
+  curl -H 'Content-Type: application/json' -d '{"q":"hello"}' https://api.example.com/search
+
+  # Authenticate
+  curl -u alice:secret https://api.example.com/private
+
+  # See the response headers too
+  curl -i https://api.example.com/status
+
+  # Save the body to a file
+  curl -o /tmp/page.html https://example.com/
+
+  # Branch on the response without re-parsing text
+  curl --json https://api.example.com/status | jq -r .status
+
+
+Operations: net.request, fs.overwrite

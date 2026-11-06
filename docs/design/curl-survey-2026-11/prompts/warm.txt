@@ -1,0 +1,103 @@
+You are an agent in a shell named kaish (bash-like). A `curl` command is available. A test API is at http://127.0.0.1:8765 . The current directory contains these files: payload.json (a JSON object), upload.txt (a short text file), token.txt (an API token), partial.txt (the first part of a download). `jq` is available too.
+
+The output of `help curl` follows.
+
+----- help curl -----
+curl — Make one HTTP request — GET or POST a URL, set headers, send a body, save the response. Reaches only hosts the embedder permits; flags this build cannot honor are refused rather than ignored
+
+Parameters:
+  url : string (required)
+    The URL to fetch, positionally or as --url. Exactly one per invocation; http and https only
+  request : string (also: X)
+    Send this HTTP method. Default GET, or POST when a body is given
+  data : string (also: d)
+    Request body. Repeatable; parts join with '&'. Implies POST and Content-Type: application/x-www-form-urlencoded unless -H sets one
+  data-binary : string (also: data_binary)
+    Like --data, and sends no Content-Type of its own
+  data-raw : string (also: data_raw)
+    Like --data, with '@' literal rather than a file read, and no Content-Type of its own
+  data-urlencode : string (also: data_urlencode)
+    Send 'name=value' as a body part, percent-encoding only the value. Repeatable
+  header : string (also: H)
+    Send a request header, 'Name: value'. Repeatable
+  include : bool (also: i)
+    Print the response headers above the body; with -o they go into the file instead
+  head : bool (also: I)
+    Send HEAD and print the response headers only. Cannot be combined with a request body
+  output : string (also: o)
+    Write the body to this path in the shell's filesystem instead of stdout. Required for a binary response, which stdout cannot carry
+  location : bool (also: L)
+    Follow redirects; off by default. Every hop is checked against the embedder's egress policy, and user/password are dropped when the host changes
+  max-redirs : string (also: max_redirs)
+    Stop after this many redirects. Default 50, and the embedder's own ceiling still applies. Exceeding it exits 47
+  user : string (also: u)
+    Basic auth, 'user' or 'user:password'. Dropped on a redirect to a different host
+  user-agent : string (also: A, user_agent)
+    Set the User-Agent. Default kaish-curl
+  referer : string (also: e)
+    Set the Referer header
+  fail : bool (also: f)
+    Exit 22 on an HTTP status of 400 or more instead of printing the body. Without it, any status is exit 0 and the body prints
+  max-time : string (also: max_time)
+    Give up after this many seconds. Default 30; may lower the embedder's ceiling, never raise it. Exceeding it exits 28
+  unix-socket : string (also: unix_socket)
+    Connect to this filesystem socket instead of the URL's host, which becomes a placeholder the Host header still needs. The path must resolve inside a mount this shell can reach
+  connect-timeout : string (also: connect_timeout)
+    Give up on connecting after this many seconds. No connect-phase limit of its own by default; --max-time still bounds the whole request. Exceeding it exits 28
+
+Examples:
+  # Fetch a URL
+  curl https://api.example.com/status
+
+  # Post JSON and read the reply
+  curl -H 'Content-Type: application/json' -d '{"q":"hello"}' https://api.example.com/search
+
+  # Authenticate
+  curl -u alice:secret https://api.example.com/private
+
+  # See the response headers too
+  curl -i https://api.example.com/status
+
+  # Save the body to a file
+  curl -o /tmp/page.html https://example.com/
+
+  # Branch on the response without re-parsing text
+  curl --json https://api.example.com/status | jq -r .status
+
+
+Operations: net.request, fs.overwrite
+----- end help curl -----
+
+Below are numbered tasks. For each, give the single shell command line you would run first (pipes allowed). Do not explain.
+
+Answer with strict JSON only: an object mapping the task number (as a string) to the command line string. No markdown fences.
+
+Tasks:
+1. GET http://127.0.0.1:8765/json and print the response body.
+2. GET http://127.0.0.1:8765/text with no progress output, but still show an error message if the request fails.
+3. Show only the response headers of http://127.0.0.1:8765/json (no body).
+4. Print the response headers followed by the body of http://127.0.0.1:8765/json.
+5. http://127.0.0.1:8765/redirect redirects to /json. Print the final body, following the redirect.
+6. Request http://127.0.0.1:8765/status/404 so that the command exits non-zero because of the HTTP error status (do not rely on parsing the output).
+7. Request http://127.0.0.1:8765/status/404, exit non-zero on the HTTP error, but still print the error response body.
+8. Download http://127.0.0.1:8765/file/report.txt and save it in the current directory under the name the URL gives it (report.txt).
+9. Save the body of http://127.0.0.1:8765/json to a local file named out.json.
+10. POST the JSON object {"name":"widget"} to http://127.0.0.1:8765/echo with the right JSON content type.
+11. POST the contents of the local file payload.json to http://127.0.0.1:8765/echo as JSON.
+12. POST the form fields name=widget and qty=3 to http://127.0.0.1:8765/echo as an ordinary HTML form submission.
+13. Send a PUT request with the JSON body {"qty":5} to http://127.0.0.1:8765/echo.
+14. Send a DELETE request to http://127.0.0.1:8765/echo.
+15. Send a PATCH request with the JSON body {"qty":6} to http://127.0.0.1:8765/echo.
+16. GET http://127.0.0.1:8765/bearer with the bearer token abc123 in the Authorization header.
+17. GET http://127.0.0.1:8765/basic-auth using HTTP basic auth with user alice and password s3cret.
+18. GET http://127.0.0.1:8765/echo with the User-Agent set to survey-bot/1.0.
+19. Print only the HTTP status code (a number such as 200 or 404) of http://127.0.0.1:8765/status/404, nothing else.
+20. Print how many seconds the request to http://127.0.0.1:8765/json took.
+21. GET http://127.0.0.1:8765/slow (it takes 3 seconds) but give up after 1 second.
+22. GET http://127.0.0.1:8765/flaky, which fails with 503 a couple of times; retry up to 3 times until it succeeds.
+23. Upload the local file upload.txt as a multipart form file field named "file" to http://127.0.0.1:8765/upload.
+24. Upload the local file upload.txt to http://127.0.0.1:8765/upload using an HTTP PUT with the file as the raw body.
+25. GET http://127.0.0.1:8765/echo with the query parameters q="hello world" and n=5 added to the URL, letting curl do the URL-encoding.
+26. Fetch http://127.0.0.1:8765/json and pipe it to jq to print only the "name" field's value, without quotes.
+27. Fetch http://127.0.0.1:8765/json with verbose debugging output that shows the request and response headers.
+28. partial.txt is the first part of http://127.0.0.1:8765/file/report.txt. Resume the download so partial.txt becomes the complete file.
