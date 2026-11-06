@@ -25,6 +25,11 @@ pub async fn prepare(
     ctx: &dyn ToolCtx,
     max_bytes: u64,
 ) -> Result<(), CurlError> {
+    if let Some(path) = req.upload_file.clone() {
+        req.body = read_file(ctx, &path, max_bytes).await?;
+        add_file_name_to_url(&mut req.url, &path);
+        return Ok(());
+    }
     if !req.forms.is_empty() {
         return prepare_form(req, ctx, max_bytes).await;
     }
@@ -182,4 +187,23 @@ async fn prepare_form(
     }
     req.body = body;
     Ok(())
+}
+
+/// `-T` to a URL whose path ends in `/` names the file in it: curl appends
+/// the file's basename. A URL with a query is left alone, as in curl.
+fn add_file_name_to_url(url: &mut String, path: &str) {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return; // the backend reports an unusable URL
+    };
+    if !parsed.path().ends_with('/') || parsed.query().is_some() {
+        return;
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if name.is_empty() {
+        return;
+    }
+    if let Ok(mut segments) = parsed.path_segments_mut() {
+        segments.pop_if_empty().push(name);
+    }
+    *url = parsed.to_string();
 }

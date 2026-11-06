@@ -73,6 +73,13 @@ impl CurlTool {
             #[arg(short = 'F', long, action = clap::ArgAction::Append)]
             form: Vec<String>,
 
+            /// Send this file's bytes as the body, with PUT unless -X says
+            /// otherwise. A URL ending in '/' gains the file's name. One file
+            /// per invocation; cannot be combined with -d, -F, -G or -I. '-T -'
+            /// (stdin) exits 2.
+            #[arg(short = 'T', long)]
+            upload_file: Option<String>,
+
             /// Send a request header, 'Name: value'. Repeatable.
             #[arg(short = 'H', long, action = clap::ArgAction::Append)]
             header: Vec<String>,

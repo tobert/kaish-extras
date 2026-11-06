@@ -700,3 +700,74 @@ async fn remote_name_and_output_are_one_choice_and_j_stays_refused() {
     }
     assert!(server.requests().is_empty());
 }
+
+// ── 5. -T / --upload-file ───────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn upload_file_puts_the_files_bytes() {
+    let server = recorder();
+    let bin: &[u8] = b"a\r\n\0\xff\n";
+    let files: &[(&str, &[u8])] = &[("up.txt", b"hello\n"), ("bin", bin), ("empty", b""), ("sub/deep.txt", b"deep")];
+    for (args, method, path, body) in [
+        ("-T up.txt \"$URL/echo\"", "PUT", "/echo", &b"hello\n"[..]),
+        ("--upload-file up.txt \"$URL/echo\"", "PUT", "/echo", b"hello\n"),
+        ("-T bin \"$URL/echo\"", "PUT", "/echo", bin),
+        ("-T empty \"$URL/echo\"", "PUT", "/echo", b""),                      // Content-Length: 0
+        ("-T up.txt -X POST \"$URL/echo\"", "POST", "/echo", b"hello\n"),
+        // A URL ending in '/' gains the file's basename.
+        ("-T up.txt \"$URL/u/\"", "PUT", "/u/up.txt", b"hello\n"),
+        ("-T sub/deep.txt \"$URL/u/\"", "PUT", "/u/deep.txt", b"deep"),
+        ("-T up.txt \"$URL\"", "PUT", "/up.txt", b"hello\n"),
+        // ...but not when a query follows the slash.
+        ("-T up.txt \"$URL/u/?q=1\"", "PUT", "/u/?q=1", b"hello\n"),
+        ("-T up.txt -H 'Content-Type: text/x-up' \"$URL/echo\"", "PUT", "/echo", b"hello\n"),
+    ] {
+        let p = compare(&server, &format!("-s {args}"), files).await;
+        assert_eq!(p.ours.code, 0, "{args}: {}", p.ours.err);
+        let got = Wire::of(&p.ours_req[0]);
+        assert_eq!((got.method.as_str(), got.path.as_str()), (method, path), "{args}");
+        assert_eq!(got.body, body, "{args}");
+        assert_eq!(got.content_length.as_deref(), Some(body.len().to_string().as_str()), "{args}");
+        p.assert_same(args);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn upload_file_errors_send_nothing() {
+    let server = recorder();
+    let files: &[(&str, &[u8])] = &[("up.txt", b"x"), ("sub/y", b"y")];
+    for (args, code) in [
+        ("-T nope", 26),
+        ("-T sub", 26),                   // a directory
+        ("-T up.txt -d a=1", 2),
+        ("-T up.txt -F a=1", 2),
+        ("-T up.txt -I", 2),
+    ] {
+        let p = compare(&server, &format!("-s {args} \"$URL/echo\""), files).await;
+        assert_eq!(p.ours.code, code as i64, "{args}: {}", p.ours.err);
+        assert!(p.ours_req.is_empty(), "{args}");
+        if let Some(t) = &p.theirs {
+            if args != "-T sub" {
+                assert_eq!(t.code, code, "{args}: control, real curl");
+            }
+        }
+    }
+    // curl accepts these; each would be a quiet difference.
+    for (args, needle) in [("-T up.txt -G", "-G"), ("-T -", "stdin"), ("-T up.txt -T sub/y", "one")] {
+        let p = compare(&server, &format!("-s {args} \"$URL/echo\""), files).await;
+        assert_eq!(p.ours.code, 2, "{args}: {}", p.ours.err);
+        assert!(p.ours.err.contains(needle), "{args}: {}", p.ours.err);
+        assert!(p.ours_req.is_empty(), "{args}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn upload_file_counts_against_the_byte_limit() {
+    let server = recorder();
+    let big = vec![b'u'; 3000];
+    let config = loopback_config().with_limits(Limits { max_response_bytes: 1024, ..Limits::default() });
+    let p = compare_with(&server, "-s -T big \"$URL/echo\"", &[("big", &big)], config).await;
+    assert_ne!(p.ours.code, 0);
+    assert!(p.ours.err.contains("1024") && p.ours.err.contains("big"), "{}", p.ours.err);
+    assert!(p.ours_req.is_empty());
+}

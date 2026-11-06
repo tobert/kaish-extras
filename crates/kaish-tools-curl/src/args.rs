@@ -56,6 +56,7 @@ pub(crate) const HONORED_FLAGS: &[&str] = &[
     "--remote-name",
     "--location",
     "--max-redirs",
+    "--upload-file",
     "--user",
     "--user-agent",
     "--referer",
@@ -112,6 +113,8 @@ pub struct Request {
     pub get: bool,
     /// `-F` parts, in order. Files in them are read by `input::prepare`.
     pub forms: Vec<crate::form::FormPart>,
+    /// `-T`: the file whose bytes are the body, as typed.
+    pub upload_file: Option<String>,
     /// Header name/value pairs, including the `User-Agent` (the caller's or
     /// [`DEFAULT_USER_AGENT`]) and any `Referer` from `-e`.
     pub headers: Vec<(String, String)>,
@@ -167,7 +170,7 @@ impl Request {
     /// curl sends neither when no data flag was given, and an empty body
     /// still counts when a flag asked for one (`-d ''`).
     pub fn sends_body(&self) -> bool {
-        !(self.body.is_empty() && (self.bodies.is_empty() || self.get))
+        self.upload_file.is_some() || !(self.body.is_empty() && (self.bodies.is_empty() || self.get))
     }
 }
 
@@ -201,7 +204,7 @@ pub enum BodyPart {
 const BOOLEAN_SHORTS: &[char] = &['i', 'I', 'f', 'L', 's', 'S', 'k', 'O', 'v', 'G', 'J'];
 
 /// Short flags that take a value, and so cannot appear inside a cluster.
-const VALUE_SHORTS: &[char] = &['X', 'd', 'H', 'o', 'u', 'A', 'e', 'w', 'b', 'x', 'K', 'F', 'm'];
+const VALUE_SHORTS: &[char] = &['X', 'd', 'H', 'o', 'u', 'A', 'e', 'w', 'b', 'x', 'K', 'F', 'm', 'T', 'C'];
 
 /// Expand `-sSL` into `-s -S -L`.
 ///
@@ -262,6 +265,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let mut unix_socket: Option<String> = None;
     let mut json_output = false;
     let mut get = false;
+    let mut upload_file: Option<String> = None;
     let mut remote_name = false;
     let mut output_dir: Option<String> = None;
     let mut forms: Vec<crate::form::FormPart> = Vec::new();
@@ -339,6 +343,15 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             "-A" | "--user-agent" => user_agent = Some(value(&mut i)?),
             "-e" | "--referer" => referer = Some(value(&mut i)?),
             "-F" | "--form" => forms.push(crate::form::parse(&value(&mut i)?)?),
+            "-T" | "--upload-file" => {
+                let path = value(&mut i)?;
+                crate::args::refuse_stdin(&path, "-T")?;
+                if let Some(first) = upload_file.replace(path.clone()) {
+                    return Err(CurlError::Usage(format!(
+                        "only one '-T' file per invocation is supported (exit 2), and both '{first}' and '{path}' were given. No request was sent. Run curl once per file."
+                    )));
+                }
+            }
             "-G" | "--get" => get = true,
             "-O" | "--remote-name" => remote_name = true,
             "--output-dir" => output_dir = Some(value(&mut i)?),
@@ -445,6 +458,27 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
 
     output_file = resolve_output(output_file, remote_name, output_dir.clone(), &url)?;
 
+    if upload_file.is_some() {
+        // curl refuses -d, -F and -I with -T too (exit 2); it accepts -G and
+        // ignores it, which would be a quiet difference here.
+        let with = if !bodies.is_empty() {
+            Some("a data flag ('-d', '--data-binary', '--data-raw', '--data-urlencode')")
+        } else if !forms.is_empty() {
+            Some("'-F'")
+        } else if get {
+            Some("'-G'")
+        } else if head_only {
+            Some("'-I'")
+        } else {
+            None
+        };
+        if let Some(with) = with {
+            return Err(CurlError::Usage(format!(
+                "'-T' cannot be combined with {with} (exit 2), and no request was sent. A request has one body."
+            )));
+        }
+    }
+
     if !forms.is_empty() {
         // curl refuses these mixes too (exit 2).
         let with = if !bodies.is_empty() {
@@ -493,6 +527,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         Some(m) => m,
         None if head_only => "HEAD".to_string(),
         None if (!bodies.is_empty() && !get) || !forms.is_empty() => "POST".to_string(),
+        None if upload_file.is_some() => "PUT".to_string(),
         None => "GET".to_string(),
     };
 
@@ -503,6 +538,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         body: Vec::new(),
         get,
         forms,
+        upload_file,
         headers,
         include_headers,
         head_only,
