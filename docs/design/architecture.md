@@ -849,12 +849,16 @@ impl ReadRepo {
 ```
 
 There is no facade `Repository` to hand out ([A.2](#a2-feature-axes)):
-`ReadRepo` assembles the plumbing handles itself and never lends them, so no
-caller can reach a ref transaction or an index writer. Every write-capable path
-lives under `verbs/write/` behind `#[cfg(feature = "worktree")]` /
-`#[cfg(feature = "commit")]` and constructs a *different* handle
-(`WriteRepo`, which will take an approval token as a constructor argument). In
-a default build those modules are not compiled.
+`ReadRepo` assembles the plumbing handles itself and lends them only as
+`OdbRead` and `RefsRead`, borrowed wrappers with no write trait, no
+transaction and no `Deref` to the real handle, so a caller holding a
+`ReadRepo` cannot reach a ref transaction or an object write. `ReadRepo` has
+no index writer. Every write-capable path lives under `verbs/write/` behind
+`#[cfg(feature = "worktree")]` / `#[cfg(feature = "commit")]` and constructs a
+*different* handle (`WriteRepo`, which holds the real object store handle and
+a reflog-writing ref store, and takes a `WriteToken` as a constructor
+argument; the token is proof that the commit profile is installed, not an
+authorization). In a default build those modules are not compiled.
 
 A grep-able invariant, enforced by a test that scans the crate source: outside
 `verbs/write/`, the write-shaped plumbing does not appear — `gix-ref`'s

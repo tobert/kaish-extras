@@ -2,10 +2,14 @@
 //! plumbing handles are assembled (architecture.md A.1, D.1, D.2, E.2).
 //!
 //! There is no facade `Repository` to hand out. `ReadRepo` builds an object
-//! store, a ref store and a parsed repo-local config, keeps all three
-//! private, and never lends them. A caller cannot reach a ref transaction or
-//! an index writer because it cannot reach the handle that would offer one —
-//! the read-only property is the shape of the type, not a check inside it.
+//! store, a ref store and a parsed repo-local config and keeps all three
+//! private. It lends the first two only as [`OdbRead`] and [`RefsRead`],
+//! borrowed wrappers that offer find, header, exists and iterate and have no
+//! write trait, no transaction and no `Deref` to the real handle. A caller
+//! cannot reach a ref transaction or an object write through them because
+//! the methods do not exist on those types. The `write_shaped_identifiers`
+//! scan is the second line, for the code that builds a handle of its own.
+//! `ReadRepo` holds no index writer at all.
 //!
 //! Isolation is likewise structural (D.2): nothing is loaded that we did not
 //! choose to load. No system config, no user config, no `GIT_*` environment
@@ -78,6 +82,81 @@ pub struct ReadRepo {
     ceiling: PathBuf,
     objects: gix_odb::Handle,
     refs: gix_ref::file::Store,
+}
+
+/// The object store as a reader sees it (feasibility section 7, F1).
+///
+/// A borrowed wrapper over the real [`gix_odb::Handle`] that implements the
+/// read traits (`Find`, `FindHeader`, `Exists`) and nothing else: not
+/// `gix_object::Write`, not `Deref`. A function that takes a [`ReadRepo`]
+/// receives this and cannot write an object through it, because the method
+/// does not exist on the type. [`WriteRepo`](crate::verbs::write::repo::WriteRepo)
+/// holds the real handle. The `write_shaped_identifiers` scan is the second
+/// line, not the first.
+#[derive(Clone, Copy)]
+pub(crate) struct OdbRead<'a>(&'a gix_odb::Handle);
+
+impl gix_object::Find for OdbRead<'_> {
+    fn try_find<'b>(
+        &self,
+        id: &gix_hash::oid,
+        buffer: &'b mut Vec<u8>,
+    ) -> Result<Option<gix_object::Data<'b>>, gix_object::find::Error> {
+        gix_object::Find::try_find(self.0, id, buffer)
+    }
+}
+
+impl gix_object::FindHeader for OdbRead<'_> {
+    fn try_header(&self, id: &gix_hash::oid) -> Result<Option<gix_object::Header>, gix_object::find::Error> {
+        gix_object::FindHeader::try_header(self.0, id)
+    }
+}
+
+impl gix_odb::Header for OdbRead<'_> {
+    fn try_header(&self, id: &gix_hash::oid) -> Result<Option<gix_odb::find::Header>, gix_object::find::Error> {
+        gix_odb::Header::try_header(self.0, id)
+    }
+}
+
+impl gix_object::Exists for OdbRead<'_> {
+    fn exists(&self, id: &gix_hash::oid) -> bool {
+        gix_object::Exists::exists(self.0, id)
+    }
+}
+
+/// The ref store as a reader sees it (feasibility section 7, F1).
+///
+/// Exposes `try_find` and `iter` and nothing else: no `transaction`, and no
+/// `Deref` to the store that has one. See [`OdbRead`].
+#[derive(Clone, Copy)]
+pub(crate) struct RefsRead<'a>(&'a gix_ref::file::Store);
+
+impl<'a> RefsRead<'a> {
+    /// The store's reflog policy, for the test that pins it to `Disable`.
+    #[cfg(test)]
+    pub(crate) fn write_reflog(&self) -> gix_ref::store::WriteReflog {
+        self.0.write_reflog
+    }
+
+    /// Look a reference up by (partial) name; `None` when it does not exist.
+    pub(crate) fn try_find<'n, Name, E>(
+        &self,
+        partial: Name,
+    ) -> Result<Option<gix_ref::Reference>, gix_ref::file::find::Error>
+    where
+        Name: TryInto<&'n gix_ref::PartialNameRef, Error = E>,
+        gix_ref::file::find::Error: From<E>,
+    {
+        self.0.try_find(partial)
+    }
+
+    /// Iterate loose and packed references.
+    ///
+    /// Takes `self` by value (it is `Copy`) so the platform borrows the
+    /// store, not the temporary `RefsRead`.
+    pub(crate) fn iter(self) -> Result<gix_ref::file::iter::Platform<'a>, gix_ref::packed::buffer::open::Error> {
+        self.0.iter()
+    }
 }
 
 impl ReadRepo {
@@ -374,16 +453,7 @@ impl ReadRepo {
         // shared-store symlink that stays inside is followed and its resolved
         // path used); `guard_alternates` catches `objects/info/alternates`
         // naming an outside store, which needs no symlink at all.
-        let objects_dir = match open_leaf(operation, "object store", &common_dir, "objects", &ceiling)? {
-            Leaf::At(dir) => dir,
-            // A repository with no object directory is malformed; let gix say
-            // so against a path the caller owns.
-            Leaf::Absent => common_dir.join("objects"),
-        };
-        guard_alternates(operation, &objects_dir, &ceiling)?;
-        let objects = gix_odb::at(&objects_dir).map_err(|e| {
-            GitError::repository(operation, "opening the object store", &common_dir, e)
-        })?;
+        let objects = open_object_store(operation, &common_dir, &ceiling)?;
 
         // The containment boundary, stated where it actually ends. Everything
         // above ceiling-checks a path *this crate* opens. From here, gix opens
@@ -664,13 +734,14 @@ impl ReadRepo {
     // These lend `git status` the raw materials it hand-composes from — the
     // index, the HEAD tree id, `info/exclude`, and the object store — with the
     // ceiling invariant already enforced on every fixed-name leaf they open.
-    // `objects()` lends the odb handle to a sibling module, not to a caller
-    // outside the crate; it is read-only in practice, and the
-    // `write_shaped_identifiers` scan (D.1) is what keeps it that way.
+    // `objects()` lends an [`OdbRead`], which has the read traits and no
+    // write: a sibling module cannot write an object through it because the
+    // type has no method to. The `write_shaped_identifiers` scan (D.1) is the
+    // second line.
 
     /// The object store, for reading trees and blobs.
-    pub(crate) fn objects(&self) -> &gix_odb::Handle {
-        &self.objects
+    pub(crate) fn objects(&self) -> OdbRead<'_> {
+        OdbRead(&self.objects)
     }
 
     /// The common directory (`objects/`, `refs/`, `info/` live here).
@@ -1180,13 +1251,13 @@ impl ReadRepo {
     /// The ref store, for iterating `refs/heads/`, `refs/remotes/` and
     /// `refs/tags/`.
     ///
-    /// Lent to a sibling module the same way [`ReadRepo::objects`] is, and on
-    /// the same terms: it is read-only in practice, and the
-    /// `write_shaped_identifiers` scan (D.1) is what keeps it that way — the
-    /// transaction API this type also carries is a match that fails the build
+    /// Lent as a [`RefsRead`], the same way [`ReadRepo::objects`] lends an
+    /// [`OdbRead`]: it offers `try_find` and `iter`, and the transaction API
+    /// the real store carries is not on it. The `write_shaped_identifiers`
+    /// scan (D.1) is the second line: a test fails if `.transaction(` appears
     /// outside `verbs/write/`.
-    pub(crate) fn refs(&self) -> &gix_ref::file::Store {
-        &self.refs
+    pub(crate) fn refs(&self) -> RefsRead<'_> {
+        RefsRead(&self.refs)
     }
 
     /// Resolve `parent/name` for reading, refusing a symlinked leaf whose
@@ -1919,6 +1990,27 @@ fn guard_alternates(
     Ok(())
 }
 
+/// Open the object store under `common_dir`, ceiling-checked.
+///
+/// The one place the real [`gix_odb::Handle`] is built. `discover` keeps the
+/// result private behind [`OdbRead`]; `WriteRepo::open` calls it for a handle
+/// of its own.
+pub(crate) fn open_object_store(
+    operation: &'static str,
+    common_dir: &Path,
+    ceiling: &Path,
+) -> Result<gix_odb::Handle, GitError> {
+    let objects_dir = match open_leaf(operation, "object store", common_dir, "objects", ceiling)? {
+        Leaf::At(dir) => dir,
+        // A repository with no object directory is malformed; let gix say
+        // so against a path the caller owns.
+        Leaf::Absent => common_dir.join("objects"),
+    };
+    guard_alternates(operation, &objects_dir, ceiling)?;
+    gix_odb::at(&objects_dir)
+        .map_err(|e| GitError::repository(operation, "opening the object store", common_dir, e))
+}
+
 /// One navigation step in a revision suffix (`~N`, `^`, `^N`).
 enum Nav {
     /// `~N`: walk the first parent `N` times.
@@ -2091,6 +2183,41 @@ fn normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Autoref probe: `Probe::<T>::IS` is `true` only when `T: Trait`, decided
+    /// at compile time. The inherent const wins over the trait default.
+    macro_rules! implements {
+        ($ty:ty, $($bound:tt)+) => {{
+            #[allow(dead_code)]
+            trait No {
+                const IS: bool = false;
+            }
+            impl<T: ?Sized> No for T {}
+            struct Probe<T: ?Sized>(std::marker::PhantomData<T>);
+            #[allow(dead_code)]
+            impl<T: ?Sized + $($bound)+> Probe<T> {
+                const IS: bool = true;
+            }
+            Probe::<$ty>::IS
+        }};
+    }
+
+    /// F1 (feasibility section 7): "read code cannot write" is a type fact.
+    /// The handles `ReadRepo` lends have no write trait and no `Deref` to the
+    /// real handle, which is what would hand a transaction back. The control
+    /// shows the probe can say yes: the real handle writes objects.
+    #[test]
+    fn the_handles_a_read_repo_lends_cannot_write() {
+        assert!(implements!(gix_odb::Handle, gix_object::Write), "control: the real handle writes");
+        assert!(!implements!(OdbRead<'static>, gix_object::Write));
+        assert!(!implements!(OdbRead<'static>, std::ops::Deref<Target = gix_odb::Handle>));
+        assert!(!implements!(RefsRead<'static>, std::ops::Deref<Target = gix_ref::file::Store>));
+        // The reads it does offer.
+        assert!(implements!(OdbRead<'static>, gix_object::Find));
+        assert!(implements!(OdbRead<'static>, gix_object::FindHeader));
+        assert!(implements!(OdbRead<'static>, gix_object::Exists));
+        assert!(implements!(OdbRead<'static>, gix_odb::Header));
+    }
 
     #[test]
     fn normalize_resolves_dot_and_dotdot() {

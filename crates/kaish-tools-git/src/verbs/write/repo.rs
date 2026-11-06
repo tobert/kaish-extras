@@ -1,11 +1,16 @@
 //! [`WriteRepo`]: a [`ReadRepo`] plus the one handle that can write refs
 //! (feasibility §7).
 //!
-//! `ReadRepo` keeps `WriteReflog::Disable` and never lends a transaction.
-//! `WriteRepo` builds its own ref store with `WriteReflog::Normal`, so a ref
-//! move through it appends a reflog line. Everything else (discovery,
-//! revision resolution, the object reader) is `ReadRepo`'s, reused through
-//! [`WriteRepo::read`].
+//! `ReadRepo` keeps `WriteReflog::Disable` and lends only [`OdbRead`] and
+//! [`RefsRead`] (feasibility F1), types with no write method, so read code
+//! cannot write whatever the scan misses. `WriteRepo` holds the real handles:
+//! its own ref store with `WriteReflog::Normal`, so a ref move through it
+//! appends a reflog line, and its own object store handle. Everything else
+//! (discovery, revision resolution, the object reader) is `ReadRepo`'s,
+//! reused through [`WriteRepo::read`].
+//!
+//! [`OdbRead`]: crate::repo::OdbRead
+//! [`RefsRead`]: crate::repo::RefsRead
 //!
 //! A `WriteRepo` needs a [`WriteToken`], and a token comes only from the
 //! commit profile's settings. A code path with no `WritableGitConfig` behind
@@ -44,6 +49,8 @@ pub(crate) struct WriteRepo {
     /// The ref store that writes reflogs. A second store beside `ReadRepo`'s;
     /// `write_shaped_identifiers` counts constructions outside this directory.
     refs: gix_ref::file::Store,
+    /// The real object store handle, the one that can write objects.
+    objects: gix_odb::Handle,
     _token: WriteToken,
 }
 
@@ -71,7 +78,8 @@ impl WriteRepo {
                 options,
             )
         };
-        Ok(Self { read, refs, _token: token })
+        let objects = crate::repo::open_object_store(op, read.common_dir(), read.ceiling())?;
+        Ok(Self { read, refs, objects, _token: token })
     }
 
     /// The read side: discovery, revisions, objects.
@@ -83,6 +91,11 @@ impl WriteRepo {
     /// containment check for the path the transaction will touch.
     pub(crate) fn refs(&self) -> &gix_ref::file::Store {
         &self.refs
+    }
+
+    /// The object store handle that can write objects.
+    pub(crate) fn objects(&self) -> &gix_odb::Handle {
+        &self.objects
     }
 
     pub(crate) fn git_dir(&self) -> &Path {
@@ -149,9 +162,17 @@ mod tests {
             gix_ref::store::WriteReflog::Normal
         ));
         assert!(matches!(
-            repo.read().refs().write_reflog,
+            repo.read().refs().write_reflog(),
             gix_ref::store::WriteReflog::Disable
         ));
+    }
+
+    #[test]
+    fn the_write_repo_holds_a_handle_that_writes_objects() {
+        fn writes<T: gix_object::Write>(_: &T) {}
+        let fx = Fixture::new();
+        let repo = fx.write_repo(false);
+        writes(repo.objects());
     }
 
     #[test]
