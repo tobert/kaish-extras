@@ -491,6 +491,12 @@ impl ReadRepo {
         })
     }
 
+    /// The verb this repository was opened for, for errors raised on its behalf.
+    #[cfg(feature = "commit")]
+    pub(crate) fn operation(&self) -> &'static str {
+        self.operation
+    }
+
     /// The git directory on the host filesystem.
     pub fn git_dir(&self) -> &Path {
         &self.git_dir

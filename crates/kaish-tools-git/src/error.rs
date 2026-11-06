@@ -622,6 +622,46 @@ pub enum GitError {
         /// The verb that was asked for.
         operation: &'static str,
     },
+
+    /// A write would pass through a symbolic link, or through a path
+    /// component that is not a directory, inside the repository. Exit 4
+    /// (git-write-profile.md §6.1).
+    ///
+    /// `path` is relative to `store` and never absolute: it names a path
+    /// inside the mount, so it reveals nothing the caller could not already
+    /// list, and it never says where a link points.
+    #[cfg(feature = "commit")]
+    #[error(
+        "git {operation}: nothing was written. '{path}' in {store} is {found}, \
+         and writing through it could change files outside the mount. Real git \
+         follows such links; this shell does not. Replace it with a real \
+         directory using tools outside this repository's control, or use a \
+         clean clone"
+    )]
+    WriteThroughLink {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// Which root the path is relative to, as a caller would name it.
+        store: &'static str,
+        /// The offending component, relative to `store`.
+        path: String,
+        /// What was found there, for example "a symbolic link".
+        found: &'static str,
+    },
+
+    /// A reflog message contained a line break, which would forge a second
+    /// reflog line. Exit 2.
+    #[cfg(feature = "commit")]
+    #[error(
+        "git {operation}: nothing was written. The reflog message would \
+         contain a line break, which git's reflog format cannot hold. Remove \
+         the line break (and any carriage return) from the first line of the \
+         commit message and run the command again"
+    )]
+    ReflogMessageLineBreak {
+        /// The verb that was asked for.
+        operation: &'static str,
+    },
 }
 
 impl GitError {
@@ -644,6 +684,8 @@ impl GitError {
             | GitError::AncestryBudgetExhausted { .. }
             | GitError::PatchRendererFailed { .. }
             | GitError::NoSuchPath { .. } => 1,
+            #[cfg(feature = "commit")]
+            GitError::ReflogMessageLineBreak { .. } => 2,
             GitError::Usage { .. }
             | GitError::NoVerb { .. }
             | GitError::UnsupportedVerb { .. }
@@ -660,6 +702,8 @@ impl GitError {
             | GitError::PatchNeedsTextdiff { .. }
             | GitError::PatchNotInThisVerb { .. }
             | GitError::UnsupportedIndexMode { .. } => 4,
+            #[cfg(feature = "commit")]
+            GitError::WriteThroughLink { .. } => 4,
             GitError::VerbNotEnabled { .. } => 5,
         }
     }

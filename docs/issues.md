@@ -978,6 +978,17 @@ left, ranked:
   alone. Update the tests, this entry and `docs/embedding-git.md`'s "What is
   not closed" paragraph together.
 
+  **The write side (2026-11-06).** Under the commit profile the same shape is
+  a write: a symlinked `objects/ab`, `refs/heads/sub` or `logs/HEAD` would
+  receive our write outside the mount. That half is guarded, and will be
+  enforced once verbs use it. Phase 1a adds the containment walk
+  (`src/verbs/write/containment.rs`: `lstat` every component from the root of
+  the store the write lands in, refuse a link with exit 4) and its planted-link
+  fixtures. No verb calls the walk yet, so no write exists to guard today.
+  Phase 1b must route every write through it and point the fixtures at the
+  real verbs; until then this entry's write half is a plan, not a close. The
+  read half above is unchanged.
+
 - **P5 — a `.gitignore` symlinked out of the mount is a content oracle.**
   `gix-worktree` reads per-directory `.gitignore` itself during the untracked
   walk, and its content decides which paths are reported ignored. Plant an
