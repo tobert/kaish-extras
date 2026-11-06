@@ -1635,3 +1635,15 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   refuses when its line names a conversion. `core.attributesFile` refuses.
 - **W10 — `core.hooksPath` inside the tree** is resolved for the
   `post-index-change` check only.
+- **W11 — residuals of the phase 1a containment review.** The source scan
+  (`tests/write_shaped_identifiers.rs`) does not match a turbofish call
+  (`.transaction::<T>(`). The `.git` component guard does not cover
+  HFS+-ignorable code points or trailing dots and spaces (Windows/macOS name
+  folding). The hard-link refusal (`st_nlink > 1` on in-place targets) is
+  unix-only. None reachable on the Linux CI today; each wants a fixture on the
+  platform it names before a fix.
+- **W12 — `gix-lock` is a renamed dev-dependency.** Phase 1a added
+  `lock = { package = "gix-lock", version = "=24.0.0" }` for tests only, renamed
+  so `pins_match_the_manifest` does not count it as linked. Phase 2's ref
+  transactions link it for real: promote it to a pinned, `commit`-gated
+  dependency with a `GIX_PINS` row then.
