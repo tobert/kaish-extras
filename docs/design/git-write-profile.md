@@ -473,7 +473,9 @@ corrected.
    (feasibility §7 lists the needles), both fingerprint tests, then objects
    + index: `add`, `rm`, `mv`, `restore --staged`, `reset` (no revision).
 2. `commit` (`-m`, `-F`, `-a`, `--only`, `--trailer`), identity and
-   `var GIT_AUTHOR_IDENT`, reflog, the `GitHooks` boundary.
+   `var GIT_AUTHOR_IDENT`, reflog, the `GitHooks` boundary. **Built**
+   (docs/embedding-git.md, "The commit profile"); the differences from this
+   design are docs/issues.md W13-W23.
 3. `RewritePolicy`, the two-sided reachability walk, `--amend`, and
    `reset --soft|--mixed <rev>`.
 4. `branch <name>`, `tag <name>`, `switch -c`/`checkout -b`.

@@ -1264,8 +1264,8 @@ git's own, so an embedder seeding them is self-documenting:
 | `GIT_AUTHOR_EMAIL` | yes | |
 | `GIT_COMMITTER_NAME` | no | defaults to author |
 | `GIT_COMMITTER_EMAIL` | no | defaults to author |
-| `GIT_AUTHOR_DATE` | no | RFC3339; enables reproducible fixtures/tests |
-| `GIT_COMMITTER_DATE` | no | defaults to author date, else system clock |
+| `GIT_AUTHOR_DATE` | no | ISO 8601 / RFC 3339 or git's `<seconds> <+hhmm>`; enables reproducible fixtures/tests. No offset means UTC |
+| `GIT_COMMITTER_DATE` | no | else the system clock, in UTC. Not the author's date: git does not borrow it, and the oracle test compares with git (docs/issues.md, W17) |
 
 The kernel never populates these from the OS environment, so the embedder must
 seed them (`KernelConfig::with_var`). **There is no fallback**: a commit attempted
