@@ -2763,3 +2763,58 @@ fn cited_test_names(text: &str) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 1b — `add` against the same hostile repository
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "commit")]
+async fn pwn_write(repo: &PwnRepo, argv: &[&str]) -> ExecResult {
+    let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), repo.mount()));
+    let mut ctx = TestCtx::new(backend, "/mnt/repo");
+    let tool = kaish_tools_git::tool(GitConfig::read_only().with_commit_profile()).expect("config");
+    let (verb, rest) = argv.split_first().expect("a verb");
+    tool.execute(support::verb_words(verb, rest), &mut ctx).await
+}
+
+/// `add` against a repository that declares a clean filter, a smudge filter,
+/// textconv and a hooks directory. The fixture is armed: the control at the
+/// end runs real `git add` on it and the clean filter fires, so an empty
+/// sentinel directory after ours is a statement about this build.
+///
+/// Both ways in are covered: with `core.hooksPath` set (this shell cannot
+/// tell whether a post-index-change hook would run, so it refuses before it
+/// looks at a file) and with it removed (the `filter=pwn` attribute refuses
+/// the path). Neither refusal runs anything.
+#[cfg(feature = "commit")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn add_never_runs_a_filter_or_a_hook_and_refuses_the_hostile_repository() {
+    let repo = PwnRepo::build();
+    let before = support::Fingerprint::take(&repo.root.join(".git"));
+
+    let r = pwn_write(&repo, &["add", "file.txt"]).await;
+    assert_eq!(r.code, 4, "{}", r.err);
+    assert!(r.err.contains("core.hooksPath points outside the working tree"), "{}", r.err);
+    assert!(repo.fired().is_empty(), "a sentinel fired: {:?}", repo.fired());
+
+    // Take the hooks path away; now the filter attribute is what refuses.
+    git(&repo.root, &["config", "--unset", "core.hooksPath"]);
+    let before2 = support::Fingerprint::take(&repo.root.join(".git"));
+    for args in [vec!["add", "file.txt"], vec!["add", "-A"], vec!["add", "-u"], vec!["add", "."]] {
+        let r = pwn_write(&repo, &args).await;
+        assert_eq!(r.code, 4, "{args:?}: {}", r.err);
+        assert!(r.err.contains("filter=pwn"), "{args:?}: {}", r.err);
+        assert!(!r.err.contains(PWN_MARKER), "{}", r.err);
+        assert!(repo.fired().is_empty(), "{args:?}: a sentinel fired: {:?}", repo.fired());
+    }
+    assert!(support::Fingerprint::take(&repo.root.join(".git")).differences_from(&before2).is_empty());
+    let _ = before;
+
+    // The control: real git, given this repository, runs the clean filter.
+    git(&repo.root, &["add", "file.txt"]);
+    assert!(
+        repo.fired().contains(&"clean".to_string()),
+        "real git must run the clean filter on add, or the fixture is not hostile: {:?}",
+        repo.fired()
+    );
+}

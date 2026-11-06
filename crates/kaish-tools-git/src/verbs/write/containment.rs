@@ -377,6 +377,35 @@ mod tests {
         }
     }
 
+    /// A hard link is invisible to the `lstat` walk: the path is a regular
+    /// file in the repository, and the inode is also named outside the mount.
+    /// A write that reaches the inode changes both.
+    #[test]
+    fn a_hard_linked_file_is_refused_for_a_write_and_not_for_an_unlink() {
+        let fx = Fixture::new();
+        let repo = fx.write_repo(false);
+        let outside_file = fx.outside.join("logs_head");
+        let planted = repo.common_dir().join("logs/HEAD");
+        std::fs::remove_file(&planted).expect("main logs/HEAD exists after a commit");
+        std::fs::hard_link(&outside_file, &planted).expect("hard link");
+        let before = std::fs::read(&outside_file).expect("outside");
+
+        let err = repo.check(Path::new("logs/HEAD"), Leaf::File).expect_err("must refuse");
+        assert_eq!(err.exit_code(), 4);
+        let text = err.to_string();
+        assert!(text.contains("'logs/HEAD' in the git directory is a file with more than one hard link"), "{text}");
+        assert!(!text.contains(&fx.scratch().display().to_string()), "leaked a host path: {text}");
+        assert_eq!(std::fs::read(&outside_file).expect("outside"), before);
+
+        // Unlink and rename change the directory entry, not the inode.
+        repo.check(Path::new("logs/HEAD"), Leaf::Entry).expect("an entry walk does not care about the link count");
+
+        // The negative control: the same file with one link passes.
+        std::fs::remove_file(&planted).expect("unlink");
+        std::fs::write(&planted, "ordinary\n").expect("ordinary file");
+        repo.check(Path::new("logs/HEAD"), Leaf::File).expect("a file with one link is fine");
+    }
+
     #[test]
     fn the_worktree_variant_refuses_links_and_the_git_dir() {
         let fx = Fixture::new();

@@ -1161,3 +1161,48 @@ async fn a_linked_worktree_writes_its_own_index() {
     assert!(!support::git(&h.repo, &["ls-files"]).contains("fresh.txt"), "the main index must not change");
     assert_eq!(git_raw(&linked, &["fsck", "--strict"]).0, 0);
 }
+
+// ── through a real kernel ───────────────────────────────────────────────────
+
+/// The verbs reached through `Kernel::execute`, so the kernel's own argv
+/// binding (`-A`, `--`, `-r`) feeds them as an agent's command line would.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_index_verbs_work_through_a_real_kernel() {
+    use kaish_kernel::{Kernel, KernelConfig};
+    use kaish_tool_api::KernelBackend;
+    support::require_git();
+    let fx = Fixture::empty();
+    let dir = fx.path("repo");
+    std::fs::create_dir_all(&dir).expect("dir");
+    support::git(&dir, &["init", "-q", "-b", "main"]);
+    base(&dir);
+    support::write_file(&dir, "a.txt", "alpha two\n");
+    support::write_file(&dir, "new.txt", "new\n");
+
+    let backend: Arc<dyn KernelBackend> = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), fx.root()));
+    let git = kaish_tools_git::tool(GitConfig::read_only().with_commit_profile()).expect("config");
+    let mut cfg = KernelConfig::transient();
+    cfg.cwd = PathBuf::from("/mnt/repo");
+    cfg.skip_validation = true;
+    let kernel = Kernel::with_backend(backend, cfg, |_| {}, |tools| tools.register(git)).expect("kernel");
+
+    for (cmd, status_after) in [
+        ("git add -A", "A  new.txt"),
+        ("git restore --staged new.txt", "?? new.txt"),
+        ("git add -- new.txt", "A  new.txt"),
+        ("git reset -- new.txt", "?? new.txt"),
+        ("git mv b.txt bb.txt", "R  b.txt -> bb.txt"),
+        ("git rm -r d", "D  d/c.txt"),
+        ("git rm --cached bb.txt", "D  b.txt"),
+    ] {
+        let r = kernel.execute(cmd).await.unwrap_or_else(|e| panic!("{cmd}: {e}"));
+        assert_eq!(r.code, 0, "{cmd}: {}", r.err);
+        let status = support::git(&dir, &["status", "--porcelain"]);
+        assert!(status.contains(status_after), "{cmd}: wanted {status_after:?} in\n{status}");
+    }
+    // A refusal arrives as the command's own failure, with its five parts.
+    let r = kernel.execute("git reset --hard").await.expect("runs");
+    assert_eq!(r.code, 2);
+    assert!(r.err.contains("refused.") && r.err.contains("Nothing was changed."), "{}", r.err);
+    assert_eq!(git_raw(&dir, &["fsck", "--strict"]).0, 0);
+}
