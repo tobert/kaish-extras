@@ -393,7 +393,12 @@ async fn handle_success(
         )));
     }
 
-    let mut result = ExecResult::success(format!("Wrote {written} bytes to '{}'", vfs_path.display()));
+    // curl prints nothing on stdout with `-o`; its progress meter goes to
+    // stderr. This build has no meter, so there is nothing to say, and a
+    // confirmation on stdout ran into whatever printed next (survey SW-3).
+    // The size and path stay in the baggage (`curl.bytes`, `curl.file`).
+    let mut result = ExecResult::success("");
+    result.baggage.insert("curl.bytes".to_string(), written.to_string());
     result.baggage.insert("curl.file".to_string(), vfs_path.display().to_string());
     result.baggage.insert("curl.url".to_string(), url);
     result.baggage.insert("curl.status".to_string(), status.to_string());

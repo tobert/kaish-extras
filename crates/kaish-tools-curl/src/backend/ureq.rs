@@ -285,6 +285,11 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
             // resolve anything relative in the body.
             url: current.to_string(),
             status,
+            reason: resp
+                .status()
+                .canonical_reason()
+                .unwrap_or_default()
+                .to_string(),
             headers: resp_headers(resp.headers()),
             body,
         });

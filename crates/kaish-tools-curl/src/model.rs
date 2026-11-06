@@ -14,6 +14,10 @@ pub struct Response {
     pub url: String,
     /// The HTTP status code.
     pub status: u16,
+    /// The standard reason phrase for `status` (`Not Found` for 404), empty
+    /// for a code with none. The backend cannot see the phrase the server
+    /// sent: ureq drops it while parsing the status line.
+    pub reason: String,
     /// Response headers, lower-cased names, **every** value the server sent
     /// under each name. A `BTreeMap<String, String>` kept only the last of
     /// three `Set-Cookie`s and silently dropped the rest (CU37); `-i` is

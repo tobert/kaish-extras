@@ -77,9 +77,9 @@ the last positional unless `--url` is used.
 | `--data-raw <data>` | Like `-d`, `@` is literal, and no Content-Type is implied. | None. |
 | `--data-urlencode <data>` | Accepts `name=value`; encodes only `value`, not the name or `=` separator. | Real curl also supports `@filename` and `name@filename` forms (deferred). |
 | `-H, --header <h:v>` | Request header. Repeatable. | None. |
-| `-i, --include` | Print response headers above the body. With `-o <file>`, writes headers **into the file** alongside the body, matching curl's behavior. | None. |
+| `-i, --include` | Print response headers above the body, starting with `HTTP/1.1 <code> <reason>` (the standard phrase for the code). With `-o <file>`, writes headers **into the file** alongside the body, matching curl's behavior. | None. |
 | `-I, --head` | HEAD; print headers only. | None. |
-| `-o, --output <file>` | Write body to a VFS path, through `ToolCtx::resolve_path` + `backend().write()` — never the host filesystem. Headers go into the same file if `-i` is also given. | None. |
+| `-o, --output <file>` | Write body to a VFS path, through `ToolCtx::resolve_path` + `backend().write()` — never the host filesystem. Headers go into the same file if `-i` is also given. Prints nothing on stdout, as curl does (this build has no progress meter to print); the byte count and path are in the result's baggage as `curl.bytes` and `curl.file`. | None. |
 | `-L, --location` | Follow redirects, up to `--max-redirs` (default 50). Hops are driven by this build, not by ureq, so **the egress allowlist is evaluated on every one** — a redirect cannot leave the embedder's policy. User/password are dropped on a cross-host hop. | Opt-in (matches curl's `-L`). Embedder can set a config default for auto-follow. |
 | `--max-redirs <n>` | Redirect cap. | None. |
 | `-u, --user <user[:pass]>` | Basic auth, `Authorization: Basic`. | None. |

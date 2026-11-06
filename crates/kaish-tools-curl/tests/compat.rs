@@ -161,3 +161,58 @@ async fn json_output_carries_a_binary_body_as_base64() {
     let r = run_at(&server, "curl --json \"$URL/blob\" | jq -r .body_format").await;
     assert_eq!(r.text_out(), "base64\n", "stderr: {}", r.err);
 }
+
+// ── SW-3: `-o` prints nothing on stdout, as curl does ───────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_file_leaves_stdout_empty_and_writes_the_body() {
+    let server = api();
+    let r = run_at(&server, "curl -o /tmp/out.txt \"$URL/text\"\ncat /tmp/out.txt").await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    // Only the `cat` prints: the file holds the body and curl said nothing.
+    assert_eq!(r.text_out(), "plain body\n");
+
+    // The survey case: a value computed after `-o` must not be prefixed.
+    let r = run_at(&server, "curl -o /tmp/out.txt \"$URL/text\"\necho \"after\"").await;
+    assert_eq!(r.text_out(), "after\n");
+    let r = run_at(&server, "x=$(curl -o /tmp/out.txt \"$URL/text\")\necho \"[$x]\"").await;
+    assert_eq!(r.text_out(), "[]\n");
+
+    if let Some((stdout, code)) = oracle(&server, "-o /dev/null \"$URL/text\"") {
+        assert_eq!((stdout.as_str(), code), ("", 0), "real curl is silent on stdout with -o");
+    }
+}
+
+// ── SW-2: the status line carries the reason phrase ─────────────────────
+
+fn first_line(s: &str) -> &str {
+    s.lines().next().unwrap_or("").trim_end_matches('\r')
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn include_prints_the_status_line_with_its_reason_phrase() {
+    let server = api();
+    let r = run_at(&server, "curl -i \"$URL/status/404\"").await;
+    assert_eq!(first_line(&r.text_out()), "HTTP/1.1 404 Not Found");
+    // The CR stays: header lines end in CRLF, as on the wire and in curl.
+    assert!(r.text_out().starts_with("HTTP/1.1 404 Not Found\r\n"));
+
+    let r = run_at(&server, "curl -I \"$URL/text\"").await;
+    assert_eq!(first_line(&r.text_out()), "HTTP/1.1 200 OK");
+
+    // The survey's pipe: no stray CR on the code after splitting on a space.
+    let r = run_at(
+        &server,
+        "curl -i \"$URL/status/404\" | head -n 1 | awk '{print $2}'",
+    )
+    .await;
+    assert_eq!(r.text_out().trim(), "404", "stderr: {}", r.err);
+
+    if let Some((stdout, _)) = oracle(&server, "-i -s \"$URL/status/404\"") {
+        assert_eq!(first_line(&stdout), "HTTP/1.1 404 Not Found");
+    }
+    if let Some((stdout, _)) = oracle(&server, "-i -s \"$URL/teapot\"") {
+        let ours = run_at(&server, "curl -i \"$URL/teapot\"").await;
+        assert_eq!(first_line(&ours.text_out()), first_line(&stdout));
+    }
+}

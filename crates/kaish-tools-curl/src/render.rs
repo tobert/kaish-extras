@@ -13,7 +13,14 @@ pub fn render_text(response: &Response, include_headers: bool, head_only: bool) 
     let mut out = String::new();
 
     if include_headers {
-        out.push_str(&format!("HTTP/1.1 {}\r\n", response.status));
+        // curl prints `HTTP/1.1 404 Not Found`. The phrase matters to a
+        // script that splits the line on spaces: without it the last field
+        // is `404\r` (survey SW-2).
+        if response.reason.is_empty() {
+            out.push_str(&format!("HTTP/1.1 {}\r\n", response.status));
+        } else {
+            out.push_str(&format!("HTTP/1.1 {} {}\r\n", response.status, response.reason));
+        }
         for (name, values) in &response.headers {
             // One line per value, as the server sent them — three
             // `Set-Cookie`s print as three lines, which is what curl does.
