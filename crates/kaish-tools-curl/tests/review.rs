@@ -9,7 +9,7 @@
 #[path = "support.rs"]
 mod support;
 
-use support::{compare, Response, Server, TcpGuard, Wire};
+use support::{compare, compare_with, Response, Server, TcpGuard, Wire};
 
 fn redirector() -> TcpGuard {
     Server::builder()
@@ -199,4 +199,43 @@ async fn output_dash_is_stdout_not_a_file_named_dash() {
     if let Some(theirs) = &p.theirs {
         assert_eq!(theirs.stdout, b"plain\n");
     }
+}
+
+// ── 6. -f decides at the headers ────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fail_is_decided_before_the_body_is_read() {
+    let server = Server::builder()
+        .route("/big404", Response::json(404, "x".repeat(4096)))
+        .route("/ok", Response::text(200, "fine\n"))
+        .start_tcp();
+    // A cap far below the 404 body: reading it first would fail with exit 1.
+    let small = support::loopback_config().with_limits(kaish_tools_curl::Limits {
+        max_response_bytes: 64,
+        ..kaish_tools_curl::Limits::default()
+    });
+    let p = compare_with(
+        &server,
+        "-s -f -w '%{http_code} %{size_download}\\n' -o out.txt \"$URL/big404\"",
+        &[],
+        small,
+    )
+    .await;
+    assert_eq!(p.ours.code, 22, "an over-cap error body must not turn 22 into 1: {}", p.ours.err);
+    assert_eq!(p.ours.text_out(), "404 0\n", "-w still prints, and nothing was downloaded");
+    assert!(p.fx.file("out.txt").await.is_none(), "no file under -f");
+    if let Some(theirs) = &p.theirs {
+        assert_eq!((theirs.code, theirs.stdout.as_slice()), (22, b"404 0\n".as_slice()));
+    }
+
+    // Controls: --fail-with-body still reads (and so still hits the cap), and
+    // a 200 under -f is untouched.
+    let small = support::loopback_config().with_limits(kaish_tools_curl::Limits {
+        max_response_bytes: 64,
+        ..kaish_tools_curl::Limits::default()
+    });
+    let p = compare_with(&server, "-s --fail-with-body \"$URL/big404\"", &[], small).await;
+    assert_eq!(p.ours.code, 1, "the body is wanted, so the cap applies: {}", p.ours.err);
+    let p = compare(&server, "-s -f \"$URL/ok\"", &[]).await;
+    assert_eq!((p.ours.code, p.ours.text_out().as_ref()), (0, "fine\n"));
 }

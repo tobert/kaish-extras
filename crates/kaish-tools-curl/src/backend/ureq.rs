@@ -304,7 +304,20 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
             continue;
         }
 
-        let body = read_body_within(&mut resp, limits.max_response_bytes, &current)?;
+        // `-f` is decided at the headers, as in curl: an error body that is
+        // about to be thrown away is not read, so a huge or slow 404 is still
+        // exit 22 (not the size cap's exit 1 or a timeout's 28), and
+        // `%{size_download}` is 0. A 416 on a resumed download is the one
+        // status `-f` lets through (tool.rs reads it as "already complete").
+        let discard_body = req.fail_on_error
+            && !req.fail_with_body
+            && status >= 400
+            && !(req.resume_from.is_some() && status == 416);
+        let body = if discard_body {
+            Vec::new()
+        } else {
+            read_body_within(&mut resp, limits.max_response_bytes, &current)?
+        };
         return Ok(CurlResponse {
             // The URL the response actually came from, after any hops — which
             // is what `model.rs` documents and what the caller needs to
