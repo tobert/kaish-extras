@@ -225,30 +225,21 @@ accident," not "constrain a confused agent." The kernel's own
 *specific* state transition and verify it at redemption — which for git
 becomes: approve old-oid→new-oid on a named ref, fail loud if the ref moved.
 
-Writeable git therefore needs a deeper kaish facility as a prerequisite:
-
-- **A double-entry ledger**: simple, not cryptographic — a correct and
-  easy-to-use state machine with an authorization handoff. Every privileged
-  operation posts a request entry; a matching authorization entry (human, or
-  policy-automated for pre-approved classes) must exist before the operation
-  proceeds; the implementation side *always* calls it, unconditionally.
-- **Automatable approval side**: policy can auto-authorize scoped classes
-  (e.g. "commits to branches matching `agent/*` in worktrees the agent
-  created") while everything else waits for a human.
-- **Spans everywhere**: nearly every ledger call site is a natural span
-  boundary — request, wait, authorize, execute, settle — so the OTel story and
-  the audit story are the same story.
-
-If this lands, it lands as kaish kernel PRs (a git plugin shouldn't own the
-authorization primitive), and kaish-git's write profile becomes its first
-consumer.
+The write side is designed in
+[design/git-write-profile.md](design/git-write-profile.md). It does not wait for
+a ledger: it keeps `GitConfig::read_only()` as the default, adds a separate
+`commit` profile behind the `commit` cargo feature, and leaves per-command
+approval to the embedder through kaish `plan` (that document, section 2). The
+double-entry ledger described in the safety inventory stays a possible kaish
+facility; nothing in the write profile depends on it. Phase status is in
+[embedding-git.md](embedding-git.md), "The commit profile (in progress)".
 
 ### 8. kaibo-coder (later, tempting)
 
 kaibo is already a strong read-only subagent; a **kaibo-coder** would be
 strictly opt-in and add limited committing machinery with full control over
 worktrees: the agent works in worktrees kaish-git created and locked, commits
-through the ledger-gated write profile, and never touches the primary working
+through the commit profile (design/git-write-profile.md), and never touches the primary working
 tree. Worktree control + shallow commit surface + approval ledger is the whole
 shape — no push, no rebase, no history rewriting in v1 of that idea.
 

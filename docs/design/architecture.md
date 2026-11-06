@@ -860,11 +860,20 @@ a reflog-writing ref store, and takes a `WriteToken` as a constructor
 argument; the token is proof that the commit profile is installed, not an
 authorization). In a default build those modules are not compiled.
 
-A grep-able invariant, enforced by a test that scans the crate source: outside
-`verbs/write/`, the write-shaped plumbing does not appear — `gix-ref`'s
-transaction API (`transaction`, `prepare`, `commit`), `gix-index`'s writers
-(`write_to`, `write`), and `gix_object::Write`. Crude, cheap, and it fails the
-day someone reaches for one in the wrong place.
+A grep-able invariant, enforced by a test that scans the crate source
+(`tests/write_shaped_identifiers.rs`): outside `src/verbs/write/` and
+`src/verbs/write.rs` (matched by path component), the write-shaped plumbing
+does not appear. The needle list is the test's `WRITE_SHAPED` table:
+`gix-ref`'s `.transaction(` and `.prepare(`, `gix-index`'s `.write_to(`,
+`gix_object::Write` and the ways to import it (brace list, glob, a crate alias),
+`gix_lock` and `gix_tempfile`, the `std::fs` primitives that create, rename or
+delete, `OpenOptions` and `File::options`, process spawning, and a second ref
+store. It does not match `.commit(` or a bare `write`, which would hit prose and
+unrelated code. The scan strips comments, string and raw-string contents and
+`#[cfg(test)]` modules, collapses whitespace around `.` and `::`, and refuses
+`#[path = ..]` and `include!` in any file. It is a second line: the first is
+that `ReadRepo` lends only `OdbRead` and `RefsRead`. Crude, cheap, and it fails
+the day someone reaches for one in the wrong place.
 
 ### D.2 Layer 2 — isolation by construction
 

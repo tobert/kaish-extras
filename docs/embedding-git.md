@@ -302,8 +302,10 @@ keep that from being a false sense of safety.
    `src/repo.rs`). There is no facade `Repository` handle a caller could
    reach a ref transaction or index writer through. Every write-shaped gitoxide
    identifier (`gix-ref`'s `transaction`/`prepare`/`commit`, `gix-index`'s
-   `write_to`/`write`, `gix_object::Write`) is asserted absent outside a
-   `verbs/write/` module that does not exist in this build
+   `write_to`/`write`, `gix_object::Write`) is asserted absent outside
+   `src/verbs/write/` and `src/verbs/write.rs`, which are compiled only with
+   the `commit` cargo feature; the scan reads source files, so it runs the
+   same with the feature on or off
    (`write_shaped_plumbing_appears_only_under_verbs_write`,
    `tests/write_shaped_identifiers.rs`).
 2. **Isolation by construction.** Nothing is loaded that this crate did not
