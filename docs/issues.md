@@ -1125,10 +1125,6 @@ repository size, not result size.
   kaijutsu's `git log --oneline` prints `c6eba240`, ours `c6eba24`. Same
   shape as T4 for the patch `index` line. Harmless until two prefixes
   collide; then two commits print one oid.
-- **R8 — no test pins the text surface of the table verbs.** Only
-  `log --oneline`'s text is asserted exactly; status, branch, tag and
-  worktree list are asserted through the typed table, so an agent-visible
-  string in `render.rs` can change with every test green.
 
 ## git — from the 2026-10-11 survey (docs/design/git-survey-2026-10.md)
 
