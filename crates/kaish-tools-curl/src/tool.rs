@@ -96,8 +96,21 @@ impl CurlTool {
 
             /// Write the body to this path in the shell's filesystem instead of
             /// stdout. Required for a binary response, which stdout cannot carry.
+            /// An unwritable path exits 23.
             #[arg(short = 'o', long)]
             output: Option<String>,
+
+            /// Write the body to a file named after the last segment of the URL
+            /// path, in the current directory, replacing any file of that name.
+            /// The name is not percent-decoded. A URL with no segment, or
+            /// together with -o, exits 2. -J is refused.
+            #[arg(short = 'O', long)]
+            remote_name: bool,
+
+            /// Put the -o or -O file in this directory, which must exist (exit
+            /// 23 when it does not). Exits 2 without -o or -O.
+            #[arg(long)]
+            output_dir: Option<String>,
 
             /// Follow redirects; off by default. Every hop is checked against
             /// the embedder's egress policy, and user/password are dropped when
@@ -232,6 +245,7 @@ impl Tool for CurlTool {
         }
 
         let output_file = req.output_file.clone();
+        let output_dir = req.output_dir.clone();
         let render = Render {
             include_headers: req.include_headers,
             head_only: req.head_only,
@@ -248,7 +262,7 @@ impl Tool for CurlTool {
         let elapsed = started.elapsed();
 
         match result {
-            Ok(response) => handle_success(output_file.as_deref(), response, render, elapsed, ctx).await,
+            Ok(response) => handle_success(output_file.as_deref(), output_dir.as_deref(), response, render, elapsed, ctx).await,
             Err(err) => error_result(err),
         }
     }
@@ -265,7 +279,7 @@ Reaches only hosts the embedder permits; flags this build cannot honor are refus
 ///
 /// Chosen for the shapes an agent actually types, not for flag coverage: read
 /// an API, post JSON, authenticate, save a file, branch on the result.
-const EXAMPLES: [(&str, &str); 6] = [
+const EXAMPLES: [(&str, &str); 7] = [
     ("Fetch a URL", "curl https://api.example.com/status"),
     (
         "Post JSON and read the reply",
@@ -274,6 +288,7 @@ const EXAMPLES: [(&str, &str); 6] = [
     ("Authenticate", "curl -u alice:secret https://api.example.com/private"),
     ("See the response headers too", "curl -i https://api.example.com/status"),
     ("Save the body to a file", "curl -o /tmp/page.html https://example.com/"),
+    ("Save under the name in the URL", "curl -O https://example.com/files/report.pdf"),
     (
         "Branch on the response without re-parsing text",
         "curl --json https://api.example.com/status | jq -r .status",
@@ -383,6 +398,7 @@ struct Render {
 /// paths, applied to the one flag that produces a path.
 async fn handle_success(
     output_file: Option<&str>,
+    output_dir: Option<&str>,
     response: crate::model::Response,
     render: Render,
     elapsed: std::time::Duration,
@@ -406,7 +422,7 @@ async fn handle_success(
         return r;
     }
 
-    let mut result = deliver(output_file, response, &render, ctx).await;
+    let mut result = deliver(output_file, output_dir, response, &render, ctx).await;
     if result.code != 0 {
         return result;
     }
@@ -429,6 +445,7 @@ async fn handle_success(
 /// Put the body where the caller asked: stdout, or a VFS path for `-o`.
 async fn deliver(
     output_file: Option<&str>,
+    output_dir: Option<&str>,
     response: crate::model::Response,
     render: &Render,
     ctx: &mut dyn ToolCtx,
@@ -479,15 +496,35 @@ async fn deliver(
     let written = payload.len();
 
     let vfs_path = ctx.resolve_path(path);
+    // `--output-dir` must name a directory that exists; the backend would
+    // otherwise create it on write, which is not what curl does.
+    if let Some(dir) = output_dir {
+        let dir_vfs = ctx.resolve_path(dir);
+        match ctx.backend().stat(&dir_vfs).await {
+            Ok(entry) if entry.kind == kaish_types::DirEntryKind::Directory => {}
+            Ok(_) => {
+                return error_result(CurlError::WriteFailed {
+                    path: vfs_path.display().to_string(),
+                    reason: format!("'{dir}' is not a directory"),
+                })
+            }
+            Err(err) => {
+                return error_result(CurlError::WriteFailed {
+                    path: vfs_path.display().to_string(),
+                    reason: format!("the directory '{dir}' is not usable: {err}"),
+                })
+            }
+        }
+    }
     if let Err(err) = ctx
         .backend()
         .write(&vfs_path, &payload, WriteMode::Overwrite)
         .await
     {
-        return error_result(CurlError::Transport(format!(
-            "could not write '{}': {err}",
-            vfs_path.display()
-        )));
+        return error_result(CurlError::WriteFailed {
+            path: vfs_path.display().to_string(),
+            reason: err.to_string(),
+        });
     }
 
     // curl prints nothing on stdout with `-o`; its progress meter goes to

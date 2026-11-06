@@ -82,6 +82,8 @@ the last positional unless `--url` is used.
 | `-i, --include` | Print response headers above the body, starting with `HTTP/1.1 <code> <reason>` (the standard phrase for the code). With `-o <file>`, writes headers **into the file** alongside the body, matching curl's behavior. | None. |
 | `-I, --head` | HEAD; print headers only. | None. |
 | `-o, --output <file>` | Write body to a VFS path, through `ToolCtx::resolve_path` + `backend().write()` — never the host filesystem. Headers go into the same file if `-i` is also given. Prints nothing on stdout, as curl does (this build has no progress meter to print); the byte count and path are in the result's baggage as `curl.bytes` and `curl.file`. | None. |
+| `-O, --remote-name` | Write the body to a file named after the **last non-empty segment of the URL path** (query and fragment excluded; not percent-decoded, as in curl 8.23: `c%20d.txt` stays that) in the shell's cwd, replacing a file of that name, through the same VFS write as `-o`. The name comes from the URL as typed, not from a redirect target. Prints nothing on stdout. A URL with no such segment (`http://h/`) exits 2 with no request. `-O` with `-o` exits 2. | curl falls back to the name `curl_response` for a URL with no segment; this build refuses (Amy's ruling, 2026-11-06). `-J` / `--remote-header-name` stays refused: a server must not choose the file name. |
+| `--output-dir <dir>` | Puts the `-o` or `-O` file under `<dir>`, which must exist and be a directory: otherwise exit 23, naming the path. Without `-o` or `-O` it exits 2. | curl ignores it without `-o`/`-O`. |
 | `-L, --location` | Follow redirects, up to `--max-redirs` (default 50). Hops are driven by this build, not by ureq, so **the egress allowlist is evaluated on every one** — a redirect cannot leave the embedder's policy. User/password are dropped on a cross-host hop. | Opt-in (matches curl's `-L`). Embedder can set a config default for auto-follow. |
 | `--max-redirs <n>` | Redirect cap. | None. |
 | `-u, --user <user[:pass]>` | Basic auth, `Authorization: Basic`. | None. |
@@ -158,7 +160,7 @@ A cluster containing a value-taking flag (`-so out.txt`) is refused, naming
 the flag that broke it.
 
 This build refuses the following flags at parse time with literate errors:
-`-O` (use `-o <file>`), `--compressed`, `--proxy`/SOCKS,
+`-J`, `--compressed`, `--proxy`/SOCKS,
 `--cookie`, `--verbose`, `--retry`, `--cert`/`--key`,
 `--resolve`, `--config`, `--netrc`, `--parallel`, `--next`, and — because the backend
 does not implement them rather than because they are out of scope — `-k`/`--insecure`
@@ -214,6 +216,7 @@ the rest to 1. State the number so an agent can branch on it.
 | 6 | Host not found. |
 | 7 | Could not connect — **and** URL malformed (bad scheme, bad syntax). curl uses 3 for a malformed URL; kaish's kernel reserves 3, so this build maps malformed URLs here with an error naming the real cause (CU11). |
 | 22 | `--fail` or `--fail-with-body` and HTTP status >= 400. |
+| 23 | The `-o` / `-O` file could not be written, or the `--output-dir` directory does not exist. |
 | 28 | `--max-time` or `--connect-timeout` exceeded. |
 | 35 | TLS handshake failed. |
 | 47 | Too many redirects. |
@@ -448,7 +451,7 @@ crates/kaish-tools-curl/
 
 `CurlConfig` mirrors `GitConfig`: embedder-supplied, with a `tool_name` for
 embedders who want a different name. The `Tool` impl declares `operations`:
-`net.request` always, plus `fs.overwrite` when `-o`/`-O` is enabled. The ids
+`net.request` always, plus `fs.overwrite` (declared for `-o` and `-O`). The ids
 are free-form dotted strings (kaish `ToolSchema::operations`), so this is
 correct without a `kaish-kernel` dep, the same call `kaish-tools-git` makes
 for the read profile.

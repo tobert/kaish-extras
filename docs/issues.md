@@ -1298,7 +1298,8 @@ reference only; they no longer block work.
 - **CU19 — delete xhr stub.** DECIDED: carry `compile_error!` on wasm until
   the backend is real. No dual representation.
 - **CU20 — agent ergonomics.** Three rulings implemented:
-  - `-O` dropped (literate error naming `-o`)
+  - `-O` dropped (literate error naming `-o`). Reversed 2026-11-06 (Amy): `-O`
+    is supported, named from the URL's last path segment, and `-J` stays refused.
   - Redirects stay opt-in (`-L` flag) with `follow_redirects` config default
   - `--retry` moved in minimally: transient failures with exponential backoff.
     Not retrying non-idempotent methods without stating so.

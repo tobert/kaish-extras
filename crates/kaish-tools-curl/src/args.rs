@@ -52,6 +52,8 @@ pub(crate) const HONORED_FLAGS: &[&str] = &[
     "--include",
     "--head",
     "--output",
+    "--output-dir",
+    "--remote-name",
     "--location",
     "--max-redirs",
     "--user",
@@ -71,7 +73,8 @@ pub(crate) const HONORED_FLAGS: &[&str] = &[
 /// implemented by the backend (`-k`, `--unix-socket`). Both refuse, because
 /// the alternative is a flag that quietly does nothing.
 pub(crate) const REFUSED_FLAGS: &[(&str, &str)] = &[
-    ("-O", "'-O' is not supported. Use '-o <file>' for an explicit output path."),
+    ("-J", "'-J' is not supported, and no request was sent. A server-chosen filename from Content-Disposition is not trusted. '-O' names the file after the last segment of the URL path, or choose the name with '-o <file>'."),
+    ("--remote-header-name", "'--remote-header-name' is not supported, and no request was sent. A server-chosen filename from Content-Disposition is not trusted. '-O' names the file after the last segment of the URL path, or choose the name with '-o <file>'."),
     ("--compressed", "'--compressed' is not supported. Responses are decompressed already — drop the flag."),
     ("--cookie", "'--cookie' is not supported. Send cookies with '-H Cookie:<value>'."),
     ("-b", "'-b' is not supported. Send cookies with '-H Cookie:<value>'."),
@@ -118,6 +121,8 @@ pub struct Request {
     pub head_only: bool,
     /// Write the body to this VFS path instead of stdout (`-o`).
     pub output_file: Option<String>,
+    /// `--output-dir`, as typed. It must exist: the file is written under it.
+    pub output_dir: Option<String>,
     /// Basic auth user; `password` is `None` when the caller gave no `:pass`.
     pub user: Option<String>,
     pub password: Option<String>,
@@ -193,7 +198,7 @@ pub enum BodyPart {
 ///
 /// Refused shorts are here too, so `-kL` refuses `-k` rather than reporting
 /// the whole cluster as unknown.
-const BOOLEAN_SHORTS: &[char] = &['i', 'I', 'f', 'L', 's', 'S', 'k', 'O', 'v', 'G'];
+const BOOLEAN_SHORTS: &[char] = &['i', 'I', 'f', 'L', 's', 'S', 'k', 'O', 'v', 'G', 'J'];
 
 /// Short flags that take a value, and so cannot appear inside a cluster.
 const VALUE_SHORTS: &[char] = &['X', 'd', 'H', 'o', 'u', 'A', 'e', 'w', 'b', 'x', 'K', 'F', 'm'];
@@ -257,6 +262,8 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let mut unix_socket: Option<String> = None;
     let mut json_output = false;
     let mut get = false;
+    let mut remote_name = false;
+    let mut output_dir: Option<String> = None;
     let mut forms: Vec<crate::form::FormPart> = Vec::new();
 
     // Every `-d`-family flag implies the form Content-Type, as in curl.
@@ -333,6 +340,8 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             "-e" | "--referer" => referer = Some(value(&mut i)?),
             "-F" | "--form" => forms.push(crate::form::parse(&value(&mut i)?)?),
             "-G" | "--get" => get = true,
+            "-O" | "--remote-name" => remote_name = true,
+            "--output-dir" => output_dir = Some(value(&mut i)?),
             "-i" | "--include" => include_headers = true,
             // curl's `-s` also silences *error* messages; this build always
             // reports errors, because an agent that cannot see a failure
@@ -434,6 +443,8 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         ));
     }
 
+    output_file = resolve_output(output_file, remote_name, output_dir.clone(), &url)?;
+
     if !forms.is_empty() {
         // curl refuses these mixes too (exit 2).
         let with = if !bodies.is_empty() {
@@ -496,6 +507,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         include_headers,
         head_only,
         output_file,
+        output_dir,
         user,
         password,
         follow_redirects,
@@ -509,6 +521,59 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         unix_socket,
         json_output,
     })
+}
+
+/// Decide where the body goes: `-o`, or `-O`'s name from the URL, under
+/// `--output-dir` when given. The name is one segment of the URL path, so it
+/// cannot name a directory above the output directory.
+fn resolve_output(
+    output: Option<String>,
+    remote_name: bool,
+    dir: Option<String>,
+    url: &str,
+) -> Result<Option<String>, CurlError> {
+    let name = match (output, remote_name) {
+        (Some(_), true) => {
+            return Err(CurlError::Usage(
+                "'-O' and '-o' both name the output file (exit 2), and no request was sent. Use one: '-O' for the last segment of the URL path, or '-o <file>'.".into(),
+            ))
+        }
+        (Some(file), false) => file,
+        (None, true) => remote_file_name(url)?,
+        (None, false) => {
+            if dir.is_some() {
+                return Err(CurlError::Usage(
+                    "'--output-dir' has no effect without '-o' or '-O' (exit 2), and no request was sent. Add '-O', or '-o <file>'.".into(),
+                ));
+            }
+            return Ok(None);
+        }
+    };
+    Ok(Some(match dir {
+        Some(d) => format!("{}/{name}", d.trim_end_matches('/')),
+        None => name,
+    }))
+}
+
+/// `-O`'s file name: the last non-empty segment of the URL path, query and
+/// fragment excluded, and not percent-decoded (curl 8.23 does not decode it
+/// either). curl falls back to `curl_response` when there is none; this build
+/// refuses, because a name nobody chose is a name nobody will find.
+fn remote_file_name(url: &str) -> Result<String, CurlError> {
+    let parsed = url::Url::parse(url).map_err(|e| CurlError::MalformedUrl {
+        url: url.to_string(),
+        reason: e.to_string(),
+    })?;
+    let name = parsed
+        .path_segments()
+        .and_then(|mut segments| segments.rfind(|s| !s.is_empty()))
+        .unwrap_or_default();
+    if name.is_empty() || name == "." || name == ".." || name.contains('\\') {
+        return Err(CurlError::Usage(format!(
+            "'-O' found no file name in '{url}' (exit 2), and no request was sent. The name is the last segment of the URL path. Choose one with '-o <file>'."
+        )));
+    }
+    Ok(name.to_string())
 }
 
 /// One URL per invocation, and say so rather than fetching the first and

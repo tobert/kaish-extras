@@ -552,3 +552,151 @@ async fn form_files_count_against_the_byte_limit() {
     assert_eq!(p.ours.code, 0, "{}", p.ours.err);
     assert_eq!(parts(&p.ours_req[0])[0].data, big);
 }
+
+// ── 4. -O / --remote-name ───────────────────────────────────────────────
+
+/// A server with the paths the `-O` cases fetch. Routes match the raw
+/// request target, query string included.
+fn files_server() -> TcpGuard {
+    let mut b = Server::builder();
+    for target in [
+        "/a/b.txt",
+        "/a/b.txt?x=1",
+        "/a/c%20d.txt",
+        "/a/",
+        "/a/%2e%2e%2fz",
+        "/a/deep/f.bin",
+        "/x/..",
+        "/",
+    ] {
+        b = b.route(target, Response::text(200, format!("body of {target}")));
+    }
+    b.route("/gone", Response::json(404, "{\"error\":\"gone\"}\n"))
+        .route("/a/gone.txt", Response::json(404, "{\"error\":\"gone\"}\n"))
+        .start_tcp()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_name_saves_under_the_last_path_segment() {
+    let server = files_server();
+    for (args, name) in [
+        ("-s -O \"$URL/a/b.txt\"", "b.txt"),
+        ("-sO \"$URL/a/b.txt\"", "b.txt"),
+        ("--remote-name \"$URL/a/b.txt\"", "b.txt"),
+        ("-s -O \"$URL/a/b.txt?x=1\"", "b.txt"),           // the query is not part of the name
+        ("-s -O \"$URL/a/c%20d.txt\"", "c%20d.txt"),       // curl 8.23 does not decode it
+        ("-s -O \"$URL/a/deep/f.bin\"", "f.bin"),
+        ("-s -O \"$URL/a/\"", "a"),                        // a trailing slash: the segment before it
+    ] {
+        let p = compare(&server, args, &[]).await;
+        assert_eq!(p.ours.code, 0, "{args}: {}", p.ours.err);
+        assert_eq!(p.ours.text_out(), "", "{args}: -O prints nothing on stdout");
+        let ours = p.fx.file(name).await.unwrap_or_else(|| panic!("{args}: {name} was not written"));
+        assert!(ours.starts_with(b"body of "), "{args}: {ours:?}");
+        if let Some(t) = &p.theirs {
+            assert_eq!(t.code, 0);
+            assert_eq!(t.file(name).as_deref(), Some(ours.as_slice()), "{args}: file content");
+        }
+        p.assert_same(args);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_name_with_no_name_in_the_url_sends_nothing() {
+    // curl falls back to the name `curl_response`. Amy's ruling is to refuse.
+    let server = files_server();
+    for target in ["/", "", "/x/.."] {
+        let p = compare(&server, &format!("-s -O \"$URL{target}\""), &[]).await;
+        assert_eq!(p.ours.code, 2, "{target:?}: {}", p.ours.err);
+        assert!(p.ours.err.contains("-o <file>"), "name the way forward: {}", p.ours.err);
+        assert!(p.ours_req.is_empty(), "{target:?}: no request");
+        assert!(p.fx.file("curl_response").await.is_none());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_name_cannot_leave_the_working_directory() {
+    // However the URL is spelled, the name is one path segment.
+    let server = files_server();
+    let p = compare(&server, "-s -O \"$URL/a/%2e%2e%2fz\"", &[]).await;
+    assert_eq!(p.ours.code, 0, "{}", p.ours.err);
+    assert!(p.fx.file("%2e%2e%2fz").await.is_some());
+    assert!(p.fx.file("../z").await.is_none());
+    assert!(p.fx.file("z").await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_dir_prefixes_both_o_and_dash_o() {
+    let server = files_server();
+    let files: &[(&str, &[u8])] = &[("d/keep", b"1")];
+    for (args, path) in [
+        ("-s -O --output-dir d \"$URL/a/b.txt\"", "d/b.txt"),
+        ("-s -o w.txt --output-dir d \"$URL/a/b.txt\"", "d/w.txt"),
+    ] {
+        let p = compare(&server, args, files).await;
+        assert_eq!(p.ours.code, 0, "{args}: {}", p.ours.err);
+        assert!(p.fx.file(path).await.is_some(), "{args}: {path}");
+        if let Some(t) = &p.theirs {
+            assert!(t.file(path).is_some(), "control: curl wrote {path}");
+        }
+        assert!(p.fx.file("b.txt").await.is_none(), "{args}: nothing lands in the cwd");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_output_dir_fails_with_exit_23_and_names_the_path() {
+    let server = files_server();
+    let p = compare(&server, "-s -O --output-dir nodir \"$URL/a/b.txt\"", &[]).await;
+    assert_eq!(p.ours.code, 23, "{}", p.ours.err);
+    assert!(p.ours.err.contains("nodir/b.txt"), "{}", p.ours.err);
+    if let Some(t) = &p.theirs {
+        assert_eq!(t.code, 23, "control: real curl");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_dir_without_an_output_flag_is_refused() {
+    let server = files_server();
+    let p = compare(&server, "-s --output-dir d \"$URL/a/b.txt\"", &[("d/x", b"")]).await;
+    assert_eq!(p.ours.code, 2, "{}", p.ours.err);
+    assert!(p.ours.err.contains("--output-dir"), "{}", p.ours.err);
+    assert!(p.ours_req.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_name_overwrites_an_existing_file_and_honors_include_and_fail() {
+    let server = files_server();
+    let p = compare(&server, "-s -O \"$URL/a/b.txt\"", &[("b.txt", b"OLD OLD OLD OLD OLD OLD")]).await;
+    assert_eq!(p.fx.file("b.txt").await.as_deref(), Some(&b"body of /a/b.txt"[..]));
+
+    let p = compare(&server, "-s -i -O \"$URL/a/b.txt\"", &[]).await;
+    let got = String::from_utf8(p.fx.file("b.txt").await.unwrap()).unwrap();
+    assert!(got.starts_with("HTTP/1.1 200 OK\r\n") && got.ends_with("body of /a/b.txt"), "{got:?}");
+
+    // -f on a 404 writes nothing, as with -o.
+    let p = compare(&server, "-s -f -O \"$URL/a/gone.txt\"", &[]).await;
+    assert_eq!(p.ours.code, 22, "{}", p.ours.err);
+    assert!(p.fx.file("gone.txt").await.is_none());
+    if let Some(t) = &p.theirs {
+        assert!(t.file("gone.txt").is_none(), "control: curl wrote nothing either");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_name_and_output_are_one_choice_and_j_stays_refused() {
+    let server = files_server();
+    let fx = Fixture::new(loopback_config(), &[]).await;
+    let base = server.url("");
+    for (args, needle) in [
+        ("-O -o x \"$URL/a/b.txt\"", "-o"),
+        ("-O -J \"$URL/a/b.txt\"", "-J"),
+        ("-O --remote-header-name \"$URL/a/b.txt\"", "--remote-header-name"),
+    ] {
+        let r = fx.run(&base, &format!("curl -s {args}")).await;
+        // `-J` is a refused flag (exit 1 like the others); `-O -o` is a usage error.
+        assert!(r.code == 1 || r.code == 2, "{args}: {}", r.err);
+        assert!(r.err.contains(needle), "{args}: {}", r.err);
+        assert!(r.err.contains("no request was sent"), "{args}: {}", r.err);
+    }
+    assert!(server.requests().is_empty());
+}
