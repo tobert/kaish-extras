@@ -479,6 +479,37 @@ Decide that deliberately — a dedicated mount scoped to exactly the common
 dir, if your backend supports one, is narrower than widening an existing
 allowed-tree entry to cover it.
 
+## The commit profile (in progress)
+
+Design: `docs/design/git-write-profile.md`. This section says what exists, and
+it is deliberately short: **nothing writes yet.**
+
+After phase 1a, a build with the `commit` cargo feature (off by default) has:
+
+- `GitConfig::with_commit_profile()`, which returns a `WritableGitConfig`.
+  `tool()` accepts either config. `git info` then reports the `commit`
+  profile and the `commit` feature.
+- `WritableGitConfig::with_rewrite_policy`, `with_hooks`, `with_identity` and
+  `without_verb`, and the types they take: `RewritePolicy` (default
+  `Unpublished`), `GitHooks` with `HookContext`, `HookOutput` and `HookError`,
+  and `Identity`. No verb reads them yet.
+- Scaffolding under `src/verbs/write/` that no verb calls: `WriteRepo`, the
+  write-containment walk (design section 6.1), and the check that refuses a
+  reflog message containing a line break.
+- Two tests for the read surface. The read verbs still leave the repository
+  byte-identical with `commit` compiled in and a `WritableGitConfig`
+  installed, and every refused write spelling does too.
+
+It does **not** have: any write verb. `git add`, `git commit` and the rest are
+still refused as read-only, with a `WritableGitConfig` as well, and
+`git info`'s `verbs` list is unchanged. Installing the profile today changes
+what `git info` reports and nothing else. Hooks and identity settings are
+stored and ignored. Write containment is a function with tests, not yet a
+guard on any write.
+
+The `commit` feature adds no dependency: `cargo tree -i gix-command`,
+`gix-filter` and `gix-transport` stay empty with it on, and CI asserts that.
+
 ## What this tool does not protect you from
 
 The threat model this crate addresses is stated above: read-only by
