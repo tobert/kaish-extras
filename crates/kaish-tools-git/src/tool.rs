@@ -247,17 +247,24 @@ impl GitTool {
         // flag-less log — would be a wrong answer rather than a missing one
         // (E.5's precedent).
         if parsed.patch {
+            // Named as the caller typed it: a flag they did not write is a
+            // flag they cannot find in their own command.
+            let flag = if argv.iter().take_while(|w| *w != "--").any(|w| w == "--patch") {
+                "--patch"
+            } else {
+                "-p"
+            };
             #[cfg(not(feature = "textdiff"))]
             return failure(GitError::PatchNeedsTextdiff {
                 operation: OP,
-                flag: "--patch",
+                flag,
                 instead: "Use --stat for the changed-file and line counts this \
                           build does compute.",
             });
             #[cfg(feature = "textdiff")]
             return failure(GitError::PatchNotInThisVerb {
                 operation: OP,
-                flag: "--patch",
+                flag,
                 instead: "One commit's patch is 'git diff --patch \
                           \"<commit>~1\" <commit>'; --stat gives every \
                           commit's changed-file and line counts.",

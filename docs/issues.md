@@ -1125,11 +1125,6 @@ repository size, not result size.
   kaijutsu's `git log --oneline` prints `c6eba240`, ours `c6eba24`. Same
   shape as T4 for the patch `index` line. Harmless until two prefixes
   collide; then two commits print one oid.
-- **R7 — small refusal gaps.** `git status -uno` may miss the `-u` hint,
-  depending on the token clap reports for a clustered short (unpinned).
-  `git log -p` is refused naming `--patch`, a flag the caller did not type.
-  `--oneline --stat` puts the counts on the same line, where git puts them on
-  the lines after.
 - **R8 — no test pins the text surface of the table verbs.** Only
   `log --oneline`'s text is asserted exactly; status, branch, tag and
   worktree list are asserted through the typed table, so an agent-visible

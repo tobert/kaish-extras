@@ -207,12 +207,18 @@ async fn log_oneline_and_body_are_refused_together() {
 }
 
 #[tokio::test]
-async fn log_p_is_log_patch() {
+async fn log_p_is_refused_as_p_and_patch_as_patch() {
     let (_f, root) = repo();
     let p = run(&root, "git log -p").await;
     let patch = run(&root, "git log --patch").await;
     assert_ne!(patch.code, 0, "log --patch is refused in every build");
-    assert_eq!((p.code, &p.err), (patch.code, &patch.err), "-p must be refused exactly as --patch is");
+    assert_eq!(p.code, patch.code, "the same refusal class and exit code");
+    // Each names the flag the caller typed, and neither names the other.
+    assert!(p.err.starts_with("git log: -p is not available here"), "{}", p.err);
+    assert!(!p.err.contains("--patch is"), "{}", p.err);
+    assert!(patch.err.starts_with("git log: --patch is not available here"), "{}", patch.err);
+    // Past the flag's name the two are one message.
+    assert_eq!(p.err.replacen("-p is", "--patch is", 1), patch.err);
 }
 
 #[tokio::test]
@@ -351,12 +357,31 @@ async fn stderr_notes_end_with_a_newline() {
 }
 
 #[tokio::test]
-async fn zz_probe() {
+async fn status_untracked_files_spellings_carry_the_mode_hint() {
     let (_f, root) = repo();
-    for c in ["git status -uno", "git status -u", "git status -unormal", "git status --untracked-files=no", "git log -p", "git log -p -n 1", "git status -b"] {
-        let r = run(&root, c).await;
-        println!("=== {c} {} {}", r.code, r.err);
-    }
+    let hint = "Write the untracked mode as '--untracked no'";
+    refused(&root, "git status -uno", &["-u is not supported", hint]).await;
+    refused(&root, "git status --untracked-files=no", &["--untracked-files is not supported", hint]).await;
+}
+
+/// `--oneline --stat` puts the counts on the line after the commit, where git
+/// puts them. This build counts files and lines per commit, not per file, so
+/// the line is git's `--shortstat` one, and that is what it is compared with.
+#[tokio::test]
+async fn log_oneline_stat_has_git_shortstat_line_structure() {
+    let (_f, root) = repo();
+    // A commit with one insertion and no deletion, and one with none to count.
+    write_file(&root, "new.txt", "x\ny\n");
+    git(&root, &["add", "new.txt"]);
+    git(&root, &["commit", "-m", "add", "--quiet"]);
+    git(&root, &["commit", "--allow-empty", "-m", "empty", "--quiet"]);
+    let ours = run(&root, "git log --oneline --stat -n 5").await;
+    assert_eq!(ours.code, 0, "{}", ours.err);
+    let theirs = git(&root, &["log", "--oneline", "--shortstat", "--no-decorate", "-n", "5"]);
+    // git separates a commit's line from its counts with nothing and the next
+    // commit with nothing too, under --oneline; compare line for line.
+    assert_eq!(ours.out.trim_end(), theirs.trim_end());
+    assert!(ours.out.contains(" 1 file changed, 1 insertion(+), 1 deletion(-)\n") && ours.out.contains(" 3 files changed, 3 insertions(+)"), "negative control: singular forms and a missing deletions part: {}", ours.out);
 }
 
 // --- verbatim binding, through the kernel -----------------------------------
