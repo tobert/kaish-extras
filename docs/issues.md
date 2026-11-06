@@ -1594,3 +1594,44 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   compute.
 - **S5 — `git diff --cached <rev>` (a revision against the index).** No
   `RevToIndex` endpoint exists; refused naming the two comparisons that do.
+
+
+## git write — phase 1b (index verbs), what is left
+
+- **W1 — add atomicity.** `git add a ignored.log` stages `a` and exits 1 in git;
+  here the whole command refuses. Kept: a half-staged result is worse for an
+  agent than a refusal it can fix and rerun.
+- **W2 — write: racy smudge.** The rule follows git's `ce_smudge_racily_clean_entry`
+  against the OLD index file's mtime, which git uses (`istate->timestamp`) and is
+  never later than the new index's. Stat match is looser than git's (mtime
+  second and size), so the smudge applies to a superset. Git compares seconds
+  only unless built with `USE_NSEC`; this does too. The design text says "the
+  new index file's mtime": the new file's mtime is not known until it is
+  written, and the old one is the threshold that closes the hidden-edit window.
+  Design doc to be corrected.
+- **W3 — refusals take no lock.** The design says to take `index.lock` first. A
+  refusal that created and removed the lock would move `.git`'s mtime, and the
+  fingerprint test treats that as a write. So a verb plans from an unlocked
+  snapshot, locks, re-reads, and re-plans if the bytes changed. The written
+  state is always the locked read. A refusal found only in the re-plan (a race)
+  does touch `.git`.
+- **W4 — `reset`/`restore --staged`/`add` do not refresh.** Git's `reset` runs
+  `refresh_index` and prints "Unstaged changes after reset"; `add` refreshes
+  nothing it does not stage. Entries we restore keep a zero stat until a read
+  refreshes them in memory. Costs one content compare per entry on the next
+  `git status`.
+- **W5 — hooks.** Only `post-index-change` is checked for index writes. The
+  other hooks belong to `commit` (phase 2) and the `GitHooks` boundary.
+- **W6 — large files and non-UTF-8 names.** `add` reads a file whole (128 MiB
+  cap) and refuses a non-UTF-8 name.
+- **W7 — gitlinks.** An existing gitlink is updated to the nested repository's
+  HEAD when it is a repository of its own; a nested repository not tracked as a
+  submodule refuses where git warns and adds an embedded repository.
+- **W8 — `rm`/`mv` partial failure.** `mv` undoes completed renames if a later
+  one fails; `rm` deletes files before the index commits, so a failure between
+  leaves files gone and the index unchanged (`git status` shows them deleted).
+- **W9 — attribute matcher.** `[attr]` macros are expanded to depth 5; a
+  quoted pattern, or a pattern with a backslash, is treated as "may match" and
+  refuses when its line names a conversion. `core.attributesFile` refuses.
+- **W10 — `core.hooksPath` inside the tree** is resolved for the
+  `post-index-change` check only.
