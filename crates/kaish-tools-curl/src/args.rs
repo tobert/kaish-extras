@@ -67,6 +67,8 @@ pub(crate) const HONORED_FLAGS: &[&str] = &[
     "--connect-timeout",
     "--continue-at",
     "--unix-socket",
+    "--silent",
+    "--show-error",
 ];
 
 /// Flags refused at parse time, each with the message an agent reads.

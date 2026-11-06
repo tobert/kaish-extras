@@ -80,7 +80,9 @@ impl CurlTool {
             #[arg(short = 'T', long)]
             upload_file: Option<String>,
 
-            /// Send a request header, 'Name: value'. Repeatable.
+            /// Send a request header, 'Name: value'. Repeatable. 'Name:' removes a
+            /// header the client adds itself (Accept, User-Agent); 'Name;' sends
+            /// it with no value.
             #[arg(short = 'H', long, action = clap::ArgAction::Append)]
             header: Vec<String>,
 
@@ -91,19 +93,19 @@ impl CurlTool {
             #[arg(short = 'G', long)]
             get: bool,
 
-            /// Print the response headers above the body; with -o they go into
-            /// the file instead.
+            /// Print the response headers above the body; with -L, every redirect's
+            /// headers print first. With -o they go into the file instead.
             #[arg(short = 'i', long)]
             include: bool,
 
-            /// Send HEAD and print the response headers only. Cannot be combined
-            /// with a request body.
+            /// Send HEAD and print the response headers only; with -o the file
+            /// holds them. Cannot be combined with a request body.
             #[arg(short = 'I', long)]
             head: bool,
 
             /// Write the body to this path in the shell's filesystem instead of
             /// stdout. Required for a binary response, which stdout cannot carry.
-            /// An unwritable path exits 23.
+            /// '-' means stdout. An unwritable path exits 23.
             #[arg(short = 'o', long)]
             output: Option<String>,
 
@@ -130,14 +132,16 @@ impl CurlTool {
 
             /// Follow redirects; off by default. Every hop is checked against
             /// the embedder's egress policy, and user/password are dropped when
-            /// the host changes.
+            /// the host changes. A 301/302/303 turns a POST into a GET and drops
+            /// the body; 307/308 keep both.
             #[arg(short = 'L', long)]
             location: bool,
 
             /// Stop after this many redirects. Default 50, and the embedder's
-            /// own ceiling still applies. Exceeding it exits 47.
+            /// own ceiling still applies. -1 sets no cap of your own. Exceeding
+            /// the cap exits 47.
             #[arg(long)]
-            max_redirs: Option<u32>,
+            max_redirs: Option<i64>,
 
             /// Basic auth, 'user' or 'user:password'. Dropped on a redirect to a
             /// different host.
@@ -148,12 +152,22 @@ impl CurlTool {
             #[arg(short = 'A', long)]
             user_agent: Option<String>,
 
+            /// Do not print a progress meter. This build has none, so it changes
+            /// nothing; errors still print.
+            #[arg(short = 's', long)]
+            silent: bool,
+
+            /// Print errors even under -s. This build always does.
+            #[arg(short = 'S', long)]
+            show_error: bool,
+
             /// Set the Referer header.
             #[arg(short = 'e', long)]
             referer: Option<String>,
 
             /// Exit 22 on an HTTP status of 400 or more instead of printing the
-            /// body. Without it, any status is exit 0 and the body prints.
+            /// body, which is not read. Without it, any status is exit 0 and the
+            /// body prints.
             #[arg(short = 'f', long)]
             fail: bool,
 
@@ -172,7 +186,8 @@ impl CurlTool {
             write_out: Option<String>,
 
             /// Give up after this many seconds. Default 30; may lower the
-            /// embedder's ceiling, never raise it. Exceeding it exits 28.
+            /// embedder's ceiling, never raise it. 0 sets no limit of your own.
+            /// Exceeding it exits 28.
             #[arg(short = 'm', long)]
             max_time: Option<f64>,
 
@@ -188,8 +203,8 @@ impl CurlTool {
             insecure: bool,
 
             /// Give up on connecting after this many seconds. No connect-phase
-            /// limit of its own by default; --max-time still bounds the whole
-            /// request. Exceeding it exits 28.
+            /// limit of its own by default, and 0 keeps it that way; --max-time
+            /// still bounds the whole request. Exceeding it exits 28.
             #[arg(long)]
             connect_timeout: Option<f64>,
         }
@@ -722,6 +737,47 @@ mod tests {
                 described.iter().any(|d| d == flag),
                 "the parser honors {flag} and the schema never mentions it — \
                  an agent reading `help curl` would never know to type it"
+            );
+        }
+    }
+
+    /// `HONORED_FLAGS` is a hand-kept mirror, and `-s`/`-S` were accepted by
+    /// the parser for months while absent from both it and the schema. This
+    /// reads the parser's own match arms, so a flag added there without a
+    /// schema entry (or a refusal) fails here, whether or not anyone
+    /// remembered the mirror.
+    #[test]
+    fn every_long_flag_the_parser_matches_is_in_the_schema() {
+        let src = include_str!("args.rs");
+        let start = src.find("pub fn parse_args").expect("parse_args exists");
+        let end = src[start..].find("\nfn resolve_output").expect("resolve_output follows") + start;
+        let mut found: Vec<&str> = Vec::new();
+        let mut rest = &src[start..end];
+        while let Some(at) = rest.find("\"--") {
+            let after = &rest[at + 1..];
+            let Some(close) = after.find('"') else { break };
+            let token = &after[..close];
+            if token.len() > 2 && token.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+                found.push(token);
+            }
+            rest = &after[close + 1..];
+        }
+        // Negative control: the scan really sees flags, including the two
+        // that were missing.
+        assert!(found.len() > 25, "the scan found only {found:?}");
+        for must in ["--silent", "--show-error", "--header"] {
+            assert!(found.contains(&must), "the scan missed {must}: {found:?}");
+        }
+        let schema = tool(CurlConfig::default().with_insecure_permitted(true)).schema();
+        let described: Vec<String> = schema.params.iter().map(|p| format!("--{}", p.name)).collect();
+        for flag in found {
+            // `--json` is kaish's own output flag, handled by the kernel.
+            if flag == "--json" || described.iter().any(|d| d == flag) {
+                continue;
+            }
+            assert!(
+                REFUSED_FLAGS.iter().any(|(f, _)| *f == flag) || flag == "--url",
+                "the parser matches {flag} and `help curl` never mentions it"
             );
         }
     }
