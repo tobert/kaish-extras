@@ -2,8 +2,10 @@
 
 Status: **draft**. Policy sections record Amy's rulings of 2026-11-06. The
 plumbing sections rest on `gix-write-feasibility-2026-11.md` (source-read,
-file:line into the pinned crates). Sections marked *(pending)* wait on
-`git-write-survey-2026-11.md`.
+file:line into the pinned crates). Spellings and refusal wording rest on
+`git-write-survey-2026-11.md` (13 first-turn runs, 5 model families, plus a
+second-turn refusal probe). Reviewed 2026-11-06 by gemini-pro (batch) on whole
+files; its findings are folded in and marked *(review)*.
 
 This replaces architecture.md B.11's "Commit profile" sketch and C.3's
 ledger-based gate. Both assumed kaish's approval ledger, which kaish removed
@@ -17,15 +19,17 @@ before 0.14 (kaish `docs/EMBEDDING.md`, "Why this, and not a gate").
 | W2 | Writes run only on a `WritableGitConfig`, which an embedder must construct by name | §2 |
 | W3 | Per-command approval is the embedder's, through kaish `plan` and the schema's `operations` ids. The tool holds no approval state | §2 |
 | W4 | History rewrites follow `RewritePolicy::{Refuse, Unpublished, Allow}`; default `Unpublished` | §3 |
-| W5 | First cut: `add`, `rm`, `restore --staged`, `commit` (`-m`, `-F`, `-a`, `--amend`), `branch <name>`, `tag <name>`, `switch -c` | §4 |
-| W6 | Nothing writes the working tree. `switch <existing>` and `restore <file>` are refused in this cut | §4 |
+| W5 | First cut: `add`, `rm`, `mv`, `restore --staged`, `reset` (no revision), `commit` (`-m`, `-F`, `-a`, `--only`/`-- <paths>`, `--trailer`, `--amend`), `branch <name>`, `tag <name>`, `switch -c`, `var GIT_AUTHOR_IDENT` | §4 |
+| W6 | Nothing writes file *content* into the working tree. `mv` renames; `switch <existing>` and `restore <file>` are refused in this cut | §4 |
 | W7 | Hooks: refuse when the repository has one, unless the embedder installs a `GitHooks` provider | §5 |
-| W8 | Signing: refuse when `commit.gpgSign`/`tag.gpgSign` is true, unless the embedder installs a `CommitSigner` | §5 |
-| W9 | Content conversion (`filter=`, `text`/`eol`, `core.autocrlf`): refuse for the affected path. No provider in this cut | §5 |
+| W8 | Signing: refuse when `commit.gpgSign`/`tag.gpgSign` is true; no signer provider in this cut | §5 |
+| W9 | Content conversion: any `filter=` attribute refuses the path; `text`/`eol`/`ident`/`core.autocrlf` refuse only when the bytes could change | §5 |
 | W10 | Every ref move is compare-and-swap against the oid we read, and writes a reflog entry in git's format | §6 |
 | W11 | The read surface stays provably read-only with `commit` compiled in (D.1 invariant, D.4 fingerprint) | §7 |
 | W12 | Oracle tests: a commit we write is byte-identical to the one real git writes from the same index, identity, and dates | §8 |
-| W13 | Every directory a write touches under the git dir is `lstat`-checked first; a symlink refuses the write | §6.1 |
+| W13 | Every directory a write touches is `lstat`-checked from the root of the store it lands in (git dir or common dir); a symlink refuses the write | §6.1 |
+| W16 | `reset --soft`/`--mixed <rev>` lands with `--amend`, under the same `RewritePolicy` | §3 |
+| W17 | Every refusal names the command, the reason, one exact next command, whether an override exists and who grants it, and says nothing was changed | §3 |
 | W14 | Identity: the embedder may pin it on `WritableGitConfig`; otherwise kernel variables; neither refuses | §5.4 |
 | W15 | Loose objects are fsynced before the ref transaction that makes them reachable | §6 |
 
@@ -36,10 +40,16 @@ workflows. --amend will be interesting, I'd like it to be switchable, to
 disallow it when a linear clean history is preferred. this way we can put off
 force push longer since amends are the main reason they become necessary."*
 
-The 2026-10 survey (tasks 18–24) found that every model, in every run, typed real
-git for the commit path: `add`, `commit -m`, `commit --amend -m`,
-`checkout -b`/`switch -c`, `restore --staged`, `restore FILE`, `stash`.
-*(pending: the 2026-11 write survey's ranked spellings replace this paragraph.)*
+The 2026-11 write survey asked five model families for 26 commit-workflow
+tasks (`git-write-survey-2026-11.md`). Unanimous or near-unanimous across 13
+runs: `add PATH`, `add -A`, `add -u`, `commit -m` (repeated `-m` for a body),
+`commit -am`, `rm`, `mv`, `restore --staged`, `switch -c`, `branch NAME`,
+`tag`, `tag -a -m`. Every run typed some form of `commit PATH -m` for "commit
+only this file" (`--only` in real git), and every run reached for
+`reset --soft HEAD~1` or `--amend` to undo or fix a commit, *including* runs
+told that the repository keeps a linear history (5 of 6 typed `--amend`
+anyway). So the refusals in §3 will be hit on the first turn, and their text
+is part of the design, not an afterthought.
 
 ## 2. The gate
 
@@ -55,8 +65,7 @@ depends on the others.
    ```rust
    #[cfg(feature = "commit")]
    impl GitConfig {
-       /// Enable the commit profile: `add`, `rm`, `restore --staged`,
-       /// `commit`, `branch <name>`, `tag <name>`, `switch -c`.
+       /// Enable the commit profile (§4's verbs).
        pub fn with_commit_profile(self) -> WritableGitConfig;
    }
 
@@ -64,7 +73,7 @@ depends on the others.
    impl WritableGitConfig {
        pub fn with_rewrite_policy(self, p: RewritePolicy) -> Self;
        pub fn with_hooks(self, h: Arc<dyn GitHooks>) -> Self;
-       pub fn with_signer(self, s: Arc<dyn CommitSigner>) -> Self;
+       pub fn with_identity(self, author: Identity, committer: Identity) -> Self;
        pub fn without_verb(self, v: Verb) -> Self; // still subtractive
    }
 
@@ -81,10 +90,15 @@ depends on the others.
 
    | id | Declared by |
    |---|---|
-   | `git.index` | `add`, `rm`, `restore --staged`, `commit -a` |
+   | `git.index` | `add`, `rm`, `mv`, `restore --staged`, `reset`, `commit` |
    | `git.commit` | `commit` |
-   | `git.ref` | `commit`, `branch <name>`, `tag <name>`, `switch -c` |
-   | `git.rewrite` | `commit --amend` (and any later rewrite verb) |
+   | `git.ref` | `commit`, `branch <name>`, `tag <name>`, `switch -c`, `reset <rev>` |
+   | `git.rewrite` | `commit` (for `--amend`), `reset` (for `<rev>`) |
+   | `fs.remove` | `rm` (deletes the working-tree file) |
+   | `fs.rename` | `mv` |
+
+   `fs.remove` and `fs.rename` are the kernel's ids; declaring them says this
+   tool has the effect the kernel's id names, as curl declares `fs.overwrite`.
 
    The `git.` namespace is ours (kaish's operation module reserves only `fs.`
    and `trash.`). `git.rewrite` is on the `commit` leaf even when the policy is
@@ -112,10 +126,12 @@ pub enum RewritePolicy {
 ```
 
 - **What counts as a rewrite:** anything that moves a branch to a commit that
-  is not a descendant of where it was. In this cut that is only
-  `commit --amend`. Later candidates (`reset --soft HEAD~N`, `commit --fixup`
-  + autosquash) go through the same check, so the policy is about the ref
-  move and not about a flag.
+  is not a descendant of where it was. `commit --amend` and
+  `reset --soft|--mixed <rev>` (Amy, 2026-11-06: phase 3, under this policy;
+  `--hard` never) both go through one check, so the policy is about the ref
+  move and not about a flag. The survey found one run that, told amend was
+  off, did `reset --soft HEAD~1 && commit` instead: a policy that guards
+  `--amend` alone does not hold.
 - **`Unpublished` reachability:** is `HEAD` an ancestor of (or equal to) any
   ref under `refs/remotes/`? A walk down from each remote tip that looks for
   HEAD costs the whole history behind the tip when the answer is "no", which
@@ -125,7 +141,9 @@ pub enum RewritePolicy {
   stop when every queued commit is reached by both. HEAD is published if a
   remote side reaches HEAD itself. For HEAD one commit ahead of `origin/main`
   this examines a few commits. Use commit-graph generation numbers when the
-  file exists. The walk keeps `reach.rs`'s 100,000-commit budget; exhausting
+  file exists. *(review)* This is **new code**, not `reach.rs`'s existing
+  `Reaches`, which is a single-sided walk and has exactly the cost problem
+  above. The walk keeps `reach.rs`'s 100,000-commit budget; exhausting
   it refuses (a wrong "unpublished" is the dangerous error, a refusal is
   not). A shallow repository refuses `--amend` under `Unpublished`: the
   history that would answer is missing.
@@ -133,28 +151,50 @@ pub enum RewritePolicy {
   fetch, not the remote. A commit pushed by another clone since the last fetch
   looks unpublished. The refusal text and `docs/git.md` say this in those
   words. It is the same information real git's `--force-with-lease` uses.
-- **Refusal text** *(pending: second-turn survey results pick the wording).*
-  Shape: lead with the consequence, name the policy and the commit, give the
-  one command that recovers:
+- **Refusal text.** The second-turn probe settled it. A bare "--amend is
+  disabled in this shell" sent 4 of 5 models to plumbing (`commit-tree` plus
+  `update-ref HEAD`, 12 of 20 cells). A refusal with the reason and one exact
+  next command produced **zero** bypass attempts in 40 cells. Two models
+  invented override flags (`--allow-rewrite`, `GIT_ALLOW_HISTORY_REWRITE=1`)
+  when the text did not say whether one exists. Every refusal therefore
+  carries five parts: the command, the reason in one clause, one exact next
+  command, whether an override exists and who grants it, and "nothing was
+  changed".
 
-  > `git commit --amend`: refused — HEAD a1b2c3d is on origin/main, and this
+  > git commit --amend: refused. HEAD a1b2c3d is on origin/main, and this
   > shell does not rewrite published commits. Make a new commit instead:
-  > `git commit -m '<message>'`
+  > git commit -m '<message>'. There is no flag that overrides this; the
+  > policy is set by the program embedding this shell. Nothing was changed.
+
+  Never suggest `reset --soft` as the recovery: it is itself a rewrite.
+- **The plumbing is not a side door.** `commit-tree`, `update-ref`,
+  `hash-object`, `write-tree` stay out permanently (architecture.md B.11), and
+  their refusal names the policy when one applies, so a model that was
+  refused `--amend` and reaches for plumbing gets the same answer again.
+- **`--fixup`/`--squash`** refuse with "make a normal commit": we have no
+  autosquash, so a `fixup!` commit would stay in history forever, which is
+  the opposite of what the agent intended.
 
 ## 4. Verb surface
 
-*(pending: spellings and flags from the write survey.)* Minimum spellings,
-each checked against real git:
+Spellings from the survey, each checked against real git when built:
 
 | Verb | Accepts | Refuses, naming the next step |
 |---|---|---|
-| `add` | `<paths>`, `-A`/`--all`, `-u`/`--update`, `.` | `-p`/`-i` (interactive), `-f` past ignore rules (open: see §9) |
-| `rm` | `<paths>`, `--cached`, `-r` | `-f` when the worktree file differs from the index (git refuses too) |
-| `restore --staged` | `<paths>`, `.` | `restore <file>` without `--staged` (writes the worktree; W6) |
-| `commit` | `-m` (repeatable, paragraphs as git), `-F <file>`, `-a`, `--amend` (policy), `--allow-empty`, `--author` (open: see §9) | `--no-verify` when hooks exist (§5), `-S`/`--gpg-sign` without a signer, `--fixup`/`--squash` (later) |
+| `add` | `<paths>`, `.`, `-A`/`--all` (new files included), `-u`/`--update` (tracked only), `-f` past an ignore rule | `-p`/`-i` (interactive; no terminal). Plain `add` of an ignored path refuses with git's hint naming `-f` |
+| `rm` | `<paths>`, `--cached`, `-r` | without `-f`, a path whose worktree differs from the index **or whose index differs from HEAD** — git's staged-changes check, naming `--cached` and `-f` *(review)* |
+| `mv` | `<src> <dst>`, `<src>... <dir>` | an untracked source, an existing destination without `-f`, a destination outside the work tree |
+| `restore --staged` | `<paths>`, `.` | `restore <file>` without `--staged` (W6) |
+| `reset` | no revision, `-- <paths>`, `<paths>`: unstage, as `restore --staged` | `reset <rev>` until phase 3, with §3's refusal; `--hard` always |
+| `commit` | `-m` (repeatable; each a paragraph), `-F <file>`, `-a`/`-am`, `--only <paths>` and `<paths>`/`-- <paths>` (git's `--only` semantics: that path's working-tree content, other staged changes stay staged), `--trailer <k: v>` (git's trailer placement), `--allow-empty`, `--author`, `--amend` and `--amend --no-edit` (policy) | no `-m`/`-F` (and not `--amend --no-edit`): "there is no editor in this shell; pass -m". `--no-verify` with a hook present (§5.1). `-S`. `--fixup`/`--squash` (§3) |
 | `branch <name> [<start>]` | create only | `-d`/`-D`/`-m`/`-f` |
-| `tag <name> [<rev>]`, `tag -a -m` | lightweight and annotated | `-d`, `-f` |
-| `switch -c <name>` / `checkout -b <name>` | create at HEAD and move HEAD (no worktree change) | `switch <existing>`, `checkout <branch>` (W6), `-c` with a start point that is not HEAD (it would change the worktree) |
+| `tag <name> [<rev>]`, `tag -a <name> -m <msg>` | lightweight and annotated | `-d`, `-f`, `-s` |
+| `switch -c <name>` / `checkout -b <name>` | create at HEAD and move HEAD (no worktree change) | `switch <existing>`, `checkout <branch>` (W6), a start point other than HEAD (it would change the worktree) |
+| `var GIT_AUTHOR_IDENT`, `var GIT_COMMITTER_IDENT` | the identity the next commit will use (§5.4), in git's `Name <email> <time> <tz>` form | other `var` names |
+
+`git config user.name` (3 of 13 runs) is refused naming `git var
+GIT_AUTHOR_IDENT`: we do not read `user.*` (§5.4), so answering from config
+would describe an identity the commit will not use.
 
 Repository states we refuse to write in (exit 4, naming the state and the
 real-git command that ends it):
@@ -215,12 +255,17 @@ real scripts, run its own checks, or decline. Without a provider:
   `core.hooksPath`, which also counts when set at all) named for a hook git
   would run on that write: `pre-commit`, `prepare-commit-msg`, `commit-msg`,
   `post-commit`, `post-rewrite` (amend), and `reference-transaction` (git
-  runs it on every ref update, so it gates `branch` and `tag` too).
+  runs it on every ref update, so it gates `branch` and `tag` too), and
+  `post-checkout` (git runs it on `switch -c`/`checkout -b`) *(review)*.
 - **No hook file** → commit proceeds. Nothing is skipped, so nothing is said.
 - **`--no-verify`** is refused whenever a hook is present and no provider is
   installed (Amy, 2026-11-06: refuse always). We cannot run the hook, so
   honoring the flag would look exactly like a silent bypass. With a provider
-  installed, `--no-verify` is passed to it and the provider decides.
+  installed, `--no-verify` is passed to it and the provider decides. With no
+  hook present it is accepted: there is nothing to skip. The survey found 7
+  of 13 runs reach for `--no-verify` after a hook failure, so the refusal
+  says plainly that this shell runs no hooks and the commit must go through
+  real git.
 - **User-level config is invisible.** A human's `~/.gitconfig` can set
   `core.hooksPath`, `commit.gpgSign` or `core.autocrlf`, and we never read it
   (hermetic, D.2). The `commit` tool description says so in plain words: this
@@ -254,8 +299,10 @@ conversions git applies on `add` are identities on bytes with no `\r` and no
 `$Id` (feasibility §6, probed: under `* text=auto`, `x\r\ny\r\n` and `x\ny\n`
 hash to the same blob, so raw staging of the CRLF file is wrong). The rule:
 
-1. A path matched by a `filter=` attribute whose driver has a `clean` or
-   `process` entry in repo-local config → refuse.
+1. A path matched by **any** `filter=` attribute → refuse, wherever the
+   driver is defined. *(review)* Git LFS writes `filter.lfs.clean` into
+   `~/.gitconfig`, which we never read, so keying on repo-local config would
+   stage a large binary's raw bytes where git stages the LFS pointer.
 2. A path matched by `working-tree-encoding` → refuse.
 3. Otherwise, if the bytes contain no `\r` and no `$Id` → stage them raw.
 4. Otherwise, if any conversion could apply (`core.autocrlf` true/input,
@@ -313,6 +360,14 @@ Amy, 2026-11-06: the embedder pins, kernel variables are the fallback.
   gix-ref 0.66 declares that check and never runs it, so a newline would
   forge a second reflog line. The reflog is what makes an amend
   recoverable, so `Unpublished` and `Allow` depend on it.
+- **What `add` reads** *(review)*: `lstat`, never `open`-then-`fstat`. A
+  symlink stages as mode `120000` with the link text (`readlink`) as its
+  blob, as git does; following it would stage the target's bytes as a
+  regular file. The exec bit comes from the lstat mode (`100755`/`100644`).
+  A gitlink (a nested repository with its own `.git`) is staged by its HEAD
+  oid only if it is already a gitlink in the index; `add -A` does not turn a
+  nested repository into a submodule silently — it refuses naming it, where
+  git warns and adds an "embedded repository".
 - **Index write:** take `index.lock` first, read the index from bytes
   (`State::from_bytes`, which keeps `link` visible so we can refuse it),
   edit, `write_to` the lock, commit the lock. `gix-index`'s `File::write`
@@ -321,7 +376,12 @@ Amy, 2026-11-06: the embedder pins, kernel variables are the fallback.
   The untracked-cache, fsmonitor and resolve-undo extensions are dropped,
   as `gix-index` cannot write them; git rebuilds the first two. Entry stat
   comes from `gix_index::fs::Metadata` (lstat, git's `ctime`), not
-  `std::fs::Metadata`. Racy entries are smudged on write, as git does.
+  `std::fs::Metadata`. *(review)* Racy-git smudging follows git's rule
+  (`ce_smudge_racily_clean_entry` in `read-cache.c`) over **every** entry,
+  the ones this write touched included, compared against the mtime of the
+  index file being written, not the old one: an entry whose mtime is not
+  older than the new index gets its size smudged so a same-second edit is
+  never hidden. Pinned by a same-second edit test against `git status`.
 - **A stale `.lock`** is not ours to remove. Exit 4 naming the lock path and
   saying another git process may be running.
 
@@ -331,10 +391,16 @@ The read side's P13 carve-out (a symlinked loose ref can read outside the
 mount, docs/issues.md) becomes a write primitive here: a symlinked
 `objects/ab`, `refs/heads/sub` or `logs/HEAD` receives our write outside the
 mount (feasibility surprise 1, with file:line). Before each write, every
-directory component from the git dir down to the target — and the target
-itself, for appends — is `lstat`ed; a symlink or a non-directory refuses the
-write, exit 4, naming the path relative to the git dir only (existence-oracle
-rule). The threat is a hostile repository at rest, not a concurrent attacker
+directory component from **the root of the store the write lands in** down to
+the target — and the target itself, for appends — is `lstat`ed; a symlink or
+a non-directory refuses the write, exit 4, naming the path relative to that
+root only (existence-oracle rule). *(review)* In a linked worktree refs and
+objects land in the common dir, and `HEAD`, `index` and `logs/HEAD` in the
+per-worktree git dir, so the walk's root is chosen per target — checking
+`git_dir/refs/…` for a write that lands in `common_dir/refs/…` checks the
+wrong path. Both roots must themselves already be inside the mount (the read
+side's discovery screen proves that; the write side asserts it again). `mv`
+applies the same walk to both working-tree paths. The threat is a hostile repository at rest, not a concurrent attacker
 racing us, and the doc says so. The planted-symlink fixture lands in PR 1,
 before any verb.
 
@@ -377,6 +443,10 @@ Real git is the oracle, as on the read side:
 - Signing: refuse now, trait later (§5.2).
 - `add -f` past an ignore rule: accept, as git does. Plain `add` of an
   ignored path refuses with git's hint naming `-f`.
+- `mv`: in the first cut. It renames a working-tree file but writes no
+  content, so no filter or checkout path is involved.
+- `reset --soft|--mixed <rev>`: phase 3, with `--amend`, under
+  `RewritePolicy`. `--hard` never.
 
 What this changes elsewhere, in the same PR: architecture.md B.11's "Never"
 list loses `commit --amend` and `switch -c`/`checkout -b`; C.3's
@@ -384,12 +454,14 @@ list loses `commit --amend` and `switch -c`/`checkout -b`; C.3's
 (a `read` feature and a wasm escape feature the manifest does not have) is
 corrected.
 
-## 10. Phasing *(pending)*
+## 10. Phasing
 
 1. `WriteRepo`, the gate, write containment (§6.1) with its planted-symlink
-   fixture, the widened D.1 scan (feasibility §7 lists the needles), both
-   fingerprint tests, then objects + index, `add`/`rm`/`restore --staged`.
-2. `commit` (`-m`, `-F`, `-a`), identity, reflog, hooks and signer
-   boundaries.
-3. `--amend` and `RewritePolicy`.
+   fixture (linked-worktree variant included), the widened D.1 scan
+   (feasibility §7 lists the needles), both fingerprint tests, then objects
+   + index: `add`, `rm`, `mv`, `restore --staged`, `reset` (no revision).
+2. `commit` (`-m`, `-F`, `-a`, `--only`, `--trailer`), identity and
+   `var GIT_AUTHOR_IDENT`, reflog, the `GitHooks` boundary.
+3. `RewritePolicy`, the two-sided reachability walk, `--amend`, and
+   `reset --soft|--mixed <rev>`.
 4. `branch <name>`, `tag <name>`, `switch -c`/`checkout -b`.
