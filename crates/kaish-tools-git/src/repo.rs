@@ -701,8 +701,6 @@ impl ReadRepo {
     /// uniqueness check in [`ReadRepo::short_oid`] still covers every object
     /// the store can reach.
     fn abbrev_floor(&self) -> Result<usize, GitError> {
-        const HEX_LEN: usize = 40;
-        const MINIMUM: usize = 4;
         if let Some(floor) = self.abbrev_floor.get() {
             return Ok(*floor);
         }
