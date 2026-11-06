@@ -688,7 +688,8 @@ impl ReadRepo {
     }
 
     /// The shortest abbreviation printed, git's `core.abbrev`: a number of
-    /// characters (at least 4), `no` for the whole oid, or `auto` (the default).
+    /// characters (4 to 40; more prints the whole oid), a false boolean for
+    /// the whole oid, or `auto` (the default). See [`parse_core_abbrev`].
     ///
     /// `auto` is 7 for a small repository and grows with the number of
     /// objects in packs, as `find_unique_abbrev` does: half the bit length of
@@ -707,16 +708,19 @@ impl ReadRepo {
         }
         let configured = self.config_values("core", "abbrev")?.pop().map(|(_, v)| v);
         let floor = match configured.as_deref().map(str::trim) {
-            None | Some("auto") => self.auto_abbrev()?,
-            Some("no" | "false") => HEX_LEN,
-            Some(n) => n.parse::<usize>().map(|n| n.clamp(MINIMUM, HEX_LEN)).map_err(|e| {
-                GitError::repository(
-                    self.operation,
-                    format!("reading core.abbrev = {n:?}, which is not a number, 'auto' or 'no'"),
-                    &self.git_dir,
-                    e,
-                )
-            })?,
+            None => self.auto_abbrev()?,
+            Some(value) => match parse_core_abbrev(value) {
+                Ok(Some(n)) => n,
+                Ok(None) => self.auto_abbrev()?,
+                Err(reason) => {
+                    return Err(GitError::repository(
+                        self.operation,
+                        format!("reading core.abbrev = {value:?}"),
+                        &self.git_dir,
+                        reason,
+                    ))
+                }
+            },
         };
         Ok(*self.abbrev_floor.get_or_init(|| floor))
     }
@@ -2168,6 +2172,52 @@ fn normalize(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// git's reading of `core.abbrev`, checked against git 2.56: `auto` in any
+/// case is `None` (compute it); an empty value or a false boolean (`no`,
+/// `off`, `false`, any case) is the whole 40-character oid; anything else is
+/// an integer in decimal, hex (`0x10`) or octal (`010`), with an optional
+/// `k`/`m`/`g` suffix. A number past 40 prints the whole oid; one under 4 is
+/// refused, as git refuses it. Other words (`true`, `yes`) are refused.
+fn parse_core_abbrev(value: &str) -> Result<Option<usize>, std::io::Error> {
+    const HEX_LEN: i128 = 40;
+    const MINIMUM: i128 = 4;
+    let bad = |what: String| std::io::Error::new(std::io::ErrorKind::InvalidData, what);
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    if value.is_empty()
+        || ["no", "off", "false"].iter().any(|word| value.eq_ignore_ascii_case(word))
+    {
+        return Ok(Some(HEX_LEN as usize));
+    }
+    let (negative, digits) = match value.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, value.strip_prefix('+').unwrap_or(value)),
+    };
+    let (digits, factor) = match digits.chars().last().map(|c| c.to_ascii_lowercase()) {
+        Some('k') => (&digits[..digits.len() - 1], 1i128 << 10),
+        Some('m') => (&digits[..digits.len() - 1], 1i128 << 20),
+        Some('g') => (&digits[..digits.len() - 1], 1i128 << 30),
+        _ => (digits, 1),
+    };
+    let (radix, digits) = if let Some(hex) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+        (16, hex)
+    } else if digits.len() > 1 && digits.starts_with('0') {
+        (8, &digits[1..])
+    } else {
+        (10, digits)
+    };
+    let number = i128::from_str_radix(digits, radix)
+        .ok()
+        .filter(|_| !digits.starts_with(['+', '-']))
+        .ok_or_else(|| bad(format!("{value:?} is not a number, 'auto' or a false boolean")))?;
+    let number = if negative { -number } else { number } * factor;
+    if number < MINIMUM {
+        return Err(bad(format!("abbrev length {number} is out of range; git needs at least {MINIMUM}")));
+    }
+    Ok(Some(number.min(HEX_LEN) as usize))
 }
 
 #[cfg(test)]

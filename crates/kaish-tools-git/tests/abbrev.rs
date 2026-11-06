@@ -117,3 +117,57 @@ async fn core_abbrev_sets_the_floor() {
     assert_eq!(ours, git(&root, &["log", "--oneline", "--no-decorate"]));
     assert_eq!(oid_widths(&ours), vec![12]);
 }
+
+/// `git log --oneline --limit 5` through the kernel, failures kept.
+async fn oneline_result(root: &Path) -> (i64, String, String) {
+    let backend: Arc<dyn KernelBackend> =
+        Arc::new(StrictBackend::single(PathBuf::from("/mnt"), root.to_path_buf()));
+    let git = kaish_tools_git::tool(GitConfig::read_only()).expect("valid config");
+    let mut cfg = KernelConfig::transient();
+    cfg.cwd = PathBuf::from("/mnt");
+    let k = Kernel::with_backend(backend, cfg, |_| {}, |tools| tools.register(git))
+        .expect("kernel assembles");
+    let r = k.execute("git log --oneline --limit 5").await.expect("kernel runs it");
+    (r.code, r.text_out().trim_end().to_string(), r.err)
+}
+
+fn one_commit() -> (Fixture, PathBuf) {
+    let (f, root) = init();
+    write_file(&root, "a.txt", "one\n");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "first", "--quiet"]);
+    (f, root)
+}
+
+/// Every value below was run against git 2.56: the booleans for false and
+/// `auto` in any case, numbers in decimal, hex or octal, and numbers past the
+/// hash length all print; each is held against git's own output.
+#[tokio::test]
+async fn core_abbrev_values_git_accepts_print_what_git_prints() {
+    let (_f, root) = one_commit();
+    for value in ["no", "NO", "off", "Off", "false", "auto", "Auto", "AUTO", "4", "12", "0x10", "010", "40", "41", "100", "1k"] {
+        git(&root, &["config", "core.abbrev", value]);
+        let theirs = git(&root, &["log", "--oneline", "--no-decorate"]);
+        let (code, ours, err) = oneline_result(&root).await;
+        assert_eq!(code, 0, "core.abbrev={value}: {err}");
+        assert_eq!(ours, theirs.trim_end(), "core.abbrev={value}");
+    }
+}
+
+/// Git refuses these at read time. So do we, rather than guess a width.
+#[tokio::test]
+async fn core_abbrev_values_git_refuses_are_refused() {
+    let (_f, root) = one_commit();
+    for value in ["0", "1", "3", "-1", "true", "yes", "on", "12abc", "08", "1.5"] {
+        git(&root, &["config", "core.abbrev", value]);
+        let status = std::process::Command::new("git")
+            .args(["log", "--oneline", "-1"])
+            .current_dir(&root)
+            .output()
+            .expect("git runs");
+        assert!(!status.status.success(), "negative control: git refuses core.abbrev={value}");
+        let (code, _out, err) = oneline_result(&root).await;
+        assert_ne!(code, 0, "core.abbrev={value} must be refused");
+        assert!(err.contains("core.abbrev"), "core.abbrev={value}: {err}");
+    }
+}
