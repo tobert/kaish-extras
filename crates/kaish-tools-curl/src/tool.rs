@@ -68,6 +68,13 @@ impl CurlTool {
             #[arg(short = 'H', long, action = clap::ArgAction::Append)]
             header: Vec<String>,
 
+            /// Send the -d, --data-binary, --data-raw and --data-urlencode data
+            /// on the URL's query string instead of in a body. The method stays
+            /// GET (or -X, or HEAD under -I). Data a URL cannot carry, such as
+            /// a space, exits 2: use --data-urlencode.
+            #[arg(short = 'G', long)]
+            get: bool,
+
             /// Print the response headers above the body; with -o they go into
             /// the file instead.
             #[arg(short = 'i', long)]

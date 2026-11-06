@@ -233,16 +233,21 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
             builder = builder.header("Authorization", format!("Basic {encoded}"));
         }
 
-        let http_req = builder
-            .body(body_bytes.to_vec())
-            .map_err(|e| CurlError::MalformedUrl {
-                url: current.to_string(),
-                reason: format!("could not build request: {e}"),
-            })?;
-
-        let mut resp = agent
-            .run(http_req)
-            .map_err(|e| map_ureq_into_curl(e, &current, started.elapsed(), max_redirs))?;
+        // A request with no data flag carries no body and no Content-Length,
+        // as in curl; `-d ''` and an empty `-T` file still send
+        // `Content-Length: 0`.
+        let outcome = if req.sends_body() {
+            builder
+                .body(body_bytes.to_vec())
+                .map_err(|e| build_error(&current, &e))
+                .and_then(|r| run_once(&agent, r, &current, started.elapsed(), max_redirs))
+        } else {
+            builder
+                .body(())
+                .map_err(|e| build_error(&current, &e))
+                .and_then(|r| run_once(&agent, r, &current, started.elapsed(), max_redirs))
+        };
+        let mut resp = outcome?;
         let status = resp.status().as_u16();
 
         if let Some(location) = redirect_target(status, resp.headers()).filter(|_| following) {
@@ -287,6 +292,25 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
             body,
         });
     }
+}
+
+fn build_error(url: &Url, e: &ureq::http::Error) -> CurlError {
+    CurlError::MalformedUrl {
+        url: url.to_string(),
+        reason: format!("could not build request: {e}"),
+    }
+}
+
+fn run_once<B: ureq::AsSendBody>(
+    agent: &ureq::Agent,
+    request: ureq::http::Request<B>,
+    url: &Url,
+    elapsed: std::time::Duration,
+    max_redirs: u32,
+) -> Result<ureq::http::Response<ureq::Body>, CurlError> {
+    agent
+        .run(request)
+        .map_err(|e| map_ureq_into_curl(e, url, elapsed, max_redirs))
 }
 
 /// The `Location` of a redirect this build follows, if this is one.

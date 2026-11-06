@@ -80,6 +80,18 @@ impl Pair {
         );
     }
 
+    /// Same requests and exit code; stdout is not compared (`-i` and `-I`
+    /// print header names lower-cased and sorted, curl prints them as sent).
+    fn assert_same_wire(&self, what: &str) {
+        let Some(theirs) = &self.theirs else { return };
+        assert_eq!(
+            self.ours_req.iter().map(Wire::of).collect::<Vec<_>>(),
+            self.theirs_req.iter().map(Wire::of).collect::<Vec<_>>(),
+            "{what}: request differs from real curl's"
+        );
+        assert_eq!(self.ours.code as i32, theirs.code, "{what}: exit code");
+    }
+
     fn body(&self) -> &[u8] {
         &self.ours_req.first().expect("a request was sent").body
     }
@@ -256,5 +268,69 @@ async fn a_body_file_is_read_from_the_shell_filesystem_never_the_host() {
     assert!(p.ours_req.is_empty(), "host bytes must not reach the wire");
     if let Some(t) = &p.theirs {
         assert_eq!(t.code, 0, "control: real curl does read the host file");
+    }
+}
+
+// ── 2. -G / --get ───────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_moves_the_data_to_the_query_string() {
+    let server = recorder();
+    let files: &[(&str, &[u8])] = &[("f.txt", CRLF)];
+    for (args, want) in [
+        ("-G -d a=1 -d b=2 \"$URL/echo\"", "/echo?a=1&b=2"),
+        ("--get -d a=1 \"$URL/echo\"", "/echo?a=1"),
+        // The survey's shape: urlencode puts '+' for the space.
+        ("-G --data-urlencode 'q=hello world' --data-urlencode n=5 \"$URL/echo\"", "/echo?q=hello+world&n=5"),
+        ("-G -d a=1 \"$URL/echo?z=1\"", "/echo?z=1&a=1"),
+        ("-G -d @f.txt \"$URL/echo\"", "/echo?abc"),
+        ("-G --data-binary k=v -d @f.txt \"$URL/echo\"", "/echo?k=v&abc"),
+    ] {
+        let p = compare(&server, &format!("-s {args}"), files).await;
+        assert_eq!(p.ours.code, 0, "{args}: {}", p.ours.err);
+        let got = Wire::of(&p.ours_req[0]);
+        assert_eq!(got.method, "GET", "{args}");
+        assert_eq!(got.path, want, "{args}");
+        assert!(got.body.is_empty(), "{args}: no body");
+        assert_eq!(got.content_type, None, "{args}: no form Content-Type without a body");
+        p.assert_same(args);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_keeps_an_explicit_method_and_head() {
+    let server = recorder();
+    for (args, method) in [
+        ("-G -d a=1 -X POST \"$URL/echo\"", "POST"),
+        ("-G -d a=1 -I \"$URL/echo\"", "HEAD"),
+    ] {
+        let p = compare(&server, &format!("-s {args}"), &[]).await;
+        assert_eq!(p.ours.code, 0, "{args}: {}", p.ours.err);
+        let got = Wire::of(&p.ours_req[0]);
+        assert_eq!((got.method.as_str(), got.path.as_str()), (method, "/echo?a=1"), "{args}");
+        p.assert_same_wire(args);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_without_data_is_a_plain_get() {
+    let server = recorder();
+    let p = compare(&server, "-s -G \"$URL/echo\"", &[]).await;
+    assert_eq!(Wire::of(&p.ours_req[0]).path, "/echo");
+    p.assert_same("-G alone");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_refuses_data_a_url_cannot_carry_and_sends_nothing() {
+    // curl exits 3 (bad URL) here; this build exits 2 before any request and
+    // names --data-urlencode, which is the fix.
+    let server = recorder();
+    let p = compare(&server, "-s -G -d 'a=b c' \"$URL/echo\"", &[]).await;
+    assert_eq!(p.ours.code, 2, "{}", p.ours.err);
+    assert!(p.ours.err.contains("--data-urlencode"), "{}", p.ours.err);
+    assert!(p.ours_req.is_empty());
+    if let Some(t) = &p.theirs {
+        assert_ne!(t.code, 0, "control: real curl refuses it too");
+        assert!(p.theirs_req.is_empty());
     }
 }

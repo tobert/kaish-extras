@@ -53,7 +53,41 @@ pub async fn prepare(
         }
         check_total(joined.len() as u64, max_bytes)?;
     }
-    req.body = joined;
+    if req.get {
+        append_query(&mut req.url, &joined)?;
+    } else {
+        req.body = joined;
+    }
+    Ok(())
+}
+
+/// `-G`: add the data to the URL's query. A URL cannot carry a space, a
+/// control byte, `#`, or a byte outside ASCII unencoded, and curl refuses such
+/// a URL (exit 3). Refuse before the request, and name the fix.
+fn append_query(url: &mut String, data: &[u8]) -> Result<(), CurlError> {
+    if let Some(bad) = data.iter().find(|b| !(0x21..=0x7e).contains(*b) || **b == b'#') {
+        return Err(CurlError::Usage(format!(
+            "'-G' data contains a byte a URL cannot carry ({:?}), so no request was sent (exit 2). \
+             Percent-encode it with '--data-urlencode', as in: curl -G --data-urlencode 'q=a b' <url>",
+            char::from(*bad)
+        )));
+    }
+    let data = std::str::from_utf8(data).expect("ASCII checked above");
+    // Keep a fragment out of the query: it stays at the end, as in a browser.
+    let (base, fragment) = match url.split_once('#') {
+        Some((b, f)) => (b.to_string(), Some(f.to_string())),
+        None => (url.clone(), None),
+    };
+    let sep = match base.contains('?') {
+        false => "?",
+        true if base.ends_with('?') || base.ends_with('&') => "",
+        true => "&",
+    };
+    *url = format!("{base}{sep}{data}");
+    if let Some(f) = fragment {
+        url.push('#');
+        url.push_str(&f);
+    }
     Ok(())
 }
 

@@ -46,6 +46,7 @@ pub(crate) const HONORED_FLAGS: &[&str] = &[
     "--data-binary",
     "--data-raw",
     "--data-urlencode",
+    "--get",
     "--header",
     "--include",
     "--head",
@@ -78,8 +79,6 @@ pub(crate) const REFUSED_FLAGS: &[(&str, &str)] = &[
     ("--verbose", "'--verbose' is not supported, and no request was sent. This build prints no request or connection trace. Use 'curl -i <url>' to print the response headers above the body. The request headers are the ones you set with '-H' plus 'User-Agent: kaish-curl'."),
     ("-v", "'-v' is not supported, and no request was sent. This build prints no request or connection trace. Use 'curl -i <url>' to print the response headers above the body. The request headers are the ones you set with '-H' plus 'User-Agent: kaish-curl'."),
     ("--retry", "'--retry' is not supported. Retry from the shell: 'for i in 1 2 3; do curl ... && break; done'."),
-    ("--get", "'--get' is not supported. Put the query string in the URL."),
-    ("-G", "'-G' is not supported. Put the query string in the URL."),
     ("--cert", "'--cert' is not supported. Client certificates are not available."),
     ("--key", "'--key' is not supported. Client key files are not available."),
     ("--proxy", "'--proxy' is not supported. Direct connections only."),
@@ -107,6 +106,8 @@ pub struct Request {
     /// The request body as it goes on the wire. Empty until `input::prepare`
     /// has resolved `bodies`; the backend sends this and nothing else.
     pub body: Vec<u8>,
+    /// `-G`: `bodies` go on the query string instead of in a body.
+    pub get: bool,
     /// Header name/value pairs, including the `User-Agent` (the caller's or
     /// [`DEFAULT_USER_AGENT`]) and any `Referer` from `-e`.
     pub headers: Vec<(String, String)>,
@@ -153,6 +154,15 @@ pub struct Request {
     /// and carries no structured data, because a pipe hands the next tool
     /// that data in place of the text (survey SW-1).
     pub json_output: bool,
+}
+
+impl Request {
+    /// Whether the request carries a body (and so a `Content-Length`).
+    /// curl sends neither when no data flag was given, and an empty body
+    /// still counts when a flag asked for one (`-d ''`).
+    pub fn sends_body(&self) -> bool {
+        !(self.body.is_empty() && (self.bodies.is_empty() || self.get))
+    }
 }
 
 /// One `-d`-family body part, before any file is read.
@@ -245,6 +255,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let mut insecure = false;
     let mut unix_socket: Option<String> = None;
     let mut json_output = false;
+    let mut get = false;
 
     // Every `-d`-family flag implies the form Content-Type, as in curl.
     let mut body_implies_form = false;
@@ -318,6 +329,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             }
             "-A" | "--user-agent" => user_agent = Some(value(&mut i)?),
             "-e" | "--referer" => referer = Some(value(&mut i)?),
+            "-G" | "--get" => get = true,
             "-i" | "--include" => include_headers = true,
             // curl's `-s` also silences *error* messages; this build always
             // reports errors, because an agent that cannot see a failure
@@ -419,7 +431,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         ));
     }
 
-    if head_only && !bodies.is_empty() {
+    if head_only && !get && !bodies.is_empty() {
         return Err(CurlError::MalformedUrl {
             url: url.clone(),
             reason: "--head discards the response body; providing --data is meaningless".into(),
@@ -432,6 +444,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     // docs/curl.md's `-d` row: a body implies form encoding unless the caller
     // named a Content-Type themselves.
     if body_implies_form
+        && !get
         && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
     {
         headers.push((
@@ -447,7 +460,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let method = match method_override {
         Some(m) => m,
         None if head_only => "HEAD".to_string(),
-        None if !bodies.is_empty() => "POST".to_string(),
+        None if !bodies.is_empty() && !get => "POST".to_string(),
         None => "GET".to_string(),
     };
 
@@ -456,6 +469,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         method,
         bodies,
         body: Vec::new(),
+        get,
         headers,
         include_headers,
         head_only,
