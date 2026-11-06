@@ -1143,10 +1143,30 @@ repository size, not result size.
 
 - **Q3 — `--format`/`--pretty` and `--date`.** 8 cells. Refused with a pointer
   at `--json`; a `--format` subset (`%H %h %s %an %ae %ad`) would cover most
-  of what models typed. Needs kaish to accept `%` in a word first — check.
-- **Q4 — re-run the survey after these land.** `git-survey-2026-10/` keeps
-  the tasks, responses and fixture; replay `responses.jsonl` through
-  `examples/probe.rs` and compare the bins.
+  of what models typed. Still open on kaish 0.18: an unquoted `%` in a word
+  (`--format=%an,%ad`) is a kernel lexer error that never reaches the tool
+  (1 cell in the 2026-11-06 re-run); the quoted form reaches the refusal.
+- **Q5 — `log --follow` is refused without a substitute.** 4 cells (T7). The
+  text lists the accepted flags and does not say what to type for file history
+  (`git log -- FILE`) or that renames are not followed. `--date` gets the same
+  generic text.
+- **Q6 — `-N` is refused, one error per retry.** 8 cells (`--oneline -10` x3,
+  `-1 ...` x5). The refusal is exact ("Write the count as '-n 10'"), and it is
+  the only complaint, so `-1 --format='%an %ad'` costs two retries: `-1`, then
+  `--format`. Decide whether to accept `-N` (git does) or report every refused
+  flag at once.
+- **Q7 — `log <branch>` answers a different question.** 3 cells (T12,
+  `log feature/x`). Output is the branch's whole history, identical to git's.
+  The range spelling now works, so the gap is only that nothing steers a model
+  from `log feature/x` to `log main..feature/x`. `help git` could say so.
+- **Q8 — `--json` after `--` is a path.** `git log -n 1 -- Cargo.toml --json`
+  prints text, exit 0, because the token is a pathspec; git does the same. A
+  model that typed it expected JSON. Not counted as SILENT-WRONG (the answer
+  was right); a stderr notice when a pathspec starts with `--` would close it.
+- **Q9 — `command git ...` misdiagnoses.** 7 cells across T18-T24 typed
+  `command git ...`; kaish's `command` builtin answers "only -v and -V are
+  supported" or "-c is not supported" and never says git is read-only. That
+  text is kaish's, so the fix is a kaish PR.
 
 ## git log — from the 2026-10-11 review of `A..B` (deepseek-flash)
 
