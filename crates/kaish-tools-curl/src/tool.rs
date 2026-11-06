@@ -272,6 +272,11 @@ impl Tool for CurlTool {
             write_out: req.write_out.clone(),
         };
 
+        // `-w` still prints when no response came, with `000` for the code, as
+        // in curl; a script that branches on `%{http_code}` needs the
+        // answer on the failure path most of all.
+        let unanswered = req.write_out.clone().map(|w| (w, req.url.clone()));
+
         let started = std::time::Instant::now();
         let result = crate::util::block_in_place_compat(move || {
             crate::backend::fetch(&req, &self.config)
@@ -280,7 +285,18 @@ impl Tool for CurlTool {
 
         match result {
             Ok(response) => handle_success(output_file.as_deref(), output_dir.as_deref(), resume_from, response, render, elapsed, ctx).await,
-            Err(err) => error_result(err),
+            Err(err) => {
+                let mut r = error_result(err);
+                if let Some((w, url)) = unanswered {
+                    let text = w.render(&crate::model::Response::unanswered(url), elapsed);
+                    let err_text = std::mem::take(&mut r.err);
+                    let code = r.code;
+                    r = ExecResult::with_output(OutputData::text(text));
+                    r.code = code;
+                    r.err = err_text;
+                }
+                r
+            }
         }
     }
 }

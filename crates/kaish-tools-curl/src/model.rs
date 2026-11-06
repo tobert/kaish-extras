@@ -30,6 +30,19 @@ pub struct Response {
 }
 
 impl Response {
+    /// What `-w` reports when the request failed before any response:
+    /// status 0 (printed `000`), nothing downloaded, the URL as asked for.
+    pub fn unanswered(url: String) -> Self {
+        Self {
+            url,
+            status: 0,
+            reason: String::new(),
+            headers: BTreeMap::new(),
+            redirects: 0,
+            body: Vec::new(),
+        }
+    }
+
     /// Whether the server labelled this body as JSON.
     ///
     /// The `Content-Type` is the only authority worth trusting here: sniffing

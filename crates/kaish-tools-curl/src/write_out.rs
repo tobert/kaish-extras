@@ -151,7 +151,8 @@ impl WriteOut {
         for part in &self.0 {
             match part {
                 Part::Text(t) => out.push_str(t),
-                Part::Var(Var::HttpCode) => out.push_str(&response.status.to_string()),
+                // Three digits, so a request with no response is `000`, as in curl.
+                Part::Var(Var::HttpCode) => out.push_str(&format!("{:03}", response.status)),
                 Part::Var(Var::TimeTotal) => out.push_str(&format!("{:.6}", elapsed.as_secs_f64())),
                 Part::Var(Var::SizeDownload) => out.push_str(&response.body.len().to_string()),
                 Part::Var(Var::UrlEffective) => out.push_str(&response.url),

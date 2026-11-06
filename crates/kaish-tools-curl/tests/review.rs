@@ -239,3 +239,19 @@ async fn fail_is_decided_before_the_body_is_read() {
     let p = compare(&server, "-s -f \"$URL/ok\"", &[]).await;
     assert_eq!((p.ours.code, p.ours.text_out().as_ref()), (0, "fine\n"));
 }
+
+// ── 7. -w prints even when no response came ─────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn write_out_prints_000_when_the_connection_fails() {
+    let server = redirector();
+    // Nothing listens on port 1.
+    let args = "-s -w '%{http_code}|%{url_effective}|%{size_download}|%{num_redirects}|[%{content_type}]\\n' http://127.0.0.1:1/x";
+    let p = compare(&server, args, &[]).await;
+    assert_eq!(p.ours.code, 7, "{}", p.ours.err);
+    assert_eq!(p.ours.text_out(), "000|http://127.0.0.1:1/x|0|0|[]\n");
+    assert!(!p.ours.err.is_empty(), "the error still reaches stderr");
+    if let Some(theirs) = &p.theirs {
+        assert_eq!((theirs.code, theirs.stdout.as_slice()), (7, p.ours.text_out().as_bytes()));
+    }
+}
