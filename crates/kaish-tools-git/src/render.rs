@@ -707,7 +707,9 @@ pub fn worktree_list(report: &WorktreeReport) -> OutputData {
     attach(table, report, "git worktree list")
 }
 
-/// The first 7 hex characters of an oid — the width `git log --oneline` uses.
+/// The first 7 hex characters of an oid. Fixed width: `git log --oneline`
+/// widens its own to stay unique (`short_oid` does), but the branch, tag and
+/// worktree tables and the detached-HEAD line cut here (docs/issues.md R5).
 fn short(oid: &str) -> String {
     oid.chars().take(7).collect()
 }

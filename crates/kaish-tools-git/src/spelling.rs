@@ -2,15 +2,16 @@
 //!
 //! An agent types git's flags because git's flags are what it was trained on.
 //! When a verb accepts the spelling, the clap struct carries it (`-a`,
-//! `--cached`, `--oneline`); this module is the other half: a flag the verb
+//! `--oneline`, `-n`); this module is the other half: a flag the verb
 //! does not support is refused **saying that it is not supported**, with the
 //! command to type instead whenever one exists. The next call should work.
 //!
 //! clap's own unknown-argument text is not fit for that reader. It suggests
 //! `-- --oneline`, which here would turn the flag into a pathspec; it suggests
-//! `--patch` for `--cached`, by edit distance; and it ends in `try '--help'`,
-//! which this tool does not answer. So the message is rebuilt from clap's
-//! error context rather than passed through.
+//! a flag by edit distance, which can be a different flag; and it ends in
+//! `try '--help'`, while this tool's help is `git <verb> --help`, answered
+//! from its schema. So the message is rebuilt from clap's error context rather
+//! than passed through.
 
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 
