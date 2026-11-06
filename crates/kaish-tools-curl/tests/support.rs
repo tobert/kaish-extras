@@ -1090,3 +1090,75 @@ impl Wire {
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// One case, run under real curl and under this tool
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Both sides of one case.
+pub struct Pair {
+    pub ours: ExecResult,
+    pub ours_req: Vec<CapturedRequest>,
+    pub theirs: Option<Oracle>,
+    pub theirs_req: Vec<CapturedRequest>,
+    /// Kept for `file()` reads in cases that check what was written.
+    #[allow(dead_code)]
+    pub fx: Fixture,
+}
+
+/// Run `args` (the text after `curl`, with `$URL` for the server base) under
+/// real curl and under this tool, each with `files` seeded.
+pub async fn compare(server: &TcpGuard, args: &str, files: &[(&str, &[u8])]) -> Pair {
+    compare_with(server, args, files, loopback_config()).await
+}
+
+pub async fn compare_with(
+    server: &TcpGuard,
+    args: &str,
+    files: &[(&str, &[u8])],
+    config: kaish_tools_curl::CurlConfig,
+) -> Pair {
+    let base = server.url("");
+    server.take_requests();
+    let theirs = Oracle::run(&base, args, files);
+    let theirs_req = server.take_requests();
+    let fx = Fixture::new(config, files).await;
+    let ours = fx.run(&base, &format!("curl {args}")).await;
+    let ours_req = server.take_requests();
+    Pair { ours, ours_req, theirs, theirs_req, fx }
+}
+
+impl Pair {
+    /// Same requests on the wire, same exit code, same stdout.
+    pub fn assert_same(&self, what: &str) {
+        let Some(theirs) = &self.theirs else { return };
+        assert_eq!(
+            self.ours_req.iter().map(Wire::of).collect::<Vec<_>>(),
+            self.theirs_req.iter().map(Wire::of).collect::<Vec<_>>(),
+            "{what}: request differs from real curl's (stderr: {})",
+            self.ours.err
+        );
+        assert_eq!(self.ours.code as i32, theirs.code, "{what}: exit code; ours stderr: {}", self.ours.err);
+        assert_eq!(
+            self.ours.text_out().as_bytes(),
+            theirs.stdout.as_slice(),
+            "{what}: stdout"
+        );
+    }
+
+    /// Same requests and exit code; stdout is not compared (`-i` and `-I`
+    /// print header names lower-cased and sorted, curl prints them as sent).
+    pub fn assert_same_wire(&self, what: &str) {
+        let Some(theirs) = &self.theirs else { return };
+        assert_eq!(
+            self.ours_req.iter().map(Wire::of).collect::<Vec<_>>(),
+            self.theirs_req.iter().map(Wire::of).collect::<Vec<_>>(),
+            "{what}: request differs from real curl's"
+        );
+        assert_eq!(self.ours.code as i32, theirs.code, "{what}: exit code");
+    }
+
+    pub fn body(&self) -> &[u8] {
+        &self.ours_req.first().expect("a request was sent").body
+    }
+}

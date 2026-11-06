@@ -119,3 +119,7 @@ path = "tests/compat.rs"
 [[test]]
 name = "features"
 path = "tests/features.rs"
+
+[[test]]
+name = "review"
+path = "tests/review.rs"

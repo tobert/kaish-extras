@@ -104,6 +104,13 @@ const DEFAULT_USER_AGENT: &str = "kaish-curl";
 pub struct Request {
     pub url: String,
     pub method: String,
+    /// `-X` named the method. curl keeps an explicit method across a
+    /// redirect, and derives it again from the request kind when none was
+    /// named.
+    pub method_explicit: bool,
+    /// The caller set a `Content-Type` with `-H`. One this build added for a
+    /// body goes with the body when a redirect drops it; the caller's stays.
+    pub caller_content_type: bool,
     /// Body parts, joined with `&`. Files in them are read by `input::prepare`
     /// (the parser has no filesystem), which fills [`Request::body`].
     pub bodies: Vec<BodyPart>,
@@ -542,10 +549,8 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     }
     // docs/curl.md's `-d` row: a body implies form encoding unless the caller
     // named a Content-Type themselves.
-    if body_implies_form
-        && !get
-        && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-    {
+    let caller_content_type = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+    if body_implies_form && !get && !caller_content_type {
         headers.push((
             "Content-Type".to_string(),
             "application/x-www-form-urlencoded".to_string(),
@@ -556,6 +561,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         user_agent.unwrap_or_else(|| DEFAULT_USER_AGENT.to_string()),
     ));
 
+    let method_explicit = method_override.is_some();
     let method = match method_override {
         Some(m) => m,
         None if head_only => "HEAD".to_string(),
@@ -567,6 +573,8 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     Ok(Request {
         url,
         method,
+        method_explicit,
+        caller_content_type,
         bodies,
         body: Vec::new(),
         get,

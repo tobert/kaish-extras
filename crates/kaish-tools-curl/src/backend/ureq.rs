@@ -179,6 +179,14 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
     let start_host = current.host_str().map(str::to_string);
     let mut same_host_as_start = true;
     let mut hops: u32 = 0;
+    // What the next request is, which a redirect can change: curl turns a
+    // POST into a GET across 301/302 and any non-HEAD request into a GET
+    // across 303, dropping the body (and the form type this build added for
+    // it). 307 and 308 keep both. Replaying a body to wherever a `Location`
+    // points is how a payload meant for one host reaches another.
+    let mut method = req.method.clone();
+    let mut body_active = req.sends_body();
+    let mut body_dropped = false;
     loop {
         if config.permit_egress(current.as_str()) != EgressResult::Allowed {
             return Err(CurlError::CouldNotConnect {
@@ -192,7 +200,7 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
         }
 
         let mut builder = ureq::http::Request::builder()
-            .method(req.method.as_str())
+            .method(method.as_str())
             .uri(current.as_str());
 
         // The embedder's headers, applied to every request the agent cannot
@@ -212,6 +220,12 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
         // the far end would choose — which is not a choice to hand over when
         // one of the two is the embedder's credential.
         for (name, value) in &req.headers {
+            if body_dropped
+                && !req.caller_content_type
+                && name.eq_ignore_ascii_case("content-type")
+            {
+                continue;
+            }
             if injected_here.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)) {
                 continue;
             }
@@ -228,7 +242,14 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
         for (name, value) in injected_here {
             builder = builder.header(name, value);
         }
-        if let Some((user, pass)) = &credentials {
+        // One `Authorization` goes out. Precedence: the embedder's header,
+        // then the caller's `-H Authorization:` (curl lets `-H` override
+        // `-u`), then `-u` or the URL's userinfo. `Builder::header` appends, so
+        // sending two would leave the far end to choose between a credential
+        // the embedder injected and one the agent typed.
+        let authorization_set = injected_here.iter().any(|(n, _)| n.eq_ignore_ascii_case("authorization"))
+            || req.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("authorization"));
+        if let (Some((user, pass)), false) = (&credentials, authorization_set) {
             let encoded = STANDARD.encode(format!("{user}:{pass}"));
             builder = builder.header("Authorization", format!("Basic {encoded}"));
         }
@@ -236,7 +257,7 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
         // A request with no data flag carries no body and no Content-Length,
         // as in curl; `-d ''` and an empty `-T` file still send
         // `Content-Length: 0`.
-        let outcome = if req.sends_body() {
+        let outcome = if body_active {
             builder
                 .body(body_bytes.to_vec())
                 .map_err(|e| build_error(&current, &e))
@@ -260,6 +281,14 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
                     url: location.clone(),
                     reason: format!("redirect target is not a usable URL: {e}"),
                 })?;
+            let post_becomes_get = matches!(status, 301 | 302) && body_active && req.upload_file.is_none();
+            if (status == 303 && !req.head_only) || post_becomes_get {
+                body_dropped |= body_active;
+                body_active = false;
+                if !req.method_explicit {
+                    method = "GET".to_string();
+                }
+            }
             // Credentials do not cross a host boundary. docs/curl.md and CU10
             // both promised this; nothing implemented it, so `-u` plus a
             // redirect was an exfiltration path.
