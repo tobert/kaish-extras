@@ -417,6 +417,27 @@ async fn log_oneline_stat_has_git_shortstat_line_structure() {
     assert!(ours.out.contains(" 1 file changed, 1 insertion(+), 1 deletion(-)\n") && ours.out.contains(" 3 files changed, 3 insertions(+)"), "negative control: singular forms and a missing deletions part: {}", ours.out);
 }
 
+/// Where the counts differ from git's, pinned: git pairs a rename by default
+/// (`diff.renames`, true since git 2.9) and counts one file; this build counts
+/// a deletion and an addition, two files (docs/issues.md L1). When the pairing
+/// lands, this test fails and the published `--oneline` text changes with it.
+#[tokio::test]
+async fn log_oneline_stat_counts_a_rename_as_two_files_where_git_counts_one() {
+    let (_f, root) = repo();
+    write_file(&root, "notes.txt", "one\ntwo\nthree\nfour\n");
+    git(&root, &["add", "notes.txt"]);
+    git(&root, &["commit", "-m", "notes", "--quiet", "--", "notes.txt"]);
+    git(&root, &["mv", "notes.txt", "memo.txt"]);
+    git(&root, &["commit", "-m", "rename", "--quiet", "--", "notes.txt", "memo.txt"]);
+    let theirs = git(&root, &["log", "--oneline", "--shortstat", "--no-decorate", "-n", "1"]);
+    assert!(theirs.contains(" 1 file changed,"), "negative control: git pairs the rename: {theirs}");
+    let ours = run(&root, "git log --oneline --stat -n 1").await;
+    assert_eq!(ours.code, 0, "{}", ours.err);
+    assert!(ours.out.contains(" 2 files changed,"), "{}", ours.out);
+    let help = run(&root, "git log --help").await;
+    assert!(help.out.contains("differ from git's for a rename"), "the description says so: {}", help.out);
+}
+
 // --- verbatim binding, through the kernel -----------------------------------
 
 /// `--json` is the kernel's: under verbatim binding it lifts the flag out of

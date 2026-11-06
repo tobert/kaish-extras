@@ -117,7 +117,9 @@ pub(crate) struct LogArgs {
 
     /// One line per commit: the short oid, a space, and the summary, as
     /// `git log --oneline` prints them. With `--stat` the counts follow on the
-    /// next line, as `git log --oneline --shortstat` prints them. `--json` is
+    /// next line, in the shape of `git log --oneline --shortstat`. The counts
+    /// differ from git's for a rename (here one deletion and one addition, so
+    /// two files), a mode-only change and a submodule move. `--json` is
     /// unchanged by it.
     #[arg(long = "oneline", default_value_t = false, conflicts_with = "body")]
     pub oneline: bool,

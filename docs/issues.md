@@ -101,17 +101,17 @@ fixture asserted against real `git status --porcelain` before fixing.
 
 - **L1 — `--stat` does not detect renames.** A renamed file is counted as one
   deletion plus one addition, so `files` is 2 and the line counts are the whole
-  file twice. `status` has exact-match rename pairing and `log` does not,
-  because the tree comparison here is per-commit and pairing would need the same
-  oid-reappearance pass run against every commit walked. Git's own default
-  (`git log --stat` without `-M`) also does not detect renames, so this matches
-  the tool an agent is comparing against — but it is a divergence from `status`
-  within our own surface, which is the part worth closing. PR 5 did factor the
-  pairing out — it is `diffcore::pair_exact_renames`, shared by `status` and
-  `diff` — so what remains is deciding whether `log --stat` should run it per
-  commit at all, which costs an add/delete pass over every commit walked and
-  diverges from git's own default (`git log --stat` without `-M` does not
-  detect renames either).
+  file twice. Git pairs renames by default (`diff.renames` is true since git
+  2.9; real git 2.56 prints `1 file changed` for a pure rename), so this is a
+  divergence from the tool an agent is comparing against, as well as from
+  `status` within our own surface. `--oneline --stat` therefore matches
+  `--shortstat` in shape only; its published text says so, and
+  `log_oneline_stat_counts_a_rename_as_two_files_where_git_counts_one` pins the
+  difference. `diffcore::pair_exact_renames` is shared by `status` and `diff`;
+  what remains is running it per commit, which costs an add/delete pass over
+  every commit walked, and exact pairing still differs from git's similarity
+  pairing of edited renames. (An earlier version of this entry said git's
+  default does not detect renames. It does.)
 
 - **L2 — a filtered `log` walks history rather than stopping at `--limit`.**
   No filter (`--author`, `--path`, a date window) is sorted along ancestry, so
