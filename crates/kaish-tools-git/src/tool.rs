@@ -1016,6 +1016,7 @@ impl GitTool {
         let contains = parsed.contains.clone();
         let merged = parsed.merged.clone();
         let ahead_behind = parsed.ahead_behind;
+        let all = parsed.all;
 
         let outcome = block_in_place_compat(move || {
             let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
@@ -1036,7 +1037,7 @@ impl GitTool {
             Err(e) => return failure(e),
         };
 
-        let mut result = ExecResult::with_output(crate::render::branch(&model));
+        let mut result = ExecResult::with_output(crate::render::branch(&model, all));
         if model.truncated {
             result.err = format!(
                 "git branch: output truncated at {} branches (--limit); \

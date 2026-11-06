@@ -46,7 +46,9 @@ const REMOTES: &str = "refs/remotes/";
 pub(crate) struct BranchArgs {
     /// List remote-tracking branches beside the local ones. A remote-tracking
     /// branch is a record of what a fetch last saw; this build performs no
-    /// fetch, so it is as old as the last one someone else ran.
+    /// fetch, so it is as old as the last one someone else ran. The text names
+    /// them `remotes/origin/main`, as git's `-a` does; `--remote` and `--json`
+    /// name them `origin/main`.
     #[arg(short = 'a', long = "all", default_value_t = false, conflicts_with = "remote")]
     pub all: bool,
 

@@ -140,6 +140,26 @@ async fn branch_a_is_branch_all() {
     assert!(out.contains("origin/main"), "-a includes the remote-tracking branch: {out}");
 }
 
+/// `-a` names a remote-tracking branch as git does, `remotes/origin/main`,
+/// where `-r` names it `origin/main`. The text is compared with git's own, and
+/// `contains` cannot tell the two apart.
+#[tokio::test]
+async fn branch_a_text_names_remote_rows_as_git_does() {
+    let (_f, root) = repo();
+    let names = |text: &str| -> Vec<String> {
+        text.lines().map(|l| l.split('\t').next().unwrap_or_default().to_string()).collect()
+    };
+    let ours_a = run(&root, "git branch -a").await;
+    let theirs_a = git(&root, &["branch", "-a", "--no-color"]);
+    assert_eq!(names(&ours_a.out), theirs_a.lines().map(String::from).collect::<Vec<_>>());
+    assert!(theirs_a.contains("  remotes/origin/main"), "negative control: git prefixes it: {theirs_a}");
+    let ours_r = run(&root, "git branch -r").await;
+    assert_eq!(names(&ours_r.out), vec!["  origin/main".to_string()]);
+    // The typed model keeps the short name, as git's %(refname:short) does.
+    let json = run(&root, "git branch -a --json").await;
+    assert!(json.out.contains("\"name\": \"origin/main\"") || json.out.contains("\"name\":\"origin/main\""), "{}", json.out);
+}
+
 #[tokio::test]
 async fn branch_r_is_branch_remote() {
     let (_f, root) = repo();
@@ -328,6 +348,15 @@ async fn stderr_notes_end_with_a_newline() {
     assert_eq!(r.code, 0, "{}", r.err);
     assert!(r.err.starts_with("git log: output truncated at 1 commits"), "negative control: a note exists: {}", r.err);
     assert!(r.err.ends_with('\n') && !r.err.ends_with("\n\n"), "one terminator: {:?}", r.err);
+}
+
+#[tokio::test]
+async fn zz_probe() {
+    let (_f, root) = repo();
+    for c in ["git status -uno", "git status -u", "git status -unormal", "git status --untracked-files=no", "git log -p", "git log -p -n 1", "git status -b"] {
+        let r = run(&root, c).await;
+        println!("=== {c} {} {}", r.code, r.err);
+    }
 }
 
 // --- verbatim binding, through the kernel -----------------------------------

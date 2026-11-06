@@ -9,7 +9,7 @@
 use kaish_types::{OutputData, OutputNode};
 
 use crate::model::{
-    BranchReport, DiffEndpoint, DiffFile, DiffReport, EntryKind, EntryStatus, LogReport, LsReport,
+    BranchKind, BranchReport, DiffEndpoint, DiffFile, DiffReport, EntryKind, EntryStatus, LogReport, LsReport,
     RepoInfo, ShowCommit, ShowTag, StatusReport, TagKind, TagReport, TreeRow, WorktreeReport,
 };
 
@@ -576,16 +576,19 @@ fn summary_line(report: &DiffReport) -> String {
 /// marked, the oid is shortened to scan, and the upstream carries its
 /// ahead/behind counts when they were asked for. `--json` has the full oid and
 /// each count as its own field.
-pub fn branch(report: &BranchReport) -> OutputData {
+pub fn branch(report: &BranchReport, all: bool) -> OutputData {
     let rows: Vec<OutputNode> = report
         .branches
         .iter()
         .map(|b| {
-            let name = if b.is_head {
-                format!("* {}", b.name)
-            } else {
-                format!("  {}", b.name)
+            // git's `-a` names a remote-tracking branch `remotes/origin/main` so
+            // it cannot be read as a local branch; its `-r` names it
+            // `origin/main`. `--json` keeps the short name either way.
+            let shown = match b.kind {
+                BranchKind::Remote if all => format!("remotes/{}", b.name),
+                _ => b.name.clone(),
             };
+            let name = if b.is_head { format!("* {shown}") } else { format!("  {shown}") };
             let upstream = match (&b.upstream, b.upstream_gone) {
                 (Some(u), true) => format!("{u} (gone)"),
                 (Some(u), false) => match (b.ahead, b.behind) {

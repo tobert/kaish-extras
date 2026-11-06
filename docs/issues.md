@@ -1125,10 +1125,6 @@ repository size, not result size.
   kaijutsu's `git log --oneline` prints `c6eba240`, ours `c6eba24`. Same
   shape as T4 for the patch `index` line. Harmless until two prefixes
   collide; then two commits print one oid.
-- **R6 — `git branch -a` names remote rows `origin/main`; git's `-a` prints
-  `remotes/origin/main`** (its `-r` prints `origin/main`). docs/git.md calls
-  the strip a choice; `tests/spellings.rs`'s `-a` test uses `contains`, which
-  cannot tell the two apart. Compare against git's `-a` output and decide.
 - **R7 — small refusal gaps.** `git status -uno` may miss the `-u` hint,
   depending on the token clap reports for a clustered short (unpinned).
   `git log -p` is refused naming `--patch`, a flag the caller did not type.
