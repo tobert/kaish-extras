@@ -66,6 +66,13 @@ fn config_flag(repo: &WriteRepo, section: &str, key: &str) -> Result<Option<bool
 /// Refuse when the repository is in a state an index write must not run in,
 /// and return the settings the write needs. Writes nothing.
 pub(crate) fn ensure_writable(repo: &WriteRepo, command: &str) -> Result<StagePolicy, GitError> {
+    ensure_writable_with(repo, command, true)
+}
+
+/// [`ensure_writable`], where `index_hook` says whether a `post-index-change`
+/// hook refuses. `commit` passes `false` and does its own hook accounting,
+/// because an embedder's hook provider changes the answer.
+pub(crate) fn ensure_writable_with(repo: &WriteRepo, command: &str, index_hook: bool) -> Result<StagePolicy, GitError> {
     let op = repo.read().operation();
     if repo.read().work_dir().is_none() {
         return Err(GitError::NeedsWorktree { operation: op, repo: repo.git_dir().to_path_buf() });
@@ -110,7 +117,9 @@ pub(crate) fn ensure_writable(repo: &WriteRepo, command: &str) -> Result<StagePo
         bad("core.attributesFile", "is set to a file this shell does not read", "Unset it with real git, outside this shell: git config --unset core.attributesFile.".into())?;
     }
 
-    ensure_no_index_hook(repo, command)?;
+    if index_hook {
+        ensure_no_index_hook(repo, command)?;
+    }
 
     let autocrlf = match config_last(repo, "core", "autocrlf")?.as_deref() {
         None => Autocrlf::Off,
@@ -129,30 +138,37 @@ pub(crate) fn ensure_writable(repo: &WriteRepo, command: &str) -> Result<StagePo
     })
 }
 
-/// Git runs `post-index-change` after it writes the index. This shell cannot
-/// run a hook, so a repository that has one is refused rather than skipped.
-fn ensure_no_index_hook(repo: &WriteRepo, command: &str) -> Result<(), GitError> {
-    const HOOK: &str = "post-index-change";
-    let dir = match config_last(repo, "core", "hookspath")? {
-        None => repo.common_dir().join("hooks"),
+/// The directory git looks for hooks in: `core.hooksPath` when the
+/// repository sets it at all, else `<common dir>/hooks`.
+///
+/// A `hooksPath` outside the working tree is refused, not followed: this
+/// shell cannot look there, so it cannot tell which hooks would run.
+pub(crate) fn hooks_dir(repo: &WriteRepo, command: &str) -> Result<std::path::PathBuf, GitError> {
+    match config_last(repo, "core", "hookspath")? {
+        None => Ok(repo.common_dir().join("hooks")),
         Some(path) => {
             let p = Path::new(&path);
             let inside = !p.is_absolute()
                 && p.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir));
             match (inside, repo.read().work_dir()) {
-                (true, Some(work)) => work.join(p),
-                _ => {
-                    return refuse(
-                        4,
-                        command,
-                        "core.hooksPath points outside the working tree, so this shell cannot tell whether a post-index-change hook would run.",
-                        "Use real git for this write, outside this shell: git add <path>.",
-                        Override::Repository,
-                    )
-                }
+                (true, Some(work)) => Ok(work.join(p)),
+                _ => refuse(
+                    4,
+                    command,
+                    "core.hooksPath points outside the working tree, so this shell cannot tell whether a hook would run.",
+                    "Use real git for this write, outside this shell, for example: git add <path>.",
+                    Override::Repository,
+                ),
             }
         }
-    };
+    }
+}
+
+/// Git runs `post-index-change` after it writes the index. This shell cannot
+/// run a hook, so a repository that has one is refused rather than skipped.
+fn ensure_no_index_hook(repo: &WriteRepo, command: &str) -> Result<(), GitError> {
+    const HOOK: &str = "post-index-change";
+    let dir = hooks_dir(repo, command)?;
     if std::fs::symlink_metadata(dir.join(HOOK)).is_ok() {
         return refuse(
             4,

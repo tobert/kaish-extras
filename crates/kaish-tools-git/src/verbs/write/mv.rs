@@ -113,7 +113,7 @@ pub(crate) fn run(repo: &WriteRepo, opts: &MvOptions) -> Result<Outcome, GitErro
     tx.commit(repo)?;
 
     let pairs: Vec<[&str; 2]> = moves.iter().map(|m| [m.src.as_str(), m.dst.as_str()]).collect();
-    Ok(Outcome { text: String::new(), json: serde_json::json!({ "moved": pairs }) })
+    Ok(Outcome { text: String::new(), err: String::new(), json: serde_json::json!({ "moved": pairs }) })
 }
 
 fn any_leaf(repo: &WriteRepo, rel: &str) -> Result<std::path::PathBuf, GitError> {

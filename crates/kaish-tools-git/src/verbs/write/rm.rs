@@ -109,7 +109,7 @@ pub(crate) fn run(repo: &WriteRepo, opts: &RmOptions) -> Result<Outcome, GitErro
     tx.commit(repo)?;
 
     let text: String = plan.paths.iter().map(|p| format!("rm '{p}'\n")).collect();
-    Ok(Outcome { text, json: serde_json::json!({ "removed": plan.paths, "cached": opts.cached }) })
+    Ok(Outcome { text, err: String::new(), json: serde_json::json!({ "removed": plan.paths, "cached": opts.cached }) })
 }
 
 /// Git removes the directories a removal leaves empty, up to the root.

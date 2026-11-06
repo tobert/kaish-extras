@@ -89,10 +89,10 @@ pub(crate) struct AddOptions {
 }
 
 #[derive(Default)]
-struct Plan {
-    files: Vec<Staged>,
-    removals: Vec<String>,
-    gitlinks: Vec<(String, ObjectId, Stat)>,
+pub(crate) struct Plan {
+    pub(crate) files: Vec<Staged>,
+    pub(crate) removals: Vec<String>,
+    pub(crate) gitlinks: Vec<(String, ObjectId, Stat)>,
     added: Vec<String>,
     modified: Vec<String>,
     refreshed: usize,
@@ -109,6 +109,7 @@ pub(crate) fn run(repo: &WriteRepo, opts: &AddOptions) -> Result<Outcome, GitErr
     if opts.specs.is_empty() && !opts.all && !opts.update {
         return Ok(Outcome {
             text: "Nothing specified, nothing added.\n".to_string(),
+            err: String::new(),
             json: serde_json::json!({ "added": [], "modified": [], "removed": [], "refreshed": 0 }),
         });
     }
@@ -145,6 +146,7 @@ pub(crate) fn run(repo: &WriteRepo, opts: &AddOptions) -> Result<Outcome, GitErr
 fn report(plan: &Plan) -> Outcome {
     Outcome {
         text: String::new(),
+        err: String::new(),
         json: serde_json::json!({
             "added": plan.added,
             "modified": plan.modified,
@@ -203,7 +205,7 @@ impl Tracked {
     }
 }
 
-fn build(
+pub(crate) fn build(
     repo: &WriteRepo,
     state: &gix_index::State,
     index_mtime: Option<filetime::FileTime>,
@@ -420,7 +422,7 @@ fn unchanged(
 
 /// The HEAD commit of a nested repository, or `None` when the directory has no
 /// repository of its own (an empty submodule directory).
-fn gitlink_head(repo: &WriteRepo, abs: &Path) -> Result<Option<ObjectId>, GitError> {
+pub(crate) fn gitlink_head(repo: &WriteRepo, abs: &Path) -> Result<Option<ObjectId>, GitError> {
     if std::fs::symlink_metadata(abs.join(".git")).is_err() {
         return Ok(None);
     }

@@ -13,6 +13,12 @@
 //! No `mod.rs`, by house rule.
 
 pub(crate) mod add;
+pub(crate) mod commit;
+pub(crate) mod ident;
+pub(crate) mod message;
+pub(crate) mod refmove;
+pub(crate) mod tree;
+pub(crate) mod var;
 pub(crate) mod attributes;
 pub(crate) mod containment;
 pub(crate) mod reflog;

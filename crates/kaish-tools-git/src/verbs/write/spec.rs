@@ -11,6 +11,9 @@ use crate::pathfilter::PathFilter;
 /// typed summary for `--json`.
 pub(crate) struct Outcome {
     pub(crate) text: String,
+    /// Notes for stderr that go with a success: a hook's output, a detached
+    /// HEAD. Empty for most verbs.
+    pub(crate) err: String,
     pub(crate) json: serde_json::Value,
 }
 

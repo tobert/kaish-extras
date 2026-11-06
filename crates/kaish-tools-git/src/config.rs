@@ -46,9 +46,9 @@ pub enum Profile {
     /// The read profile: every verb is proven read-only by the `.git`
     /// fingerprint test (architecture.md D.4).
     Read,
-    /// The commit profile (docs/design/git-write-profile.md). Phase 1b
-    /// enables the index verbs: `add`, `rm`, `mv`, `restore --staged` and
-    /// `reset` with no revision. `commit` is not built yet.
+    /// The commit profile (docs/design/git-write-profile.md): the index
+    /// verbs (`add`, `rm`, `mv`, `restore --staged`, `reset` with no
+    /// revision), `commit` and `var`.
     #[cfg(feature = "commit")]
     Commit,
 }
@@ -119,6 +119,13 @@ pub enum Verb {
     /// `git reset` with no revision — unstage paths (commit profile).
     #[cfg(feature = "commit")]
     Reset,
+    /// `git commit` — write a commit from the index (commit profile).
+    #[cfg(feature = "commit")]
+    Commit,
+    /// `git var GIT_AUTHOR_IDENT` and `GIT_COMMITTER_IDENT` — the identity the
+    /// next commit will use (commit profile).
+    #[cfg(feature = "commit")]
+    Var,
 }
 
 impl Verb {
@@ -135,11 +142,12 @@ impl Verb {
         Verb::WorktreeList,
     ];
 
-    /// The verbs the commit profile adds, in the order phase 1b built them.
+    /// The verbs the commit profile adds, in the order they were built.
     /// Not part of [`Verb::ALL`]: the read profile never has them, and
     /// `GitConfig::read_only` publishes exactly `ALL`.
     #[cfg(feature = "commit")]
-    pub const WRITE: &'static [Verb] = &[Verb::Add, Verb::Rm, Verb::Mv, Verb::Restore, Verb::Reset];
+    pub const WRITE: &'static [Verb] =
+        &[Verb::Add, Verb::Rm, Verb::Mv, Verb::Restore, Verb::Reset, Verb::Commit, Verb::Var];
 
     /// Every verb this build knows, read and write.
     pub fn known() -> impl Iterator<Item = Verb> {
@@ -176,6 +184,10 @@ impl Verb {
             Verb::Restore => "restore",
             #[cfg(feature = "commit")]
             Verb::Reset => "reset",
+            #[cfg(feature = "commit")]
+            Verb::Commit => "commit",
+            #[cfg(feature = "commit")]
+            Verb::Var => "var",
         }
     }
 
@@ -192,7 +204,13 @@ impl Verb {
             | Verb::Tag
             | Verb::WorktreeList => Profile::Read,
             #[cfg(feature = "commit")]
-            Verb::Add | Verb::Rm | Verb::Mv | Verb::Restore | Verb::Reset => Profile::Commit,
+            Verb::Add
+            | Verb::Rm
+            | Verb::Mv
+            | Verb::Restore
+            | Verb::Reset
+            | Verb::Commit
+            | Verb::Var => Profile::Commit,
         }
     }
 }

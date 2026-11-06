@@ -183,7 +183,7 @@ fn report(plan: &Plan) -> Outcome {
     let mut unstaged: Vec<&str> = plan.restore.iter().map(|(p, _, _)| p.as_str()).collect();
     unstaged.extend(plan.remove.iter().map(String::as_str));
     unstaged.sort();
-    Outcome { text: String::new(), json: serde_json::json!({ "unstaged": unstaged }) }
+    Outcome { text: String::new(), err: String::new(), json: serde_json::json!({ "unstaged": unstaged }) }
 }
 
 fn build(

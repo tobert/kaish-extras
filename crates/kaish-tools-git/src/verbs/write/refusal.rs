@@ -32,6 +32,9 @@ pub(crate) enum Override {
     /// A flag of this same verb overrides it, and the caller grants it by
     /// typing the flag.
     Flag(&'static str),
+    /// Variables in this shell override it, and the caller grants that by
+    /// setting them. The embedder can also pin the value.
+    Variables,
 }
 
 impl Override {
@@ -44,6 +47,10 @@ impl Override {
                                      repository, which you or real git can change."
                 .to_string(),
             Override::Never => "There is no flag or setting that overrides this; this shell never does it."
+                .to_string(),
+            Override::Variables => "Setting those variables in this shell overrides this; you grant \
+                                    it by setting them, and the program embedding this shell can \
+                                    pin the value instead."
                 .to_string(),
             Override::Flag(flag) => {
                 format!("The flag {flag} overrides this; you grant it by typing it.")
