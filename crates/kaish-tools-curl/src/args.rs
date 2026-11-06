@@ -65,6 +65,7 @@ pub(crate) const HONORED_FLAGS: &[&str] = &[
     "--write-out",
     "--max-time",
     "--connect-timeout",
+    "--continue-at",
     "--unix-socket",
 ];
 
@@ -115,6 +116,11 @@ pub struct Request {
     pub forms: Vec<crate::form::FormPart>,
     /// `-T`: the file whose bytes are the body, as typed.
     pub upload_file: Option<String>,
+    /// `-C -`: resume the `-o` / `-O` file from its current size.
+    pub resume: bool,
+    /// The size the file had when `input::prepare` added `Range: bytes=N-`;
+    /// `None` when no Range was sent (no file yet, or an empty one).
+    pub resume_from: Option<u64>,
     /// Header name/value pairs, including the `User-Agent` (the caller's or
     /// [`DEFAULT_USER_AGENT`]) and any `Referer` from `-e`.
     pub headers: Vec<(String, String)>,
@@ -265,6 +271,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let mut unix_socket: Option<String> = None;
     let mut json_output = false;
     let mut get = false;
+    let mut resume = false;
     let mut upload_file: Option<String> = None;
     let mut remote_name = false;
     let mut output_dir: Option<String> = None;
@@ -351,6 +358,15 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
                         "only one '-T' file per invocation is supported (exit 2), and both '{first}' and '{path}' were given. No request was sent. Run curl once per file."
                     )));
                 }
+            }
+            "-C" | "--continue-at" => {
+                let offset = value(&mut i)?;
+                if offset != "-" {
+                    return Err(CurlError::Usage(format!(
+                        "'{argv_flag} {offset}' takes only '-' (exit 2), and no request was sent. '-C -' resumes from the size of the '-o' / '-O' file."
+                    )));
+                }
+                resume = true;
             }
             "-G" | "--get" => get = true,
             "-O" | "--remote-name" => remote_name = true,
@@ -458,6 +474,23 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
 
     output_file = resolve_output(output_file, remote_name, output_dir.clone(), &url)?;
 
+    if resume {
+        let problem = if output_file.is_none() {
+            Some("needs '-o <file>' or '-O', because it resumes that file (curl would silently start over)")
+        } else if include_headers || head_only {
+            Some("cannot be combined with '-i' or '-I', because headers would be written into the middle of the file")
+        } else if headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("range")) {
+            Some("sets the Range header itself, so '-H Range: ...' cannot be combined with it")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            return Err(CurlError::Usage(format!(
+                "'-C -' {problem} (exit 2), and no request was sent."
+            )));
+        }
+    }
+
     if upload_file.is_some() {
         // curl refuses -d, -F and -I with -T too (exit 2); it accepts -G and
         // ignores it, which would be a quiet difference here.
@@ -539,6 +572,8 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         get,
         forms,
         upload_file,
+        resume,
+        resume_from: None,
         headers,
         include_headers,
         head_only,

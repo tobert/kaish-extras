@@ -105,6 +105,11 @@ pub enum CurlError {
         reason: String,
     },
 
+    /// A resumed download (`-C -`) got an answer that cannot be appended to
+    /// the file. Exit 33, curl's "range error". The file is left as it was.
+    #[error("curl: {0}")]
+    Range(String),
+
     /// The command line asked for something this build refuses before any
     /// request is made. Exit 2, curl's "failed init".
     #[error("curl: {0}")]
@@ -129,6 +134,7 @@ impl CurlError {
             CurlError::CertificateNotAuthenticated { .. } => 60,
             CurlError::ReadFailed { .. } => 26,
             CurlError::WriteFailed { .. } => 23,
+            CurlError::Range(_) => 33,
             CurlError::Usage(_) => 2,
             CurlError::Transport(_) => 1,
         }

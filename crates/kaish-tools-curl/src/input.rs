@@ -14,6 +14,7 @@
 //! together.
 
 use kaish_tool_api::ToolCtx;
+use kaish_types::backend::BackendError;
 use kaish_types::DirEntryKind;
 
 use crate::args::{percent_encode, BodyPart, Request};
@@ -25,6 +26,9 @@ pub async fn prepare(
     ctx: &dyn ToolCtx,
     max_bytes: u64,
 ) -> Result<(), CurlError> {
+    if req.resume {
+        add_resume_range(req, ctx).await?;
+    }
     if let Some(path) = req.upload_file.clone() {
         req.body = read_file(ctx, &path, max_bytes).await?;
         add_file_name_to_url(&mut req.url, &path);
@@ -206,4 +210,27 @@ fn add_file_name_to_url(url: &mut String, path: &str) {
         segments.pop_if_empty().push(name);
     }
     *url = parsed.to_string();
+}
+
+/// `-C -`: ask for the bytes after what the output file already holds. A
+/// missing or empty file sends no Range, and the download starts from zero.
+async fn add_resume_range(req: &mut Request, ctx: &dyn ToolCtx) -> Result<(), CurlError> {
+    let path = req.output_file.as_deref().expect("the parser requires -o or -O with -C -");
+    let vfs = ctx.resolve_path(path);
+    let unusable = |reason: String| CurlError::WriteFailed {
+        path: vfs.display().to_string(),
+        reason,
+    };
+    match ctx.backend().stat(&vfs).await {
+        Ok(entry) if entry.kind == DirEntryKind::Directory => {
+            Err(unusable("it is a directory".into()))
+        }
+        Ok(entry) if entry.size > 0 => {
+            req.headers.push(("Range".into(), format!("bytes={}-", entry.size)));
+            req.resume_from = Some(entry.size);
+            Ok(())
+        }
+        Ok(_) | Err(BackendError::NotFound(_)) => Ok(()),
+        Err(e) => Err(unusable(e.to_string())),
+    }
 }

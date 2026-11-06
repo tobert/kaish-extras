@@ -771,3 +771,129 @@ async fn upload_file_counts_against_the_byte_limit() {
     assert!(p.ours.err.contains("1024") && p.ours.err.contains("big"), "{}", p.ours.err);
     assert!(p.ours_req.is_empty());
 }
+
+// ── 6. -C - / --continue-at ─────────────────────────────────────────────
+
+const HUNDRED: &[u8] = b"0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789";
+
+/// `/f` honors Range (206, or 416 past the end), `/ignore` always answers
+/// 200 with everything, `/416` always answers 416, `/gone` is a 404.
+fn range_server() -> TcpGuard {
+    Server::builder()
+        .route_fn("/f", |req| {
+            let Some(range) = req.header("Range") else {
+                return Response::new(200).body(HUNDRED).header("Accept-Ranges", "bytes");
+            };
+            let start: usize = range.strip_prefix("bytes=").and_then(|r| r.strip_suffix('-')).and_then(|n| n.parse().ok()).expect("bytes=N-");
+            if start >= HUNDRED.len() {
+                return Response::new(416).header("Content-Range", format!("bytes */{}", HUNDRED.len()));
+            }
+            Response::new(206)
+                .header("Content-Range", format!("bytes {start}-{}/{}", HUNDRED.len() - 1, HUNDRED.len()))
+                .body(&HUNDRED[start..])
+        })
+        .route("/ignore", Response::new(200).body(HUNDRED))
+        .route("/416", Response::new(416).header("Content-Range", "bytes */100"))
+        .route("/gone", Response::json(404, "{\"error\":\"gone\"}\n"))
+        .route_fn("/wrongrange", |_| {
+            Response::new(206).header("Content-Range", "bytes 0-99/100").body(HUNDRED)
+        })
+        .start_tcp()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn continue_at_resumes_from_the_files_size() {
+    let server = range_server();
+    for (args, seed, range, final_len) in [
+        ("-s -C - -o out \"$URL/f\"", Some(&HUNDRED[..28]), Some("bytes=28-"), 100),
+        ("-s --continue-at - -o out \"$URL/f\"", Some(&HUNDRED[..1]), Some("bytes=1-"), 100),
+        // A missing file and an empty one both start from zero, with no Range.
+        ("-s -C - -o out \"$URL/f\"", None, None, 100),
+        ("-s -C - -o out \"$URL/f\"", Some(&b""[..]), None, 100),
+        // Already whole: the server says 416, and nothing changes.
+        ("-s -C - -o out \"$URL/f\"", Some(HUNDRED), Some("bytes=100-"), 100),
+    ] {
+        let files: Vec<(&str, &[u8])> = seed.map(|s| ("out", s)).into_iter().collect();
+        let p = compare(&server, args, &files).await;
+        assert_eq!(p.ours.code, 0, "{args} seed {:?}: {}", seed.map(<[u8]>::len), p.ours.err);
+        assert_eq!(p.ours_req.len(), 1);
+        assert_eq!(Wire::of(&p.ours_req[0]).range.as_deref(), range, "{args}");
+        let got = p.fx.file("out").await.expect("the file exists");
+        assert_eq!(got, HUNDRED, "{args}: appended to the same bytes real curl ends with");
+        assert_eq!(got.len(), final_len);
+        if let Some(t) = &p.theirs {
+            assert_eq!(t.file("out").as_deref(), Some(got.as_slice()), "{args}: oracle's file");
+        }
+        p.assert_same(args);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn continue_at_with_remote_name_resumes_the_named_file() {
+    let server = range_server();
+    let p = compare(&server, "-s -C - -O \"$URL/f\"", &[("f", &HUNDRED[..40])]).await;
+    assert_eq!(p.ours.code, 0, "{}", p.ours.err);
+    assert_eq!(Wire::of(&p.ours_req[0]).range.as_deref(), Some("bytes=40-"));
+    assert_eq!(p.fx.file("f").await.as_deref(), Some(HUNDRED));
+    p.assert_same("-C - -O");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_ignores_range_exits_33_and_leaves_the_file_alone() {
+    // Appending a full 200 body to a partial file would corrupt it.
+    let server = range_server();
+    let p = compare(&server, "-s -C - -o out \"$URL/ignore\"", &[("out", b"012345")]).await;
+    assert_eq!(p.ours.code, 33, "{}", p.ours.err);
+    assert!(p.ours.err.contains("range"), "{}", p.ours.err);
+    assert_eq!(p.fx.file("out").await.as_deref(), Some(&b"012345"[..]));
+    if let Some(t) = &p.theirs {
+        assert_eq!(t.code, 33, "control: real curl");
+        assert_eq!(t.file("out").as_deref(), Some(&b"012345"[..]));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_416_is_success_with_the_file_unchanged_even_under_fail() {
+    let server = range_server();
+    for args in ["-s -C - -o out \"$URL/416\"", "-s -f -C - -o out \"$URL/416\""] {
+        let p = compare(&server, args, &[("out", b"012345")]).await;
+        assert_eq!(p.ours.code, 0, "{args}: {}", p.ours.err);
+        assert_eq!(p.fx.file("out").await.as_deref(), Some(&b"012345"[..]), "{args}");
+        p.assert_same(args);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn continue_at_never_appends_something_that_is_not_the_next_bytes() {
+    let server = range_server();
+    // A 206 whose Content-Range starts elsewhere would splice the wrong
+    // bytes into the file.
+    let p = compare(&server, "-s -C - -o out \"$URL/wrongrange\"", &[("out", b"012345")]).await;
+    assert_eq!(p.ours.code, 33, "{}", p.ours.err);
+    assert!(p.ours.err.contains("6"), "name the offset it asked for: {}", p.ours.err);
+    assert_eq!(p.fx.file("out").await.as_deref(), Some(&b"012345"[..]));
+    // An error page is not the next bytes either.
+    let p = compare(&server, "-s -C - -o out \"$URL/gone\"", &[("out", b"012345")]).await;
+    assert_eq!(p.ours.code, 33, "{}", p.ours.err);
+    assert!(p.ours.err.contains("404"), "{}", p.ours.err);
+    assert_eq!(p.fx.file("out").await.as_deref(), Some(&b"012345"[..]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn continue_at_refusals_name_the_fix_and_send_nothing() {
+    let server = range_server();
+    for (args, needle) in [
+        ("-s -C - \"$URL/f\"", "-o"),                           // nothing to resume
+        ("-s -C 10 -o out \"$URL/f\"", "-C -"),                 // only the file-size form
+        ("-s -C - -i -o out \"$URL/f\"", "-i"),                 // headers would land mid-file
+        ("-s -C - -I -o out \"$URL/f\"", "-I"),
+        ("-s -C - -H 'Range: bytes=0-1' -o out \"$URL/f\"", "Range"),
+    ] {
+        let p = compare(&server, args, &[("out", b"012345")]).await;
+        assert_eq!(p.ours.code, 2, "{args}: {}", p.ours.err);
+        assert!(p.ours.err.contains(needle), "{args}: {}", p.ours.err);
+        assert!(p.ours.err.contains("no request was sent"), "{args}: {}", p.ours.err);
+        assert!(p.ours_req.is_empty(), "{args}");
+        assert_eq!(p.fx.file("out").await.as_deref(), Some(&b"012345"[..]), "{args}");
+    }
+}

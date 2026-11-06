@@ -107,6 +107,15 @@ impl CurlTool {
             #[arg(short = 'o', long)]
             output: Option<String>,
 
+            /// Resume the -o or -O file: send 'Range: bytes=<size>-' and append the
+            /// 206 body. Only the value '-' (the file's size) is accepted. A
+            /// missing or empty file downloads from the start. A 416 exits 0
+            /// with the file as it was; a 200 or any other status exits 33 and
+            /// leaves the file alone. Needs -o or -O; exits 2 with -i, -I or
+            /// -H Range.
+            #[arg(short = 'C', long)]
+            continue_at: Option<String>,
+
             /// Write the body to a file named after the last segment of the URL
             /// path, in the current directory, replacing any file of that name.
             /// The name is not percent-decoded. A URL with no segment, or
@@ -253,6 +262,7 @@ impl Tool for CurlTool {
 
         let output_file = req.output_file.clone();
         let output_dir = req.output_dir.clone();
+        let resume_from = req.resume_from;
         let render = Render {
             include_headers: req.include_headers,
             head_only: req.head_only,
@@ -269,7 +279,7 @@ impl Tool for CurlTool {
         let elapsed = started.elapsed();
 
         match result {
-            Ok(response) => handle_success(output_file.as_deref(), output_dir.as_deref(), response, render, elapsed, ctx).await,
+            Ok(response) => handle_success(output_file.as_deref(), output_dir.as_deref(), resume_from, response, render, elapsed, ctx).await,
             Err(err) => error_result(err),
         }
     }
@@ -406,6 +416,7 @@ struct Render {
 async fn handle_success(
     output_file: Option<&str>,
     output_dir: Option<&str>,
+    resume_from: Option<u64>,
     response: crate::model::Response,
     render: Render,
     elapsed: std::time::Duration,
@@ -420,6 +431,13 @@ async fn handle_success(
         .unwrap_or_default();
     let failure = || CurlError::HttpFailure { status };
 
+    // `-C -` and a 416: the server has no bytes past the end of the file,
+    // which curl takes to mean the file is whole. Nothing is written, and the
+    // exit is 0 even under `-f`.
+    if resume_from.is_some() && status == 416 {
+        return ExecResult::success(write_out_text);
+    }
+
     // `-f`: the body is dropped, the exit is 22, and `-w` still prints, as
     // in curl. Nothing is written to the `-o` file.
     if failed && !render.fail_with_body {
@@ -429,7 +447,10 @@ async fn handle_success(
         return r;
     }
 
-    let mut result = deliver(output_file, output_dir, response, &render, ctx).await;
+    let mut result = match (resume_from, output_file) {
+        (Some(from), Some(path)) => resume_append(path, from, response, ctx).await,
+        _ => deliver(output_file, output_dir, response, &render, ctx).await,
+    };
     if result.code != 0 {
         return result;
     }
@@ -446,6 +467,64 @@ async fn handle_success(
         result.code = failure().exit_code();
         result.err = failure().to_string();
     }
+    result
+}
+
+/// `-C -`: append the body to the file, if and only if the server answered
+/// with exactly the bytes that follow it. Anything else leaves the file as it
+/// was, because appending a whole body or an error page to a partial file
+/// corrupts it.
+async fn resume_append(
+    path: &str,
+    from: u64,
+    response: crate::model::Response,
+    ctx: &mut dyn ToolCtx,
+) -> ExecResult {
+    let status = response.status;
+    let unchanged = |why: String| {
+        error_result(CurlError::Range(format!(
+            "{why}. '{path}' was left unchanged. Re-run without '-C -' to download it again."
+        )))
+    };
+    if status == 200 {
+        return unchanged(
+            "the server ignored the Range request (it answered 200, not 206) and does not seem to support byte ranges, so the download cannot resume".to_string(),
+        );
+    }
+    if status != 206 {
+        return unchanged(format!(
+            "the request for bytes {from}- was answered {status}, not 206"
+        ));
+    }
+    let starts_at = response
+        .headers
+        .get("content-range")
+        .and_then(|v| v.first())
+        .and_then(|v| v.strip_prefix("bytes "))
+        .and_then(|v| v.split_once('-'))
+        .and_then(|(start, _)| start.trim().parse::<u64>().ok());
+    if starts_at != Some(from) {
+        return unchanged(format!(
+            "the server's Content-Range ({}) does not start at byte {from}",
+            response
+                .headers
+                .get("content-range")
+                .and_then(|v| v.first())
+                .map_or("missing", String::as_str)
+        ));
+    }
+    let vfs_path = ctx.resolve_path(path);
+    if let Err(err) = ctx.backend().append(&vfs_path, &response.body).await {
+        return error_result(CurlError::WriteFailed {
+            path: vfs_path.display().to_string(),
+            reason: err.to_string(),
+        });
+    }
+    let mut result = ExecResult::success("");
+    result.baggage.insert("curl.bytes".to_string(), response.body.len().to_string());
+    result.baggage.insert("curl.file".to_string(), vfs_path.display().to_string());
+    result.baggage.insert("curl.url".to_string(), response.url);
+    result.baggage.insert("curl.status".to_string(), status.to_string());
     result
 }
 

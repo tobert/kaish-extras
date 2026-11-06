@@ -122,13 +122,31 @@ Each fix has a test in `tests/compat.rs` that runs through a real kernel, and co
 | SW-1 `curl URL \| jq` printed `null` | fixed: `.data` is set only under `--json`; X6 closed |
 | SW-2 status line without reason phrase | fixed: `HTTP/1.1 404 Not Found` (the standard phrase; ureq drops the server's) |
 | SW-3 `-o` confirmation on stdout | fixed: `-o` prints nothing on stdout, as curl does |
-| `--data-binary -` sent the literal `-` | fixed: refused, exit 2; the `@path` message names `-d "$(cat <path>)"` |
+| `--data-binary -` sent the literal `-` | superseded on `feat/curl-cu5`: curl sends the literal `-` too (checked against 8.23), so a bare `-` is the body `-` again |
 | 3. `-w` | fixed for `http_code`, `response_code`, `time_total`, `size_download`, `url_effective`, `content_type`, `redirect_url`, `num_redirects` |
 | 4. `--fail-with-body` | fixed: exit 22 and the body prints |
 | 5. `-F` message | fixed: no longer offers `--data`; shows the hand-built multipart form (text files only). `-F` itself is open |
 | 7. `-v` message | fixed: says what is and is not available. `-v` itself stays refused |
 | 9. `-m` | fixed. `-T` open |
-| open | `-d @file`, stdin bodies, `-O`, `-F`, `-T`, `-C -`, `-G`, `content-length: 0` on bodyless requests, lowercase sorted header names |
+| open at that point | `-d @file`, stdin bodies, `-O`, `-F`, `-T`, `-C -`, `-G`, `content-length: 0` on bodyless requests, lowercase sorted header names |
+
+## Status after `feat/curl-cu5` (2026-11-06)
+
+Amy approved these on 2026-11-06. Each has cases in `tests/features.rs` that run through a real kernel over an in-memory filesystem and compare, where curl is installed, the request the server received (method, request target, `Content-Type`, `Content-Length`, `Range`, body bytes), the exit code, stdout, and files written, against curl 8.23 on the same loopback server.
+
+| item | state |
+|---|---|
+| 2. `-d @file`, `--data-binary @file`, `--data-raw`, `--data-urlencode @file` / `name@file` | done. `-d` strips every CR and LF, `--data-binary` keeps bytes, a bare `-` is the literal body. Missing file exit 26, no request. Over `Limits::max_response_bytes` refused before the read |
+| 2. stdin bodies (`@-`, `-T -`) | open: `ToolCtx` has no stdin (docs/issues.md CU47). Exit 2 naming the file form |
+| 5. `-F` | done: text, `@file`, `<file`, `;type=`, `;filename=`; parts match curl part for part. Several files in one part, `;headers=`, unknown keys, and nameless parts exit 2 |
+| 8. `-O` | done (reverses CU20), plus `--output-dir`. No name in the URL exits 2 (curl: `curl_response`). `-J` stays refused |
+| 9. `-T` | done: PUT, basename appended to a URL ending in `/` |
+| 6. `-C -` | done: 206 appends, 416 is exit 0, 200 is exit 33, the file is untouched on every failure |
+| 11. `-G` | done, including `-G --data-urlencode` (the survey's T25 idiom) |
+| `content-length: 0` on bodyless requests | fixed |
+| lowercase sorted header names | open |
+
+Two beliefs in the earlier text were wrong, and the oracle showed it. Real curl 8.23 sends `Content-Type: application/x-www-form-urlencoded` for `--data-binary` and `--data-raw` as well as `-d`; `docs/curl.md` and CU40 had said it sends none. And curl encodes a space as `+` in `--data-urlencode`, not `%20` (the `C-enc` tag above); this build now does the same.
 
 ## Evidence: every USELESS-ERROR and SILENT-WRONG spelling
 
