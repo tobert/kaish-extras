@@ -216,7 +216,8 @@ pub(crate) fn refuse(
                 _ => String::new(),
             };
             // `--pretty=oneline` is the flag `--pretty` with a value.
-            let first = arg.split_once('=').map_or(arg.as_str(), |(flag, _)| flag).to_string();
+            let first = arg.split_once('=').map_or(arg.as_str(), |(flag, _)| flag);
+            let first = whole_word(first, argv);
             // clap stops at the first unknown flag. Reporting it alone costs a
             // retry per flag, so the rest of the argv is scanned for more.
             let mut flags = vec![first];
@@ -228,7 +229,7 @@ pub(crate) fn refuse(
             let mut parts = Vec::new();
             let mut lists_flags = false;
             for flag in &flags {
-                match hint(operation, flag).filter(|next| runnable(next, config)) {
+                match hint(operation, flag, cmd).filter(|next| runnable(next, config)) {
                     Some(next) => parts.push(format!("{flag} is not supported. {next}")),
                     None => {
                         parts.push(format!("{flag} is not supported."));
@@ -244,6 +245,26 @@ pub(crate) fn refuse(
         _ => format!("{}. See 'help git'", first_line(err)),
     };
     GitError::Usage { operation, message }
+}
+
+/// clap names `-5` for `-5p` and for `-p5`, the part it could not place. The
+/// caller typed one cluster, which git also refuses (`'5p' not an integer`),
+/// so the refusal names the word as typed.
+fn whole_word(flag: &str, argv: &[String]) -> String {
+    if flag.len() > 1 && flag[1..].bytes().all(|b| b.is_ascii_digit()) {
+        let longer = argv
+            .iter()
+            .take_while(|w| w.as_str() != "--")
+            .find(|w| {
+                !w.starts_with("--")
+                    && w.len() > flag.len()
+                    && (w.starts_with(flag) || w.ends_with(&flag[1..]) && w.starts_with('-'))
+            });
+        if let Some(word) = longer {
+            return word.clone();
+        }
+    }
+    flag.to_string()
 }
 
 /// The long flags and `-N` counts in `argv`, before any `--`, that `cmd` does
@@ -296,26 +317,30 @@ pub(crate) fn expand_counts(operation: &str, argv: &[String]) -> Vec<String> {
             before_marker = false;
         }
         // The word after a bare value-taking flag is that flag's value.
-        takes_value = !takes_value && matches!(word.as_str(), "-n" | "--limit" | "--rev" | "--author" | "--since" | "--until" | "--path");
+        takes_value = !takes_value && matches!(word.as_str(), "-n" | "--limit" | "--rev" | "--author" | "--since" | "--until" | "--path" | "--repo");
     }
     out
 }
 
 /// The next step for `flag` on `operation`, if there is a known one.
-fn hint(operation: &str, flag: &str) -> Option<String> {
+fn hint(operation: &str, flag: &str, cmd: &clap::Command) -> Option<String> {
     if let Some((_, _, next)) = HINTS
         .iter()
         .find(|(op, flags, _)| *op == operation && flags.contains(&flag))
     {
         return Some(format!("{next}."));
     }
-    // `git log -5`: git's count shorthand. Every verb that takes a count here
-    // spells it `-n`.
+    // `git log -5`: git's count shorthand. The spelling named is one the verb
+    // takes: `-n` where it has one, else `--limit`, else none.
     let count = flag.strip_prefix('-')?;
-    if !count.is_empty() && count.bytes().all(|b| b.is_ascii_digit()) {
-        return Some(format!("Write the count as '-n {count}'."));
+    if count.is_empty() || !count.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
     }
-    None
+    let limit = cmd.get_arguments().find(|a| a.get_long() == Some("limit"))?;
+    Some(match limit.get_short() {
+        Some(short) => format!("Write the count as '-{short} {count}'."),
+        None => format!("Write the count as '--limit {count}'."),
+    })
 }
 
 /// The flags a verb accepts, as an agent would type them: `--limit (-n)`.
@@ -416,6 +441,7 @@ mod tests {
         assert_eq!(expand_counts("log", &v(&["-12", "--oneline"])), v(&["-n", "12", "--oneline"]));
         assert_eq!(expand_counts("log", &v(&["--oneline", "--", "-2"])), v(&["--oneline", "--", "-2"]));
         assert_eq!(expand_counts("log", &v(&["--author", "-3"])), v(&["--author", "-3"]));
+        assert_eq!(expand_counts("log", &v(&["--repo", "-3", "-2"])), v(&["--repo", "-3", "-n", "2"]));
         assert_eq!(expand_counts("show", &v(&["-2"])), v(&["-2"]));
     }
 

@@ -195,9 +195,9 @@ async fn log_oneline_leaves_json_unchanged() {
 async fn log_on_a_branch_with_a_limit_and_oneline() {
     let (_f, root) = repo();
     // The bench's exact words, with this fixture's branch name.
-    let r = run(&root, "git log main --limit 10 --oneline").await;
+    let r = run(&root, "git log main --limit 1 --oneline").await;
     assert_eq!(r.code, 0, "{}", r.err);
-    assert_eq!(r.out.lines().count(), 3, "{}", r.out);
+    assert_eq!(r.out.lines().count(), 1, "the limit cuts three commits to one: {}", r.out);
 }
 
 #[tokio::test]
@@ -287,6 +287,39 @@ async fn every_refused_flag_is_reported_in_one_error() {
     // Each flag's own next step is carried, not only the first one's.
     assert!(err.contains("--first-parent"), "--graph's step: {err}");
     assert!(err.contains("git tag"), "--decorate's step: {err}");
+    // A count the caller wrote as `-1` is expanded before it is refused, so
+    // it is never reported as a flag.
+    assert!(!err.contains("-1 is not supported"), "the count is not a refused flag: {err}");
+}
+
+#[tokio::test]
+async fn a_count_beside_an_unknown_flag_is_not_reported_as_unsupported() {
+    let (_f, root) = repo();
+    let err = refused(&root, "git log -1 --frobnicate", &["--frobnicate is not supported"]).await;
+    assert!(!err.contains("-1 is not"), "{err}");
+    assert!(!err.contains("-n is not"), "{err}");
+}
+
+#[tokio::test]
+async fn a_count_hint_names_only_a_spelling_the_verb_takes() {
+    let (_f, root) = repo();
+    // branch takes -n; status takes --limit only; info takes no count.
+    let err = refused(&root, "git branch -5", &["Write the count as '-n 5'"]).await;
+    assert!(!err.contains("--limit"), "{err}");
+    let err = refused(&root, "git status -5", &["-5 is not supported", "Write the count as '--limit 5'"]).await;
+    assert!(!err.contains("'-n 5'"), "status has no -n: {err}");
+    let err = refused(&root, "git info -5", &["-5 is not supported"]).await;
+    assert!(!err.contains("Write the count"), "info takes no count: {err}");
+}
+
+#[tokio::test]
+async fn a_digit_run_with_a_trailing_flag_names_the_whole_word() {
+    let (_f, root) = repo();
+    // git itself: `git log -5p` is "'5p' not an integer"; neither half works.
+    let err = refused(&root, "git log -5p", &["-5p is not supported"]).await;
+    assert!(!err.contains("'-n 5'"), "{err}");
+    let err = refused(&root, "git log -p5", &["-p"]).await;
+    assert!(!err.contains("-5 is not supported"), "{err}");
 }
 
 #[tokio::test]

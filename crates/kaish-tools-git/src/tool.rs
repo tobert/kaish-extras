@@ -1759,8 +1759,8 @@ fn parse_leaf<P: Parser>(
     // Boxed: `ExecResult` is a wide type, and an unboxed `Err` variant makes
     // every `Ok` return pay for it (clippy::result_large_err).
     let expanded = crate::spelling::expand_counts(operation, argv);
-    P::try_parse_from(std::iter::once(format!("git {operation}")).chain(expanded))
-        .map_err(|e| Box::new(failure(crate::spelling::refuse(operation, &e, &P::command(), config, argv))))
+    P::try_parse_from(std::iter::once(format!("git {operation}")).chain(expanded.iter().cloned()))
+        .map_err(|e| Box::new(failure(crate::spelling::refuse(operation, &e, &P::command(), config, &expanded))))
 }
 
 /// A verb's operands, split at git's `--` end-of-options marker.
