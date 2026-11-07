@@ -63,6 +63,30 @@ fn config_flag(repo: &WriteRepo, section: &str, key: &str) -> Result<Option<bool
     Ok(config_last(repo, section, key)?.and_then(|v| parse_bool(&v)))
 }
 
+/// Refuse when the repository has no working tree, or a merge, rebase,
+/// cherry-pick, revert or bisect is in progress. `what` completes "this shell
+/// does not ... in the middle of one".
+pub(crate) fn ensure_idle(repo: &WriteRepo, command: &str, what: &str) -> Result<(), GitError> {
+    let op = repo.read().operation();
+    if repo.read().work_dir().is_none() {
+        return Err(GitError::NeedsWorktree { operation: op, repo: repo.git_dir().to_path_buf() });
+    }
+    for (marker, state, abort) in IN_PROGRESS {
+        // `lstat`, never `exists`: a link planted here must not make us read
+        // through it, and its presence alone answers the question.
+        if std::fs::symlink_metadata(repo.git_dir().join(marker)).is_ok() {
+            return refuse(
+                4,
+                command,
+                format!("{state} is in progress in this repository, and this shell does not {what} in the middle of one."),
+                format!("Finish or end it with real git, outside this shell: {abort}."),
+                Override::Repository,
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Refuse when the repository is in a state an index write must not run in,
 /// and return the settings the write needs. Writes nothing.
 pub(crate) fn ensure_writable(repo: &WriteRepo, command: &str) -> Result<StagePolicy, GitError> {
@@ -73,24 +97,7 @@ pub(crate) fn ensure_writable(repo: &WriteRepo, command: &str) -> Result<StagePo
 /// hook refuses. `commit` passes `false` and does its own hook accounting,
 /// because an embedder's hook provider changes the answer.
 pub(crate) fn ensure_writable_with(repo: &WriteRepo, command: &str, index_hook: bool) -> Result<StagePolicy, GitError> {
-    let op = repo.read().operation();
-    if repo.read().work_dir().is_none() {
-        return Err(GitError::NeedsWorktree { operation: op, repo: repo.git_dir().to_path_buf() });
-    }
-
-    for (marker, what, abort) in IN_PROGRESS {
-        // `lstat`, never `exists`: a link planted here must not make us read
-        // through it, and its presence alone answers the question.
-        if std::fs::symlink_metadata(repo.git_dir().join(marker)).is_ok() {
-            return refuse(
-                4,
-                command,
-                format!("{what} is in progress in this repository, and this shell does not write the index in the middle of one."),
-                format!("Finish or end it with real git, outside this shell: {abort}."),
-                Override::Repository,
-            );
-        }
-    }
+    ensure_idle(repo, command, "write the index")?;
 
     let bad = |key: &str, why: &str, fix: String| {
         refuse::<()>(
@@ -200,16 +207,26 @@ fn ensure_no_index_hook(repo: &WriteRepo, command: &str) -> Result<(), GitError>
     Ok(())
 }
 
-/// Refuse when `core.logAllRefUpdates` is off: this shell always writes the
-/// reflog, and a branch move that differs from git's there is not one to make.
+/// Refuse when git would write no reflog where this shell would: this shell
+/// always writes one, and a branch move that differs from git's there is not
+/// one to make. That is `core.logAllRefUpdates` turned off, and a bare
+/// repository that leaves it unset (git's default there is off).
 pub(crate) fn ensure_reflog_on(repo: &WriteRepo, command: &str) -> Result<(), GitError> {
-    if config_last(repo, "core", "logallrefupdates")?
-        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "false" | "no" | "off" | "0" | "never"))
-    {
+    let setting = config_last(repo, "core", "logallrefupdates")?;
+    if setting.as_ref().is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "false" | "no" | "off" | "0" | "never")) {
         return refuse(
             4,
             command,
             "core.logAllRefUpdates is off, and this shell always writes the reflog.",
+            "Use real git, outside this shell, or turn it on: git config core.logAllRefUpdates true.",
+            Override::Repository,
+        );
+    }
+    if setting.is_none() && repo.read().is_bare() {
+        return refuse(
+            4,
+            command,
+            "This is a bare repository and core.logAllRefUpdates is not set, so git writes no reflog here, and this shell always writes one.",
             "Use real git, outside this shell, or turn it on: git config core.logAllRefUpdates true.",
             Override::Repository,
         );

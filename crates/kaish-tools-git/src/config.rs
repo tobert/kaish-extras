@@ -126,6 +126,16 @@ pub enum Verb {
     /// next commit will use (commit profile).
     #[cfg(feature = "commit")]
     Var,
+    /// `git switch -c <name>` — create a branch at HEAD and point HEAD at it
+    /// (commit profile). `switch <branch>` would write file content and
+    /// refuses (git-write-profile.md W6).
+    #[cfg(feature = "commit")]
+    Switch,
+    /// `git checkout -b <name>` — the same as `switch -c` (commit profile).
+    /// `checkout <branch>` and `checkout <path>` write file content and
+    /// refuse (git-write-profile.md W6).
+    #[cfg(feature = "commit")]
+    Checkout,
 }
 
 impl Verb {
@@ -147,7 +157,17 @@ impl Verb {
     /// `GitConfig::read_only` publishes exactly `ALL`.
     #[cfg(feature = "commit")]
     pub const WRITE: &'static [Verb] =
-        &[Verb::Add, Verb::Rm, Verb::Mv, Verb::Restore, Verb::Reset, Verb::Commit, Verb::Var];
+        &[
+            Verb::Add,
+            Verb::Rm,
+            Verb::Mv,
+            Verb::Restore,
+            Verb::Reset,
+            Verb::Commit,
+            Verb::Var,
+            Verb::Switch,
+            Verb::Checkout,
+        ];
 
     /// Every verb this build knows, read and write.
     pub fn known() -> impl Iterator<Item = Verb> {
@@ -188,6 +208,10 @@ impl Verb {
             Verb::Commit => "commit",
             #[cfg(feature = "commit")]
             Verb::Var => "var",
+            #[cfg(feature = "commit")]
+            Verb::Switch => "switch",
+            #[cfg(feature = "commit")]
+            Verb::Checkout => "checkout",
         }
     }
 
@@ -210,7 +234,9 @@ impl Verb {
             | Verb::Restore
             | Verb::Reset
             | Verb::Commit
-            | Verb::Var => Profile::Commit,
+            | Verb::Var
+            | Verb::Switch
+            | Verb::Checkout => Profile::Commit,
         }
     }
 }

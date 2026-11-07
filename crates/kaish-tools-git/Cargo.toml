@@ -346,3 +346,10 @@ required-features = ["commit"]
 name = "write_rewrite"
 path = "tests/write_rewrite.rs"
 required-features = ["commit"]
+
+# Phase 4: `branch <name>`, `tag <name>`, `switch -c` and `checkout -b`
+# against real git on a twin repository.
+[[test]]
+name = "write_refs"
+path = "tests/write_refs.rs"
+required-features = ["commit"]

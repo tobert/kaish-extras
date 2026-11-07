@@ -13,10 +13,12 @@
 //! No `mod.rs`, by house rule.
 
 pub(crate) mod add;
+pub(crate) mod branch;
 pub(crate) mod commit;
 pub(crate) mod ident;
 pub(crate) mod message;
 pub(crate) mod refmove;
+pub(crate) mod refname;
 pub(crate) mod tree;
 pub(crate) mod var;
 pub(crate) mod attributes;
@@ -36,6 +38,8 @@ pub(crate) mod repo;
 pub(crate) mod spec;
 pub(crate) mod stage;
 pub(crate) mod state;
+pub(crate) mod switch;
+pub(crate) mod tag;
 pub(crate) mod unstage;
 
 // Unix-only: the fixtures plant symbolic and hard links and run real git.
