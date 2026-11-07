@@ -1399,7 +1399,7 @@ impl ReadRepo {
         &self,
         section: &str,
         key: &str,
-    ) -> Result<Vec<(Option<String>, Option<String>)>, GitError> {
+    ) -> Result<Vec<ConfigEntry>, GitError> {
         use gix_config::parse::{Events, EventRef};
         let Some(path) = self.contained_leaf("config file", &self.common_dir, "config")? else {
             return Ok(Vec::new());
@@ -1580,6 +1580,10 @@ impl ReadRepo {
 // ═══════════════════════════════════════════════════════════════════════════
 // Config reading and the refusals
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// One configuration entry: its subsection, and its value (`None` for a key
+/// with no `=`).
+pub(crate) type ConfigEntry = (Option<String>, Option<String>);
 
 /// Every entry of `key` in one section body, in order: `None` for a key with
 /// no `=`, else its normalized value.

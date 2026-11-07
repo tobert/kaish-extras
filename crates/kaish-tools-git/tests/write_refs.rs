@@ -1478,7 +1478,7 @@ async fn an_annotated_tag_whose_ref_cannot_be_made_says_its_object_remains() {
     // The twin makes the same bytes, so its tag id is the one ours writes.
     assert_eq!(p.twin(&["tag", "-a", "v1", "-m", "m"]).0, 0);
     let tag_id = git_raw(&p.twin, &["rev-parse", "v1"]).1.trim().to_string();
-    assert_eq!(git_raw(&p.ours, &["cat-file", "-t", &tag_id]).0 != 0, true, "the object is not there yet");
+    assert!(git_raw(&p.ours, &["cat-file", "-t", &tag_id]).0 != 0, "the object is not there yet");
     let tags = p.ours.join(".git/refs/tags");
     chmod(&tags, 0o555);
     let before_refs = git_raw(&p.ours, &["for-each-ref"]).1;
