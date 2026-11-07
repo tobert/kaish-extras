@@ -557,13 +557,15 @@ A build with the `commit` cargo feature (off by default) has:
 **Order of a commit.** Refusals first, from an unlocked read (a refusal leaves
 `.git` byte-identical, which `tests/write_commit.rs` asserts for every refused
 spelling); then, for `-a` and `--only`, `index.lock`; blobs, trees and the
-commit as loose objects, all fsynced; then one `gix-ref` transaction on `HEAD`
-(or on the branch it names), compare-and-swap against the oid read at the
+commit as loose objects, all fsynced; then one `gix-ref` transaction on the branch
+HEAD names (on `HEAD` itself when detached), compare-and-swap against the oid read at the
 start, with reflog lines in git's format in the branch's log and in
-`logs/HEAD`; then the index rename. A branch that moved in between fails with
+`logs/HEAD` (for a branch, `HEAD.lock` is held across the move and the
+`logs/HEAD` line is appended here, not by gix-ref); then the index rename. A branch that moved in between fails with
 exit 1 naming the ref and both oids. A stale lock is never removed (exit 4).
-gix-ref 0.66.0 hangs when the branch's lock exists under a symbolic HEAD, so
-the locks are looked at first (`docs/issues.md`, W13).
+gix-ref 0.66.0 hangs when the branch's lock exists and it is given a symbolic
+HEAD edit, so it is never given one; the locks are also looked at first, to
+refuse before any object is written (`docs/issues.md`, W13).
 
 What the verbs do not do, stated plainly:
 

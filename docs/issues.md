@@ -1645,16 +1645,28 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
 
 ## git write — phase 2 (commit), what is left
 
-- **W13 — gix-ref 0.66.0 hangs on a branch lock under a symbolic HEAD.**
+- **W13 — gix-ref 0.66.0 hangs on a branch lock under a symbolic HEAD
+  (closed; the upstream defect remains).**
   `Transaction::prepare_inner` (`store/file/transaction/prepare.rs:401`,
   `while let Some(parent_idx) = cursor`) never advances `cursor` when the
   lock for the *child* of a split `HEAD` edit cannot be taken, and spins at
   100% CPU. Found by `a_stale_ref_lock_fails_the_commit_and_is_left_alone`.
-  `refmove::precheck` looks at `<ref>.lock`, `HEAD.lock` and
-  `packed-refs.lock` with `lstat` first and refuses with exit 4, before any
-  object is written. A lock that appears between that look and the
-  transaction still reaches the loop. No upstream work yet (local guard,
-  as with G5/R4); the guard goes when the pin moves to a fixed gix-ref.
+  `refmove::move_head` no longer hands gix-ref a `deref: true` edit: for a
+  branch the one edit names the branch (`deref: false`), which has no parent
+  and never enters that loop. HEAD is taken as git takes it: `HEAD.lock` is
+  acquired with fail-immediately, HEAD is re-read and must still name the
+  branch (else exit 1), the branch moves, the same line is appended to
+  `logs/HEAD`, and the lock is released with HEAD unchanged. A lock that
+  exists when the move starts, whether it appeared before or after
+  `refmove::precheck`, is an exit 4 refusal. `precheck` stays as the early
+  check that refuses before any object is written. Tests:
+  `refmove::tests::a_branch_lock_taken_after_the_precheck_...` and
+  `..._head_lock_...` run the move with a 10 second deadline. The gix-ref
+  defect itself is untouched: any other caller that gives it a symbolic
+  edit would hit it. Reflogs match git's line for line
+  (`an_unborn_branch_gets_the_initial_reflog_...`). Remaining gap: a crash
+  between the branch move and the `logs/HEAD` append leaves the branch
+  moved with no `logs/HEAD` line.
 - **W14 — the summary shows a rename as a delete and a create.** Git's commit
   summary runs rename detection (`rename a => b (100%)`, and inexact
   renames); here the shortstat counts two files and prints a `delete mode`
