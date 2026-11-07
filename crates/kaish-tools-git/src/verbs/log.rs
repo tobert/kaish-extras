@@ -64,9 +64,11 @@ pub(crate) const DEFAULT_REV: &str = "HEAD";
 )]
 pub(crate) struct LogArgs {
     /// Revision to start from: `HEAD` (the default), a branch, a tag, an oid,
-    /// or any of those with a `~N` / `^N` suffix. `A..B` lists the commits B
-    /// reaches and A does not (an empty side is `HEAD`). `A...B` and reflog
-    /// syntax (`@{...}`) are usage errors, not silent reinterpretations. Also
+    /// `@{-N}` (the Nth previous branch, from `logs/HEAD`), or any of those
+    /// with a `~N` / `^N` / `^{commit}` suffix. `A..B` lists the commits B
+    /// reaches and A does not (an empty side is `HEAD`). `A...B` and the other
+    /// reflog forms (`@{u}`, `HEAD@{1}`) are usage errors, not silent
+    /// reinterpretations. A revision that names a tree or blob exits 1. Also
     /// accepted as a bare operand, git's spelling: `git log main..feature`.
     #[arg(long = "rev", value_name = "REV", default_value = DEFAULT_REV)]
     pub rev: String,

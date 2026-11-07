@@ -313,6 +313,64 @@ async fn rev_navigation_matches_git() {
     }
 }
 
+/// `@{-N}` and `^{type}` suffixes resolve to the commits `git rev-parse`
+/// names. The history checked out `side` and back to `main`, so `@{-1}` is
+/// `side` and `@{-2}` is `main`, and the two are different commits.
+#[tokio::test]
+async fn prior_checkouts_and_peel_suffixes_match_git() {
+    let h = History::build();
+    git(&h.root, &["tag", "-a", "-m", "annotated", "v2.0.0", "HEAD~1"]);
+    let mut seen = std::collections::BTreeSet::new();
+    for spec in [
+        "@{-1}",
+        "@{-2}",
+        "@{-1}~1",
+        "@{-1}^",
+        "@{-01}",
+        "HEAD^{commit}",
+        "HEAD^{}",
+        "HEAD^{object}",
+        "HEAD~1^{commit}",
+        "v1.0.0^{}",
+        "v2.0.0",
+        "v2.0.0^{}",
+        "v2.0.0^{commit}",
+        "v2.0.0^{tag}",
+        "v2.0.0^{object}",
+        "v2.0.0~1",
+        "v2.0.0^{commit}~1",
+        "@{-1}^{commit}",
+    ] {
+        let expected = git(&h.root, &["rev-parse", &format!("{spec}^{{commit}}")]);
+        let result = log(&h.scratch(), "/mnt/repo", &["--rev", spec, "--limit", "1"]).await;
+        assert_eq!(result.code, 0, "--rev {spec} failed: {}", result.err);
+        assert_eq!(oids(&result)[0], expected, "--rev {spec} resolved wrong");
+        seen.insert(expected);
+    }
+    assert!(seen.len() >= 4, "the specs name different commits, so a wrong one shows: {seen:?}");
+    assert_ne!(
+        oids(&log(&h.scratch(), "/mnt/repo", &["--rev", "@{-1}", "--limit", "1"]).await)[0],
+        oids(&log(&h.scratch(), "/mnt/repo", &["--rev", "@{-2}", "--limit", "1"]).await)[0],
+        "@{{-1}} and @{{-2}} are different commits (negative control)"
+    );
+    // Too few checkouts: git has no such revision, and so does this.
+    let result = log(&h.scratch(), "/mnt/repo", &["--rev", "@{-3}"]).await;
+    assert_eq!(result.code, 1, "{}", result.err);
+    assert!(result.err.contains("@{-3}"), "{}", result.err);
+}
+
+/// A type that is not a commit is refused where a commit is wanted. Git's
+/// `log HEAD^{tree}` prints nothing and exits 0 (docs/issues.md, W48).
+#[tokio::test]
+async fn a_tree_where_a_commit_is_wanted_is_refused_by_type() {
+    let h = History::build();
+    for spec in ["HEAD^{tree}", "HEAD^{tree}~1", "HEAD^{blob}", "HEAD^{tag}"] {
+        let result = log(&h.scratch(), "/mnt/repo", &["--rev", spec]).await;
+        assert_eq!(result.code, 1, "--rev {spec}: {}", result.err);
+        assert!(result.err.contains(spec) && result.err.contains(", not a "), "{}", result.err);
+    }
+}
+
 /// The report echoes the revision as the caller spelled it, not the oid it
 /// became — an agent that asked for `HEAD` should see `HEAD` come back.
 #[tokio::test]
@@ -345,7 +403,10 @@ async fn unsupported_revspec_is_a_named_usage_error() {
     for (spec, token) in [
         ("main...side", "..."),
         ("HEAD@{1}", "@{"),
-        ("HEAD^{tree}", "^{"),
+        ("HEAD^{/initial}", "^{/"),
+        ("HEAD^{foo}", "^{foo}"),
+        ("@{-0}", "@{"),
+        ("HEAD@{-1}", "@{"),
         ("HEAD:src/lib.rs", ":"),
     ] {
         let result = log(&h.scratch(), "/mnt/repo", &["--rev", spec]).await;

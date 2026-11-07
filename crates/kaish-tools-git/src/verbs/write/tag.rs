@@ -217,7 +217,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &TagCreate) -> Result<O
     }
 
     let target = match &opts.target {
-        Some(spec) => repo.read().resolve_object(spec)?,
+        Some(spec) => repo.read().resolve_object_expr(spec)?,
         None => {
             let head = repo.read().head()?;
             match head.oid.as_deref() {

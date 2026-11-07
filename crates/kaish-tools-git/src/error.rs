@@ -437,8 +437,8 @@ pub enum GitError {
     #[error(
         "git {operation}: '{rev}' does not name a commit in repository '{repo}' \
          — no such ref, and no object with that id. kaish-git resolves HEAD, a \
-         branch, a tag, a full or >=4-char unambiguous oid, and the ~/^ \
-         suffixes on any of those"
+         branch, a tag, a full or >=4-char unambiguous oid, @{{-N}} (the Nth \
+         previous branch), and the ~/^ and ^{{type}} suffixes on any of those"
     )]
     NoSuchRevision {
         /// The verb that was asked for.
@@ -471,8 +471,8 @@ pub enum GitError {
     #[error(
         "git {operation}: revision '{spec}' uses '{syntax}', which kaish-git \
          does not parse — the accepted forms are HEAD, a branch, a tag, \
-         refs/..., a full or >=4-char oid, the ~N / ^ / ^N suffixes, and \
-         A..B on log and diff"
+         refs/..., a full or >=4-char oid, @{{-N}}, the ~N / ^ / ^N / ^{{type}} \
+         suffixes, and A..B on log and diff"
     )]
     UnsupportedRevspec {
         /// The verb that was asked for.
@@ -481,6 +481,27 @@ pub enum GitError {
         spec: String,
         /// The unsupported token that was recognized.
         syntax: String,
+    },
+
+    /// A revision named an object of one type where the form asked for
+    /// another: `HEAD^{tree}~1` (a tree has no parent), `v1^{blob}`, or a tree
+    /// given to a verb that needs a commit. Exit 1, the same class as
+    /// `NoSuchRevision`.
+    #[error(
+        "git {operation}: '{spec}' names a {found}, not a {expected}, in \
+         repository '{repo}'. Give a revision that names a {expected}"
+    )]
+    WrongObjectType {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The revision, as the caller spelled it.
+        spec: String,
+        /// The type the form needed.
+        expected: &'static str,
+        /// The type the revision names.
+        found: &'static str,
+        /// The repository the lookup ran against.
+        repo: PathBuf,
     },
 
     /// A `<rev>:<path>` navigation (`show`, `ls`) resolved `<rev>` to a blob,
@@ -748,6 +769,7 @@ impl GitError {
             | GitError::NoSuchRevision { .. }
             | GitError::AmbiguousRevision { .. }
             | GitError::NotATree { .. }
+            | GitError::WrongObjectType { .. }
             | GitError::AncestryBudgetExhausted { .. }
             | GitError::PatchRendererFailed { .. }
             | GitError::NoSuchPath { .. } => 1,
@@ -935,6 +957,13 @@ mod tests {
             GitError::NotATree {
                 operation: "show",
                 spec: "HEAD:README.md".into(),
+                repo: repo.clone(),
+            },
+            GitError::WrongObjectType {
+                operation: "log",
+                spec: "HEAD^{tree}".into(),
+                expected: "commit",
+                found: "tree",
                 repo: repo.clone(),
             },
             GitError::NoSuchPath {

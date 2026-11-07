@@ -77,7 +77,8 @@ pub(crate) struct DiffArgs {
 
     /// Compare from this revision. Alone it compares against the working
     /// tree; with `--to` it compares two revisions. `HEAD`, a branch, a tag,
-    /// an oid, and the `~N` / `^N` suffixes are the whole grammar. git's
+    /// an oid, `@{-N}` (the Nth previous branch), and the `~N` / `^N` /
+    /// `^{tree}` / `^{commit}` suffixes are the whole grammar. git's
     /// operand spellings name the same ends: `git diff A B` and
     /// `git diff A..B` are `--from A --to B`, and `git diff A` is `--from A`.
     #[arg(long = "from", value_name = "REV")]

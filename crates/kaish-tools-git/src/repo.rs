@@ -909,48 +909,157 @@ impl ReadRepo {
 
     /// Resolve a `--rev` argument to a commit oid, over the small revision
     /// grammar (architecture.md B): `HEAD`, a branch, a tag, `refs/...`, a full
-    /// or ≥4-char unambiguous oid, and the `~N` / `^` / `^N` suffixes on any of
-    /// those. Everything else — `@{...}`, `A..B`, `:/text`, `^{...}`,
-    /// `<rev>:<path>` — is a loud usage error naming the form, never resolved
-    /// to a surprising commit.
+    /// or ≥4-char unambiguous oid, `@{-N}` (the Nth previous branch), and the
+    /// `~N` / `^` / `^N` / `^{type}` suffixes on any of those. Everything else
+    /// — `@{u}`, `A..B`, `:/text`, `^{/text}`, `<rev>:<path>` — is a loud usage
+    /// error naming the form, never resolved to a surprising commit.
     ///
     /// A ref is tried before an oid, matching git's preference, so a branch
     /// named like a hex string still resolves as the branch. The result is
     /// always peeled to a commit: a tag resolves to what it ultimately points
     /// at, and a revision that names a tree or blob is refused.
     pub(crate) fn resolve_commit(&self, spec: &str) -> Result<gix_hash::ObjectId, GitError> {
-        let (base, nav) = split_base_and_nav(self.operation, spec)?;
-        let oid = self.resolve_base(base, spec)?;
-        let oid = self.peel_to_commit(oid, spec)?;
-        self.apply_nav_steps(oid, spec, nav)
+        let expanded = self.expand_prior_checkout(spec)?;
+        let (base, nav) = split_base_and_nav(self.operation, spec, &expanded)?;
+        let oid = self.resolve_base_shallow(base, spec)?;
+        let oid = self.apply_nav_steps(oid, spec, nav)?;
+        self.peel_to_commit(oid, spec)
     }
 
     /// Resolve a revision the way `show`/`ls` need it: over the same small
     /// grammar as [`ReadRepo::resolve_commit`], but the object handed back is
     /// whatever the revision plainly names, not forced down to a commit.
     ///
-    /// A `~N`/`^N` suffix still walks commit ancestry, so when one is present
-    /// the base is peeled to a commit first, exactly as `resolve_commit` does,
-    /// and the result is a commit. A bare revision with no suffix — `v0.1.0`,
-    /// an oid — is returned exactly as resolved, tag included: collapsing an
-    /// annotated tag here would make `show <tag>` silently describe the tag's
-    /// target instead of the tag itself (architecture.md B.5, D5).
+    /// A `~N`/`^N` suffix still walks commit ancestry, so the object is peeled
+    /// to a commit first, exactly as git does. A `^{type}` suffix peels to that
+    /// type. A bare revision with no suffix — `v0.1.0`, an oid — is returned
+    /// exactly as resolved, tag included: collapsing an annotated tag here
+    /// would make `show <tag>` silently describe the tag's target instead of
+    /// the tag itself (architecture.md B.5, D5).
     ///
     /// The caller splits off any `<rev>:<path>` suffix first
     /// ([`split_revision_and_path`]) — `spec` here is the revision half alone
-    /// and, by construction of that split, never contains a colon.
+    /// and, by construction of that split, never contains a colon. A caller
+    /// that wants the whole form uses [`ReadRepo::resolve_object_expr`].
     pub(crate) fn resolve_object(&self, spec: &str) -> Result<gix_hash::ObjectId, GitError> {
-        let (base, nav) = split_base_and_nav(self.operation, spec)?;
+        let expanded = self.expand_prior_checkout(spec)?;
+        let (base, nav) = split_base_and_nav(self.operation, spec, &expanded)?;
         let oid = self.resolve_base_shallow(base, spec)?;
-        if nav.is_empty() {
-            return Ok(oid);
-        }
-        let oid = self.peel_to_commit(oid, spec)?;
         self.apply_nav_steps(oid, spec, nav)
     }
 
-    /// Apply a parsed `~N`/`^N` navigation suffix to an already-resolved
-    /// commit. Shared by [`ReadRepo::resolve_commit`] and
+    /// Resolve any object expression git accepts where an object, not a
+    /// commit, is wanted (`git tag <name> <object>`): everything
+    /// [`ReadRepo::resolve_object`] takes, plus `<rev>:<path>` (a blob or
+    /// tree in that revision's tree), `:<path>` and `:<N>:<path>` (an index
+    /// entry at stage `N`, default 0).
+    ///
+    /// A path is taken from the root of the tree. `./` and `../` forms, which
+    /// git reads from the current directory, are refused by name.
+    #[cfg(feature = "commit")]
+    pub(crate) fn resolve_object_expr(&self, spec: &str) -> Result<gix_hash::ObjectId, GitError> {
+        let op = self.operation;
+        if let Some(rest) = spec.strip_prefix(':') {
+            if rest.starts_with('/') {
+                return Err(GitError::UnsupportedRevspec {
+                    operation: op,
+                    spec: spec.to_string(),
+                    syntax: ":/...".to_string(),
+                });
+            }
+            let (stage, path) = match rest.as_bytes() {
+                [n @ b'0'..=b'3', b':', ..] => (*n - b'0', &rest[2..]),
+                _ => (0, rest),
+            };
+            return self.index_entry_object(spec, stage, path);
+        }
+        let (rev, path) = split_revision_and_path(op, spec)?;
+        let oid = self.resolve_object(&rev)?;
+        match path {
+            None => Ok(oid),
+            Some(path) => {
+                let tree = self.tree_of_object(oid, &rev)?;
+                self.object_at_path(tree, &rev, &path)
+            }
+        }
+    }
+
+    /// The object at `path` below `root`, strictly as git's `HEAD:<path>`
+    /// reads it: no leading `/`, no empty or `.` component, and a trailing `/`
+    /// only after a tree. An empty path is the tree itself.
+    #[cfg(feature = "commit")]
+    fn object_at_path(&self, root: gix_hash::ObjectId, rev: &str, path: &str) -> Result<gix_hash::ObjectId, GitError> {
+        let op = self.operation;
+        if path.starts_with("./") || path.starts_with("../") {
+            return Err(GitError::UnsupportedRevspec {
+                operation: op,
+                spec: format!("{rev}:{path}"),
+                syntax: "a path that starts with ./ or ../ (give the path from the repository root)".to_string(),
+            });
+        }
+        let missing = || GitError::NoSuchPath {
+            operation: op,
+            rev: rev.to_string(),
+            path: path.to_string(),
+            repo: self.git_dir.clone(),
+        };
+        if path.is_empty() {
+            return Ok(root);
+        }
+        let (trimmed, wants_tree) = match path.strip_suffix('/') {
+            Some(t) => (t, true),
+            None => (path, false),
+        };
+        let mut current = root;
+        let mut is_tree = true;
+        for name in trimmed.split('/') {
+            if name.is_empty() || !is_tree {
+                return Err(missing());
+            }
+            let mut buf = Vec::new();
+            let iter = self
+                .objects
+                .find_tree_iter(&current, &mut buf)
+                .map_err(|e| GitError::repository(op, "reading a tree", &self.git_dir, e))?;
+            let mut found = None;
+            for entry in iter {
+                let entry = entry.map_err(|e| GitError::repository(op, "decoding a tree", &self.git_dir, e))?;
+                if entry.filename.as_bytes() == name.as_bytes() {
+                    found = Some((entry.oid.to_owned(), entry.mode.is_tree()));
+                    break;
+                }
+            }
+            let (oid, tree) = found.ok_or_else(missing)?;
+            current = oid;
+            is_tree = tree;
+        }
+        if wants_tree && !is_tree {
+            return Err(missing());
+        }
+        Ok(current)
+    }
+
+    /// The object id of the index entry at `stage` for `path`.
+    #[cfg(feature = "commit")]
+    fn index_entry_object(&self, spec: &str, stage: u8, path: &str) -> Result<gix_hash::ObjectId, GitError> {
+        let missing = || GitError::NoSuchRevision {
+            operation: self.operation,
+            rev: spec.to_string(),
+            repo: self.git_dir.clone(),
+        };
+        let state = self.open_index()?.ok_or_else(missing)?;
+        let stage = match stage {
+            0 => gix_index::entry::Stage::Unconflicted,
+            1 => gix_index::entry::Stage::Base,
+            2 => gix_index::entry::Stage::Ours,
+            _ => gix_index::entry::Stage::Theirs,
+        };
+        let entry = state.entry_by_path_and_stage(path.as_bytes().into(), stage).ok_or_else(missing)?;
+        Ok(entry.id)
+    }
+
+    /// Apply a parsed navigation suffix (`~N`, `^N`, `^{type}`) to an
+    /// already-resolved object. Shared by [`ReadRepo::resolve_commit`] and
     /// [`ReadRepo::resolve_object`] so the two grammars cannot drift apart.
     fn apply_nav_steps(
         &self,
@@ -961,7 +1070,7 @@ impl ReadRepo {
         for step in parse_nav(self.operation, spec, nav)? {
             oid = match step {
                 Nav::FirstParentAncestor(n) => {
-                    let mut cur = oid;
+                    let mut cur = self.peel_to_commit(oid, spec)?;
                     for _ in 0..n {
                         cur = self.nth_parent(cur, 1, spec)?;
                     }
@@ -969,54 +1078,166 @@ impl ReadRepo {
                 }
                 // `^0` dereferences to the commit itself; `^N` (N≥1) takes the
                 // Nth parent.
-                Nav::NthParent(0) => oid,
-                Nav::NthParent(n) => self.nth_parent(oid, n, spec)?,
+                Nav::NthParent(0) => self.peel_to_commit(oid, spec)?,
+                Nav::NthParent(n) => {
+                    let commit = self.peel_to_commit(oid, spec)?;
+                    self.nth_parent(commit, n, spec)?
+                }
+                Nav::Peel(to) => self.peel_to(oid, to, spec)?,
             };
         }
         Ok(oid)
     }
 
-    /// Resolve the base of a revision — a ref if one matches, otherwise an
-    /// oid — fully peeling a ref through any annotated tags to its first
-    /// non-tag object, matching git's own `peel_to_id` semantics. Used by
-    /// `resolve_commit` (`log`), which only ever wants a commit.
-    fn resolve_base(&self, base: &str, spec: &str) -> Result<gix_hash::ObjectId, GitError> {
+    /// `<rev>^{type}`: follow annotated tags to an object of `to`.
+    fn peel_to(&self, start: gix_hash::ObjectId, to: PeelTo, spec: &str) -> Result<gix_hash::ObjectId, GitError> {
         let op = self.operation;
-        // D3 (kaish-extras issue backlog, L4): `@` is git's alias for `HEAD`
-        // wherever a revision is expected. Safe as a hard-coded substitution —
-        // `git check-ref-format` refuses to create a ref literally named `@`,
-        // so there is no real ref this could ever shadow.
-        let base = if base == "@" { "HEAD" } else { base };
-        // A ref first, matching git, so a branch named like a hex string still
-        // resolves as the branch. The name is converted here rather than inside
-        // `try_find` to keep two failure modes apart: a string that is not a
-        // valid ref name simply is not a ref, and falls through to the oid
-        // attempt; a refs backend that actually failed to read is loud. Letting
-        // one `if let Ok(..)` swallow both would turn an unreadable `.git/refs`
-        // into a confident "no such revision" (house rule: no silent
-        // fallbacks).
-        if let Ok(partial) = TryInto::<&gix_ref::PartialNameRef>::try_into(base) {
-            match self.refs.try_find(partial) {
-                Ok(Some(mut reference)) => {
-                    let id = reference.peel_to_id(&self.refs, &self.objects).map_err(|e| {
-                        GitError::repository(op, format!("resolving ref '{base}'"), &self.git_dir, e)
-                    })?;
-                    return Ok(id);
+        let wrong = |expected: &'static str, found: gix_object::Kind| GitError::WrongObjectType {
+            operation: op,
+            spec: spec.to_string(),
+            expected,
+            found: kind_name(found),
+            repo: self.git_dir.clone(),
+        };
+        let mut oid = start;
+        let mut buf = Vec::new();
+        // A tag chain is finite in any real repository; the bound stops a
+        // hand-built cycle from spinning rather than trusting it cannot happen.
+        for _ in 0..32 {
+            let kind = self
+                .objects
+                .header(oid)
+                .map_err(|e| GitError::repository(op, "reading an object header", &self.git_dir, e))?
+                .kind();
+            match (to, kind) {
+                (PeelTo::Object, _) => return Ok(oid),
+                (PeelTo::Tag, gix_object::Kind::Tag) => return Ok(oid),
+                (PeelTo::Tag, other) => return Err(wrong("tag", other)),
+                (_, gix_object::Kind::Tag) => {
+                    oid = self
+                        .objects
+                        .find_tag(&oid, &mut buf)
+                        .map_err(|e| GitError::repository(op, "reading a tag", &self.git_dir, e))?
+                        .target();
                 }
-                // A valid ref name that names nothing — fall through and try
-                // the same string as an oid.
-                Ok(None) => {}
-                Err(e) => {
-                    return Err(GitError::repository(
-                        op,
-                        format!("looking up ref '{base}'"),
-                        &self.git_dir,
-                        e,
-                    ))
+                (PeelTo::Deref, _) => return Ok(oid),
+                (PeelTo::Commit, gix_object::Kind::Commit) => return Ok(oid),
+                (PeelTo::Commit, other) => return Err(wrong("commit", other)),
+                (PeelTo::Tree, gix_object::Kind::Tree) => return Ok(oid),
+                (PeelTo::Tree, gix_object::Kind::Commit) => {
+                    return Ok(self
+                        .objects
+                        .find_commit(&oid, &mut buf)
+                        .map_err(|e| GitError::repository(op, "reading a commit", &self.git_dir, e))?
+                        .tree());
                 }
+                (PeelTo::Tree, other) => return Err(wrong("tree", other)),
+                (PeelTo::Blob, gix_object::Kind::Blob) => return Ok(oid),
+                (PeelTo::Blob, other) => return Err(wrong("blob", other)),
             }
         }
-        self.resolve_oid_prefix(base, spec)
+        Err(GitError::NoSuchRevision {
+            operation: op,
+            rev: spec.to_string(),
+            repo: self.git_dir.clone(),
+        })
+    }
+
+    /// Expand a leading `@{-N}` to the name of the Nth previous branch, as git
+    /// does wherever it reads a revision: the text after the closing `}` (a
+    /// `~`, `^` or `:` suffix) is kept. Any other spelling is returned as it
+    /// came, for the grammar check to name.
+    ///
+    /// Git finds the name in `logs/HEAD`, newest entry first: the Nth line whose
+    /// message is `checkout: moving from <name> to <name>` gives the first name
+    /// (`interpret_nth_prior_checkout`). A detached HEAD leaves its oid there,
+    /// and that is what the expansion yields.
+    fn expand_prior_checkout<'a>(&self, spec: &'a str) -> Result<std::borrow::Cow<'a, str>, GitError> {
+        let Some(rest) = spec.strip_prefix("@{-") else {
+            return Ok(spec.into());
+        };
+        let Some(close) = rest.find('}') else {
+            return Ok(spec.into());
+        };
+        let (digits, tail) = (&rest[..close], &rest[close + 1..]);
+        if digits.is_empty()
+            || !digits.bytes().all(|b| b.is_ascii_digit())
+            || !(tail.is_empty() || tail.starts_with(['~', '^', ':']))
+        {
+            return Ok(spec.into());
+        }
+        // A number too large for usize names no checkout; `@{-0}` is not a form.
+        let n: usize = digits.parse().unwrap_or(usize::MAX);
+        if n == 0 {
+            return Ok(spec.into());
+        }
+        match self.prior_checkout(n)? {
+            Some(name) => Ok(format!("{name}{tail}").into()),
+            None => Err(GitError::NoSuchRevision {
+                operation: self.operation,
+                rev: spec.to_string(),
+                repo: self.git_dir.clone(),
+            }),
+        }
+    }
+
+    /// The branch (or oid) HEAD was on `n` checkouts ago, or `None` when
+    /// `logs/HEAD` records fewer than `n` checkouts.
+    ///
+    /// `logs` and `HEAD` each go through [`open_leaf`], so a symlink at either
+    /// that leaves the mount is refused, not followed. Only the last
+    /// [`MAX_REFLOG_SCAN_BYTES`] are read, newest entries being last; a scan
+    /// that runs out of those bytes before finding `n` checkouts is an error,
+    /// not "fewer than `n`".
+    fn prior_checkout(&self, n: usize) -> Result<Option<String>, GitError> {
+        use std::io::{Read, Seek, SeekFrom};
+        let op = self.operation;
+        let Some(logs) = open_leaf(op, "reflog directory (logs)", &self.git_dir, "logs", &self.ceiling)?
+            .path()
+            .map(Path::to_path_buf)
+        else {
+            return Ok(None);
+        };
+        let Some(log) = open_leaf(op, "reflog (logs/HEAD)", &logs, "HEAD", &self.ceiling)?
+            .path()
+            .map(Path::to_path_buf)
+        else {
+            return Ok(None);
+        };
+        let read_err = |e| GitError::repository(op, "reading logs/HEAD", &log, e);
+        let mut file = std::fs::File::open(&log).map_err(read_err)?;
+        let len = file.metadata().map_err(read_err)?.len();
+        let start = len.saturating_sub(MAX_REFLOG_SCAN_BYTES);
+        file.seek(SeekFrom::Start(start)).map_err(read_err)?;
+        let mut bytes = Vec::new();
+        file.take(MAX_REFLOG_SCAN_BYTES).read_to_end(&mut bytes).map_err(read_err)?;
+        // The first line of a partial read is cut off; drop it.
+        let mut text: &[u8] = &bytes;
+        if start > 0 {
+            text = text.iter().position(|b| *b == b'\n').map_or(&[][..], |i| &text[i + 1..]);
+        }
+        const PREFIX: &[u8] = b"checkout: moving from ";
+        let mut seen = 0usize;
+        for line in text.rsplit(|b| *b == b'\n') {
+            let Some(tab) = line.iter().position(|b| *b == b'\t') else { continue };
+            let Some(moving) = line[tab + 1..].strip_prefix(PREFIX) else { continue };
+            let Some(to) = moving.windows(4).position(|w| w == b" to ") else { continue };
+            seen += 1;
+            if seen == n {
+                return Ok(Some(String::from_utf8_lossy(&moving[..to]).into_owned()));
+            }
+        }
+        if start > 0 {
+            return Err(GitError::repository(
+                op,
+                "scanning logs/HEAD for a previous checkout",
+                &log,
+                std::io::Error::other(format!(
+                    "fewer than {n} checkouts in the last {MAX_REFLOG_SCAN_BYTES} bytes, and the file is {len} bytes"
+                )),
+            ));
+        }
+        Ok(None)
     }
 
     /// Resolve the base of a revision the way [`ReadRepo::resolve_object`]
@@ -1200,10 +1421,12 @@ impl ReadRepo {
                 })? {
                     gix_object::ObjectRef::Commit(_) => None,
                     gix_object::ObjectRef::Tag(tag) => Some(tag.target()),
-                    _ => {
-                        return Err(GitError::NoSuchRevision {
+                    other => {
+                        return Err(GitError::WrongObjectType {
                             operation: op,
-                            rev: spec.to_string(),
+                            spec: spec.to_string(),
+                            expected: "commit",
+                            found: kind_name(other.kind()),
                             repo: self.git_dir.clone(),
                         })
                     }
@@ -2172,11 +2395,39 @@ enum Nav {
     FirstParentAncestor(usize),
     /// `^N`: the Nth parent. `^0` is the commit itself.
     NthParent(usize),
+    /// `^{type}`: peel to an object of that type.
+    Peel(PeelTo),
 }
+
+/// What a `^{...}` suffix peels to.
+#[derive(Clone, Copy)]
+enum PeelTo {
+    Commit,
+    Tree,
+    Blob,
+    Tag,
+    /// `^{}`: follow tags to the first object that is not one.
+    Deref,
+    /// `^{object}`: the object itself.
+    Object,
+}
+
+/// The type name git prints for an object kind.
+fn kind_name(kind: gix_object::Kind) -> &'static str {
+    match kind {
+        gix_object::Kind::Blob => "blob",
+        gix_object::Kind::Tree => "tree",
+        gix_object::Kind::Commit => "commit",
+        gix_object::Kind::Tag => "tag",
+    }
+}
+
+/// The last bytes of `logs/HEAD` read to find a previous checkout.
+const MAX_REFLOG_SCAN_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Recognize revision syntax outside the small grammar, returning the offending
 /// form. The order matters: `...` is checked before `..`, and `^{` before a
-/// bare `^` is treated as navigation.
+/// bare `^` is treated as navigation. `^{type}` is navigation; `^{/text}` is not.
 fn unsupported_revspec(spec: &str) -> Option<String> {
     if spec.contains("@{") {
         return Some("@{...}".to_string());
@@ -2187,8 +2438,8 @@ fn unsupported_revspec(spec: &str) -> Option<String> {
     if spec.contains("..") {
         return Some("..".to_string());
     }
-    if spec.contains("^{") {
-        return Some("^{...}".to_string());
+    if spec.contains("^{/") {
+        return Some("^{/...}".to_string());
     }
     if spec.contains(":/") {
         return Some(":/...".to_string());
@@ -2205,12 +2456,13 @@ fn unsupported_revspec(spec: &str) -> Option<String> {
 /// `show` and `ls` all refuse the same unsupported forms the same way.
 fn split_base_and_nav<'a>(
     operation: &'static str,
+    display: &str,
     spec: &'a str,
 ) -> Result<(&'a str, &'a str), GitError> {
     if let Some(bad) = unsupported_revspec(spec) {
         return Err(GitError::UnsupportedRevspec {
             operation,
-            spec: spec.to_string(),
+            spec: display.to_string(),
             syntax: bad,
         });
     }
@@ -2220,7 +2472,7 @@ fn split_base_and_nav<'a>(
     if base.is_empty() {
         return Err(GitError::UnsupportedRevspec {
             operation,
-            spec: spec.to_string(),
+            spec: display.to_string(),
             syntax: "a leading ~ or ^ with no revision".to_string(),
         });
     }
@@ -2284,6 +2536,39 @@ fn parse_nav(operation: &'static str, spec: &str, nav: &str) -> Result<Vec<Nav>,
                 })
             }
         };
+        if !is_tilde && chars.peek() == Some(&'{') {
+            chars.next();
+            let mut name = String::new();
+            loop {
+                match chars.next() {
+                    Some('}') => break,
+                    Some(c) => name.push(c),
+                    None => {
+                        return Err(GitError::UnsupportedRevspec {
+                            operation,
+                            spec: spec.to_string(),
+                            syntax: "^{ with no closing }".to_string(),
+                        })
+                    }
+                }
+            }
+            out.push(Nav::Peel(match name.as_str() {
+                "commit" => PeelTo::Commit,
+                "tree" => PeelTo::Tree,
+                "blob" => PeelTo::Blob,
+                "tag" => PeelTo::Tag,
+                "" => PeelTo::Deref,
+                "object" => PeelTo::Object,
+                other => {
+                    return Err(GitError::UnsupportedRevspec {
+                        operation,
+                        spec: spec.to_string(),
+                        syntax: format!("^{{{other}}} (the types are commit, tree, blob, tag and object)"),
+                    })
+                }
+            }));
+            continue;
+        }
         let mut digits = String::new();
         while let Some(d) = chars.peek() {
             if d.is_ascii_digit() {
