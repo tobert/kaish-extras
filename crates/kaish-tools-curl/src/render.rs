@@ -6,30 +6,60 @@ use serde_json::{json, Value};
 
 use crate::model::Response;
 
-/// Render the response in text form for kaish output.
-///
-/// When `include_headers` is true, response headers are printed above the body.
-pub fn render_text(response: &Response, include_headers: bool, head_only: bool) -> String {
+/// The status line, headers, and blank line, as `-i` and `-I` print them —
+/// one block per redirect `-L` followed, then the final response's.
+pub fn render_head(response: &Response) -> String {
     let mut out = String::new();
-
-    if include_headers {
-        out.push_str(&format!("HTTP/1.1 {}\r\n", response.status));
-        for (name, values) in &response.headers {
-            // One line per value, as the server sent them — three
-            // `Set-Cookie`s print as three lines, which is what curl does.
-            for value in values {
-                out.push_str(&format!("{name}: {value}\r\n"));
-            }
-        }
-        out.push_str("\r\n");
+    for hop in &response.history {
+        push_head(&mut out, hop.status, &hop.reason, &hop.headers);
     }
+    push_head(&mut out, response.status, &response.reason, &response.headers);
+    out
+}
 
+fn push_head(
+    out: &mut String,
+    status: u16,
+    reason: &str,
+    headers: &std::collections::BTreeMap<String, Vec<String>>,
+) {
+    // curl prints `HTTP/1.1 404 Not Found`. The phrase matters to a
+    // script that splits the line on spaces: without it the last field
+    // is `404\r` (survey SW-2).
+    if reason.is_empty() {
+        out.push_str(&format!("HTTP/1.1 {status}\r\n"));
+    } else {
+        out.push_str(&format!("HTTP/1.1 {status} {reason}\r\n"));
+    }
+    for (name, values) in headers {
+        // One line per value, as the server sent them — three
+        // `Set-Cookie`s print as three lines, which is what curl does.
+        for value in values {
+            out.push_str(&format!("{name}: {value}\r\n"));
+        }
+    }
+    out.push_str("\r\n");
+}
+
+/// The bytes `-i`, `-I`, and `-o` put out: the head when asked for, then the
+/// body unless the request was a HEAD. Bytes, not text — a binary body must
+/// reach a file as it arrived.
+pub fn render_bytes(response: &Response, include_headers: bool, head_only: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    if include_headers {
+        out.extend_from_slice(render_head(response).as_bytes());
+    }
     // `-I` asked for headers; a HEAD response has no body to print anyway.
     if !head_only {
-        out.push_str(&String::from_utf8_lossy(&response.body));
+        out.extend_from_slice(&response.body);
     }
-
     out
+}
+
+/// Render the response in text form for stdout, where the caller has already
+/// refused a body that is not UTF-8.
+pub fn render_text(response: &Response, include_headers: bool, head_only: bool) -> String {
+    String::from_utf8_lossy(&render_bytes(response, include_headers, head_only)).into_owned()
 }
 
 /// Build a structured JSON object for kaish `--json` output.
