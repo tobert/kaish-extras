@@ -601,7 +601,11 @@ kaish> git mv old.txt new.txt
 kaish> git mv a.txt b.txt dir        # several sources into a directory
 kaish> git restore --staged src/main.rs
 kaish> git reset                     # also: git reset HEAD, git reset -- <path>
+kaish> git reset HEAD~1 -- notes.txt # that index entry from another revision; nothing moves
 ```
+
+`reset --soft <rev>` and `reset --mixed <rev>` (also `reset <rev>`) move the
+branch and are described under "Rewriting history" below.
 
 Each returns its summary in `--json` (`added`, `modified`, `removed`,
 `refreshed`; `removed`, `cached`; `moved`; `unstaged`). The text surface is
@@ -622,21 +626,23 @@ What refuses, with the exit code:
 | `rm <dir>` without `-r` | 1 | |
 | `mv` untracked or missing source, existing destination without `-f`, a directory into itself, a missing destination parent | 1 | |
 | `restore` without `--staged`, or with `--worktree` | 2 | it would write file content |
-| `reset --hard` | 2 | never |
-| `reset <rev>`, `reset --soft`, `--merge`, `--keep` | 2 | moves the branch; a later phase, under the rewrite policy |
+| `reset --hard`, `--merge`, `--keep` | 2 | they write working-tree files; never |
+| `reset --soft` with a path; two of `--soft`, `--mixed`, `--hard`, `--merge`, `--keep` | 2 | usage |
 | any of them in a merge, rebase, ... or with a split index, ... | 4 | design section 4 |
 
-`reset HEAD` and `reset HEAD -- <path>` are the unstage forms; any other first
-word that names a revision, or contains `~`, `^`, `@` or `{`, is the revision
-form and refuses.
+`reset HEAD` and `reset HEAD -- <path>` are the unstage forms. Any other first
+word that names a revision, or contains `~`, `^`, `@` or `{`, is a revision:
+alone it moves the branch (see "Rewriting history"), and before `-- <path>` it
+copies those index entries from that revision and moves nothing.
 
 ### Where it differs from git, on purpose
 
 - `add` refuses the whole command when a named path is ignored; git stages the
   other paths and exits 1.
-- `reset` and `restore --staged` do not print "Unstaged changes after reset",
-  do not refresh the stat of entries they restore, and `reset` writes no
-  `ORIG_HEAD` or reflog line (HEAD does not move).
+- `reset` and `restore --staged` do not print "Unstaged changes after reset"
+  and do not refresh the stat of entries they restore. `reset`, `reset HEAD`
+  and `reset -- <path>` write no `ORIG_HEAD` or reflog line; git writes both
+  for the first two, even though HEAD does not move (`docs/issues.md` W25).
 - `restore --staged` and `reset` give a restored entry an all-zero stat, as git
   does; an entry that already matches HEAD is left alone.
 - `add` reads whole files: a file over 128 MiB refuses (git streams).
@@ -714,7 +720,12 @@ does not borrow the author's.
 
 | Spelling | Exit | Why |
 |---|---|---|
-| `--amend`, `--amend --no-edit` | 2 | not available yet; the next command is a new commit |
+| `--amend` with neither `-m`/`-F` nor `--no-edit` | 2 | no editor |
+| `--amend` the rewrite policy forbids, or a shallow repository | 2, 4 | "Rewriting history" below |
+| `--amend` on a branch with no commit | 1 | nothing to amend |
+| `--amend` that leaves the commit's tree equal to its parent's, without `--allow-empty` | 1 | as git |
+| `--amend` of a commit with an `encoding` header or a message that is not UTF-8 | 4 | cannot carry it over |
+| `--no-edit` or `--reset-author` without `--amend`; `--reset-author` with `--author` | 2 | usage |
 | `--fixup`, `--squash` | 2 | no autosquash |
 | `-S`, `--gpg-sign` | 2 | this shell never signs |
 | `commit.gpgSign` or `tag.gpgSign` true in the repository's config | 4 | same |
@@ -748,6 +759,70 @@ does not borrow the author's.
   rebuilds it); `-a` and `--only` rewrite the index without it.
 - A pre-commit hook rejection after `-a` or `--only` leaves unreachable
   objects behind; the index and the branch do not change.
+
+## Rewriting history — `commit --amend` and `reset <rev>`
+
+Both replace the branch's tip, so both pass the embedder's `RewritePolicy`
+(`docs/embedding-git.md`, "The rewrite policy") before anything is written.
+
+```sh
+kaish> git commit --amend -m 'Fix the parser'      # new message, the index's tree
+kaish> git commit --amend --no-edit                # keep the message; stage first
+kaish> git commit --amend -a --no-edit             # also stage tracked changes
+kaish> git commit --amend --no-edit --reset-author # author = the shell's identity, now
+kaish> git reset --soft HEAD~1                     # move the branch; index and files stay
+kaish> git reset HEAD~2                            # move it and reset the index (--mixed)
+```
+
+**`--amend`.** The new commit has the old commit's parents (all of them, for a
+merge), the old author (name, email and date) unless `--author` replaces name
+and email or `--reset-author` makes the author the shell's identity and clock,
+and a new committer. The tree is the index, or `-a`'s or `--only`'s. The
+message is `-m`/`-F` (cleaned as for a commit) or, with `--no-edit`, the old
+message cleaned the same way; `--trailer` applies to either. Other commit
+headers are copied and a signature is dropped, as git does. The reflog line is
+`commit (amend): <first line>`; no `ORIG_HEAD` is written. Hooks are as for a
+commit, plus `post-rewrite`: a repository with one refuses the amend without a
+hook provider (exit 4), before anything is written. The output is git's, with
+` Author:` when it differs and ` Date:` (the author's) except under
+`--reset-author`; `--json` adds `amended`, the old commit.
+
+**`reset --soft <rev>` and `reset [--mixed] <rev>`.** `--soft` moves the branch
+(or a detached HEAD) and nothing else. `--mixed` also puts the whole index back
+to `<rev>`'s tree. The working tree is never written. Both write `ORIG_HEAD`
+(the old tip) and the reflog line `reset: moving to <rev as typed>` in the
+branch's log and `logs/HEAD`, as git does, and need an identity for the line.
+`<rev>` is what `git log` accepts: `HEAD~N`, `^`, a branch, a tag, an oid.
+`--json` returns `head`, `previous`, `mode`, `branch` and `unstaged`.
+
+**The policy.** `Refuse` forbids a move that drops commits; `Unpublished`, the
+default, forbids it when a dropped commit is reachable from a `refs/remotes/*`
+ref; `Allow` permits it. A move that drops nothing always passes. The refusal
+is exit 2 and reads, for an amend:
+
+> git commit --amend -m x: refused. HEAD a1b2c3d is on origin/main, and this
+> shell does not rewrite published commits. Remote-tracking refs show the last
+> fetch, not the remote itself. Make a new commit instead: git commit -m
+> '<message>'. There is no flag that overrides this; the policy is set by the
+> program embedding this shell. Nothing was changed.
+
+For a reset it says "This reset would drop commit a1b2c3d, which is on
+origin/main". Remote-tracking refs are the state at the last fetch: a commit
+another clone pushed since looks unpublished. A shallow repository refuses
+under `Unpublished` (exit 4). In a repository with more than 100,000 commits
+to read and no commit-graph file the check gives up (exit 1) rather than
+guess; `git commit-graph write --reachable` makes it short. `commit-tree`,
+`update-ref`, `hash-object` and `write-tree` are refused by name, and say what
+the policy is unless it is `Allow`.
+
+### Where it differs from git, on purpose
+
+- `reset` with no revision or `HEAD` writes no `ORIG_HEAD` and no reflog line;
+  with a revision it writes both. Git writes both always.
+- No "Unstaged changes after reset" list; entries a `--mixed` reset restores
+  get an all-zero stat.
+- Amend refuses a commit with an `encoding` header or a non-UTF-8 message.
+- Costs, trust and smaller differences: `docs/issues.md` W24-W27.
 
 ## Non-goals
 

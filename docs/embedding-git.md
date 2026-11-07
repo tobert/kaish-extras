@@ -487,8 +487,9 @@ allowed-tree entry to cover it.
 ## The commit profile (in progress)
 
 Design: `docs/design/git-write-profile.md`. This section says what exists as of
-phase 2: **the index verbs write, and `commit` and `var` exist. Amending a
-commit, `reset <rev>`, `branch <name>`, `tag <name>` and `switch -c` do not.**
+phase 3: **the index verbs write, `commit` (with `--amend`), `reset --soft`
+and `--mixed <rev>`, and `var` exist, and `RewritePolicy` is read. `branch
+<name>`, `tag <name>` and `switch -c` do not.**
 
 A build with the `commit` cargo feature (off by default) has:
 
@@ -498,7 +499,7 @@ A build with the `commit` cargo feature (off by default) has:
   profile but carries no write settings, and builds a tool with no write verbs.
 - Seven write verbs, added to the verb set by `with_commit_profile()` and
   removable one by one with `without_verb`: `add`, `rm`, `mv`,
-  `restore --staged`, `reset` with no revision, `commit` and `var`
+  `restore --staged`, `reset`, `commit` and `var`
   (`Verb::WRITE`). `GitConfig::read_only()` still publishes exactly
   `Verb::ALL`. Their text surface is in `docs/git.md`, "`git add`, `rm`, `mv`,
   `restore --staged` and `reset`" and "`git commit` and `git var`".
@@ -507,23 +508,49 @@ A build with the `commit` cargo feature (off by default) has:
 
   | Leaf | `operations` |
   |---|---|
-  | `add`, `restore`, `reset` | `git.index` |
+  | `add`, `restore` | `git.index` |
+  | `reset` | `git.index`, `git.ref`, `git.rewrite` |
   | `rm` | `git.index`, `fs.remove` |
   | `mv` | `git.index`, `fs.rename` |
   | `commit` | `git.index`, `git.commit`, `git.ref`, `git.rewrite` |
 
-  `commit` declares `git.rewrite` although `--amend` is refused today: the
-  schema is reflected before argv is known. `var` declares none. The read
+  `commit` and `reset` declare `git.ref` and `git.rewrite` for every
+  spelling, a plain `commit` and a plain `reset` included: the schema is
+  reflected before argv is known, and `plan` reports the command's words and
+  not the leaf they resolve to. `var` declares none. The read
   verbs declare none. The root of a read-only tool declares none.
 - `WritableGitConfig::with_hooks` and `with_identity`, and the types they take
-  (`GitHooks`, `Identity`), which `commit` and `var` read. `with_rewrite_policy`
-  and `RewritePolicy` are **not read by any verb yet**: `--amend` and
-  `reset <rev>` are a later phase and refuse regardless.
+  (`GitHooks`, `Identity`), which `commit`, `reset` and `var` read.
+  `with_rewrite_policy` takes a `RewritePolicy`, described next.
 - The per-profile router text. A tool without write settings answers `git add`
   with "this git is read-only". A tool with them never says that: for a git
   command it has no verb for (`commit`, `switch`, `checkout`, `stash`) it names
   the verbs it does have, and for a verb the embedder subtracted it says the
   embedder turned it off.
+
+**The rewrite policy.** `RewritePolicy` decides whether a branch move may
+drop commits. `commit --amend` and `reset --soft|--mixed <rev>` are the moves
+that can. One function checks every branch move before anything is written.
+
+| Policy | A move that drops nothing (a commit, a forward reset) | A move that drops commits |
+|---|---|---|
+| `Refuse` | allowed | refused, exit 2 |
+| `Unpublished` (the default) | allowed | allowed only if no dropped commit is reachable from a `refs/remotes/*` ref; else refused, exit 2 |
+| `Allow` | allowed | allowed |
+
+"Dropped" means reachable from the old tip and not from the new one. `--amend`
+drops the old tip. `reset --soft HEAD~3` drops three commits, and one published
+commit among them refuses it, even when HEAD itself is not published. A
+refusal has the five parts, names the dropped commit and the remote-tracking
+ref, says those refs are the last fetch and not the remote, gives one next
+command (a new commit; never `reset --soft`), and says no flag overrides it
+and the embedder sets the policy. The refusal text for `commit-tree`,
+`update-ref`, `hash-object` and `write-tree` names the policy unless it is
+`Allow`. Two refusals are not about the policy: a shallow repository under
+`Unpublished` (exit 4), and a walk past 100,000 commits (exit 1) in a
+repository with no `objects/info/commit-graph`. With no remote-tracking refs,
+nothing counts as published. Cost, trust and the other limits are
+`docs/issues.md` W24-W27.
 
 **What `commit` does with your hooks and identity.**
 
@@ -539,8 +566,9 @@ A build with the `commit` cargo feature (off by default) has:
   are UTC.
 - *Hooks.* This crate spawns nothing. Without a provider, a hook git would run
   for a commit (`pre-commit`, `prepare-commit-msg`, `commit-msg`,
-  `post-commit`, `reference-transaction`, and `post-index-change` when `-a` or
-  `--only` writes the index) refuses the commit, exit 4, naming it; so does
+  `post-commit`, `reference-transaction`, `post-rewrite` for `--amend`, and
+  `post-index-change` when `-a` or `--only` writes the index) refuses the
+  commit, exit 4, naming it; a `reset` refuses for `reference-transaction`; so does
   `--no-verify` when one is present. "Present" is an executable regular file
   or a link, not a `.sample`, in `<common dir>/hooks` or the directory
   `core.hooksPath` names (any value counts; a path outside the working tree

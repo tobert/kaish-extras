@@ -1711,8 +1711,11 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   cache-tree extension, as the index verbs do.
 - **W21 — hook accounting.** `prepare-commit-msg` and `reference-transaction`
   have no `GitHooks` method: with a provider they appear in
-  `HookContext::hooks_present` and the provider decides. `post-rewrite` and
-  `post-checkout` belong to later verbs. `pre_commit` and `commit_msg` run
+  `HookContext::hooks_present` and the provider decides. `post-rewrite`
+  (an amend) is the same: scanned, refused without a provider, listed with
+  one, and never called with the old and new oids git feeds it. `reset`
+  scans `reference-transaction` only. `post-checkout` belongs to a later verb.
+  `pre_commit` and `commit_msg` run
   while `index.lock` is held for `-a` and `--only`, so a provider that runs a
   real hook script which itself writes the index will find it locked.
   `--no-verify` is passed to the provider and the provider decides.
@@ -1724,3 +1727,50 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   (add's rule for a spec that matches many); a nested repository that is
   already a gitlink is updated to its HEAD. Intent-to-add entries are left
   out of the tree and stay in the index, as git does.
+
+## git write — phase 3 (amend, reset, the rewrite policy), what is left
+
+- **W24 — what the rewrite check trusts, and what it costs.** The walk
+  (`verbs/write/rewrite.rs`) reads no commit date. Without
+  `objects/info/commit-graph` it runs to exhaustion: the commits behind each
+  remote tip that the dropped commits do not reach, and for a published verdict
+  the whole history of the new tip. The 100,000-commit budget refuses (exit
+  1) on a repository too large for that, naming `git commit-graph write
+  --reachable`; fetch does not write one by default, `git gc` does. With a
+  graph, generation numbers stop the walk early. Each expanded commit is
+  checked against the graph (a parent with an equal or higher generation, or a
+  commit that gains a side after it was expanded, restarts the walk without the
+  graph), but a graph that is consistently wrong is trusted: the file is part
+  of the repository. Only a single `commit-graph` file is exercised by tests;
+  a split chain is read through the same call. A symlink at `objects/info`,
+  `commit-graph` or `commit-graphs` makes the file ignored, not followed.
+  Remote-tracking refs are the last fetch: a commit pushed from another clone
+  since looks unpublished. Under `Unpublished`, a shallow repository refuses
+  (exit 4) even when no remote ref exists, and with no remote-tracking refs at
+  all a non-shallow repository allows every rewrite.
+- **W25 — `reset` and `ORIG_HEAD`.** `reset --soft|--mixed <rev>`, with or
+  without `--soft` and a revision other than `HEAD`, writes `ORIG_HEAD` (the
+  old tip) and `reset: moving to <rev as typed>` in the branch's log and
+  `logs/HEAD`, as git does, including when the tip does not change. The
+  no-revision forms (`reset`, `reset HEAD`, `reset --mixed`, `reset -- <path>`)
+  write neither; git writes both for the first three (checked: git 2.56 writes
+  `ORIG_HEAD` and a `reset: moving to HEAD` line for `git reset HEAD`). Git
+  deletes `ORIG_HEAD` when a reset starts from an unborn branch; this does not.
+  A reset needs a committer identity (the variables or the pinned one) for
+  the reflog line, where git falls back to its own identity detection. `reset
+  --mixed` prints no "Unstaged changes after reset" (W4). `reset <rev> --
+  <path>` is supported and moves nothing.
+- **W26 — what `--amend` cannot carry over.** A commit with an `encoding`
+  header, or a message that is not UTF-8, refuses the amend (exit 4). Other
+  extra headers are copied; `gpgsig` and `gpgsig-sha256` are dropped, as git
+  drops them. The author's date is copied as `seconds +hhmm`: a timestamp git
+  prints in a form that does not round-trip (`-0000`) comes out as `+0000`.
+  `--reset-author` with `--author` refuses, as git does. The summary's `Date:`
+  line is the author's date in git's default format, left out under
+  `--reset-author`, as git does.
+- **W27 — the refusal names one commit and one ref.** A rewrite that drops
+  several published commits names one of them (the highest in generation
+  order with a graph, the lowest oid without) and the first remote-tracking ref
+  in name order that reaches it. `reset <rev>` accepts the read side's
+  revision grammar: `HEAD~N`, `^`, branches, tags, oids; `@{...}`, `^{tree}`
+  and `A..B` are refused by the revision parser.
