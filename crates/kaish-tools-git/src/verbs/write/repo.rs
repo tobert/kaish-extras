@@ -49,6 +49,10 @@ pub(crate) struct WriteRepo {
     /// The ref store that writes reflogs. A second store beside `ReadRepo`'s;
     /// `write_shaped_identifiers` counts constructions outside this directory.
     refs: gix_ref::file::Store,
+    /// The same store with reflogs off, for a ref that gets none (a tag).
+    /// gix-ref opens an existing log path even then, and fails on a directory
+    /// there where git carries on.
+    refs_unlogged: gix_ref::file::Store,
     /// The real object store handle, the one that can write objects.
     objects: gix_odb::Handle,
     _token: WriteToken,
@@ -63,23 +67,28 @@ impl WriteRepo {
         containment::assert_inside_ceiling(op, Root::GitDir, read.git_dir(), read.ceiling())?;
         containment::assert_inside_ceiling(op, Root::CommonDir, read.common_dir(), read.ceiling())?;
 
-        let options = gix_ref::store::init::Options {
-            write_reflog: gix_ref::store::WriteReflog::Normal,
-            prohibit_windows_device_names: cfg!(windows),
-            ..Default::default()
+        // Same two layouts as `ReadRepo`'s store (repo.rs). Built once for
+        // each reflog mode, from this one body, so the two cannot disagree.
+        let build = |write_reflog| {
+            let options = gix_ref::store::init::Options {
+                write_reflog,
+                prohibit_windows_device_names: cfg!(windows),
+                ..Default::default()
+            };
+            if read.git_dir() == read.common_dir() {
+                gix_ref::file::Store::at(read.git_dir().to_path_buf(), options)
+            } else {
+                gix_ref::file::Store::for_linked_worktree(
+                    read.git_dir().to_path_buf(),
+                    read.common_dir().to_path_buf(),
+                    options,
+                )
+            }
         };
-        // Same two layouts as `ReadRepo`'s store (repo.rs).
-        let refs = if read.git_dir() == read.common_dir() {
-            gix_ref::file::Store::at(read.git_dir().to_path_buf(), options)
-        } else {
-            gix_ref::file::Store::for_linked_worktree(
-                read.git_dir().to_path_buf(),
-                read.common_dir().to_path_buf(),
-                options,
-            )
-        };
+        let refs = build(gix_ref::store::WriteReflog::Normal);
+        let refs_unlogged = build(gix_ref::store::WriteReflog::Disable);
         let objects = crate::repo::open_object_store(op, read.common_dir(), read.ceiling())?;
-        Ok(Self { read, refs, objects, _token: token })
+        Ok(Self { read, refs, refs_unlogged, objects, _token: token })
     }
 
     /// The read side: discovery, revisions, objects.
@@ -91,6 +100,11 @@ impl WriteRepo {
     /// containment check for the path the transaction will touch.
     pub(crate) fn refs(&self) -> &gix_ref::file::Store {
         &self.refs
+    }
+
+    /// [`Self::refs`] without reflogs. Same containment rule.
+    pub(crate) fn refs_unlogged(&self) -> &gix_ref::file::Store {
+        &self.refs_unlogged
     }
 
     /// The object store handle that can write objects.
@@ -146,17 +160,33 @@ impl WriteRepo {
     /// (`refs/bisect/*`, `HEAD`, `logs/HEAD`) is checked under the
     /// worktree's git directory and the rest under the common one.
     pub(crate) fn check_ref_write(&self, refname: &str, also_head: bool) -> Result<Vec<PathBuf>, GitError> {
-        let mut rels = vec![
-            refname.to_string(),
-            format!("{refname}.lock"),
-            format!("logs/{refname}"),
-        ];
+        self.check_ref_write_with(refname, also_head, true)
+    }
+
+    /// [`Self::check_ref_write`] for a ref the write gives no reflog (a tag).
+    /// Git opens the ref's log only if one exists, and a directory there is
+    /// not an error, so only the directories above the log are walked.
+    pub(crate) fn check_ref_write_unlogged(&self, refname: &str) -> Result<Vec<PathBuf>, GitError> {
+        self.check_ref_write_with(refname, false, false)
+    }
+
+    fn check_ref_write_with(&self, refname: &str, also_head: bool, logged: bool) -> Result<Vec<PathBuf>, GitError> {
+        let mut rels = vec![refname.to_string(), format!("{refname}.lock")];
+        if logged {
+            rels.push(format!("logs/{refname}"));
+        }
         if also_head && refname != "HEAD" {
             rels.push("logs/HEAD".to_string());
         }
         rels.push("packed-refs".to_string());
         rels.push("packed-refs.lock".to_string());
-        rels.iter().map(|rel| self.check(Path::new(rel), Leaf::File)).collect()
+        let mut paths: Vec<PathBuf> = rels.iter().map(|rel| self.check(Path::new(rel), Leaf::File)).collect::<Result<_, _>>()?;
+        if !logged {
+            if let Some(dir) = Path::new("logs").join(refname).parent() {
+                paths.push(self.check(dir, Leaf::Dir)?);
+            }
+        }
+        Ok(paths)
     }
 
     /// Check a path under the work tree root (`mv`, `add`, `rm`).

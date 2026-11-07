@@ -1382,23 +1382,41 @@ impl ReadRepo {
         section: &str,
         key: &str,
     ) -> Result<Vec<(Option<String>, String)>, GitError> {
+        Ok(self
+            .config_entries(section, key)?
+            .into_iter()
+            .map(|(sub, v)| (sub, v.unwrap_or_default()))
+            .collect())
+    }
+
+    /// [`Self::config_values`] that tells a key written with no `=` (`None`,
+    /// which git reads as true) from one written `key =` (`Some("")`).
+    ///
+    /// Walks the parser's events rather than asking the parsed file for the
+    /// key's values: that call pairs a key with no `=` with the value of the
+    /// next key that has one.
+    pub(crate) fn config_entries(
+        &self,
+        section: &str,
+        key: &str,
+    ) -> Result<Vec<ConfigEntry>, GitError> {
+        use gix_config::parse::{Events, EventRef};
         let Some(path) = self.contained_leaf("config file", &self.common_dir, "config")? else {
             return Ok(Vec::new());
         };
         let bytes = std::fs::read(&path)
             .map_err(|e| GitError::repository(self.operation, "reading config", &path, e))?;
-        let file = parse_config_bytes(self.operation, &path, &bytes)?;
+        let events = Events::from_bytes(&bytes, None)
+            .map_err(|e| GitError::repository(self.operation, "parsing config", &path, e))?;
         let mut out = Vec::new();
-        for s in file.sections() {
-            if !s.header().name().eq_ignore_ascii_case(section.as_bytes()) {
+        for s in events.sections() {
+            let EventRef::SectionHeader { name, subsection_name, .. } = s.header() else { continue };
+            if !name.eq_ignore_ascii_case(section.as_bytes()) {
                 continue;
             }
-            let subsection = s
-                .header()
-                .subsection_name()
-                .map(|n| n.to_str_lossy().into_owned());
-            for value in s.values(key) {
-                out.push((subsection.clone(), value.to_str_lossy().into_owned()));
+            let subsection = subsection_name.map(|n| n.to_str_lossy().into_owned());
+            for value in section_key_entries(s.body(), key) {
+                out.push((subsection.clone(), value));
             }
         }
         Ok(out)
@@ -1562,6 +1580,53 @@ impl ReadRepo {
 // ═══════════════════════════════════════════════════════════════════════════
 // Config reading and the refusals
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// One configuration entry: its subsection, and its value (`None` for a key
+/// with no `=`).
+pub(crate) type ConfigEntry = (Option<String>, Option<String>);
+
+/// Every entry of `key` in one section body, in order: `None` for a key with
+/// no `=`, else its normalized value.
+fn section_key_entries<'a>(
+    body: impl Iterator<Item = gix_config::parse::EventRef<'a>>,
+    key: &str,
+) -> Vec<Option<String>> {
+    use gix_config::parse::EventRef;
+    /// The entry being read: whether it is `key`, whether `=` was seen, and
+    /// the value bytes so far.
+    struct Entry {
+        wanted: bool,
+        separator: bool,
+        value: Vec<u8>,
+    }
+    fn flush(entry: Option<Entry>, out: &mut Vec<Option<String>>) {
+        let Some(e) = entry.filter(|e| e.wanted) else { return };
+        out.push(e.separator.then(|| gix_config::value::normalize(e.value.as_slice()).to_str_lossy().into_owned()));
+    }
+    let mut out = Vec::new();
+    let mut entry: Option<Entry> = None;
+    for event in body {
+        match event {
+            EventRef::SectionValueName(n) => {
+                flush(entry.take(), &mut out);
+                entry = Some(Entry { wanted: n.eq_ignore_ascii_case(key.as_bytes()), separator: false, value: Vec::new() });
+            }
+            EventRef::KeyValueSeparator => {
+                if let Some(e) = entry.as_mut() {
+                    e.separator = true;
+                }
+            }
+            EventRef::Value(v) | EventRef::ValueNotDone(v) | EventRef::ValueDone(v) => {
+                if let Some(e) = entry.as_mut() {
+                    e.value.extend_from_slice(v);
+                }
+            }
+            _ => {}
+        }
+    }
+    flush(entry, &mut out);
+    out
+}
 
 /// Parse config bytes we fetched ourselves. Includes are never followed.
 fn parse_config_bytes(

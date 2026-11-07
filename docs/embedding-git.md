@@ -484,12 +484,14 @@ Decide that deliberately — a dedicated mount scoped to exactly the common
 dir, if your backend supports one, is narrower than widening an existing
 allowed-tree entry to cover it.
 
-## The commit profile (in progress)
+## The commit profile
 
 Design: `docs/design/git-write-profile.md`. This section says what exists as of
-phase 3: **the index verbs write, `commit` (with `--amend`), `reset --soft`
-and `--mixed <rev>`, and `var` exist, and `RewritePolicy` is read. `branch
-<name>`, `tag <name>` and `switch -c` do not.**
+phase 4: **the index verbs write; `commit` (with `--amend`), `reset --soft`
+and `--mixed <rev>`, and `var` exist; `RewritePolicy` is read; and `branch
+<name>`, `tag <name>`, `switch -c` and `checkout -b` create refs.** Creation
+only: no verb here deletes, renames or moves a branch or a tag that exists, and
+none writes a file into the working tree.
 
 A build with the `commit` cargo feature (off by default) has:
 
@@ -497,12 +499,15 @@ A build with the `commit` cargo feature (off by default) has:
   `tool()` accepts either config. The write verbs exist only when `tool()` was
   given a `WritableGitConfig`: a clone of `read_config()` lists the `commit`
   profile but carries no write settings, and builds a tool with no write verbs.
-- Seven write verbs, added to the verb set by `with_commit_profile()` and
+- Nine write verbs, added to the verb set by `with_commit_profile()` and
   removable one by one with `without_verb`: `add`, `rm`, `mv`,
-  `restore --staged`, `reset`, `commit` and `var`
+  `restore --staged`, `reset`, `commit`, `var`, `switch` and `checkout`
   (`Verb::WRITE`). `GitConfig::read_only()` still publishes exactly
-  `Verb::ALL`. Their text surface is in `docs/git.md`, "`git add`, `rm`, `mv`,
-  `restore --staged` and `reset`" and "`git commit` and `git var`".
+  `Verb::ALL`. `branch` and `tag` are in `Verb::ALL`: the commit profile
+  widens what they accept (a name to create) and subtracting `Verb::Branch`
+  or `Verb::Tag` takes the creation with the listing. Their text surface is in
+  `docs/git.md`, "`git add`, `rm`, `mv`, `restore --staged` and `reset`",
+  "`git commit` and `git var`" and "Creating refs".
 - Effect ids on the schema, for `plan`. Each write leaf declares what any of
   its spellings can do, and the root lists the union:
 
@@ -513,18 +518,22 @@ A build with the `commit` cargo feature (off by default) has:
   | `rm` | `git.index`, `fs.remove` |
   | `mv` | `git.index`, `fs.rename` |
   | `commit` | `git.index`, `git.commit`, `git.ref`, `git.rewrite` |
+  | `branch`, `tag`, `switch`, `checkout` | `git.ref` |
 
   `commit` and `reset` declare `git.ref` and `git.rewrite` for every
   spelling, a plain `commit` and a plain `reset` included: the schema is
   reflected before argv is known, and `plan` reports the command's words and
-  not the leaf they resolve to. `var` declares none. The read
-  verbs declare none. The root of a read-only tool declares none.
+  not the leaf they resolve to. The same holds for `branch` and `tag`, which
+  declare `git.ref` on a tool with the commit profile although `git branch`
+  and `git tag --list` write nothing. `var` declares none. The other read
+  verbs declare none. The root of a read-only tool declares none, and a
+  read-only tool's `branch` and `tag` accept no creation flag.
 - `WritableGitConfig::with_hooks` and `with_identity`, and the types they take
   (`GitHooks`, `Identity`), which `commit`, `reset` and `var` read.
   `with_rewrite_policy` takes a `RewritePolicy`, described next.
 - The per-profile router text. A tool without write settings answers `git add`
   with "this git is read-only". A tool with them never says that: for a git
-  command it has no verb for (`commit`, `switch`, `checkout`, `stash`) it names
+  command it has no verb for (`stash`, `merge`, `rebase`) it names
   the verbs it does have, and for a verb the embedder subtracted it says the
   embedder turned it off.
 
@@ -568,8 +577,12 @@ nothing counts as published. Cost, trust and the other limits are
   for a commit (`pre-commit`, `prepare-commit-msg`, `commit-msg`,
   `post-commit`, `reference-transaction`, `post-rewrite` for `--amend`, and
   `post-index-change` when `-a` or `--only` writes the index) refuses the
-  commit, exit 4, naming it; a `reset` refuses for `reference-transaction`; so does
-  `--no-verify` when one is present. "Present" is an executable regular file
+  commit, exit 4, naming it; a `reset`, `branch <name>` and `tag <name>`
+  refuse for `reference-transaction`, and `switch -c` and `checkout -b` for that
+  and for `post-checkout`; so does
+  `--no-verify` when one is present. A provider does not change the ref-only
+  verbs: they proceed, the hook file does not run and the provider is not told
+  (W34). "Present" is an executable regular file
   or a link, not a `.sample`, in `<common dir>/hooks` or the directory
   `core.hooksPath` names (any value counts; a path outside the working tree, or
   through a symbolic link, refuses by name). With a `GitHooks` provider, `pre_commit` gets the tree oid
@@ -577,8 +590,9 @@ nothing counts as published. Cost, trust and the other limits are
   `commit_msg` may rewrite the message (git cleans it again afterward), and
   `post_commit` runs after the ref moved, its failures reported on stderr and
   not fatal. The provider is told `no_verify` and decides what it means.
-- *Signing* is refused: `-S`, and `commit.gpgSign` or `tag.gpgSign` true in
-  the repository's own config. Host `~/.gitconfig` is never read, so a host
+- *Signing* is refused: `-S`, `tag -s` and `-u`, and `commit.gpgSign` or
+  `tag.gpgSign` true in the repository's own config (`tag.forceSignAnnotated`
+  refuses an annotated tag). Host `~/.gitconfig` is never read, so a host
   that signs by default still gets an unsigned commit from this tool; the
   tool description says so.
 
@@ -598,6 +612,36 @@ HEAD edit, so it is never given one; the locks are also looked at first, to
 refuse before any object is written (`docs/issues.md`, W13). The refusals that
 come after objects exist (`pre_commit` is handed the tree id, W15; a branch that
 moved) say so: objects remain, no ref or index changed, `git gc` prunes them.
+
+**Creating refs.** `branch <name> [<start>]`, `tag <name> [<rev>]`,
+`tag -a <name> -m <message>`, `switch -c <name>` and `checkout -b <name>` write
+a ref that did not exist, with a compare-and-swap on "does not exist" after a
+look of this crate's own at the name (gix-ref passes that swap for a ref that
+exists at the same oid). The name is checked as git checks it (`HEAD`, a
+leading `-` and git's ref-format rules refuse, exit 2); a name that exists, or
+that would sit above or below another ref (`a` and `a/b`), refuses with exit
+1. A branch gets git's reflog line, `branch: Created from <start as typed>`
+(the current branch's name, or `HEAD` when detached, when no start is given).
+A tag gets no reflog, as in git. An annotated tag is a tag object written byte
+for byte as git writes it, with the committer identity as tagger, and `-m`
+alone makes one, as in git. `switch -c` and `checkout -b` make the branch at
+HEAD, point `HEAD` at it, and append `checkout: moving from <old> to <new>` to
+`logs/HEAD` themselves, under one `HEAD.lock`; the index and the working tree
+are not touched, and a start point is accepted only when it names the commit
+HEAD is on (`HEAD` is resolved like any other start point, so on an unborn HEAD
+it refuses, exit 1). `switch <branch>`, `checkout <branch>`, `checkout <path>`,
+`switch -C`, `checkout -B`, `-d`, `-D`, `-m`, `-M`, `-c`, `-C`, `-f`, `-s` and
+the upstream flags are refused with the command to type instead. Every
+creation passes the containment walk over what it writes before it writes: a
+branch walks the ref, its lock, its reflog and `packed-refs`; `switch -c` and
+`checkout -b` add `logs/HEAD`; a tag walks the ref, its lock and `packed-refs`
+and the directories above its (unwritten) log path, so a directory at the log
+path does not stop it, as in git. A planted link refuses (exit 4); a lock that
+exists is never removed (exit 4). An annotated tag writes its object before the
+ref, and a commit writes its objects before the branch moves, so a refusal or
+an I/O failure after that says the objects remain, that nothing refers to them
+and that `git gc` prunes them. The differences from git are `docs/issues.md`
+W34-W47.
 
 What the verbs do not do, stated plainly:
 

@@ -1813,3 +1813,118 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   in name order that reaches it. `reset <rev>` accepts the read side's
   revision grammar: `HEAD~N`, `^`, branches, tags, oids; `@{...}`, `^{tree}`
   and `A..B` are refused by the revision parser.
+- **W33 — a trailing `/` in a pathspec still matches a file.** `PathFilter`
+  (`pathfilter.rs`, `parse`) strips a trailing `/` before it builds a
+  `Spec::Literal`, so the spec `d/` matches a file named `d`. Git 2.56.0 matches
+  only a directory: with `d` a tracked file, `git ls-files -- d/` prints
+  nothing and `git ls-files -- d` prints `d`. It affects every verb that takes
+  a pathspec, and it predates the commit profile. The fix is to keep the
+  trailing `/` in the spec and match directories only.
+- **W34 — the hook provider is not called for `branch`, `tag`, `switch -c`,
+  `checkout -b` or `reset`.** `GitHooks` has `pre_commit`, `commit_msg` and
+  `post_commit` and nothing for a ref update. Without a provider these verbs
+  refuse when the repository has a `reference-transaction` hook (and
+  `post-checkout`, for the two switches). With a provider installed they
+  proceed, the hook file does not run, and the provider hears nothing
+  (`tests/write_refs.rs`, `with_a_provider_the_ref_writes_proceed_and_the_provider_is_not_called`).
+  An embedder that installs a provider to run `pre-commit` therefore loses the
+  `reference-transaction` check for these verbs. The fix is a `GitHooks`
+  method for a ref update, called with the ref, old and new value.
+- **W35 — `commit` keeps no trailing form feed or vertical tab, and git
+  does.** `message::cleanup` strips `\x0c` and `\x0b` from the end of a line;
+  git's `isspace` is space, tab, newline and carriage return, so git keeps them
+  (checked on git 2.56: `commit -m $'a\f'` and `tag -a -m $'a\f'` both store
+  `a\f\n`). `tag` has its own cleanup with git's set. The failing case for
+  `commit` is `a_trailing_form_feed_or_vertical_tab_stays_in_the_message_as_in_git`
+  in `tests/write_commit.rs`, ignored until the cleanup changes.
+- **W36 — an empty directory where a ref goes is refused.** A directory at
+  `refs/heads/x` (left behind when its last branch was deleted) makes git
+  remove it and create the branch. The containment walk wants a regular file
+  or nothing there, so `branch x` exits 4 with "Nothing was changed." The
+  refusal text says "Real git fails on this layout too", which is false for an
+  empty directory; the wording belongs to the containment check, not to this
+  verb. `an_empty_directory_where_a_branch_goes_is_refused_though_git_replaces_it`
+  pins both behaviors.
+- **W37 — `branch`, `tag` and `switch -c` against git, in the names.**
+  - A name that is both a tag and a branch: `git branch n` with a tag `main`
+    and HEAD on `main` exits 128 (`ambiguous object name: 'main'`); this makes
+    the branch and writes `Created from main`. A start point resolves by the
+    read side's rule, not git's.
+  - With no start point the reflog says the current branch's short name, as
+    git does, but git picks the unambiguous short name (`heads/main` when a tag
+    is also called `main`) and this writes `main`.
+  - The name check for existing refs and for a ref under or above the name
+    lists every ref once, so its cost grows with the number of refs.
+  - Names are compared byte for byte. On a case-insensitive file system `Foo`
+    and `foo` are one file; `core.ignorecase=true` is not refused for these
+    verbs as it is for the index verbs.
+  - A name git refuses is refused here with exit 2; a name that exists, or sits
+    above or below another ref, exits 1. Git's exit is 128 for all of them. The
+    wording is this shell's five parts, not git's `fatal:` line; git's own words
+    for an existing name are asserted in `tests/write_refs.rs`.
+  - Git prints a hint for a tag of a tag; this prints nothing.
+- **W38 — tracking configuration makes a start refuse.** Git writes
+  `branch.<name>.remote` and `.merge` when the start is a remote-tracking
+  branch of a configured remote (or, with `branch.autoSetupMerge=always`, any
+  branch). This shell never writes configuration, so a start under
+  `refs/remotes/`, or `autoSetupMerge` of `always` or `inherit`, exits 4 unless
+  `--no-track` is given; `branch.autoSetupMerge=false` allows it. It refuses
+  too when no remote is configured, where git would write nothing, because the
+  check looks at the ref and not at `remote.<name>.fetch`. `-t`, `--track`, `-u`,
+  `--set-upstream-to` and `--unset-upstream` refuse (exit 2).
+- **W39 — `switch -c`, `checkout -b`, bare repositories and reflogs.**
+  - `switch -c` and `checkout -b` refuse (exit 4) while a merge, rebase,
+    cherry-pick, revert or bisect is in progress; git allows some of those.
+  - A start point is accepted only when it names the commit HEAD is on. Git
+    treats that as no change to the working tree (checked: local edits and the
+    index stay), so nothing is written but refs. Any other start exits 2 and
+    names `git branch <name> <start>`.
+  - On an unborn HEAD `switch -c x` rewrites `HEAD` and writes no reflog and
+    no branch, as git does; it then needs no identity.
+  - `branch` in a bare repository exits 4 unless `core.logAllRefUpdates` is
+    set to true: git writes no reflog there by default and this shell always
+    writes one. `tag` works in a bare repository. `core.logAllRefUpdates=always`
+    refuses `tag`, which git would then log. `core.commentChar` and
+    `core.commentString` refuse an annotated tag, whose `#` lines this drops.
+  - `tag -F -` and `-F` of a file over 1 MiB or not UTF-8 refuse, as for
+    `commit -F` (W22).
+- **W40 — `core.logAllRefUpdates=false` refuses `branch` and `switch -c` in a
+  non-bare repository.** Git makes the ref and writes no log (checked on git
+  2.56: `git branch x` exits 0 and `logs/refs/heads/x` is absent). This shell
+  always writes the reflog, so `ensure_reflog_on` refuses (exit 4). Failing
+  case: `log_all_ref_updates_false_makes_the_branch_with_no_log_as_git_does`
+  in `tests/write_refs.rs`, ignored.
+- **W41 — `branch.autoSetupMerge=simple` refuses a start git would not track.**
+  With `simple`, git writes tracking only when the new branch has the start's
+  name; for `git branch other origin/feat` it writes none. This shell refuses
+  (exit 4) any start under `refs/remotes/` unless `--no-track` is given (see
+  W38). Failing case: `auto_setup_merge_simple_writes_no_tracking_when_the_names_differ`,
+  ignored.
+- **W42 — `@{-1}` is not a start point.** Git expands it to the previous
+  branch; the revision parser has no `@{...}` form and exits 2. Failing case:
+  `at_minus_one_is_a_start_point_as_in_git`, ignored.
+- **W43 — a tag target of `HEAD^{tree}` or `HEAD:<path>` exits 2.** Git tags
+  the tree or the blob. The same object given by its id works (pinned in
+  `a_tag_of_a_tree_or_a_blob_is_made_as_git_makes_it`). Failing case:
+  `a_tag_target_may_be_a_tree_or_blob_spelling`, ignored.
+- **W44 — an existing log file for a new tag.** Git appends the tag's line to a
+  file that already exists at `logs/refs/tags/<name>` (checked: a stale file
+  gains `tag: tagging ...`); this shell writes no tag log. Failing case:
+  `an_existing_log_file_for_a_new_tag_is_appended_to_as_git_does`, ignored.
+- **W45 — a name whose directory part ends in `.` fails.** `git branch a./b` and
+  `git tag a./b` succeed. The check for a ref above the name asks gix for
+  `refs/heads/a.`, which gix calls an invalid ref name, so the verb exits 1
+  with "reading ref 'refs/heads/a.'". A bug, not a policy. Failing case:
+  `a_name_with_a_directory_part_ending_in_a_dot_is_accepted_as_git_accepts_it`,
+  ignored.
+- **W46 — `commit` refuses on `tag.gpgSign`.** `ensure_commit_settings` checks
+  `tag.gpgSign` beside `commit.gpgSign`; git's `commit` reads only the latter.
+  The refusal is conservative (nothing is written wrongly), and a bad
+  `tag.gpgSign` value now refuses a commit too. Left as it was.
+- **W47 — booleans are read from the last value only.** Git's configuration
+  set parses the last value of a key; `git_config` callbacks parse every one,
+  so a bad earlier value that a later one overrides stops some git commands.
+  This shell parses the last value (one parser, `parse_git_bool`, matching
+  `git config --type=bool`). A key with no `=` is told from `key =` by
+  `ReadRepo::config_entries`; the older `config_values` paired a bare key with
+  the value of the next key and no longer does.

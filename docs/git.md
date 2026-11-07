@@ -444,7 +444,8 @@ one question each.
 ## `git branch` and `git tag` — what the built verbs do
 
 The design is [architecture.md B.7](design/architecture.md#b7-git-branch--git-tag);
-this is what shipped. Listing only — creation belongs to the commit profile.
+this is what shipped. A read-only tool lists. A tool with the commit profile
+also creates (next section, "Creating refs").
 
 ```sh
 kaish> git branch                                 # local branches
@@ -843,6 +844,63 @@ the policy is unless it is `Allow`.
   get an all-zero stat.
 - Amend refuses a commit with an `encoding` header or a non-UTF-8 message.
 - Costs, trust and smaller differences: `docs/issues.md` W29-W32.
+
+## Creating refs — `branch <name>`, `tag`, `switch -c`, `checkout -b`
+
+Only a tool built with the commit profile has these (`docs/embedding-git.md`,
+"The commit profile"). All of them create a ref that does not exist and
+nothing else.
+
+```sh
+kaish> git branch feature-x                  # at HEAD
+kaish> git branch hotfix v0.1.0              # at a start point
+kaish> git tag v0.2.0                        # lightweight
+kaish> git tag -a v0.2.0 -m 'Release 0.2.0'  # annotated
+kaish> git tag -m 'Release 0.2.0' v0.2.0     # annotated too, as in git
+kaish> git tag -a v0.2.0 -F notes.txt HEAD~1 # message from a file
+kaish> git switch -c feature-x               # make it and move HEAD onto it
+kaish> git checkout -b feature-x             # the same
+```
+
+**Names** follow git: not `HEAD`, no leading `-`, and git's ref-format rules
+(`a..b`, `a.lock`, `a@{b`, a trailing `/`, a space and `~ ^ : ? * [ \` all
+refuse, exit 2). A branch or tag that exists refuses (exit 1) with the name,
+and so does a name that would sit inside another (`a` beside `a/b`).
+
+**A branch** is made at HEAD or at `<start>`, a revision `git log` accepts. The
+reflog line is `branch: Created from <start as typed>`; with no start it names
+the current branch, or `HEAD` when detached, as git does. A branch needs an
+identity for that line (the variables or the pinned one). An unborn HEAD has
+nothing to start from (exit 1). A start that is a remote-tracking branch makes
+git write tracking configuration, which this shell never does: it refuses
+(exit 4) unless `--no-track` is given.
+
+**A tag** at `<rev>` (HEAD by default) can name a commit, a tag, a tree or a
+blob, given as a branch, a tag, a ref, an object id or a `~N`/`^` suffix on one
+of those. `HEAD^{tree}` and `HEAD:<path>` are not parsed (exit 2, W43). `-a` makes an
+annotated tag, and so do `-m` and `-F`; there is no editor, so `-a` alone
+refuses. The tag object is git's, byte for byte: `object`, `type`, `tag`,
+`tagger` (the committer identity, with its date), a blank line and the
+message. The message is cleaned as git cleans a tag message: trailing spaces
+go, lines starting with `#` go, runs of blank lines collapse, the blank lines
+at both ends go. An empty message is allowed. Tags have no reflog.
+
+**`switch -c` and `checkout -b`** make the branch at HEAD and point `HEAD` at
+it. The index and every file stay as they are, local edits included. The
+reflogs are git's: `branch: Created from HEAD` on the branch and
+`checkout: moving from <old> to <new>` on `HEAD` (`<old>` is the full oid when
+HEAD was detached). A start point must name the commit HEAD is on; for any
+other, `git branch <name> <start>` makes the branch without switching to it.
+`HEAD` is a start point like any other: on an unborn HEAD it refuses (exit 1).
+With no start point, an unborn HEAD changes only `HEAD`. `--json` returns `branch`, `ref`,
+`commit`, `previous` and `detached`.
+
+**Refused, with the next step in the text:** `branch -d -D -m -M -c -C -f` and
+`-u`/`--set-upstream-to`/`--unset-upstream`/`-t`/`--track`; `tag -d -f -s -u`
+and `tag -a` without a message; `switch <branch>`, `checkout <branch>` and
+`checkout <path>` (they write files); `switch -C`, `checkout -B`, `--detach`,
+`--orphan`, `-f` and `-m` on either. The differences from git, and the cost of
+the name check, are `docs/issues.md` W34-W47.
 
 ## Non-goals
 

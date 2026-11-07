@@ -869,6 +869,86 @@ mod tests {
         check_move_with(&repo, &reset, Some(head), &NewTip::Existing(oid(r, "HEAD~2")), &mut Budget::new(OP)).expect("only unpublished commits dropped");
     }
 
+    /// One commit that adds `name`, so a second batch of commits cannot repeat
+    /// a first batch's file content and commit nothing.
+    fn commit_file(repo: &Path, name: &str) {
+        std::fs::write(repo.join(name), format!("{name}\n")).expect("file");
+        git_stdout(repo, &["add", "."]);
+        git_stdout(repo, &["-c", "user.name=T", "-c", "user.email=t@x", "commit", "-q", "-m", name]);
+    }
+
+    /// The S2 stop rule reads generation numbers from the graph file, and a
+    /// commit made after the file was written is in no graph. Here c0 and c1
+    /// are in the graph; c2 and c3 are not, and the remote ref is at c2. The
+    /// move from c3 to c1 drops c2, which is published: the verdict must be the
+    /// same with the graph, and without it.
+    #[test]
+    fn commits_outside_the_graph_do_not_change_the_s2_verdict() {
+        let fx = Fixture::new();
+        let r = &fx.repo;
+        commit_file(r, "c0");
+        commit_file(r, "c1");
+        git_stdout(r, &["commit-graph", "write", "--reachable"]);
+        commit_file(r, "c2");
+        commit_file(r, "c3");
+        let (c1, c2, c3) = (oid(r, "HEAD~2"), oid(r, "HEAD~1"), oid(r, "HEAD"));
+        publish(r, "origin/main", "HEAD~1");
+
+        let repo = fx.write_repo(false);
+        let graph = Graph::load(&repo).expect("the graph loads, or this test proves nothing about it");
+        assert!(graph.generation(&c1).is_some(), "c1 is in the graph");
+        assert!(graph.generation(&c2).is_none() && graph.generation(&c3).is_none(), "c2 and c3 are outside it");
+
+        let policy = chk(RewritePolicy::Unpublished);
+        let with = check_move(&repo, &policy, Some(c3), &NewTip::Existing(c1)).expect_err("c2 is published and dropped");
+        assert_eq!(with.exit_code(), 2, "{with}");
+        assert!(with.to_string().contains(&short(c2)), "names c2: {with}");
+        assert!(!with.to_string().contains(&short(c3)), "c3 is not published: {with}");
+        // Dropping only c3 is fine: it is not published.
+        check_move(&repo, &policy, Some(c3), &NewTip::Existing(c2)).expect("c3 alone is unpublished");
+
+        std::fs::remove_file(r.join(".git/objects/info/commit-graph")).expect("remove the graph");
+        assert!(Graph::load(&repo).is_none(), "the graph is gone");
+        let without = check_move(&repo, &policy, Some(c3), &NewTip::Existing(c1)).expect_err("same verdict without the graph");
+        assert_eq!(without.to_string(), with.to_string());
+        check_move(&repo, &policy, Some(c3), &NewTip::Existing(c2)).expect("c3 alone, without the graph");
+    }
+
+    /// E1: an old tip that is dropped and published refuses at once. The merge
+    /// M has two parents, both published; amending M drops only M, which is
+    /// not, so it passes after reading a few commits. With a remote at M the
+    /// amend refuses, also after a few.
+    #[test]
+    fn an_amended_merge_commit_is_judged_on_the_merge_alone_and_in_a_few_reads() {
+        let fx = Fixture::new();
+        let r = &fx.repo;
+        bulk_history(r, 300);
+        let main = git_stdout(r, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        git_stdout(r, &["switch", "-q", "-c", "topic"]);
+        commit_file(r, "topic-1");
+        git_stdout(r, &["switch", "-q", &main]);
+        commit_file(r, "main-1");
+        git_stdout(r, &["-c", "user.name=T", "-c", "user.email=t@x", "merge", "-q", "--no-ff", "-m", "M", "topic"]);
+        let (m, p1, p2) = (oid(r, "HEAD"), oid(r, "HEAD^1"), oid(r, "HEAD^2"));
+        assert_ne!(p1, p2);
+        publish(r, "origin/main", "HEAD^1");
+        publish(r, "origin/side", "HEAD^2");
+
+        let repo = fx.write_repo(false);
+        let amend = MoveCheck { command: "git commit --amend", mover: Mover::Amend, policy: RewritePolicy::Unpublished };
+        let new = NewTip::Replacement(vec![p1, p2]);
+        let mut budget = Budget::new(OP);
+        check_move_with(&repo, &amend, Some(m), &new, &mut budget).expect("M is not published; its parents are");
+        assert!(budget.examined() <= 12, "read {} commits of 300+", budget.examined());
+
+        publish(r, "origin/merged", "HEAD");
+        let mut budget = Budget::new(OP);
+        let err = check_move_with(&repo, &amend, Some(m), &new, &mut budget).expect_err("a remote is at M");
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains(&short(m)) && err.to_string().contains("origin/merged"), "{err}");
+        assert!(budget.examined() <= 12, "read {} commits of 300+", budget.examined());
+    }
+
     /// Not a test: a measurement on a real clone, run by hand.
     /// `KAISH_MEASURE_REPO=<scratch clone> cargo test -p kaish-tools-git
     /// --features commit --lib measure -- --ignored --nocapture`. It rewrites

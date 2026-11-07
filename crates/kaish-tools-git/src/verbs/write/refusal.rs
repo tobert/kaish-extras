@@ -68,32 +68,7 @@ impl Override {
     }
 }
 
-/// What a refusal left on disk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Wrote {
-    /// The refusal came before any write: `.git` is byte-identical.
-    Nothing,
-    /// Objects were written before the refusal. No ref, index or `HEAD`
-    /// changed, and nothing refers to the objects.
-    UnreachableObjects,
-    /// `ORIG_HEAD` (and its reflog, when it has one) was written before the
-    /// refusal. No branch, `HEAD`, index or object changed.
-    OrigHead,
-}
-
-impl Wrote {
-    fn sentence(self) -> &'static str {
-        match self {
-            Wrote::Nothing => "Nothing was changed.",
-            Wrote::OrigHead => {
-                "ORIG_HEAD now names the tip from before this command, and no branch, HEAD or index changed."
-            }
-            Wrote::UnreachableObjects => {
-                "Objects this command wrote stay in the object database, and no ref or index changed; nothing refers to those objects, and git gc prunes them."
-            }
-        }
-    }
-}
+pub use crate::error::Wrote;
 
 /// One refusal, rendered as five parts.
 #[derive(Debug, Clone, PartialEq, Eq)]

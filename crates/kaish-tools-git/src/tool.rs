@@ -1058,11 +1058,33 @@ impl GitTool {
             return failure(e);
         }
 
+        // A tool with the commit profile parses the wider argv (creation and
+        // the refused spellings); the read-only tool's parser knows neither.
+        #[cfg(feature = "commit")]
+        let (parsed, extra) = if self.is_writable() {
+            match parse_leaf::<verbs::write::branch::BranchWriteArgs>(argv, OP, &self.config) {
+                Ok(w) => (w.read, Some(w.extra)),
+                Err(result) => return *result,
+            }
+        } else {
+            match parse_leaf::<verbs::branch::BranchArgs>(argv, OP, &self.config) {
+                Ok(p) => (p, None),
+                Err(result) => return *result,
+            }
+        };
+        #[cfg(not(feature = "commit"))]
         let parsed = match parse_leaf::<verbs::branch::BranchArgs>(argv, OP, &self.config) {
             Ok(p) => p,
             Err(result) => return *result,
         };
         parsed.global.apply(ctx);
+
+        #[cfg(feature = "commit")]
+        if let Some(extra) = &extra {
+            if let Some(result) = self.branch_write(argv, ctx, &parsed, extra) {
+                return result;
+            }
+        }
 
         // After `--list`, operands are name patterns; otherwise there are none.
         let patterns = operands(&parsed.operands, argv).all();
@@ -1152,11 +1174,31 @@ impl GitTool {
             return failure(e);
         }
 
+        #[cfg(feature = "commit")]
+        let (parsed, extra) = if self.is_writable() {
+            match parse_leaf::<verbs::write::tag::TagWriteArgs>(argv, OP, &self.config) {
+                Ok(w) => (w.read, Some(w.extra)),
+                Err(result) => return *result,
+            }
+        } else {
+            match parse_leaf::<verbs::tag::TagArgs>(argv, OP, &self.config) {
+                Ok(p) => (p, None),
+                Err(result) => return *result,
+            }
+        };
+        #[cfg(not(feature = "commit"))]
         let parsed = match parse_leaf::<verbs::tag::TagArgs>(argv, OP, &self.config) {
             Ok(p) => p,
             Err(result) => return *result,
         };
         parsed.global.apply(ctx);
+
+        #[cfg(feature = "commit")]
+        if let Some(extra) = &extra {
+            if let Some(result) = self.tag_write(argv, ctx, &parsed, extra).await {
+                return result;
+            }
+        }
 
         // After `--list`, operands are name patterns; otherwise there are none.
         let patterns = operands(&parsed.operands, argv).all();
@@ -1322,6 +1364,9 @@ fn operations_of(verb: &str) -> &'static [&'static str] {
         // spelling because the schema is reflected before argv is known
         // (git-write-profile.md §2).
         "commit" => &["git.index", "git.commit", "git.ref", "git.rewrite"],
+        // The leaf also lists, and reads nothing it writes: it declares what
+        // its creating spellings do (git-write-profile.md §2).
+        "branch" | "tag" | "switch" | "checkout" => &["git.ref"],
         _ => &[],
     }
 }
@@ -1703,7 +1748,7 @@ impl GitTool {
         }
 
         let raw_message = match &parsed.file {
-            Some(file) => match read_message_file(ctx, file).await {
+            Some(file) => match read_message_file(ctx, file, "commit").await {
                 Ok(text) => Some(text),
                 Err(e) => return failure(e),
             },
@@ -1788,16 +1833,262 @@ impl GitTool {
     }
 }
 
-/// Read `-F <file>` through the kernel's filesystem, as curl reads `-d @file`.
+/// The ref-writing verbs: `branch <name>`, `tag <name>`, `switch -c` and
+/// `checkout -b` (git-write-profile.md §4).
 #[cfg(feature = "commit")]
-async fn read_message_file(ctx: &dyn ToolCtx, file: &str) -> Result<String, GitError> {
+impl GitTool {
+    fn refs_env(&self) -> Option<verbs::write::branch::RefsEnv> {
+        self.write_settings().map(|s| verbs::write::branch::RefsEnv {
+            hooks: s.hooks.clone(),
+            identity: s.identity.clone(),
+        })
+    }
+
+    fn usage_refusal(command: &str, reason: &str, next: &str) -> ExecResult {
+        failure(
+            verbs::write::refusal::Refusal::new(2, command, reason, next, verbs::write::refusal::Override::Never)
+                .into_error(),
+        )
+    }
+
+    /// `git branch` under the commit profile. `None` means a listing form,
+    /// which the caller runs.
+    fn branch_write(
+        &self,
+        argv: &[String],
+        ctx: &mut dyn ToolCtx,
+        parsed: &verbs::branch::BranchArgs,
+        extra: &verbs::write::branch::BranchExtra,
+    ) -> Option<ExecResult> {
+        const OP: &str = "branch";
+        let command = command_text(OP, argv);
+        if let Some(e) = extra.refusal(&command) {
+            return Some(failure(e));
+        }
+        let ops = operands(&parsed.operands, argv);
+        // After `--list`, operands are patterns. With none, this is a listing.
+        if parsed.list || ops.is_empty() {
+            return None;
+        }
+        if parsed.all || parsed.remote || parsed.show_current || parsed.contains.is_some() || parsed.merged.is_some() || parsed.ahead_behind {
+            return Some(Self::usage_refusal(
+                &command,
+                "A branch name creates a branch, and the listing flags (-a, -r, --show-current, --contains, --merged, --ahead-behind) list branches; one command does one of them.",
+                "List with git branch --list '<pattern>', or create with git branch <name> [<start>].",
+            ));
+        }
+        let names = ops.all();
+        if names.len() > 2 {
+            return Some(Self::usage_refusal(
+                &command,
+                "git branch takes a name and at most one start point.",
+                "Create one branch: git branch <name> [<start>].",
+            ));
+        }
+        let vars = match verbs::write::ident::KernelVars::read(&command, ctx) {
+            Ok(v) => v,
+            Err(e) => return Some(failure(e)),
+        };
+        let env = self.refs_env()?;
+        let no_track = extra.no_track;
+        Some(self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, _| {
+            verbs::write::branch::run(
+                repo,
+                &env,
+                &verbs::write::branch::BranchCreate {
+                    name: names[0].clone(),
+                    start: names.get(1).cloned(),
+                    no_track,
+                    vars,
+                    command,
+                },
+            )
+        }))
+    }
+
+    /// `git tag` under the commit profile. `None` means a listing form.
+    async fn tag_write(
+        &self,
+        argv: &[String],
+        ctx: &mut dyn ToolCtx,
+        parsed: &verbs::tag::TagArgs,
+        extra: &verbs::write::tag::TagExtra,
+    ) -> Option<ExecResult> {
+        const OP: &str = "tag";
+        let command = command_text(OP, argv);
+        if let Some(e) = extra.refusal(&command) {
+            return Some(failure(e));
+        }
+        let ops = operands(&parsed.operands, argv);
+        if parsed.list || (ops.is_empty() && !extra.creates()) {
+            return None;
+        }
+        if parsed.contains.is_some() {
+            return Some(Self::usage_refusal(
+                &command,
+                "--contains lists tags, and a tag name creates one; one command does one of them.",
+                "List with git tag --contains <rev>, or create with git tag <name> [<rev>].",
+            ));
+        }
+        let names = ops.all();
+        if names.is_empty() {
+            return Some(Self::usage_refusal(&command, "No tag name was given.", "Name the tag: git tag <name> [<rev>]."));
+        }
+        if names.len() > 2 {
+            return Some(Self::usage_refusal(
+                &command,
+                "git tag takes a name and at most one revision.",
+                "Create one tag: git tag <name> [<rev>].",
+            ));
+        }
+        let raw_message = match &extra.file {
+            Some(file) => match read_message_file(ctx, file, "tag").await {
+                Ok(text) => Some(text),
+                Err(e) => return Some(failure(e)),
+            },
+            None if extra.message.is_empty() => None,
+            None => Some(verbs::write::message::join_paragraphs(&extra.message)),
+        };
+        let vars = match verbs::write::ident::KernelVars::read(&command, ctx) {
+            Ok(v) => v,
+            Err(e) => return Some(failure(e)),
+        };
+        let env = self.refs_env()?;
+        Some(self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, _| {
+            verbs::write::tag::run(
+                repo,
+                &env,
+                &verbs::write::tag::TagCreate {
+                    name: names[0].clone(),
+                    target: names.get(1).cloned(),
+                    raw_message,
+                    vars,
+                    command,
+                },
+            )
+        }))
+    }
+
+    async fn run_switch(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
+        const OP: &str = "switch";
+        if let Err(e) = verb_enabled(&self.config, Verb::Switch, OP) {
+            return failure(e);
+        }
+        let parsed = match parse_leaf::<verbs::write::switch::SwitchArgs>(argv, OP, &self.config) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+        let command = command_text(OP, argv);
+        let refused = verbs::write::switch::Refused {
+            verb: OP,
+            create_flag: "-c",
+            force_create: parsed.force_create.as_ref(),
+            detach: parsed.detach,
+            orphan: parsed.orphan.as_ref(),
+            force: parsed.force,
+            merge: parsed.merge,
+            patch: false,
+            track: parsed.track.is_some(),
+            create: parsed.create.as_ref(),
+        };
+        if let Some(e) = refused.refusal(&command) {
+            return failure(e);
+        }
+        let ops = operands(&parsed.operands, argv);
+        self.create_and_switch(OP, ctx, command, parsed.create.clone(), ops, parsed.no_track, parsed.quiet, parsed.repo.as_deref())
+    }
+
+    async fn run_checkout(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
+        const OP: &str = "checkout";
+        if let Err(e) = verb_enabled(&self.config, Verb::Checkout, OP) {
+            return failure(e);
+        }
+        let parsed = match parse_leaf::<verbs::write::switch::CheckoutArgs>(argv, OP, &self.config) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+        let command = command_text(OP, argv);
+        let refused = verbs::write::switch::Refused {
+            verb: OP,
+            create_flag: "-b",
+            force_create: parsed.force_create.as_ref(),
+            detach: parsed.detach,
+            orphan: parsed.orphan.as_ref(),
+            force: parsed.force,
+            merge: parsed.merge,
+            patch: parsed.patch,
+            track: parsed.track.is_some(),
+            create: parsed.create.as_ref(),
+        };
+        if let Some(e) = refused.refusal(&command) {
+            return failure(e);
+        }
+        let ops = operands(&parsed.operands, argv);
+        self.create_and_switch(OP, ctx, command, parsed.create.clone(), ops, parsed.no_track, parsed.quiet, parsed.repo.as_deref())
+    }
+
+    /// The part `switch -c` and `checkout -b` share, after their flags passed.
+    #[allow(clippy::too_many_arguments)]
+    fn create_and_switch(
+        &self,
+        op: &'static str,
+        ctx: &mut dyn ToolCtx,
+        command: String,
+        name: Option<String>,
+        ops: Operands,
+        no_track: bool,
+        quiet: bool,
+        repo_arg: Option<&str>,
+    ) -> ExecResult {
+        let Some(name) = name else {
+            // `Refused::refusal` refuses a missing name before this is reached.
+            return failure(GitError::Usage { operation: op, message: "no branch name was given".to_string() });
+        };
+        if ops.marked || ops.before.len() > 1 {
+            return Self::usage_refusal(
+                &command,
+                &format!("git {op} takes a name and at most one start point; paths after it would check files out."),
+                &format!("Name one start point: git {op} {} <name> [<start>].", if op == "switch" { "-c" } else { "-b" }),
+            );
+        }
+        let vars = match verbs::write::ident::KernelVars::read(&command, ctx) {
+            Ok(v) => v,
+            Err(e) => return failure(e),
+        };
+        let Some(env) = self.refs_env() else {
+            return failure(GitError::VerbNotEnabled { operation: op });
+        };
+        self.with_write_repo(op, ctx, repo_arg, move |repo, _| {
+            verbs::write::switch::run(
+                repo,
+                &env,
+                &verbs::write::switch::SwitchCreate {
+                    op,
+                    name,
+                    start: ops.before.first().cloned(),
+                    no_track,
+                    quiet,
+                    vars,
+                    command,
+                },
+            )
+        })
+    }
+}
+
+/// Read `-F <file>` through the kernel's filesystem, as curl reads `-d @file`.
+/// `verb` names the command in a refusal (`commit` or `tag`).
+#[cfg(feature = "commit")]
+async fn read_message_file(ctx: &dyn ToolCtx, file: &str, verb: &str) -> Result<String, GitError> {
     const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
     let refused = |reason: String| {
         verbs::write::refusal::refuse::<String>(
             2,
-            format!("git commit -F {file}"),
+            format!("git {verb} -F {file}"),
             reason,
-            "Pass the message with -m instead, or name a readable file: git commit -F <file>.",
+            format!("Pass the message with -m instead, or name a readable file: git {verb} -F <file>."),
             verbs::write::refusal::Override::Never,
         )
     };
@@ -1810,7 +2101,7 @@ async fn read_message_file(ctx: &dyn ToolCtx, file: &str) -> Result<String, GitE
         Err(e) => return refused(format!("The file '{}' could not be read: {e}.", vfs.display())),
     };
     if bytes.len() > MAX_MESSAGE_BYTES {
-        return refused(format!("The file '{}' is over {MAX_MESSAGE_BYTES} bytes, too large for a commit message.", vfs.display()));
+        return refused(format!("The file '{}' is over {MAX_MESSAGE_BYTES} bytes, too large for a message.", vfs.display()));
     }
     match String::from_utf8(bytes) {
         Ok(t) => Ok(t),
@@ -1979,10 +2270,26 @@ impl Tool for GitTool {
             cmd = cmd.subcommand(diff);
         }
         if self.config.has(Verb::Branch) {
-            cmd = cmd.subcommand(verbs::branch::BranchArgs::command().name("branch"));
+            #[cfg(feature = "commit")]
+            let branch = if self.is_writable() {
+                verbs::write::branch::BranchWriteArgs::command()
+            } else {
+                verbs::branch::BranchArgs::command()
+            };
+            #[cfg(not(feature = "commit"))]
+            let branch = verbs::branch::BranchArgs::command();
+            cmd = cmd.subcommand(branch.name("branch"));
         }
         if self.config.has(Verb::Tag) {
-            cmd = cmd.subcommand(verbs::tag::TagArgs::command().name("tag"));
+            #[cfg(feature = "commit")]
+            let tag = if self.is_writable() {
+                verbs::write::tag::TagWriteArgs::command()
+            } else {
+                verbs::tag::TagArgs::command()
+            };
+            #[cfg(not(feature = "commit"))]
+            let tag = verbs::tag::TagArgs::command();
+            cmd = cmd.subcommand(tag.name("tag"));
         }
         // `worktree` is a node, not a leaf: B.11's write profiles add
         // `add`/`remove`/`lock`/`prune` beside `list` under the same word.
@@ -2019,12 +2326,18 @@ impl Tool for GitTool {
             if self.config.has(Verb::Var) {
                 cmd = cmd.subcommand(verbs::write::var::VarArgs::command().name("var"));
             }
+            if self.config.has(Verb::Switch) {
+                cmd = cmd.subcommand(verbs::write::switch::SwitchArgs::command().name("switch"));
+            }
+            if self.config.has(Verb::Checkout) {
+                cmd = cmd.subcommand(verbs::write::switch::CheckoutArgs::command().name("checkout"));
+            }
         }
         let schema = schema_tree_from_clap(
             &cmd,
             self.config.tool_name(),
             &self.description(),
-            examples_for(&self.config),
+            self.examples(),
         )
         // The true argv, `--` included; see `execute`.
         .with_verbatim_argv()
@@ -2170,6 +2483,10 @@ impl Tool for GitTool {
             "commit" => self.run_commit(leaf, ctx).await,
             #[cfg(feature = "commit")]
             "var" => self.run_var(leaf, ctx).await,
+            #[cfg(feature = "commit")]
+            "switch" => self.run_switch(leaf, ctx).await,
+            #[cfg(feature = "commit")]
+            "checkout" => self.run_checkout(leaf, ctx).await,
             // A node with no subcommand word after it. Routing stops at the
             // node, which is correct — the caller named a group, not a verb —
             // and the answer names what the group holds rather than guessing
@@ -2286,7 +2603,9 @@ const DESCRIPTION: &str =
 const COMMIT_DESCRIPTION: &str = "Read a git repository, change its index, and commit — shallow, safety-first. \
 Reads change nothing. The write verbs are add, rm, mv, restore --staged, reset and commit: \
 they write the index, and rm and mv also delete or rename the working-tree files they name; commit \
-writes a commit and moves the current branch; commit --amend and reset --soft/--mixed <rev> replace \
+writes a commit and moves the current branch; branch <name>, tag <name>, switch -c and checkout -b create \
+a branch or a tag (switch -c and checkout -b also point HEAD at the new branch, leaving every file as it is), \
+and never delete, rename or move a ref; commit --amend and reset --soft/--mixed <rev> replace \
 commits, which the embedding program's rewrite policy may refuse (by default when a remote-tracking ref \
 already has the commit). It never opens an editor (give the message with -m or -F, or keep it with \
 --amend --no-edit), never writes working-tree file content (reset --hard, --merge and --keep are refused), \
@@ -2346,6 +2665,38 @@ const EXAMPLES: [(&str, &str); 33] = [
     ("Credit a co-author", "git commit -m 'Fix the parser' --trailer 'Co-authored-by: Ada <ada@example.com>'"),
     ("Show who the next commit is by", "git var GIT_AUTHOR_IDENT"),
 ];
+
+/// Examples that create a ref. They belong to verbs the read profile has
+/// (`branch`, `tag`), so [`examples_for`] cannot tell them from the listing
+/// examples; only a tool with the commit profile publishes them.
+#[cfg(feature = "commit")]
+const REF_EXAMPLES: &[(&str, &str)] = &[
+    ("Create a branch at HEAD", "git branch feature-x"),
+    ("Create a branch at another commit", "git branch hotfix v0.1.0"),
+    ("Create a lightweight tag at HEAD", "git tag v0.2.0"),
+    ("Create an annotated tag", "git tag -a v0.2.0 -m 'Release 0.2.0'"),
+    ("Start a branch at HEAD and switch to it", "git switch -c feature-x"),
+    ("Start a branch at HEAD and switch to it, in checkout's spelling", "git checkout -b feature-x"),
+];
+
+impl GitTool {
+    /// The examples the schema carries: the listing and index ones for the
+    /// enabled verbs, plus the ref-creating ones for a tool that can write.
+    fn examples(&self) -> Vec<(&'static str, &'static str)> {
+        #[allow(unused_mut)]
+        let mut out: Vec<_> = examples_for(&self.config).collect();
+        #[cfg(feature = "commit")]
+        if self.is_writable() {
+            out.extend(
+                REF_EXAMPLES
+                    .iter()
+                    .copied()
+                    .filter(|(_, code)| verb_of(code).is_some_and(|verb| self.config.has(verb))),
+            );
+        }
+        out
+    }
+}
 
 /// [`EXAMPLES`], narrowed to the ones whose verb this config still enables.
 ///
@@ -3335,6 +3686,38 @@ mod tests {
                     "disabling {verb:?} dropped {other:?}'s example too: {remaining:?}"
                 );
             }
+        }
+    }
+
+    /// Every write verb has an example in a tool that can write. A read-only
+    /// tool publishes none of them, and subtracting a verb drops its own.
+    #[cfg(feature = "commit")]
+    #[test]
+    fn every_write_verb_has_an_example_and_a_read_only_tool_publishes_none() {
+        let writer = tool(GitConfig::read_only().with_commit_profile()).expect("config");
+        let codes: Vec<&str> = writer.examples().into_iter().map(|(_, code)| code).collect();
+        for verb in Verb::WRITE {
+            assert!(
+                codes.iter().any(|code| verb_of(code) == Some(*verb)),
+                "{verb:?} has no example, so help git would never name it: {codes:?}"
+            );
+        }
+
+        let reader = tool(GitConfig::read_only()).expect("config");
+        let shown: Vec<&str> = reader.examples().into_iter().map(|(_, code)| code).collect();
+        for (_, code) in REF_EXAMPLES {
+            assert!(!shown.contains(code), "a read-only tool published the write example {code:?}");
+        }
+        // Negative control: the read-only tool still publishes its own.
+        assert!(shown.contains(&"git branch") && shown.contains(&"git tag"), "{shown:?}");
+
+        for verb in [Verb::Switch, Verb::Checkout] {
+            let narrowed = tool(GitConfig::read_only().with_commit_profile().without_verb(verb)).expect("config");
+            let left: Vec<&str> = narrowed.examples().into_iter().map(|(_, code)| code).collect();
+            assert!(!left.iter().any(|code| verb_of(code) == Some(verb)), "{verb:?} example survived: {left:?}");
+            // The other spelling keeps its own example.
+            let other = if verb == Verb::Switch { Verb::Checkout } else { Verb::Switch };
+            assert!(left.iter().any(|code| verb_of(code) == Some(other)), "{other:?} lost its example: {left:?}");
         }
     }
 

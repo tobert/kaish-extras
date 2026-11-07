@@ -1,6 +1,6 @@
 # kaish-git — the commit profile (design, 2026-11)
 
-Status: **draft**; phases 1-3 built. Policy sections record Amy's rulings of 2026-11-06. The
+Status: **draft**; phases 1-4 built. Policy sections record Amy's rulings of 2026-11-06. The
 plumbing sections rest on `gix-write-feasibility-2026-11.md` (source-read,
 file:line into the pinned crates). Spellings and refusal wording rest on
 `git-write-survey-2026-11.md` (13 first-turn runs, 5 model families, plus a
@@ -206,9 +206,9 @@ Spellings from the survey, each checked against real git when built:
 | `restore --staged` | `<paths>`, `.` | `restore <file>` without `--staged` (W6) |
 | `reset` | no revision, `-- <paths>`, `<paths>`: unstage, as `restore --staged`; `--soft <rev>` and `--mixed <rev>`/`<rev>` (§3's policy); `<rev> -- <paths>` | `--hard`, `--merge`, `--keep` always (they write file content) |
 | `commit` | `-m` (repeatable; each a paragraph), `-F <file>`, `-a`/`-am`, `--only <paths>` and `<paths>`/`-- <paths>` (git's `--only` semantics: that path's working-tree content, other staged changes stay staged), `--trailer <k: v>` (git's trailer placement), `--allow-empty`, `--author`, `--amend` and `--amend --no-edit` (policy) | no `-m`/`-F` (and not `--amend --no-edit`): "there is no editor in this shell; pass -m". `--no-verify` with a hook present (§5.1). `-S`. `--fixup`/`--squash` (§3) |
-| `branch <name> [<start>]` | create only | `-d`/`-D`/`-m`/`-f` |
-| `tag <name> [<rev>]`, `tag -a <name> -m <msg>` | lightweight and annotated | `-d`, `-f`, `-s` |
-| `switch -c <name>` / `checkout -b <name>` | create at HEAD and move HEAD (no worktree change) | `switch <existing>`, `checkout <branch>` (W6), a start point other than HEAD (it would change the worktree) |
+| `branch <name> [<start>]` | create only; the listing forms stay; `--no-track` | `-d`/`-D`/`-m`/`-M`/`-c`/`-C`/`-f` and the upstream flags (`-u`, `-t`, `--track`, `--set-upstream-to`, `--unset-upstream`); a start that is a remote-tracking branch without `--no-track` (git would write tracking configuration) |
+| `tag <name> [<rev>]`, `tag -a <name> -m <msg>`, `-F <file>` | lightweight and annotated (`-m` alone makes an annotated tag, as git does) | `-d`, `-f`, `-s`/`-u`, `tag -a` with no message, `tag.gpgSign` |
+| `switch -c <name>` / `checkout -b <name>` | create at HEAD and move HEAD (no worktree change); a start point only when it names the commit HEAD is on | `switch <existing>`, `checkout <branch>`, `checkout <path>` (W6), `switch -C`/`checkout -B` (it moves a branch that exists), `--detach`, `--orphan`, `-f`, `-m`, any other start point (it would change the worktree; the refusal names `git branch <name> <start>`) |
 | `var GIT_AUTHOR_IDENT`, `var GIT_COMMITTER_IDENT` | the identity the next commit will use (§5.4), in git's `Name <email> <time> <tz>` form | other `var` names |
 
 `git config user.name` (3 of 13 runs) is refused naming `git var
@@ -375,8 +375,10 @@ Amy, 2026-11-06: the embedder pins, kernel variables are the fallback.
   first and refuse with git's text (`a branch named 'x' already exists`).
 - **Reflog** for every ref move, in git's message format (probed against git
   2.56: `commit: <subject>`, `commit (amend): <subject>`,
-  `commit (initial): <subject>`, `branch: Created from HEAD`,
-  `checkout: moving from <old> to <new>`). gix writes no `HEAD` line for a
+  `commit (initial): <subject>`, `branch: Created from <start as typed>`
+  (`branch` with no start writes the current branch's name, or `HEAD` when
+  detached; `switch -c` writes `HEAD`), `checkout: moving from <old> to <new>`;
+  a tag gets no reflog). gix writes no `HEAD` line for a
   symbolic update, so `switch -c` appends its `checkout:` line itself. gix-ref 0.66
   declares a check for a line break in the message and never runs it, so a
   newline would forge a second reflog line. The message is therefore copied as
@@ -514,4 +516,17 @@ corrected.
    `(root-commit)` for an amended root; an amend that would leave the commit
    empty refuses without `--allow-empty`; `--reset-author` with `--author`
    refuses.
-4. `branch <name>`, `tag <name>`, `switch -c`/`checkout -b`.
+4. `branch <name>`, `tag <name>`, `switch -c`/`checkout -b`. **Built**
+   (docs/embedding-git.md, "The commit profile"); the differences from this
+   design are docs/issues.md W34-W39. Checked against git 2.56 and different
+   from the first draft: `branch` with no start writes `Created from <current
+   branch>`, not `Created from HEAD`; `tag -m` without `-a` makes an annotated
+   tag; a tag message loses its `#` lines (a commit's does not); an empty tag
+   message is allowed, and its object ends with the blank line gix-object's
+   encoder omits, so the tag object is encoded here; `branch x origin/main` can
+   write tracking configuration, which refuses unless `--no-track`; git runs
+   only `reference-transaction` for `branch` and `tag` and adds `post-checkout`
+   for the two switches; a switch to a start on HEAD's own commit leaves the
+   files alone, so it is allowed; on an unborn HEAD `switch -c` rewrites `HEAD`
+   and writes no log; in a bare repository git writes no branch reflog by
+   default, so `branch` refuses there unless `core.logAllRefUpdates` is true.

@@ -597,7 +597,7 @@ pub enum GitError {
         limit: u64,
     },
 
-    #[error("git {operation}: {what} at '{path}': {source}")]
+    #[error("git {operation}: {what} at '{path}': {source}{}", wrote.suffix())]
     Repository {
         /// The verb that was asked for.
         operation: &'static str,
@@ -607,6 +607,11 @@ pub enum GitError {
         path: PathBuf,
         /// The underlying failure.
         source: Box<dyn std::error::Error + Send + Sync>,
+        /// What the failed command had already written, when the error is
+        /// raised after a write. [`Wrote::Nothing`] adds no sentence: a
+        /// read error says nothing about the disk. [`Wrote::Described`]
+        /// means `what` already says what changed.
+        wrote: Wrote,
     },
 
     /// The verb exists in the binary but is not enabled by this embedder's
@@ -685,6 +690,47 @@ pub enum GitError {
     },
 }
 
+/// What a failed write command left on disk. A refusal always carries one; a [`GitError::Repository`] carries one when it was raised
+/// after a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wrote {
+    /// The failure came before any write: `.git` is byte-identical. A
+    /// refusal says so; a repository error says nothing.
+    Nothing,
+    /// Objects were written before the failure. No ref, index or `HEAD`
+    /// changed, and nothing refers to the objects.
+    UnreachableObjects,
+    /// `ORIG_HEAD` (and its reflog, when it has one) was written before the
+    /// failure. No branch, `HEAD`, index or object changed.
+    OrigHead,
+    /// A repository error whose own text already says what changed (a branch
+    /// that moved before a later step failed). Never added to a refusal.
+    Described,
+}
+
+impl Wrote {
+    pub(crate) fn sentence(self) -> &'static str {
+        match self {
+            Wrote::Nothing => "Nothing was changed.",
+            Wrote::OrigHead => {
+                "ORIG_HEAD now names the tip from before this command, and no branch, HEAD or index changed."
+            }
+            Wrote::UnreachableObjects => {
+                "Objects this command wrote stay in the object database, and no ref or index changed; nothing refers to those objects, and git gc prunes them."
+            }
+            Wrote::Described => "",
+        }
+    }
+
+    /// The sentence a [`GitError::Repository`] appends, with its leading space.
+    fn suffix(self) -> String {
+        match self {
+            Wrote::Nothing | Wrote::Described => String::new(),
+            other => format!(". {}", other.sentence()),
+        }
+    }
+}
+
 impl GitError {
     /// The process exit code for this failure (architecture.md E.5).
     ///
@@ -729,22 +775,30 @@ impl GitError {
         }
     }
 
-    /// Mark a refusal as raised after objects were written, so its text says so
-    /// instead of "Nothing was changed." Any other error is returned as it is.
+    /// Mark a refusal or a repository error as raised after objects were
+    /// written, so its text says so instead of "Nothing was changed." A
+    /// repository error that already describes what changed, and any other
+    /// error, is returned as it is.
     #[cfg(feature = "commit")]
     pub(crate) fn after_objects(self) -> Self {
         match self {
             GitError::Refused { code, refusal } => GitError::Refused { code, refusal: Box::new(refusal.after_objects()) },
+            GitError::Repository { operation, what, path, source, wrote: Wrote::Nothing } => {
+                GitError::Repository { operation, what, path, source, wrote: Wrote::UnreachableObjects }
+            }
             other => other,
         }
     }
 
-    /// [`Self::after_objects`] for a refusal raised after `ORIG_HEAD` was
-    /// written (a `reset` whose branch move lost).
+    /// [`Self::after_objects`] for a failure after `ORIG_HEAD` was written (a
+    /// `reset` whose branch move lost).
     #[cfg(feature = "commit")]
     pub(crate) fn after_orig_head(self) -> Self {
         match self {
             GitError::Refused { code, refusal } => GitError::Refused { code, refusal: Box::new(refusal.after_orig_head()) },
+            GitError::Repository { operation, what, path, source, wrote: Wrote::Nothing } => {
+                GitError::Repository { operation, what, path, source, wrote: Wrote::OrigHead }
+            }
             other => other,
         }
     }
@@ -761,6 +815,7 @@ impl GitError {
             what: what.into(),
             path: path.as_ref().to_path_buf(),
             source: Box::new(source),
+            wrote: Wrote::Nothing,
         }
     }
 }
@@ -839,6 +894,7 @@ mod tests {
                 what: "reading HEAD".into(),
                 path: repo.clone(),
                 source: Box::new(std::io::Error::other("boom")),
+                wrote: Wrote::Nothing,
             },
             GitError::VerbNotEnabled { operation: "info" },
             GitError::NeedsWorktree {
@@ -988,5 +1044,32 @@ mod tests {
             msg.contains("not a fallback"),
             "the reftable refusal must say it did not fall back: {msg}"
         );
+    }
+
+    #[cfg(feature = "commit")]
+    #[test]
+    fn a_repository_error_after_objects_says_what_remains_and_one_that_describes_itself_is_left_alone() {
+        let plain = || GitError::repository("tag", "creating 'refs/tags/v1'", "/repo/.git", std::io::Error::other("denied"));
+        let before = plain().to_string();
+        assert!(!before.contains("git gc"), "{before}");
+
+        let after = plain().after_objects().to_string();
+        assert!(after.starts_with(&before), "{after}");
+        assert!(after.contains("stay in the object database") && after.contains("no ref or index changed") && after.contains("git gc prunes"), "{after}");
+
+        let orig = plain().after_orig_head().to_string();
+        assert!(orig.contains("ORIG_HEAD now names the tip"), "{orig}");
+
+        // A failure whose own text says a ref moved must not gain "no ref changed".
+        let told = GitError::Repository {
+            operation: "commit",
+            what: "the branch moved, so do not run it again".into(),
+            path: "/repo/.git".into(),
+            source: Box::new(std::io::Error::other("denied")),
+            wrote: Wrote::Described,
+        };
+        let text = told.after_objects().to_string();
+        assert!(!text.contains("no ref or index changed") && !text.contains("git gc"), "{text}");
+        assert_eq!(plain().after_objects().exit_code(), 1);
     }
 }
