@@ -9,8 +9,8 @@
 use kaish_types::{OutputData, OutputNode};
 
 use crate::model::{
-    BranchReport, DiffEndpoint, DiffFile, DiffReport, EntryKind, EntryStatus, LogReport, LsReport,
-    RepoInfo, ShowCommit, ShowTag, StatusReport, TagKind, TagReport, TreeRow, WorktreeReport,
+    BranchKind, BranchReport, DiffEndpoint, DiffFile, DiffReport, EntryKind, EntryStatus, LogReport, LsReport,
+    RepoInfo, ShowCommit, StatSummary, ShowTag, StatusReport, TagKind, TagReport, TreeRow, WorktreeReport,
 };
 
 /// Render [`RepoInfo`] as a `FIELD`/`VALUE` table carrying the full object as
@@ -140,7 +140,7 @@ pub fn status(report: &StatusReport) -> OutputData {
 /// `oneline` is `git log --oneline`'s own line: the short oid, one space, the
 /// summary. A space and not the table's tab, because that line is what a
 /// reader trained on git's output splits — `cut -d' ' -f1` takes the oid.
-/// `--stat` still adds its column after it. `--json` is the same either way.
+/// `--stat` adds git's counts line after it. `--json` is the same either way.
 pub fn log(report: &LogReport, oneline: bool) -> OutputData {
     if oneline {
         return log_oneline(report);
@@ -203,29 +203,43 @@ pub fn log(report: &LogReport, oneline: bool) -> OutputData {
     }
 }
 
-/// [`log`]'s `--oneline` layout: `<short oid> <summary>` per commit.
+/// [`log`]'s `--oneline` layout: `<short oid> <summary>` per commit. With
+/// `--stat` the counts follow on the next line, as git prints them.
+///
+/// This build counts files and lines for the commit, not per file, so the line
+/// is the one `git log --oneline --shortstat` prints. A commit that changed
+/// nothing has no line, as in git.
 fn log_oneline(report: &LogReport) -> OutputData {
-    let with_stat = report.commits.iter().any(|c| c.stat.is_some());
     let rows: Vec<OutputNode> = report
         .commits
         .iter()
         .map(|commit| {
-            let line = OutputNode::new(format!("{} {}", commit.short_oid, commit.summary));
-            if with_stat {
-                line.with_cells(vec![match &commit.stat {
-                    Some(s) => format!("{} files +{} -{}", s.files, s.additions, s.deletions),
-                    None => String::new(),
-                }])
-            } else {
-                line
+            let mut line = format!("{} {}", commit.short_oid, commit.summary);
+            if let Some(stat) = commit.stat.as_ref().and_then(shortstat) {
+                line.push_str("\n ");
+                line.push_str(&stat);
             }
+            OutputNode::new(line)
         })
         .collect();
-    let mut headers = vec!["COMMIT".to_string()];
-    if with_stat {
-        headers.push("STAT".to_string());
+    attach(OutputData::table(vec!["COMMIT".to_string()], rows), report, "git log")
+}
+
+/// git's `--shortstat` counts: `1 file changed, 2 insertions(+), 1 deletion(-)`.
+/// A zero part is left out, and no change at all is `None`.
+fn shortstat(stat: &StatSummary) -> Option<String> {
+    let plural = |n: u64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    if stat.files == 0 && stat.additions == 0 && stat.deletions == 0 {
+        return None;
     }
-    attach(OutputData::table(headers, rows), report, "git log")
+    let mut parts = vec![format!("{} changed", plural(stat.files as u64, "file", "files"))];
+    if stat.additions > 0 {
+        parts.push(format!("{}(+)", plural(stat.additions, "insertion", "insertions")));
+    }
+    if stat.deletions > 0 {
+        parts.push(format!("{}(-)", plural(stat.deletions, "deletion", "deletions")));
+    }
+    Some(parts.join(", "))
 }
 
 /// Insert `"kind": <kind>` into an already-serialized object.
@@ -576,16 +590,19 @@ fn summary_line(report: &DiffReport) -> String {
 /// marked, the oid is shortened to scan, and the upstream carries its
 /// ahead/behind counts when they were asked for. `--json` has the full oid and
 /// each count as its own field.
-pub fn branch(report: &BranchReport) -> OutputData {
+pub fn branch(report: &BranchReport, all: bool) -> OutputData {
     let rows: Vec<OutputNode> = report
         .branches
         .iter()
         .map(|b| {
-            let name = if b.is_head {
-                format!("* {}", b.name)
-            } else {
-                format!("  {}", b.name)
+            // git's `-a` names a remote-tracking branch `remotes/origin/main` so
+            // it cannot be read as a local branch; its `-r` names it
+            // `origin/main`. `--json` keeps the short name either way.
+            let shown = match b.kind {
+                BranchKind::Remote if all => format!("remotes/{}", b.name),
+                _ => b.name.clone(),
             };
+            let name = if b.is_head { format!("* {shown}") } else { format!("  {shown}") };
             let upstream = match (&b.upstream, b.upstream_gone) {
                 (Some(u), true) => format!("{u} (gone)"),
                 (Some(u), false) => match (b.ahead, b.behind) {
@@ -594,6 +611,10 @@ pub fn branch(report: &BranchReport) -> OutputData {
                 },
                 (None, _) => String::new(),
             };
+            // git prints a symbolic ref with its target and no oid.
+            if let Some(target) = &b.symref {
+                return OutputNode::new(format!("{name} -> {target}")).with_cells(vec![String::new(), String::new()]);
+            }
             OutputNode::new(name).with_cells(vec![short(&b.oid), upstream])
         })
         .collect();
@@ -686,7 +707,9 @@ pub fn worktree_list(report: &WorktreeReport) -> OutputData {
     attach(table, report, "git worktree list")
 }
 
-/// The first 7 hex characters of an oid — the width `git log --oneline` uses.
+/// The first 7 hex characters of an oid. Fixed width: `git log --oneline`
+/// widens its own to stay unique (`short_oid` does), but the branch, tag and
+/// worktree tables and the detached-HEAD line cut here (docs/issues.md R5).
 fn short(oid: &str) -> String {
     oid.chars().take(7).collect()
 }

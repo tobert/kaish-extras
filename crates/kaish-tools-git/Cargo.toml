@@ -289,6 +289,16 @@ path = "tests/write_shaped_identifiers.rs"
 name = "spellings"
 path = "tests/spellings.rs"
 
+# The table verbs' text, byte for byte, against text built from real git.
+# `--oneline` abbreviation against git's core.abbrev=auto.
+[[test]]
+name = "abbrev"
+path = "tests/abbrev.rs"
+
+[[test]]
+name = "text_surface"
+path = "tests/text_surface.rs"
+
 [[test]]
 name = "operands"
 path = "tests/operands.rs"

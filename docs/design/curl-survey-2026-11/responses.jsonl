@@ -1,0 +1,336 @@
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 1, "command": "curl http://127.0.0.1:8765/json"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 2, "command": "curl -sS http://127.0.0.1:8765/text"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 3, "command": "curl -I http://127.0.0.1:8765/json"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 4, "command": "curl -i http://127.0.0.1:8765/json"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 5, "command": "curl -L http://127.0.0.1:8765/redirect"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 6, "command": "curl -f http://127.0.0.1:8765/status/404"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 7, "command": "curl --fail-with-body http://127.0.0.1:8765/status/404"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 8, "command": "curl -O http://127.0.0.1:8765/file/report.txt"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 9, "command": "curl -o out.json http://127.0.0.1:8765/json"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 10, "command": "curl -H 'Content-Type: application/json' -d '{\"name\":\"widget\"}' http://127.0.0.1:8765/echo"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 11, "command": "curl -H 'Content-Type: application/json' -d @payload.json http://127.0.0.1:8765/echo"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 12, "command": "curl -d name=widget -d qty=3 http://127.0.0.1:8765/echo"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 13, "command": "curl -X PUT -H 'Content-Type: application/json' -d '{\"qty\":5}' http://127.0.0.1:8765/echo"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 14, "command": "curl -X DELETE http://127.0.0.1:8765/echo"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 15, "command": "curl -X PATCH -H 'Content-Type: application/json' -d '{\"qty\":6}' http://127.0.0.1:8765/echo"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 16, "command": "curl -H 'Authorization: Bearer abc123' http://127.0.0.1:8765/bearer"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 17, "command": "curl -u alice:s3cret http://127.0.0.1:8765/basic-auth"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 18, "command": "curl -A survey-bot/1.0 http://127.0.0.1:8765/echo"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 19, "command": "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/status/404"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 20, "command": "curl -s -o /dev/null -w '%{time_total}' http://127.0.0.1:8765/json"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 21, "command": "curl -m 1 http://127.0.0.1:8765/slow"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 22, "command": "curl --retry 3 http://127.0.0.1:8765/flaky"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 23, "command": "curl -F file=@upload.txt http://127.0.0.1:8765/upload"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 24, "command": "curl -T upload.txt http://127.0.0.1:8765/upload"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 25, "command": "curl -G --data-urlencode 'q=hello world' --data-urlencode 'n=5' http://127.0.0.1:8765/echo"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 26, "command": "curl -s http://127.0.0.1:8765/json | jq -r '.name'"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 27, "command": "curl -v http://127.0.0.1:8765/json"}
+{"model": "claude-haiku-5.5", "arm": "cold", "run": "claude-haiku-5.5 cold1", "task": 28, "command": "curl -C - -o partial.txt http://127.0.0.1:8765/file/report.txt"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 1, "command": "curl http://127.0.0.1:8765/json"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 2, "command": "curl http://127.0.0.1:8765/text"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 3, "command": "curl -I http://127.0.0.1:8765/json"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 4, "command": "curl -i http://127.0.0.1:8765/json"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 5, "command": "curl -L http://127.0.0.1:8765/redirect"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 6, "command": "curl -f http://127.0.0.1:8765/status/404"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 7, "command": "curl http://127.0.0.1:8765/status/404; curl -f http://127.0.0.1:8765/status/404"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 8, "command": "curl -o report.txt http://127.0.0.1:8765/file/report.txt"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 9, "command": "curl -o out.json http://127.0.0.1:8765/json"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 10, "command": "curl -H 'Content-Type: application/json' -d '{\"name\":\"widget\"}' http://127.0.0.1:8765/echo"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 11, "command": "curl -H 'Content-Type: application/json' --data-binary @payload.json http://127.0.0.1:8765/echo"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 12, "command": "curl -d name=widget -d qty=3 http://127.0.0.1:8765/echo"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 13, "command": "curl -X PUT -H 'Content-Type: application/json' -d '{\"qty\":5}' http://127.0.0.1:8765/echo"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 14, "command": "curl -X DELETE http://127.0.0.1:8765/echo"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 15, "command": "curl -X PATCH -H 'Content-Type: application/json' -d '{\"qty\":6}' http://127.0.0.1:8765/echo"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 16, "command": "curl -H 'Authorization: Bearer abc123' http://127.0.0.1:8765/bearer"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 17, "command": "curl -u alice:s3cret http://127.0.0.1:8765/basic-auth"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 18, "command": "curl --user-agent survey-bot/1.0 http://127.0.0.1:8765/echo"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 19, "command": "curl -I http://127.0.0.1:8765/status/404 | head -n 1 | cut -d ' ' -f 2"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 20, "command": "time curl -o /dev/null http://127.0.0.1:8765/json"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 21, "command": "curl --max-time 1 http://127.0.0.1:8765/slow"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 22, "command": "for i in 1 2 3; do curl -f http://127.0.0.1:8765/flaky && break; done"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 23, "command": "curl -F file=@upload.txt http://127.0.0.1:8765/upload"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 24, "command": "curl -X PUT --data-binary @upload.txt http://127.0.0.1:8765/upload"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 25, "command": "curl 'http://127.0.0.1:8765/echo?q=hello%20world&n=5'"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 26, "command": "curl http://127.0.0.1:8765/json | jq -r .name"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 27, "command": "curl -v http://127.0.0.1:8765/json"}
+{"model": "claude-haiku-5.5", "arm": "warm", "run": "claude-haiku-5.5 warm1", "task": 28, "command": "curl -H \"Range: bytes=$(wc -c < partial.txt)-\" http://127.0.0.1:8765/file/report.txt >> partial.txt"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 1, "command": "curl http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 2, "command": "curl -sS http://127.0.0.1:8765/text"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 3, "command": "curl -I http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 4, "command": "curl -i http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 5, "command": "curl -L http://127.0.0.1:8765/redirect"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 6, "command": "curl --fail http://127.0.0.1:8765/status/404"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 7, "command": "curl --fail-with-body http://127.0.0.1:8765/status/404"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 8, "command": "curl -O http://127.0.0.1:8765/file/report.txt"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 9, "command": "curl -o out.json http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 10, "command": "curl -X POST -H 'Content-Type: application/json' -d '{\"name\":\"widget\"}' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 11, "command": "curl -X POST -H 'Content-Type: application/json' --data-binary @payload.json http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 12, "command": "curl -X POST -d 'name=widget&qty=3' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 13, "command": "curl -X PUT -H 'Content-Type: application/json' -d '{\"qty\":5}' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 14, "command": "curl -X DELETE http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 15, "command": "curl -X PATCH -H 'Content-Type: application/json' -d '{\"qty\":6}' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 16, "command": "curl -H 'Authorization: Bearer abc123' http://127.0.0.1:8765/bearer"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 17, "command": "curl -u alice:s3cret http://127.0.0.1:8765/basic-auth"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 18, "command": "curl -A 'survey-bot/1.0' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 19, "command": "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/status/404"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 20, "command": "curl -s -o /dev/null -w '%{time_total}\\n' http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 21, "command": "curl --max-time 1 http://127.0.0.1:8765/slow"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 22, "command": "curl --retry 3 http://127.0.0.1:8765/flaky"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 23, "command": "curl -F 'file=@upload.txt' http://127.0.0.1:8765/upload"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 24, "command": "curl -T upload.txt http://127.0.0.1:8765/upload"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 25, "command": "curl -G --data-urlencode 'q=hello world' --data-urlencode 'n=5' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 26, "command": "curl -s http://127.0.0.1:8765/json | jq -r '.name'"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 27, "command": "curl -v http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold1", "task": 28, "command": "curl -C - -o partial.txt http://127.0.0.1:8765/file/report.txt"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 1, "command": "curl http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 2, "command": "curl -sS http://127.0.0.1:8765/text"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 3, "command": "curl -I http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 4, "command": "curl -i http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 5, "command": "curl -L http://127.0.0.1:8765/redirect"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 6, "command": "curl -f http://127.0.0.1:8765/status/404"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 7, "command": "curl --fail-with-body http://127.0.0.1:8765/status/404"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 8, "command": "curl -O http://127.0.0.1:8765/file/report.txt"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 9, "command": "curl -o out.json http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 10, "command": "curl -X POST -H 'Content-Type: application/json' -d '{\"name\":\"widget\"}' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 11, "command": "curl -H 'Content-Type: application/json' --data-binary @payload.json http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 12, "command": "curl -d 'name=widget' -d 'qty=3' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 13, "command": "curl -X PUT -H 'Content-Type: application/json' -d '{\"qty\":5}' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 14, "command": "curl -X DELETE http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 15, "command": "curl -X PATCH -H 'Content-Type: application/json' -d '{\"qty\":6}' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 16, "command": "curl -H 'Authorization: Bearer abc123' http://127.0.0.1:8765/bearer"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 17, "command": "curl -u alice:s3cret http://127.0.0.1:8765/basic-auth"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 18, "command": "curl -A 'survey-bot/1.0' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 19, "command": "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/status/404"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 20, "command": "curl -s -o /dev/null -w '%{time_total}\\n' http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 21, "command": "curl --max-time 1 http://127.0.0.1:8765/slow"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 22, "command": "curl --retry 3 http://127.0.0.1:8765/flaky"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 23, "command": "curl -F 'file=@upload.txt' http://127.0.0.1:8765/upload"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 24, "command": "curl -X PUT --data-binary @upload.txt http://127.0.0.1:8765/upload"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 25, "command": "curl -G --data-urlencode 'q=hello world' --data-urlencode 'n=5' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 26, "command": "curl -s http://127.0.0.1:8765/json | jq -r .name"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 27, "command": "curl -v http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "cold", "run": "deepseek-flash cold2", "task": 28, "command": "curl -C - -o partial.txt http://127.0.0.1:8765/file/report.txt"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 1, "command": "curl http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 2, "command": "curl http://127.0.0.1:8765/text 2>/tmp/kaish-curl.err || cat /tmp/kaish-curl.err >&2"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 3, "command": "curl -I http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 4, "command": "curl -i http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 5, "command": "curl -L http://127.0.0.1:8765/redirect"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 6, "command": "curl -f http://127.0.0.1:8765/status/404"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 7, "command": "curl -f http://127.0.0.1:8765/status/404 2>/dev/null || { curl http://127.0.0.1:8765/status/404 2>/dev/null; false; }"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 8, "command": "curl -o report.txt http://127.0.0.1:8765/file/report.txt"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 9, "command": "curl -o out.json http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 10, "command": "curl -H 'Content-Type: application/json' -d '{\"name\":\"widget\"}' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 11, "command": "curl -H 'Content-Type: application/json' --data-binary @payload.json http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 12, "command": "curl -d 'name=widget' -d 'qty=3' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 13, "command": "curl -X PUT -H 'Content-Type: application/json' -d '{\"qty\":5}' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 14, "command": "curl -X DELETE http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 15, "command": "curl -X PATCH -H 'Content-Type: application/json' -d '{\"qty\":6}' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 16, "command": "curl -H 'Authorization: Bearer abc123' http://127.0.0.1:8765/bearer"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 17, "command": "curl -u alice:s3cret http://127.0.0.1:8765/basic-auth"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 18, "command": "curl -A survey-bot/1.0 http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 19, "command": "curl -i http://127.0.0.1:8765/status/404 2>/dev/null | jq -R -r -s 'split(\"\\n\")[0] | split(\" \")[1]'"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 20, "command": "s=$(jq -n now); curl -o /tmp/kaish-time-body http://127.0.0.1:8765/json 2>/dev/null; e=$(jq -n now); jq -n --argjson s \"$s\" --argjson e \"$e\" '$e - $s'"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 21, "command": "curl --max-time 1 http://127.0.0.1:8765/slow"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 22, "command": "for i in 1 2 3 4; do curl -f http://127.0.0.1:8765/flaky 2>/dev/null && break; done"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 23, "command": "{ printf '%b' '------kaishboundary\\r\\nContent-Disposition: form-data; name=file; filename=upload.txt\\r\\nContent-Type: text/plain\\r\\n\\r\\n'; cat upload.txt; printf '%b' '\\r\\n------kaishboundary--\\r\\n'; } > /tmp/kaish-multipart.body && curl -H 'Content-Type: multipart/form-data; boundary=----kaishboundary' --data-binary @/tmp/kaish-multipart.body http://127.0.0.1:8765/upload"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 24, "command": "curl -X PUT --data-binary @upload.txt http://127.0.0.1:8765/upload"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 25, "command": "curl \"http://127.0.0.1:8765/echo?q=$(jq -rn --arg v 'hello world' '$v|@uri')&n=5\""}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 26, "command": "curl http://127.0.0.1:8765/json 2>/dev/null | jq -r .name"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 27, "command": "printf '%b' '> GET /json HTTP/1.1\\r\\n> Host: 127.0.0.1:8765\\r\\n> User-Agent: kaish-curl\\r\\n> Accept: */*\\r\\n>\\r\\n'; curl -i http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm1", "task": 28, "command": "curl -H \"Range: bytes=$(jq -R -s 'utf8bytelength' partial.txt)-\" http://127.0.0.1:8765/file/report.txt >> partial.txt"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 1, "command": "curl http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 2, "command": "curl http://127.0.0.1:8765/text"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 3, "command": "curl -I http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 4, "command": "curl -i http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 5, "command": "curl -L http://127.0.0.1:8765/redirect"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 6, "command": "curl -f http://127.0.0.1:8765/status/404"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 7, "command": "curl -f http://127.0.0.1:8765/status/404 || { curl http://127.0.0.1:8765/status/404; false; }"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 8, "command": "curl -o report.txt http://127.0.0.1:8765/file/report.txt"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 9, "command": "curl -o out.json http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 10, "command": "curl -H 'Content-Type: application/json' -d '{\"name\":\"widget\"}' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 11, "command": "curl -H 'Content-Type: application/json' --data-binary @payload.json http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 12, "command": "curl -d 'name=widget' -d 'qty=3' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 13, "command": "curl -X PUT -H 'Content-Type: application/json' -d '{\"qty\":5}' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 14, "command": "curl -X DELETE http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 15, "command": "curl -X PATCH -H 'Content-Type: application/json' -d '{\"qty\":6}' http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 16, "command": "curl -H 'Authorization: Bearer abc123' http://127.0.0.1:8765/bearer"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 17, "command": "curl -u alice:s3cret http://127.0.0.1:8765/basic-auth"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 18, "command": "curl -A survey-bot/1.0 http://127.0.0.1:8765/echo"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 19, "command": "curl -I http://127.0.0.1:8765/status/404 | jq -Rrs 'split(\"\\n\")[0] | split(\" \")[1] | gsub(\"\\r\";\"\")'"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 20, "command": "TIMEFORMAT='%R'; time curl http://127.0.0.1:8765/json >/dev/null"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 21, "command": "curl --max-time 1 http://127.0.0.1:8765/slow"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 22, "command": "for i in 1 2 3 4; do curl -f http://127.0.0.1:8765/flaky && break; done"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 23, "command": "{ printf '%s\\r\\n' '--BOUNDARY' 'Content-Disposition: form-data; name=\"file\"; filename=\"upload.txt\"' 'Content-Type: text/plain' ''; cat upload.txt; printf '\\r\\n--BOUNDARY--\\r\\n'; } | curl -H 'Content-Type: multipart/form-data; boundary=BOUNDARY' --data-binary @- http://127.0.0.1:8765/upload"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 24, "command": "curl -X PUT --data-binary @upload.txt http://127.0.0.1:8765/upload"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 25, "command": "curl \"http://127.0.0.1:8765/echo?q=$(jq -rn --arg v 'hello world' '$v|@uri')&n=5\""}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 26, "command": "curl http://127.0.0.1:8765/json | jq -r .name"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 27, "command": "printf '> GET /json HTTP/1.1\\r\\n> Host: 127.0.0.1:8765\\r\\n> User-Agent: kaish-curl\\r\\n> Accept: */*\\r\\n>\\r\\n'; curl -i http://127.0.0.1:8765/json"}
+{"model": "deepseek-flash", "arm": "warm", "run": "deepseek-flash warm2", "task": 28, "command": "curl -H \"Range: bytes=$(( $(wc -c < partial.txt) ))-\" http://127.0.0.1:8765/file/report.txt >> partial.txt"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 1, "command": "curl http://127.0.0.1:8765/json"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 2, "command": "curl -sS http://127.0.0.1:8765/text"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 3, "command": "curl -I http://127.0.0.1:8765/json"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 4, "command": "curl -i http://127.0.0.1:8765/json"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 5, "command": "curl -L http://127.0.0.1:8765/redirect"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 6, "command": "curl -f http://127.0.0.1:8765/status/404"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 7, "command": "curl --fail-with-body http://127.0.0.1:8765/status/404"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 8, "command": "curl -O http://127.0.0.1:8765/file/report.txt"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 9, "command": "curl -o out.json http://127.0.0.1:8765/json"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 10, "command": "curl -H \"Content-Type: application/json\" -d '{\"name\":\"widget\"}' http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 11, "command": "curl -H \"Content-Type: application/json\" -d @payload.json http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 12, "command": "curl -d \"name=widget&qty=3\" http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 13, "command": "curl -X PUT -H \"Content-Type: application/json\" -d '{\"qty\":5}' http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 14, "command": "curl -X DELETE http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 15, "command": "curl -X PATCH -H \"Content-Type: application/json\" -d '{\"qty\":6}' http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 16, "command": "curl -H \"Authorization: Bearer abc123\" http://127.0.0.1:8765/bearer"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 17, "command": "curl -u alice:s3cret http://127.0.0.1:8765/basic-auth"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 18, "command": "curl -A \"survey-bot/1.0\" http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 19, "command": "curl -s -o /dev/null -w \"%{http_code}\\n\" http://127.0.0.1:8765/status/404"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 20, "command": "curl -s -o /dev/null -w \"%{time_total}\\n\" http://127.0.0.1:8765/json"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 21, "command": "curl -m 1 http://127.0.0.1:8765/slow"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 22, "command": "curl --retry 3 http://127.0.0.1:8765/flaky"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 23, "command": "curl -F \"file=@upload.txt\" http://127.0.0.1:8765/upload"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 24, "command": "curl -T upload.txt http://127.0.0.1:8765/upload"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 25, "command": "curl -G --data-urlencode \"q=hello world\" --data-urlencode \"n=5\" http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 26, "command": "curl -s http://127.0.0.1:8765/json | jq -r '.name'"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 27, "command": "curl -v http://127.0.0.1:8765/json"}
+{"model": "gemini-3.5-flash", "arm": "cold", "run": "gemini-3.5-flash cold1", "task": 28, "command": "curl -C - -o partial.txt http://127.0.0.1:8765/file/report.txt"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 1, "command": "curl http://127.0.0.1:8765/json"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 2, "command": "curl -sS http://127.0.0.1:8765/text"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 3, "command": "curl -I http://127.0.0.1:8765/json"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 4, "command": "curl -i http://127.0.0.1:8765/json"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 5, "command": "curl -L http://127.0.0.1:8765/redirect"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 6, "command": "curl -f http://127.0.0.1:8765/status/404"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 7, "command": "curl --fail-with-body http://127.0.0.1:8765/status/404"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 8, "command": "curl -O http://127.0.0.1:8765/file/report.txt"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 9, "command": "curl -o out.json http://127.0.0.1:8765/json"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 10, "command": "curl -H 'Content-Type: application/json' -d '{\"name\":\"widget\"}' http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 11, "command": "curl -H 'Content-Type: application/json' -d @payload.json http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 12, "command": "curl -d name=widget -d qty=3 http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 13, "command": "curl -X PUT -H 'Content-Type: application/json' -d '{\"qty\":5}' http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 14, "command": "curl -X DELETE http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 15, "command": "curl -X PATCH -H 'Content-Type: application/json' -d '{\"qty\":6}' http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 16, "command": "curl -H 'Authorization: Bearer abc123' http://127.0.0.1:8765/bearer"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 17, "command": "curl -u alice:s3cret http://127.0.0.1:8765/basic-auth"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 18, "command": "curl -A 'survey-bot/1.0' http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 19, "command": "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/status/404"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 20, "command": "curl -s -o /dev/null -w '%{time_total}' http://127.0.0.1:8765/json"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 21, "command": "curl --max-time 1 http://127.0.0.1:8765/slow"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 22, "command": "curl --retry 3 http://127.0.0.1:8765/flaky"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 23, "command": "curl -F file=@upload.txt http://127.0.0.1:8765/upload"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 24, "command": "curl -X PUT --data-binary @upload.txt http://127.0.0.1:8765/upload"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 25, "command": "curl -G --data-urlencode 'q=hello world' -d n=5 http://127.0.0.1:8765/echo"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 26, "command": "curl -s http://127.0.0.1:8765/json | jq -r .name"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 27, "command": "curl -v http://127.0.0.1:8765/json"}
+{"model": "gemini-3.5-flash", "arm": "warm", "run": "gemini-3.5-flash warm1", "task": 28, "command": "curl -C - -o partial.txt http://127.0.0.1:8765/file/report.txt"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 1, "command": "curl -s http://127.0.0.1:8765/json"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 2, "command": "curl -sS http://127.0.0.1:8765/text"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 3, "command": "curl -sI http://127.0.0.1:8765/json"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 4, "command": "curl -si http://127.0.0.1:8765/json"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 5, "command": "curl -sL http://127.0.0.1:8765/redirect"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 6, "command": "curl -sf http://127.0.0.1:8765/status/404"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 7, "command": "curl -sS --fail-with-body http://127.0.0.1:8765/status/404"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 8, "command": "curl -sO http://127.0.0.1:8765/file/report.txt"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 9, "command": "curl -s -o out.json http://127.0.0.1:8765/json"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 10, "command": "curl -s -H 'Content-Type: application/json' -d '{\"name\":\"widget\"}' http://127.0.0.1:8765/echo"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 11, "command": "curl -s -H 'Content-Type: application/json' -d @payload.json http://127.0.0.1:8765/echo"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 12, "command": "curl -s -d name=widget -d qty=3 http://127.0.0.1:8765/echo"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 13, "command": "curl -s -X PUT -H 'Content-Type: application/json' -d '{\"qty\":5}' http://127.0.0.1:8765/echo"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 14, "command": "curl -s -X DELETE http://127.0.0.1:8765/echo"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 15, "command": "curl -s -X PATCH -H 'Content-Type: application/json' -d '{\"qty\":6}' http://127.0.0.1:8765/echo"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 16, "command": "curl -s -H 'Authorization: Bearer abc123' http://127.0.0.1:8765/bearer"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 17, "command": "curl -s -u alice:s3cret http://127.0.0.1:8765/basic-auth"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 18, "command": "curl -s -A survey-bot/1.0 http://127.0.0.1:8765/echo"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 19, "command": "curl -s -o /dev/null -w '%{http_code}\\n' http://127.0.0.1:8765/status/404"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 20, "command": "curl -s -o /dev/null -w '%{time_total}\\n' http://127.0.0.1:8765/json"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 21, "command": "curl -s --max-time 1 http://127.0.0.1:8765/slow"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 22, "command": "curl -sS --retry 3 http://127.0.0.1:8765/flaky"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 23, "command": "curl -s -F file=@upload.txt http://127.0.0.1:8765/upload"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 24, "command": "curl -s -T upload.txt http://127.0.0.1:8765/upload"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 25, "command": "curl -s --get --data-urlencode 'q=hello world' --data-urlencode n=5 http://127.0.0.1:8765/echo"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 26, "command": "curl -s http://127.0.0.1:8765/json | jq -r .name"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 27, "command": "curl -sv http://127.0.0.1:8765/json 2>&1"}
+{"model": "glm-5.3-flash", "arm": "cold", "run": "glm-5.3-flash cold1", "task": 28, "command": "curl -s -C - -o partial.txt http://127.0.0.1:8765/file/report.txt"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 1, "command": "curl http://127.0.0.1:8765/json"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 2, "command": "curl http://127.0.0.1:8765/text"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 3, "command": "curl -I http://127.0.0.1:8765/json"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 4, "command": "curl -i http://127.0.0.1:8765/json"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 5, "command": "curl -L http://127.0.0.1:8765/redirect"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 6, "command": "curl -f http://127.0.0.1:8765/status/404"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 7, "command": "curl -i http://127.0.0.1:8765/status/404; curl -f http://127.0.0.1:8765/status/404"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 8, "command": "curl -o report.txt http://127.0.0.1:8765/file/report.txt"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 9, "command": "curl -o out.json http://127.0.0.1:8765/json"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 10, "command": "curl -H 'Content-Type: application/json' -d '{\"name\":\"widget\"}' http://127.0.0.1:8765/echo"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 11, "command": "curl -H 'Content-Type: application/json' -d @payload.json http://127.0.0.1:8765/echo"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 12, "command": "curl -d name=widget -d qty=3 http://127.0.0.1:8765/echo"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 13, "command": "curl -X PUT -H 'Content-Type: application/json' -d '{\"qty\":5}' http://127.0.0.1:8765/echo"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 14, "command": "curl -X DELETE http://127.0.0.1:8765/echo"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 15, "command": "curl -X PATCH -H 'Content-Type: application/json' -d '{\"qty\":6}' http://127.0.0.1:8765/echo"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 16, "command": "curl -H 'Authorization: Bearer abc123' http://127.0.0.1:8765/bearer"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 17, "command": "curl -u alice:s3cret http://127.0.0.1:8765/basic-auth"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 18, "command": "curl -A survey-bot/1.0 http://127.0.0.1:8765/echo"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 19, "command": "curl -i http://127.0.0.1:8765/status/404 | head -n 1 | awk '{print $2}'"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 20, "command": "S=$(date +%s%N); curl -o /dev/null http://127.0.0.1:8765/json; E=$(date +%s%N); awk -v s=\"$S\" -v e=\"$E\" 'BEGIN { printf \"%.3f\\n\", (e-s)/1000000000 }'"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 21, "command": "curl --max-time 1 http://127.0.0.1:8765/slow"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 22, "command": "for i in 1 2 3 4; do curl -f http://127.0.0.1:8765/flaky && break; done"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 23, "command": "{ printf -- '--kaishbnd\\r\\nContent-Disposition: form-data; name=\"file\"; filename=\"upload.txt\"\\r\\nContent-Type: text/plain\\r\\n\\r\\n'; cat upload.txt; printf -- '\\r\\n--kaishbnd--\\r\\n'; } > /tmp/multipart.bin && curl -H 'Content-Type: multipart/form-data; boundary=kaishbnd' --data-binary @/tmp/multipart.bin http://127.0.0.1:8765/upload"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 24, "command": "curl -X PUT --data-binary @upload.txt http://127.0.0.1:8765/upload"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 25, "command": "curl \"http://127.0.0.1:8765/echo?q=$(printf 'hello world' | jq -Rr '@uri')&n=5\""}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 26, "command": "curl http://127.0.0.1:8765/json | jq -r .name"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 27, "command": "curl -i http://127.0.0.1:8765/json"}
+{"model": "glm-5.3-flash", "arm": "warm", "run": "glm-5.3-flash warm1", "task": 28, "command": "curl -H \"Range: bytes=$(wc -c < partial.txt)-\" -o /tmp/rest http://127.0.0.1:8765/file/report.txt && cat /tmp/rest >> partial.txt && rm /tmp/rest"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 1, "command": "curl -s http://127.0.0.1:8765/json"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 2, "command": "curl -s -S http://127.0.0.1:8765/text"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 3, "command": "curl -I http://127.0.0.1:8765/json"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 4, "command": "curl -i http://127.0.0.1:8765/json"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 5, "command": "curl -L http://127.0.0.1:8765/redirect"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 6, "command": "curl -f http://127.0.0.1:8765/status/404"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 7, "command": "curl --fail-with-body http://127.0.0.1:8765/status/404"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 8, "command": "curl -O http://127.0.0.1:8765/file/report.txt"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 9, "command": "curl -o out.json http://127.0.0.1:8765/json"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 10, "command": "curl -H 'Content-Type: application/json' -d '{\"name\":\"widget\"}' http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 11, "command": "curl -H 'Content-Type: application/json' --data-binary @payload.json http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 12, "command": "curl -d 'name=widget&qty=3' http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 13, "command": "curl -X PUT -H 'Content-Type: application/json' -d '{\"qty\":5}' http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 14, "command": "curl -X DELETE http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 15, "command": "curl -X PATCH -H 'Content-Type: application/json' -d '{\"qty\":6}' http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 16, "command": "curl -H 'Authorization: Bearer abc123' http://127.0.0.1:8765/bearer"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 17, "command": "curl -u alice:s3cret http://127.0.0.1:8765/basic-auth"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 18, "command": "curl -A 'survey-bot/1.0' http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 19, "command": "curl -s -o /dev/null -w '%{http_code}\\n' http://127.0.0.1:8765/status/404"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 20, "command": "curl -s -o /dev/null -w '%{time_total}\\n' http://127.0.0.1:8765/json"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 21, "command": "curl -m 1 http://127.0.0.1:8765/slow"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 22, "command": "curl --retry 3 http://127.0.0.1:8765/flaky"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 23, "command": "curl -F 'file=@upload.txt' http://127.0.0.1:8765/upload"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 24, "command": "curl -T upload.txt http://127.0.0.1:8765/upload"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 25, "command": "curl -G --data-urlencode 'q=hello world' --data-urlencode 'n=5' http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 26, "command": "curl -s http://127.0.0.1:8765/json | jq -r '.name'"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 27, "command": "curl -v http://127.0.0.1:8765/json"}
+{"model": "qwen3.8-flash", "arm": "cold", "run": "qwen3.8-flash cold1", "task": 28, "command": "curl -C - -o partial.txt http://127.0.0.1:8765/file/report.txt"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 1, "command": "curl http://127.0.0.1:8765/json"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 2, "command": "curl --fail http://127.0.0.1:8765/text || echo 'request failed' >&2"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 3, "command": "curl -I http://127.0.0.1:8765/json"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 4, "command": "curl -i http://127.0.0.1:8765/json"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 5, "command": "curl -L http://127.0.0.1:8765/redirect"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 6, "command": "curl -f http://127.0.0.1:8765/status/404"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 7, "command": "curl -i http://127.0.0.1:8765/status/404 | awk 'NR==1{code=$2} /^[[:space:]]*$/{body=1; next} body{print} END{exit(code>=400)}'"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 8, "command": "curl -o report.txt http://127.0.0.1:8765/file/report.txt"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 9, "command": "curl -o out.json http://127.0.0.1:8765/json"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 10, "command": "curl -H 'Content-Type: application/json' -d '{\"name\":\"widget\"}' http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 11, "command": "curl -H 'Content-Type: application/json' --data-binary @payload.json http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 12, "command": "curl -d 'name=widget' -d 'qty=3' http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 13, "command": "curl -X PUT -H 'Content-Type: application/json' -d '{\"qty\":5}' http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 14, "command": "curl -X DELETE http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 15, "command": "curl -X PATCH -H 'Content-Type: application/json' -d '{\"qty\":6}' http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 16, "command": "curl -H 'Authorization: Bearer abc123' http://127.0.0.1:8765/bearer"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 17, "command": "curl -u 'alice:s3cret' http://127.0.0.1:8765/basic-auth"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 18, "command": "curl -A 'survey-bot/1.0' http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 19, "command": "curl -I http://127.0.0.1:8765/status/404 | awk 'NR==1{print $2}'"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 20, "command": "TIMEFORMAT='%R'; { time curl -o /dev/null http://127.0.0.1:8765/json; } 2>&1"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 21, "command": "curl --max-time 1 http://127.0.0.1:8765/slow"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 22, "command": "for i in 0 1 2 3; do curl --fail http://127.0.0.1:8765/flaky && break; done"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 23, "command": "{ printf -- '--X\\r\\nContent-Disposition: form-data; name=\"file\"; filename=\"upload.txt\"\\r\\nContent-Type: text/plain\\r\\n\\r\\n'; cat upload.txt; printf '\\r\\n--X--\\r\\n'; } > multipart.tmp && curl -H 'Content-Type: multipart/form-data; boundary=X' --data-binary @multipart.tmp http://127.0.0.1:8765/upload"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 24, "command": "curl -X PUT --data-binary @upload.txt http://127.0.0.1:8765/upload"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 25, "command": "curl --request GET --data-urlencode 'q=hello world' --data-urlencode 'n=5' http://127.0.0.1:8765/echo"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 26, "command": "curl http://127.0.0.1:8765/json | jq -r .name"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 27, "command": "curl -i http://127.0.0.1:8765/json"}
+{"model": "qwen3.8-flash", "arm": "warm", "run": "qwen3.8-flash warm1", "task": 28, "command": "size=$(wc -c < partial.txt | awk '{print $1}'); curl --fail -H \"Range: bytes=$size-\" http://127.0.0.1:8765/file/report.txt >> partial.txt"}

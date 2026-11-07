@@ -226,7 +226,7 @@ fn build_commit_info(repo: &ReadRepo, op: &'static str, oid: ObjectId) -> Result
     let (summary, body) = log::split_message(message.as_ref());
     Ok(CommitInfo {
         oid: oid.to_string(),
-        short_oid: oid.to_string()[..7].to_string(),
+        short_oid: repo.short_oid(&oid)?,
         parents: parents.iter().map(ToString::to_string).collect(),
         author: log::signature(&author_sig),
         committer: log::signature(&committer_sig),

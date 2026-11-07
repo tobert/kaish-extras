@@ -1,0 +1,28 @@
+1	GET http://127.0.0.1:8765/json and print the response body.
+2	GET http://127.0.0.1:8765/text with no progress output, but still show an error message if the request fails.
+3	Show only the response headers of http://127.0.0.1:8765/json (no body).
+4	Print the response headers followed by the body of http://127.0.0.1:8765/json.
+5	http://127.0.0.1:8765/redirect redirects to /json. Print the final body, following the redirect.
+6	Request http://127.0.0.1:8765/status/404 so that the command exits non-zero because of the HTTP error status (do not rely on parsing the output).
+7	Request http://127.0.0.1:8765/status/404, exit non-zero on the HTTP error, but still print the error response body.
+8	Download http://127.0.0.1:8765/file/report.txt and save it in the current directory under the name the URL gives it (report.txt).
+9	Save the body of http://127.0.0.1:8765/json to a local file named out.json.
+10	POST the JSON object {"name":"widget"} to http://127.0.0.1:8765/echo with the right JSON content type.
+11	POST the contents of the local file payload.json to http://127.0.0.1:8765/echo as JSON.
+12	POST the form fields name=widget and qty=3 to http://127.0.0.1:8765/echo as an ordinary HTML form submission.
+13	Send a PUT request with the JSON body {"qty":5} to http://127.0.0.1:8765/echo.
+14	Send a DELETE request to http://127.0.0.1:8765/echo.
+15	Send a PATCH request with the JSON body {"qty":6} to http://127.0.0.1:8765/echo.
+16	GET http://127.0.0.1:8765/bearer with the bearer token abc123 in the Authorization header.
+17	GET http://127.0.0.1:8765/basic-auth using HTTP basic auth with user alice and password s3cret.
+18	GET http://127.0.0.1:8765/echo with the User-Agent set to survey-bot/1.0.
+19	Print only the HTTP status code (a number such as 200 or 404) of http://127.0.0.1:8765/status/404, nothing else.
+20	Print how many seconds the request to http://127.0.0.1:8765/json took.
+21	GET http://127.0.0.1:8765/slow (it takes 3 seconds) but give up after 1 second.
+22	GET http://127.0.0.1:8765/flaky, which fails with 503 a couple of times; retry up to 3 times until it succeeds.
+23	Upload the local file upload.txt as a multipart form file field named "file" to http://127.0.0.1:8765/upload.
+24	Upload the local file upload.txt to http://127.0.0.1:8765/upload using an HTTP PUT with the file as the raw body.
+25	GET http://127.0.0.1:8765/echo with the query parameters q="hello world" and n=5 added to the URL, letting curl do the URL-encoding.
+26	Fetch http://127.0.0.1:8765/json and pipe it to jq to print only the "name" field's value, without quotes.
+27	Fetch http://127.0.0.1:8765/json with verbose debugging output that shows the request and response headers.
+28	partial.txt is the first part of http://127.0.0.1:8765/file/report.txt. Resume the download so partial.txt becomes the complete file.
