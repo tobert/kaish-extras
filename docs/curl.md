@@ -12,22 +12,25 @@ cross-model review before it is built.
 
 ## Status
 
-**Building MVP.** The cross-model review blockers have been resolved:
+**Built and under review.** The cross-model review blockers have been resolved:
 
 1. **Egress policy — `AllowEgress` trait (CU8).** An embedder-supplied trait
    the tool calls per-request-per-hop. Default: deny-by-empty allowlist with
    opt-in loopback/link-local. No method widens the set past what the
    constructor grants — subtractive like `GitConfig`.
-2. **Exit codes (CU11).** Malformed URL now maps to **exit 7** ("could not
-   connect") with a literate error naming the real cause. The kernel does not
+2. **Exit codes (CU11).** A malformed URL maps to **exit 7** ("could not
+   connect") with a literate error naming the real cause; a refused command
+   line is exit 2, as in curl. The kernel does not
    own a fixed set of numeric codes; that's repl policy. See kaish note below.
 3. **Literate-refusal posture (CU14–CU18).** Unsupported flags are parsed
    at construction and refused with clear messages — no silent no-ops.
    This keeps the door open for later implementation when need arises.
 
-Built so far: the crate skeleton, test harness, and `CurlConfig` with egress
-and redirect controls. The HTTP surface (argument parsing, ureq backend, Tool
-impl, renderers) follows.
+Built: the native tool (argument parsing, the ureq backend, the `Tool` impl,
+the renderers), `CurlConfig` with egress, redirect and header controls, and the
+test harness. The wasm backend is not built. Tests compare this tool with real
+curl on a loopback server where curl is installed (`tests/compat.rs`,
+`tests/features.rs`, `tests/review.rs`).
 
 The wasm section is **corrected** — see CU3. Sync XHR in a Web Worker permits
 both `timeout` and `responseType`, so the limits asserted there are overstated
@@ -72,25 +75,33 @@ the last positional unless `--url` is used.
 | `<url>` (positional) | The URL to fetch. Required. | One URL only (curl takes many). |
 | `--url <url>` | Same as the positional. | None. |
 | `-X, --request <method>` | HTTP method. | None. |
-| `-d, --data <data>` | Body, `Content-Type: application/x-www-form-urlencoded` unless overridden, implies POST. Repeatable, joined with `&`. `@path` reads the file through the VFS. | Real curl strips trailing CR/LF from `-d` bodies; this build does not. |
-| `--data-binary <data>` | Like `-d`, and no Content-Type is implied — real curl sends none for this form either. | `@path` file reads are deferred (CU5). |
-| `--data-raw <data>` | Like `-d`, `@` is literal, and no Content-Type is implied. | None. |
-| `--data-urlencode <data>` | Accepts `name=value`; encodes only `value`, not the name or `=` separator. | Real curl also supports `@filename` and `name@filename` forms (deferred). |
-| `-H, --header <h:v>` | Request header. Repeatable. | None. |
-| `-i, --include` | Print response headers above the body. With `-o <file>`, writes headers **into the file** alongside the body, matching curl's behavior. | None. |
-| `-I, --head` | HEAD; print headers only. | None. |
-| `-o, --output <file>` | Write body to a VFS path, through `ToolCtx::resolve_path` + `backend().write()` — never the host filesystem. Headers go into the same file if `-i` is also given. | None. |
+| `-d, --data <data>` | Body, `Content-Type: application/x-www-form-urlencoded` unless overridden, implies POST. Repeatable, joined with `&`. `@path` reads the file through the shell's filesystem (`ToolCtx::resolve_path` + `backend().read()`, never the host) and removes **every** CR and LF byte from it, as curl does. A file that cannot be read is exit 26 with no request. A body file over `Limits::max_response_bytes` (checked by `stat` before the read, and again on the joined body) is exit 1 with no request. | `@-` (stdin) is refused with exit 2: `ToolCtx` has no stdin (docs/issues.md CU47). A bare `-` is the literal body `-`, as in curl. |
+| `--data-binary <data>` | Like `-d`, and `@path` keeps every byte of the file. The Content-Type is the same form type as `-d`: curl 8.23 sends it for this flag too (an earlier version of this table said it did not; the oracle test in `tests/features.rs` disproves that). | `@-` (stdin) is refused like `-d @-`. A bare `-` is the literal body `-`, as in curl. |
+| `--data-raw <data>` | Like `-d` with `@` literal: `--data-raw @f` sends the four characters `@f`. Same form Content-Type. | None. |
+| `--data-urlencode <data>` | curl's grammar: `content`, `=content`, `name=content`, `@path`, `name@path`. The first `=` or `@` decides. Only the content is percent-encoded (a space is `+`, as in curl) and the name is sent as typed. The file forms encode the file's bytes, newlines included (`%0A`). | `@-` (stdin) is refused like `-d @-`. |
+| `-G, --get` | Sends the `-d`, `--data-binary`, `--data-raw` and `--data-urlencode` data on the URL's query string, joined with `&` and added after any query already there. The method stays GET (or `-X`, or HEAD with `-I`), no body and no Content-Type are sent. Data a URL cannot carry (a space, a control byte, `#`, non-ASCII) exits 2 with no request. | curl exits 3 for such data, and this build exits 2 and names `--data-urlencode`. A request with no data flag now sends no `Content-Length`, as curl does (it sent `0`). |
+| `-F, --form <name=content>` | One multipart/form-data part, repeatable, implies POST. `name=text`; `name=@path` sends the file with its basename as `filename` and a Content-Type from the name shown (`gif jpg jpeg png svg txt htm html pdf xml`, any case; otherwise `application/octet-stream`); `name=<path` sends the file's bytes as a plain value; `;type=MIME` and `;filename=NAME` follow, and a value in double quotes may hold a `;` (`\"` and `\\` inside quotes). A text part given `;filename=` is sent as a file part. Names and filenames escape `"` as `%22`. The boundary is random per request and checked against every part, so no file can contain it. A `Content-Type` set with `-H` wins, and gains `; boundary=` if it names a multipart type without one. Files are read through the VFS inside `Limits::max_response_bytes`, and the finished body is checked against it too. A file that cannot be read, or a directory, is exit 26. | One file per part: `@a,b` (curl sends nested multipart/mixed) exits 2. `;headers=`, `;encoder=`, `;format=`, an unknown `;key=`, a repeated or empty `;type=`, an empty field name, and stdin (`@-`, `<-`) exit 2, where curl ignores or accepts them. `-F` with a data flag, `-G`, or `-I` exits 2 (curl accepts `-G` and ignores it). A directory is exit 26 (curl sends something). The boundary text differs from curl's. Compared part by part against curl 8.23 in `tests/features.rs`. |
+| `-T, --upload-file <file>` | The file's bytes are the body, sent with PUT unless `-X` says otherwise, with a `Content-Length` and no `Content-Type` of its own (set one with `-H`). A URL whose path ends in `/` and has no query gains the file's basename (`-T sub/a.txt http://h/u/` is `PUT /u/a.txt`; `http://h` is `PUT /a.txt`). Read through the VFS inside `Limits::max_response_bytes`; an unreadable file or a directory is exit 26. An empty file is sent as `Content-Length: 0`. | One `-T` per invocation. `-T -` (stdin) and `-T` with `-G` exit 2 (curl ignores `-G`); with `-d`, `-F` or `-I` curl exits 2 as well. The upload is held in memory, not streamed. |
+| `-C, --continue-at -` | Resume the `-o` / `-O` file: sends `Range: bytes=<size>-` for a file that exists and is not empty (no `Range`, and a normal download, for one that is missing or empty), and appends the body through `backend().append()` **only** for a 206 whose `Content-Range` starts at `<size>`. A 416 is exit 0 with the file unchanged, even under `-f` (curl treats it as already complete). A 200 (the server ignored Range) is exit 33, and so is any other status, or a 206 for different bytes; the file is left as it was in every one of these. Needs `-o` or `-O`. | Only `-C -`; `-C <offset>` exits 2. `-C -` without `-o` / `-O` exits 2 (curl starts over without saying so), as do `-i`, `-I` and `-H Range: ...` with it. A non-200 error status exits 33 where curl would append the error page. Compared against curl 8.23 for the 206, 200, 416, missing and empty cases in `tests/features.rs`. |
+| `-H, --header <h:v>` | Request header. Repeatable. `-H 'Name;'` sends `Name` with an empty value. `-H 'Name:'` removes a header the client adds itself: `Accept`, `User-Agent`, and the `Content-Type` a body implies (a `Name:` for any other name does nothing, as in curl). | A bare `-H Name` (curl ignores it) and `-H 'Host:'` exit 2. `Accept-Encoding: gzip` is always sent unless `-H 'Accept-Encoding:'` removes it; curl sends none without `--compressed`. |
+| `-i, --include` | Print response headers above the body, starting with `HTTP/1.1 <code> <reason>` (the standard phrase for the code). With `-L`, every redirect's head prints first, as in curl (their bodies are not read). With `-o <file>`, writes headers **into the file** alongside the body, matching curl's behavior. | The head is rebuilt from ureq's parsed response, not echoed from the wire: header names are lower-cased (ureq's parser drops the case) and sorted by name (this build's choice, for a stable render; ureq's header map would keep the server's order, but the response model does not yet), the version is always `HTTP/1.1` (curl prints `HTTP/1.0` for an HTTP/1.0 server), and the reason phrase is the standard one for the code (ureq drops the server's; curl prints it). Compared by status line in `tests/compat.rs`. |
+| `-I, --head` | HEAD; print headers only. With `-o <file>`, the headers are what the file holds. | The same head rendering as `-i`, with the same divergences. |
+| `-o, --output <file>` | Write the body to a VFS path, through `ToolCtx::resolve_path` + `backend().write()` — never the host filesystem. Headers go into the same file if `-i` is also given (or alone, with `-I`), and the body is written byte for byte. `-o -` writes to stdout, not to a file named `-`. The whole body is held in memory before it is written, inside `Limits::max_response_bytes`; nothing streams. Prints nothing on stdout, as curl does (this build has no progress meter to print); the byte count and path are in the result's baggage as `curl.bytes` and `curl.file`. | None. |
+| `-O, --remote-name` | Write the body to a file named after the **last non-empty segment of the URL path** (query and fragment excluded; not percent-decoded, as in curl 8.23: `c%20d.txt` stays that) in the shell's cwd, replacing a file of that name, through the same VFS write as `-o`. The name comes from the URL as typed, not from a redirect target. Prints nothing on stdout. A URL with no such segment (`http://h/`) exits 2 with no request. `-O` with `-o` exits 2. | curl falls back to the name `curl_response` for a URL with no segment; this build refuses (Amy's ruling, 2026-11-06). `-J` / `--remote-header-name` stays refused: a server must not choose the file name. |
+| `--output-dir <dir>` | Puts the `-o` or `-O` file under `<dir>`, which must exist and be a directory: otherwise exit 23, naming the path. Without `-o` or `-O` it exits 2. | curl ignores it without `-o`/`-O`. |
 | `-L, --location` | Follow redirects, up to `--max-redirs` (default 50). Hops are driven by this build, not by ureq, so **the egress allowlist is evaluated on every one** — a redirect cannot leave the embedder's policy. User/password are dropped on a cross-host hop. | Opt-in (matches curl's `-L`). Embedder can set a config default for auto-follow. |
-| `--max-redirs <n>` | Redirect cap. | None. |
-| `-u, --user <user[:pass]>` | Basic auth, `Authorization: Basic`. | None. |
+| `--max-redirs <n>` | Redirect cap. `-1` is curl's "unlimited": no cap of your own, so the embedder's `Limits::max_redirects` is the only one. Other negatives exit 2. | None. |
+| `-u, --user <user[:pass]>` | Basic auth, `Authorization: Basic`. A `-H Authorization:` from the caller wins over it, and an embedder-injected `Authorization` wins over both; one header goes out. | None. |
 | `-A, --user-agent <ua>` | `User-Agent`. | None. |
 | `-e, --referer <url>` | `Referer`. | None. |
 | `-k, --insecure` | Skip TLS certificate verification. **Off unless the embedder sets `CurlConfig::with_insecure_permitted(true)`**, and refused with a literate error while it is off — an agent that can silence verification can be talked into it. `help curl` lists the flag only where it is permitted. | Gated by the embedder rather than always available. |
-| `-f, --fail` | Exit on HTTP status >= 400 instead of printing the body. Uses curl-compatible exit codes. | None. |
-| `--max-time <s>` | Whole-request timeout, applied to the ureq agent. Always set: the `CurlConfig` default (30s) applies when the flag is omitted, and the flag is **clamped to the embedder's ceiling** — it can lower the budget, never raise it. A deadline that fires is exit **28**, not exit 7. | WASM: refuses with literate error (no `tokio::time`). |
-| `--connect-timeout <s>` | Connect-phase timeout. | WASM: refuses with literate error. |
+| `-f, --fail` | Exit 22 on HTTP status >= 400 instead of printing the body. Decided at the response headers: the error body is not read, so an oversize or slow one is still exit 22, and `%{size_download}` is 0, as in curl 8.23. With `--json`, a failure has no envelope (there is no response to show); use `--fail-with-body` to get one. | None. |
+| `--fail-with-body` | Like `-f`: exit 22 on status >= 400 (stderr `curl: the requested URL returned error: 404`), and the body prints to stdout, or goes to the `-o` file. | Real curl's stderr has a `(22)` in it. |
+| `-w, --write-out <fmt>` | Text printed on stdout after the body. Variables: `%{http_code}`, `%{response_code}`, `%{time_total}` (seconds, six decimals, whole request), `%{size_download}` (decoded body bytes), `%{url_effective}`, `%{content_type}`, `%{redirect_url}`, `%{num_redirects}`. Escapes `\n \r \t` and `%%`; any other backslash and the character after it print as typed, so `\%{http_code}` is not a variable, as in curl. Printed even when `-f` stops the body, and when the request fails before any response (`%{http_code}` is `000`, `%{url_effective}` the URL as typed, the rest empty or 0). On exit 47 (too many redirects) curl reports the last response's status where this build prints `000`. `-o /dev/null` discards the body (the kernel's `/dev/null` device). | Any other variable, `%header{}`, and `@file` exit 2 with the supported set, where curl warns and prints nothing. Refused with `--json` (exit 2). Compared against real curl 8.23 in `tests/compat.rs`. |
+| `-m, --max-time <s>` | Whole-request timeout, applied to the ureq agent. Always set: the `CurlConfig` default (30s) applies when the flag is omitted, and the flag is **clamped to the embedder's ceiling** — it can lower the budget, never raise it. `-m 0` is curl's "no timeout": no limit of its own, so the embedder's ceiling still applies. A deadline that fires is exit **28**, not exit 7. | WASM: refuses with literate error (no `tokio::time`). |
+| `--connect-timeout <s>` | Connect-phase timeout; `0` means no connect-phase limit of its own. | WASM: refuses with literate error. |
 | `--unix-socket <path>` | Connect to an AF_UNIX socket instead of the URL host; the host in the URL is a placeholder the `Host` header still needs (e.g. `http://localhost/`). The path is resolved through `ToolCtx::resolve_path`, mapped by `backend().resolve_real_path()`, and **canonicalized** before it is required to fall inside the mount it was reached through — so a symlink out of the mount is refused, which a lexical prefix test would not catch. | Native, unix-family targets only; wasm and non-unix refuse with a literate error. `--abstract-unix-socket` deferred (CU5). |
-| `--json` | **Not curl's request-body shorthand.** It is kaish's global output flag for every tool (see next section). | curl 7.82 `--json` (request body) refused with literate error. |
+| `--json` | **Not curl's request-body shorthand.** It is kaish's global output flag for every tool (see next section). Combined with `-o` or `-O` it exits 2 with no request, because the object and the file would each hold half the answer. | curl 7.82 `--json <data>` (request body) is not carried; a JSON body typed for it is refused with a message that says what to type instead (see "Literate errors"). |
 
 
 ### Egress: names and addresses
@@ -136,7 +147,10 @@ fit.
 `CurlConfig::with_injected_headers` adds headers to every request that the
 agent can neither read nor remove — a credential for an internal API, a tenant
 header an audit trail needs. A caller `-H` naming the same header is dropped
-rather than sent beside it, so the far end never has to choose. Like `-u`
+rather than sent beside it, so the far end never has to choose. That includes
+`-u`: an injected `Authorization` replaces the `-u` credentials too, so one
+`Authorization` goes out. Without an injected one, a caller's `-H Authorization:`
+wins over `-u`, as in curl 8.23. Like `-u`
 credentials, injected headers stop at a change of host; so do
 `Authorization`, `Cookie`, and `Proxy-Authorization` set by the caller, because
 stripping only the `-u` form would leave `-H` as the way around the rule.
@@ -149,17 +163,18 @@ cannot see a failure cannot act on it. `curl -sSL <url>` therefore behaves
 exactly as an agent expects, and `curl -s <url>` still prints the error when
 one happens.
 
-Short flags combine: `-sSL`, `-iL`, `-fL` are read as the flags they spell.
-A cluster containing a value-taking flag (`-so out.txt`) is refused, naming
-the flag that broke it.
+Short flags combine, and a short flag's value may be attached, as in curl:
+`-sSL`, `-iL`, `-fL`, `-dfoo=1`, `-XPUT`, `-m5`, `-oout.txt`, `-uuser:pass`,
+`-d=a=1` (the body is `=a=1`, as in curl). A value-taking flag ends a run and
+takes the rest of the word, or the next word when nothing is attached: `-so out.txt`.
 
 This build refuses the following flags at parse time with literate errors:
-`-O` (use `-o <file>`), `--compressed`, `--proxy`/SOCKS, `--form`,
-`--cookie`, `--write-out`, `--verbose`, `--retry`, `--get`, `--cert`/`--key`,
-`--resolve`, `--config`, `--netrc`, `--parallel`, `--next`, and — because the backend
-does not implement them rather than because they are out of scope — `-k`/`--insecure`
-and `--unix-socket`. Each carries a message
-that names the unsupported flag and the supported alternative. See "Literate errors" below.
+`-J`, `--remote-header-name`, `--compressed`, `--proxy`/`-x`,
+`--cookie`/`-b`, `--verbose`/`-v`, `--retry`, `--cert`, `--key`,
+`--resolve`, `--config`/`-K`, `--netrc`, `--parallel`/`-Z`, and `--next`. Each
+message names the flag and the supported alternative (see "Literate errors"
+below). `-k`/`--insecure` is implemented but refused unless the embedder
+permits it, and `--unix-socket` is implemented on unix-family targets.
 A flag this build does not recognize is **refused**, not ignored: an agent
 that typed something must never be left believing it took effect. So is a
 second URL — one per invocation, and curl says so rather than fetching the
@@ -172,7 +187,8 @@ tool. `curl` 7.82 added a `--json` that means **a JSON request body**. Same
 spelling, opposite meaning. This build keeps kaish's convention intact:
 
 - `curl` flattens `GlobalFlags` like every builtin, so `--json` sets the output
-  format. `curl --json <url>` returns a structured object:
+  format. `curl --json <url>` returns a structured object (and only then does
+  the result carry structured data; see below):
 
   ```json
   {"status": 200, "headers": {"content-type": "application/json"}, "body": "..."}
@@ -188,6 +204,14 @@ input is the one crack in that rule. Send a JSON body with `-H
 Content-Type:application/json --data <body>`. Parse a JSON response with
 `curl <url> | jq`.
 
+Without `--json`, the output is the body text and the result carries no
+structured data. That is what makes `curl -s <url> | jq -r .name` read the
+body and `x=$(curl <url>)` bind the text. The result used to carry the
+response object on every response, and a pipe hands the next tool that object
+in place of the text, so `curl <url> | jq -r .name` printed `null` with exit 0
+(survey SW-1). Only `--json` sets it. `tests/compat.rs` pins all three
+(`| jq`, `$(...)`, and `--json | jq .status` as the control).
+
 ## Exit codes
 
 kaish-curl mirrors curl's numeric exit codes for the cases it covers, and maps
@@ -196,14 +220,18 @@ the rest to 1. State the number so an agent can branch on it.
 | Code | Cause |
 |---|---|
 | 0 | Success (any HTTP status unless `--fail`). |
+| 2 | The command line is refused before any request, as in curl: an unknown flag, a missing URL or flag value, a bad number, a second URL, a flag this build declines (`--retry`, `-v`, ...), a flag combination (`-I` with `-d`, `--json` with `-o`), `-d @-` and the other stdin forms. |
+| 26 | A file named by `-d @path` and its relatives could not be read (missing, a directory, unreadable). No request was sent. |
 | 6 | Host not found. |
 | 7 | Could not connect — **and** URL malformed (bad scheme, bad syntax). curl uses 3 for a malformed URL; kaish's kernel reserves 3, so this build maps malformed URLs here with an error naming the real cause (CU11). |
-| 22 | `--fail` and HTTP status >= 400. |
+| 22 | `--fail` or `--fail-with-body` and HTTP status >= 400. |
+| 23 | The `-o` / `-O` file could not be written, or the `--output-dir` directory does not exist. |
 | 28 | `--max-time` or `--connect-timeout` exceeded. |
+| 33 | `-C -` got an answer that cannot be appended to the file (200, another status, or a 206 for other bytes). The file is unchanged. |
 | 35 | TLS handshake failed. |
 | 47 | Too many redirects. |
 | 60 | Certificate could not be authenticated. |
-| 1 | Any other transport error. |
+| 1 | Any other transport error, or a body over `Limits::max_response_bytes`. |
 
 ## Literate errors
 
@@ -213,20 +241,21 @@ supported alternative. These strings are full weight (see
 `~/src/kaish/docs/style.md`): the constraint comes first, the fix follows, and
 they never name a mechanism the reader cannot act on.
 
-Non-http scheme:
+Non-http scheme (exit 7):
 
 ```
-curl: 'ftp://example.com/' uses scheme 'ftp', which this build does not support.
-kaish-tools-curl speaks http and https only. Read a local file with 'cat <path>'.
+curl: 'ftp://example.com/' is not a valid http or https URL: only http and https schemes are supported
 ```
 
-curl's `--json` request body (triggered by the URL-parse path when the first
-positional looks like a JSON object or array):
+curl's `--json` request body (kaish's `--json` took the flag's name, so the
+JSON text is read as a second URL; a word that opens with `{` or `[` gets this
+message instead of "only one URL"):
 
 ```
-curl: '{"a":1}' is not a valid http or https URL; it looks like a request body.
-Put the body in '--data <body>' and the URL last, or send JSON with
-'-H Content-Type:application/json --data <body>'.
+curl: '{"a":1}' is not a valid http or https URL; it looks like a request body
+(exit 2), and no request was sent. '--json' here is kaish's output flag, not
+curl's request-body shorthand. Put the body in '--data <body>' and the URL
+last, or send JSON with '-H Content-Type:application/json --data <body>'.
 ```
 
 Proxy and SOCKS:
@@ -236,37 +265,33 @@ curl: '--proxy' is not supported. kaish-tools-curl connects directly and has
 no proxy or SOCKS support.
 ```
 
-Multipart:
-
-```
-curl: '--form' (multipart) is not supported in this build. Use '--data' for
-application/x-www-form-urlencoded.
-```
-
-Force GET with query:
-
-```
-curl: '--get' is not supported. Put the query string in the URL, or build one
-with '--data-urlencode'.
-```
-
 Cookies:
 
 ```
 curl: '--cookie' is not supported. Send cookies with '-H Cookie:<value>'.
 ```
 
-Multiple URLs, `--next`, `--parallel`:
+A second URL:
 
 ```
-curl: only one URL per invocation is supported. Call curl once for each URL.
+curl: only one URL per invocation is supported, and both 'http://a/' and
+'http://b/' were given. Run curl once per URL.
 ```
 
-`--write-out`, `--verbose`:
+`--parallel`, `-Z` and `--next`:
 
 ```
-curl: '--write-out' is not supported. Use kaish '--json' for a structured
-response object, or '-i' to print headers above the body.
+curl: '--parallel' is not supported, and no request was sent. This build makes
+one request per invocation. Run curl once per URL.
+```
+
+`--verbose`:
+
+```
+curl: '--verbose' is not supported, and no request was sent. This build prints
+no request or connection trace. Use 'curl -i <url>' to print the response
+headers above the body. The request headers are the ones you set with '-H'
+plus 'User-Agent: kaish-curl'.
 ```
 
 Retry:
@@ -331,11 +356,13 @@ Probed against the published crate and the source at `~/src/research/ureq`
   that is the deliberate ring-vs-aws-lc tradeoff kaibo already accepted. A CI
   `cargo tree -i` tripwire asserts `aws-lc-sys`, `openssl-sys`, and `curl` stay
   out, the same guard the git crate keeps.
-- **Redirects are inverted.** ureq follows redirects up to `max_redirects` by
-  default; curl does not follow unless `-L`. The build sets `max_redirects = 0`
-  unless `-L` is given, then lifts it to `--max-redirs` (default 50). ureq's
-  `max_redirects_will_error` controls whether an over-cap is an error (curl's
-  default) or a last-response return; this build errors, to match curl.
+- **Redirects are driven here, not by ureq.** The agent is built with
+  `max_redirects(0)` and `max_redirects_will_error(false)`, so ureq hands every
+  3xx back, and the hop loop in `backend/ureq.rs` follows it under `-L` up to
+  `--max-redirs` (default 50, the embedder's ceiling applies). That is what
+  lets the egress policy see every hop, and what lets this build apply curl's
+  method and body rules: 301/302 turn a POST into a GET and 303 turns any
+  non-HEAD request into one, dropping the body; 307/308 keep both.
 - **Timeouts map directly.** `--max-time` is `timeout_global(Some(d))`;
   `--connect-timeout` is `timeout_connect(Some(d))`. Native only; the wasm
   backend cannot honor these and says so.
@@ -353,17 +380,19 @@ Probed against the published crate and the source at `~/src/research/ureq`
   URL host is a placeholder when `--unix-socket` is set, exactly as curl does
   it. `--abstract-unix-socket` (Linux abstract namespace) reuses the same
   transport with abstract addressing; it is deferred to CU5.
-- **Body read respects the budget.** `curl -o <file>` streams via
-  `Body::as_reader()` and writes through `ToolCtx::backend().write`, so the
-  embedder's VFS byte budget governs the download. `curl <url>` to stdout reads
-  into the `ExecResult` and is subject to the kernel output limits (and the
-  1 MB wasm clip). ureq's own 10 MB `read_to_string` default is lowered to the
-  kernel's output cap so a stdout fetch cannot blow the budget.
+- **Body read respects the budget.** Both `curl -o <file>` and `curl <url>`
+  read the body into memory through `Body::as_reader()`, bounded by
+  `Limits::max_response_bytes`: a body over it is exit 1 and nothing is
+  written. `-o` then writes the bytes through `ToolCtx::backend().write`, so
+  the embedder's VFS budget applies as well. Nothing streams, so the cap is
+  also the largest file `-o` can save. Stdout output is subject to the kernel
+  output limits (and the 1 MB wasm clip).
 - **Errors map to exit codes.** ureq's `ErrorKind` lines up with the table
   above: `HostNotFound` is 6, `ConnectionFailed` and connect `Io` are 7,
   `Timeout` is 28, `Tls` is 35, `Rustls`/`Pem` cert failures are 60,
-  `TooManyRedirects` is 47, `BadUri` is 3, and `StatusCode` under `--fail` is
-  22. Everything else is 1.
+  `TooManyRedirects` is 47, and `BadUri` is 7 (curl's 3 is kernel-reserved,
+  CU11). `--fail` is decided by this build at the response headers, not by
+  ureq's `StatusCode` error, and is 22. Everything else is 1.
 
 ## Wasm: designed in, not built
 
@@ -424,27 +453,37 @@ Modeled on `kaish-tools-git`, minus the git-specific containment and plumbing.
 crates/kaish-tools-curl/
   Cargo.toml
   src/
-    lib.rs          # Tool impl, argv routing, cfg split; compile_error! only if both backends are off
-    config.rs       # CurlConfig (embedder-supplied: tool name, defaults, limits)
-    error.rs        # CurlError -> exit code mapping, literate messages
-    model.rs        # Response model (status, headers, body, url)
-    render.rs       # text (--include/--head) and the --json object
-    args.rs         # the clap struct, flattened GlobalFlags, the unsupported-flag refusals
+    lib.rs          # re-exports
+    tool.rs         # the Tool impl, the clap schema, -o / -O / -C delivery, -f and -w
+    config.rs       # CurlConfig, Limits, AllowEgress / AllowByList (embedder-supplied)
+    args.rs         # the one parser: flags, refusals, Request
+    input.rs        # reads the files the command line names, through the VFS
+    form.rs         # -F multipart bodies
+    write_out.rs    # -w formats
+    render.rs       # text (-i / -I / -o bytes) and the --json object
+    model.rs        # Response (status, headers, body, url, redirect history)
+    error.rs        # CurlError -> exit code mapping
+    util.rs         # block_in_place_compat
     backend/
-      mod.rs        # trait Backend { fn fetch(...) -> Response }
-      ureq.rs       # cfg(not(wasm))
-      xhr.rs        # cfg(wasm) — stubbed in cut 1, built later
+      mod.rs        # the cfg split; compile_error! on wasm until an XHR backend exists
+      ureq.rs       # cfg(not(wasm)): redirects, egress vetting, body read
+      unix.rs       # cfg(unix): the --unix-socket transport
   tests/
-    support.rs      # the local server harness: 127.0.0.1 TCP + a unix-domain socket
-    surface.rs       # GET/POST/headers/-i/-o/-L/--fail/exit codes over TCP
-    unix_socket.rs   # the same surface over a unix-domain socket (--unix-socket)
-    errors.rs        # the literate-error catalog, asserted verbatim
-    tls.rs          # -k against a self-signed cert (optional fourth)
+    support.rs         # the local server harness, the real-curl oracle, the Pair comparison
+    surface.rs         # GET/POST/headers/-i/-o/-L/--fail/exit codes over TCP
+    unix_socket.rs     # the same surface over a unix-domain socket (--unix-socket)
+    errors.rs          # the literate-error catalog, asserted verbatim
+    compat.rs          # real kernel + loopback server; compares with real curl where installed
+    features.rs        # -d @file, -G, -F, -O, -T, -C -, each against real curl
+    review.rs          # the 2026-11 cross-model review's findings, each against real curl
+    kaish_behavior_canary.rs  # kaish behaviors this crate's callers depend on
 ```
 
 `CurlConfig` mirrors `GitConfig`: embedder-supplied, with a `tool_name` for
 embedders who want a different name. The `Tool` impl declares `operations`:
-`net.request` always, plus `fs.overwrite` when `-o`/`-O` is enabled. The ids
+`net.request` and `fs.overwrite`, always — the schema is per tool, not per
+call, so it cannot declare `fs.overwrite` only for the calls that use `-o`,
+`-O` or `-C`. The ids
 are free-form dotted strings (kaish `ToolSchema::operations`), so this is
 correct without a `kaish-kernel` dep, the same call `kaish-tools-git` makes
 for the read profile.

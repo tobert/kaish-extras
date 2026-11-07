@@ -85,6 +85,36 @@ pub enum CurlError {
         reason: String,
     },
 
+    /// A file named on the command line (`-d @file`, `-F`, `-T`) could not be
+    /// read. Exit 26, curl's "read error". No request was sent.
+    #[error("curl: could not read '{path}': {reason}. No request was sent")]
+    ReadFailed {
+        /// The path as the caller typed it.
+        path: String,
+        /// What the filesystem reported.
+        reason: String,
+    },
+
+    /// The output file could not be written (`-o`, `-O`). Exit 23, curl's
+    /// "write error".
+    #[error("curl: could not write '{path}': {reason}")]
+    WriteFailed {
+        /// The VFS path.
+        path: String,
+        /// What the filesystem reported.
+        reason: String,
+    },
+
+    /// A resumed download (`-C -`) got an answer that cannot be appended to
+    /// the file. Exit 33, curl's "range error". The file is left as it was.
+    #[error("curl: {0}")]
+    Range(String),
+
+    /// The command line asked for something this build refuses before any
+    /// request is made. Exit 2, curl's "failed init".
+    #[error("curl: {0}")]
+    Usage(String),
+
     /// Any other transport failure this table does not name. Exit 1.
     #[error("curl: {0}")]
     Transport(String),
@@ -102,6 +132,10 @@ impl CurlError {
             CurlError::TlsHandshakeFailed { .. } => 35,
             CurlError::TooManyRedirects { .. } => 47,
             CurlError::CertificateNotAuthenticated { .. } => 60,
+            CurlError::ReadFailed { .. } => 26,
+            CurlError::WriteFailed { .. } => 23,
+            CurlError::Range(_) => 33,
+            CurlError::Usage(_) => 2,
             CurlError::Transport(_) => 1,
         }
     }

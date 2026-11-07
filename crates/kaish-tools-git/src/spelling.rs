@@ -2,15 +2,16 @@
 //!
 //! An agent types git's flags because git's flags are what it was trained on.
 //! When a verb accepts the spelling, the clap struct carries it (`-a`,
-//! `--cached`, `--oneline`); this module is the other half: a flag the verb
+//! `--oneline`, `-n`); this module is the other half: a flag the verb
 //! does not support is refused **saying that it is not supported**, with the
 //! command to type instead whenever one exists. The next call should work.
 //!
 //! clap's own unknown-argument text is not fit for that reader. It suggests
 //! `-- --oneline`, which here would turn the flag into a pathspec; it suggests
-//! `--patch` for `--cached`, by edit distance; and it ends in `try '--help'`,
-//! which this tool does not answer. So the message is rebuilt from clap's
-//! error context rather than passed through.
+//! a flag by edit distance, which can be a different flag; and it ends in
+//! `try '--help'`, while this tool's help is `git <verb> --help`, answered
+//! from its schema. So the message is rebuilt from clap's error context rather
+//! than passed through.
 
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 
@@ -192,6 +193,20 @@ const HINTS: &[(&str, &[&str], &str)] = &[
     ),
     (
         "log",
+        &["--follow"],
+        "This git does not follow renames: history stops where a file was \
+         renamed. 'git log -- FILE' lists the commits that touched FILE under \
+         its current name only",
+    ),
+    (
+        "log",
+        &["--date"],
+        "This git takes no date format. The default table prints each commit's \
+         date as YYYY-MM-DD, and --json carries the full author time in \
+         'author.time'",
+    ),
+    (
+        "log",
         &["--grep"],
         "This git does not search commit messages. --author filters by \
          author, and --json carries each commit's 'summary' for a filter",
@@ -249,6 +264,7 @@ pub(crate) fn refuse(
     err: &clap::Error,
     cmd: &clap::Command,
     config: &GitConfig,
+    argv: &[String],
 ) -> GitError {
     let message = match err.kind() {
         ErrorKind::UnknownArgument => {
@@ -257,35 +273,131 @@ pub(crate) fn refuse(
                 _ => String::new(),
             };
             // `--pretty=oneline` is the flag `--pretty` with a value.
-            let flag = arg.split_once('=').map_or(arg.as_str(), |(flag, _)| flag);
-            match hint(operation, flag).filter(|next| runnable(next, config)) {
-                Some(next) => format!("{flag} is not supported. {next}"),
-                None => format!(
-                    "{flag} is not supported. git {operation} accepts {}. See 'help git'",
-                    flag_list(cmd)
-                ),
+            let first = arg.split_once('=').map_or(arg.as_str(), |(flag, _)| flag);
+            let first = whole_word(first, argv);
+            // clap stops at the first unknown flag. Reporting it alone costs a
+            // retry per flag, so the rest of the argv is scanned for more.
+            let mut flags = vec![first];
+            for flag in other_unknown_flags(cmd, argv) {
+                if !flags.contains(&flag) {
+                    flags.push(flag);
+                }
             }
+            let mut parts = Vec::new();
+            let mut lists_flags = false;
+            for flag in &flags {
+                match hint(operation, flag, cmd).filter(|next| runnable(next, config)) {
+                    Some(next) => parts.push(format!("{flag} is not supported. {next}")),
+                    None => {
+                        parts.push(format!("{flag} is not supported."));
+                        lists_flags = true;
+                    }
+                }
+            }
+            if lists_flags {
+                parts.push(format!("git {operation} accepts {}. See 'help git'", flag_list(cmd)));
+            }
+            parts.join(" ")
         }
         _ => format!("{}. See 'help git'", first_line(err)),
     };
     GitError::Usage { operation, message }
 }
 
+/// clap names `-5` for `-5p` and for `-p5`, the part it could not place. The
+/// caller typed one cluster, which git also refuses (`'5p' not an integer`),
+/// so the refusal names the word as typed.
+fn whole_word(flag: &str, argv: &[String]) -> String {
+    if flag.len() > 1 && flag[1..].bytes().all(|b| b.is_ascii_digit()) {
+        let longer = argv
+            .iter()
+            .take_while(|w| w.as_str() != "--")
+            .find(|w| {
+                !w.starts_with("--")
+                    && w.len() > flag.len()
+                    && (w.starts_with(flag) || w.ends_with(&flag[1..]) && w.starts_with('-'))
+            });
+        if let Some(word) = longer {
+            return word.clone();
+        }
+    }
+    flag.to_string()
+}
+
+/// The long flags and `-N` counts in `argv`, before any `--`, that `cmd` does
+/// not accept. Short clusters are left to clap, which names the first.
+fn other_unknown_flags(cmd: &clap::Command, argv: &[String]) -> Vec<String> {
+    let mut found = Vec::new();
+    for word in argv.iter().take_while(|w| w.as_str() != "--") {
+        let Some(rest) = word.strip_prefix("--") else {
+            if word.len() > 1 && word[1..].bytes().all(|b| b.is_ascii_digit()) {
+                found.push(word.clone());
+            }
+            continue;
+        };
+        let name = rest.split_once('=').map_or(rest, |(name, _)| name);
+        let known = name == "help"
+            || cmd.get_arguments().any(|a| {
+                a.get_long() == Some(name) || a.get_all_aliases().is_some_and(|al| al.contains(&name))
+            });
+        if !name.is_empty() && !known {
+            found.push(format!("--{name}"));
+        }
+    }
+    found
+}
+
+/// `git log -5` is git's count shorthand for `-n 5`: rewrite each `-N` word
+/// before `--` into the two words clap parses. Only `log` has the shorthand
+/// (`git show -2` means something else in git, and `branch` and `tag` have no
+/// such flag).
+pub(crate) fn expand_counts(operation: &str, argv: &[String]) -> Vec<String> {
+    if operation != "log" {
+        return argv.to_vec();
+    }
+    let mut out = Vec::with_capacity(argv.len());
+    let mut before_marker = true;
+    let mut takes_value = false;
+    for word in argv {
+        let is_count = before_marker
+            && !takes_value
+            && word.len() > 1
+            && word.starts_with('-')
+            && word[1..].bytes().all(|b| b.is_ascii_digit());
+        if is_count {
+            out.push("-n".to_string());
+            out.push(word[1..].to_string());
+        } else {
+            out.push(word.clone());
+        }
+        if word == "--" {
+            before_marker = false;
+        }
+        // The word after a bare value-taking flag is that flag's value.
+        takes_value = !takes_value && matches!(word.as_str(), "-n" | "--limit" | "--rev" | "--author" | "--since" | "--until" | "--path" | "--repo");
+    }
+    out
+}
+
 /// The next step for `flag` on `operation`, if there is a known one.
-fn hint(operation: &str, flag: &str) -> Option<String> {
+fn hint(operation: &str, flag: &str, cmd: &clap::Command) -> Option<String> {
     if let Some((_, _, next)) = HINTS
         .iter()
         .find(|(op, flags, _)| *op == operation && flags.contains(&flag))
     {
         return Some(format!("{next}."));
     }
-    // `git log -5`: git's count shorthand. Every verb that takes a count here
-    // spells it `-n`.
+    // `git log -5`: git's count shorthand. The spelling named is one the verb
+    // takes: `-n` where it has one, else `--limit`, else none.
     let count = flag.strip_prefix('-')?;
-    if !count.is_empty() && count.bytes().all(|b| b.is_ascii_digit()) {
-        return Some(format!("Write the count as '-n {count}'."));
+    if count.is_empty() || !count.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
     }
-    None
+    let limit = cmd.get_arguments().find(|a| a.get_long() == Some("limit"))?;
+    Some(match limit.get_short() {
+        Some(short) => format!("Write the count as '-{short} {count}'."),
+        None => format!("Write the count as '--limit {count}'."),
+    })
 }
 
 /// The flags a verb accepts, as an agent would type them: `--limit (-n)`.
@@ -357,7 +469,7 @@ mod tests {
     #[test]
     fn an_unknown_flag_is_refused_as_not_supported_with_its_hint() {
         let err = parse("log", &["--graph"]).expect_err("--graph is refused");
-        let refused = refuse("log", &err, &verbs::log::LogArgs::command(), &GitConfig::read_only()).to_string();
+        let refused = refuse("log", &err, &verbs::log::LogArgs::command(), &GitConfig::read_only(), &[]).to_string();
         assert!(refused.starts_with("git log: --graph is not supported. "), "{refused}");
         assert!(refused.contains("--first-parent"), "the hint is carried: {refused}");
         for misleading in ["-- --graph", "Usage:", "--help", "tip:"] {
@@ -371,11 +483,23 @@ mod tests {
     #[test]
     fn an_unhinted_flag_lists_the_verbs_flags() {
         let err = parse("log", &["--frobnicate"]).expect_err("unknown");
-        let refused = refuse("log", &err, &verbs::log::LogArgs::command(), &GitConfig::read_only()).to_string();
+        let refused = refuse("log", &err, &verbs::log::LogArgs::command(), &GitConfig::read_only(), &[]).to_string();
         assert!(refused.starts_with("git log: --frobnicate is not supported. git log accepts "), "{refused}");
         assert!(refused.contains("--limit (-n)"), "the list names log's real flags: {refused}");
         assert!(refused.contains("--json"), "the global flags are listed too: {refused}");
         assert!(!refused.contains("--operands"), "a hidden sink is not a flag to type: {refused}");
+    }
+
+    /// `log -5` is `log -n 5`; a count after the marker is a path, and the
+    /// word after a value-taking flag is that flag's value.
+    #[test]
+    fn counts_expand_before_the_marker_only() {
+        let v = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(expand_counts("log", &v(&["-12", "--oneline"])), v(&["-n", "12", "--oneline"]));
+        assert_eq!(expand_counts("log", &v(&["--oneline", "--", "-2"])), v(&["--oneline", "--", "-2"]));
+        assert_eq!(expand_counts("log", &v(&["--author", "-3"])), v(&["--author", "-3"]));
+        assert_eq!(expand_counts("log", &v(&["--repo", "-3", "-2"])), v(&["--repo", "-3", "-n", "2"]));
+        assert_eq!(expand_counts("show", &v(&["-2"])), v(&["-2"]));
     }
 
     /// `--pretty=oneline` is refused as `--pretty`, so it finds `--pretty`'s
@@ -383,17 +507,18 @@ mod tests {
     #[test]
     fn a_flag_with_an_inline_value_finds_its_hint() {
         let err = parse("log", &["--pretty=oneline"]).expect_err("refused");
-        let refused = refuse("log", &err, &verbs::log::LogArgs::command(), &GitConfig::read_only()).to_string();
+        let refused = refuse("log", &err, &verbs::log::LogArgs::command(), &GitConfig::read_only(), &[]).to_string();
         assert!(refused.starts_with("git log: --pretty is not supported. "), "{refused}");
         assert!(refused.contains("--oneline"), "{refused}");
     }
 
-    /// `git log -5` is git's count shorthand, and the refusal spells the
-    /// accepted form with the caller's own number.
+    /// `-5` is accepted by `log` (see `expand_counts`) and by no other verb;
+    /// `branch` refuses it and spells the accepted form with the caller's own
+    /// number.
     #[test]
     fn a_numeric_flag_is_refused_with_the_n_spelling() {
-        let err = parse("log", &["-5"]).expect_err("refused");
-        let refused = refuse("log", &err, &verbs::log::LogArgs::command(), &GitConfig::read_only()).to_string();
+        let err = parse("branch", &["-5"]).expect_err("refused");
+        let refused = refuse("branch", &err, &verbs::branch::BranchArgs::command(), &GitConfig::read_only(), &[]).to_string();
         assert!(refused.contains("Write the count as '-n 5'"), "{refused}");
     }
 
@@ -402,7 +527,7 @@ mod tests {
     #[test]
     fn another_clap_error_keeps_its_first_line_only() {
         let err = parse("log", &["--merges", "--no-merges"]).expect_err("conflict");
-        let refused = refuse("log", &err, &verbs::log::LogArgs::command(), &GitConfig::read_only()).to_string();
+        let refused = refuse("log", &err, &verbs::log::LogArgs::command(), &GitConfig::read_only(), &[]).to_string();
         assert!(refused.contains("--merges"), "{refused}");
         assert!(refused.contains("--no-merges"), "{refused}");
         assert!(refused.ends_with("See 'help git'"), "{refused}");

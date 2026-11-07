@@ -277,9 +277,9 @@ impl GitTool {
         // a successful answer that ran up against `--limit`.
         if model.truncated {
             result.err = format!(
-                "git status: output truncated at {} entries (--limit); \
+                "git status: output truncated at {} (--limit); \
                  'truncated' is true in --json",
-                model.entries.len()
+                counted(model.entries.len(), "entry", "entries")
             );
         }
         // A path that was not compared is reported the same way truncation is:
@@ -331,17 +331,24 @@ impl GitTool {
         // flag-less log — would be a wrong answer rather than a missing one
         // (E.5's precedent).
         if parsed.patch {
+            // Named as the caller typed it: a flag they did not write is a
+            // flag they cannot find in their own command.
+            let flag = if argv.iter().take_while(|w| *w != "--").any(|w| w == "--patch") {
+                "--patch"
+            } else {
+                "-p"
+            };
             #[cfg(not(feature = "textdiff"))]
             return failure(GitError::PatchNeedsTextdiff {
                 operation: OP,
-                flag: "--patch",
+                flag,
                 instead: "Use --stat for the changed-file and line counts this \
                           build does compute.",
             });
             #[cfg(feature = "textdiff")]
             return failure(GitError::PatchNotInThisVerb {
                 operation: OP,
-                flag: "--patch",
+                flag,
                 instead: "One commit's patch is 'git diff --patch \
                           \"<commit>~1\" <commit>'; --stat gives every \
                           commit's changed-file and line counts.",
@@ -485,9 +492,9 @@ impl GitTool {
             // only have come from the budget.
             result.err = if model.commits.len() >= limit {
                 format!(
-                    "git log: output truncated at {} commits (--limit); \
+                    "git log: output truncated at {} (--limit); \
                      'truncated' is true in --json",
-                    model.commits.len()
+                    counted(model.commits.len(), "commit", "commits")
                 )
             } else {
                 format!(
@@ -586,9 +593,9 @@ impl GitTool {
         let mut result = ExecResult::with_output(crate::render::ls(&model));
         if model.truncated {
             result.err = format!(
-                "git ls: output truncated at {} entries (--limit); 'truncated' \
+                "git ls: output truncated at {} (--limit); 'truncated' \
                  is true in --json",
-                model.entries.len()
+                counted(model.entries.len(), "entry", "entries")
             );
         }
         result.baggage.insert("git.repo".to_string(), repo_root);
@@ -678,9 +685,9 @@ impl GitTool {
                     );
                 } else if show.files_truncated {
                     r.err = format!(
-                        "git show: file list truncated at {} files (--limit, or this \
+                        "git show: file list truncated at {} (--limit, or this \
                          build's max_rows); 'files_truncated' is true in --json",
-                        show.files.as_ref().map_or(0, Vec::len)
+                        counted(show.files.as_ref().map_or(0, Vec::len), "file", "files")
                     );
                 }
                 (r, "commit")
@@ -692,9 +699,9 @@ impl GitTool {
                 let mut r = ExecResult::with_output(crate::render::show_tree(&report));
                 if report.truncated {
                     r.err = format!(
-                        "git show: output truncated at {} entries (--limit); \
+                        "git show: output truncated at {} (--limit); \
                          'truncated' is true in --json",
-                        report.entries.len()
+                        counted(report.entries.len(), "entry", "entries")
                     );
                 }
                 (r, "tree")
@@ -1019,9 +1026,9 @@ impl GitTool {
         }
         if model.truncated {
             notes.push(format!(
-                "output truncated at {} files (--limit); 'truncated' is true \
+                "output truncated at {} (--limit); 'truncated' is true \
                  in --json",
-                model.files.len()
+                counted(model.files.len(), "file", "files")
             ));
         }
         if model.unmerged > 0 {
@@ -1100,6 +1107,7 @@ impl GitTool {
         let contains = parsed.contains.clone();
         let merged = parsed.merged.clone();
         let ahead_behind = parsed.ahead_behind;
+        let all = parsed.all;
 
         let outcome = block_in_place_compat(move || {
             let repo = ReadRepo::discover(OP, &resolved.real, &resolved.ceiling)?;
@@ -1120,12 +1128,12 @@ impl GitTool {
             Err(e) => return failure(e),
         };
 
-        let mut result = ExecResult::with_output(crate::render::branch(&model));
+        let mut result = ExecResult::with_output(crate::render::branch(&model, all));
         if model.truncated {
             result.err = format!(
-                "git branch: output truncated at {} branches (--limit); \
+                "git branch: output truncated at {} (--limit); \
                  'truncated' is true in --json",
-                model.branches.len()
+                counted(model.branches.len(), "branch", "branches")
             );
         }
         result.baggage.insert("git.repo".to_string(), repo_root);
@@ -1186,9 +1194,9 @@ impl GitTool {
         let mut result = ExecResult::with_output(crate::render::tag(&model));
         if model.truncated {
             result.err = format!(
-                "git tag: output truncated at {} tags (--limit); 'truncated' \
+                "git tag: output truncated at {} (--limit); 'truncated' \
                  is true in --json",
-                model.tags.len()
+                counted(model.tags.len(), "tag", "tags")
             );
         }
         result.baggage.insert("git.repo".to_string(), repo_root);
@@ -1250,9 +1258,9 @@ impl GitTool {
         let mut result = ExecResult::with_output(crate::render::worktree_list(&model));
         if model.truncated {
             result.err = format!(
-                "git worktree list: output truncated at {} working trees \
+                "git worktree list: output truncated at {} \
                  (--limit); 'truncated' is true in --json",
-                model.worktrees.len()
+                counted(model.worktrees.len(), "working tree", "working trees")
             );
         }
         result.baggage.insert("git.repo".to_string(), repo_root);
@@ -2135,7 +2143,7 @@ impl Tool for GitTool {
             return verb_help(&schema, &verb);
         }
 
-        match verb.as_str() {
+        let mut result = match verb.as_str() {
             "info" => self.run_info(leaf, ctx).await,
             "status" => self.run_status(leaf, ctx).await,
             "log" => self.run_log(leaf, ctx).await,
@@ -2185,8 +2193,47 @@ impl Tool for GitTool {
                      this is a bug in kaish-tools-git, not in your command line"
                 ),
             ),
+        };
+        // A note is a whole line: in a pipeline the next stage's stderr would
+        // otherwise run onto the end of it.
+        end_line(&mut result.err);
+        if result.code == 0 {
+            if let Some(note) = dashed_pathspec_note(&verb, leaf) {
+                result.err.push_str(&note);
+                end_line(&mut result.err);
+            }
         }
+        result
     }
+}
+
+/// `1 commit`, `2 commits`: a count with its noun in the right number.
+fn counted(n: usize, singular: &str, plural: &str) -> String {
+    format!("{n} {}", if n == 1 { singular } else { plural })
+}
+
+/// Terminate a non-empty stderr string with a newline.
+fn end_line(err: &mut String) {
+    if !err.is_empty() && !err.ends_with('\n') {
+        err.push('\n');
+    }
+}
+
+/// The stderr note for a pathspec after `--` that starts with `--`, which git
+/// reads as a path and so does this tool. A caller who typed `--json` there
+/// meant a flag, and the answer in text would not say otherwise.
+fn dashed_pathspec_note(verb: &str, leaf: &[String]) -> Option<String> {
+    let marker = leaf.iter().position(|w| w == "--")?;
+    let dashed: Vec<&String> = leaf[marker + 1..].iter().filter(|w| w.starts_with("--") && w.len() > 2).collect();
+    if dashed.is_empty() {
+        return None;
+    }
+    let names = dashed.iter().map(|w| format!("'{w}'")).collect::<Vec<_>>().join(", ");
+    // `branch` and `tag` take a name pattern where the other verbs take a path.
+    let kind = if matches!(verb, "branch" | "tag") { "pattern" } else { "path" };
+    Some(format!(
+        "git {verb}: {names} after '--' was read as a {kind}, as git reads it. Write flags before '--'"
+    ))
 }
 
 /// A renderer's answer, and how many files it got no content for.
@@ -2469,8 +2516,9 @@ fn parse_leaf<P: Parser>(
 ) -> Result<P, Box<ExecResult>> {
     // Boxed: `ExecResult` is a wide type, and an unboxed `Err` variant makes
     // every `Ok` return pay for it (clippy::result_large_err).
-    P::try_parse_from(std::iter::once(format!("git {operation}")).chain(argv.iter().cloned()))
-        .map_err(|e| Box::new(failure(crate::spelling::refuse(operation, &e, &P::command(), config))))
+    let expanded = crate::spelling::expand_counts(operation, argv);
+    P::try_parse_from(std::iter::once(format!("git {operation}")).chain(expanded.iter().cloned()))
+        .map_err(|e| Box::new(failure(crate::spelling::refuse(operation, &e, &P::command(), config, &expanded))))
 }
 
 /// A verb's operands, split at git's `--` end-of-options marker.

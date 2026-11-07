@@ -961,3 +961,234 @@ pub async fn curl_with_backend(
     let tool = kaish_tools_curl::tool(config);
     tool.execute(args, &mut ctx).await
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A real kernel over an in-memory filesystem, with real curl as the oracle
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A kernel whose filesystem the test can seed and read back, with curl
+/// registered under `config`. The cwd is `/work`.
+///
+/// The seed bytes are written through the kernel's own filesystem trait, so
+/// binary content (a NUL, a lone `0xff`) reaches the tool exactly, which a
+/// shell `printf` cannot promise.
+pub struct Fixture {
+    pub kernel: kaish_kernel::Kernel,
+    vfs: Arc<kaish_kernel::vfs::VfsRouter>,
+}
+
+impl Fixture {
+    pub async fn new(config: CurlConfig, files: &[(&str, &[u8])]) -> Self {
+        use kaish_kernel::vfs::{Filesystem, MemoryFs, VfsRouter};
+        use kaish_kernel::{Kernel, KernelConfig, LocalBackend};
+
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        let vfs = Arc::new(vfs);
+        for dir in ["/work", "/tmp"] {
+            vfs.mkdir(Path::new(dir)).await.expect("mkdir");
+        }
+        for (name, bytes) in files {
+            let path = Path::new("/work").join(name);
+            if let Some(parent) = path.parent() {
+                // `mkdir` on an existing directory is the only error to
+                // tolerate here; anything else is a broken fixture.
+                if let Err(e) = vfs.mkdir(parent).await {
+                    assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "mkdir {parent:?}: {e}");
+                }
+            }
+            vfs.write(&path, bytes).await.expect("seed file");
+        }
+        let backend: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::clone(&vfs)));
+        let mut cfg = KernelConfig::transient();
+        cfg.cwd = PathBuf::from("/work");
+        let curl = kaish_tools_curl::tool(config);
+        let kernel = Kernel::with_backend(backend, cfg, |_| {}, |tools| tools.register(curl))
+            .expect("kernel assembles");
+        Self { kernel, vfs }
+    }
+
+    /// Run a script; `$URL` stands for the server base (no trailing slash).
+    pub async fn run(&self, base: &str, script: &str) -> ExecResult {
+        let script = format!("URL='{}'\n{script}", base.trim_end_matches('/'));
+        self.kernel
+            .execute(&script)
+            .await
+            .unwrap_or_else(|e| panic!("kernel failed to execute {script:?}: {e}"))
+    }
+
+    /// The bytes at `name` under `/work` (or an absolute path), if present.
+    pub async fn file(&self, name: &str) -> Option<Vec<u8>> {
+        use kaish_kernel::vfs::Filesystem;
+        self.vfs.read(&Path::new("/work").join(name)).await.ok()
+    }
+}
+
+/// What real curl did with `args`, run in a scratch directory seeded with
+/// `files`: exit code, stdout, stderr, and the files it left behind.
+#[derive(Debug)]
+pub struct Oracle {
+    pub code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+    dir: tempfile::TempDir,
+}
+
+/// Whether real curl can serve as the oracle. A box without curl skips the
+/// comparison and runs the literal assertions; a gate that sets
+/// `KAISH_REQUIRE_CURL_ORACLE` (CI does) turns that skip into a panic, because
+/// a green run that compared nothing proves less than it appears to.
+pub fn oracle_available() -> bool {
+    let present = std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let required = std::env::var_os("KAISH_REQUIRE_CURL_ORACLE")
+        .is_some_and(|v| !v.is_empty() && v != "0");
+    oracle_policy(present, required)
+}
+
+/// The decision, apart from the environment: `present` curl is usable;
+/// absent, it is a skip, or a panic when `required`.
+pub fn oracle_policy(present: bool, required: bool) -> bool {
+    if !present && required {
+        panic!(
+            "KAISH_REQUIRE_CURL_ORACLE is set and no `curl` runs here: the tests that compare \
+             against real curl would silently skip. Install curl, or unset the variable"
+        );
+    }
+    present
+}
+
+impl Oracle {
+    /// `None` when no curl is installed (the case still runs its own
+    /// assertions), or a panic when `KAISH_REQUIRE_CURL_ORACLE` is set.
+    pub fn run(base: &str, args: &str, files: &[(&str, &[u8])]) -> Option<Self> {
+        if !oracle_available() {
+            return None;
+        }
+        let dir = tempfile::tempdir().ok()?;
+        for (name, bytes) in files {
+            let path = dir.path().join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok()?;
+            }
+            std::fs::write(path, bytes).ok()?;
+        }
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("URL='{}'; curl {args}", base.trim_end_matches('/')))
+            .current_dir(dir.path())
+            .output()
+            .ok()?;
+        Some(Self {
+            code: out.status.code()?,
+            stdout: out.stdout,
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            dir,
+        })
+    }
+
+    /// A file curl wrote.
+    pub fn file(&self, name: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.dir.path().join(name)).ok()
+    }
+}
+
+/// The parts of a request that must be the same whoever sent it: not the
+/// `User-Agent`, `Accept`, or `Host`, which differ by design.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Wire {
+    pub method: String,
+    pub path: String,
+    pub content_type: Option<String>,
+    pub content_length: Option<String>,
+    pub range: Option<String>,
+    pub body: Vec<u8>,
+}
+
+impl Wire {
+    pub fn of(req: &CapturedRequest) -> Self {
+        Self {
+            method: req.method.clone(),
+            path: req.path.clone(),
+            content_type: req.header("Content-Type").map(str::to_string),
+            content_length: req.header("Content-Length").map(str::to_string),
+            range: req.header("Range").map(str::to_string),
+            body: req.body.clone(),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// One case, run under real curl and under this tool
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Both sides of one case.
+pub struct Pair {
+    pub ours: ExecResult,
+    pub ours_req: Vec<CapturedRequest>,
+    pub theirs: Option<Oracle>,
+    pub theirs_req: Vec<CapturedRequest>,
+    /// Kept for `file()` reads in cases that check what was written.
+    #[allow(dead_code)]
+    pub fx: Fixture,
+}
+
+/// Run `args` (the text after `curl`, with `$URL` for the server base) under
+/// real curl and under this tool, each with `files` seeded.
+pub async fn compare(server: &TcpGuard, args: &str, files: &[(&str, &[u8])]) -> Pair {
+    compare_with(server, args, files, loopback_config()).await
+}
+
+pub async fn compare_with(
+    server: &TcpGuard,
+    args: &str,
+    files: &[(&str, &[u8])],
+    config: kaish_tools_curl::CurlConfig,
+) -> Pair {
+    let base = server.url("");
+    server.take_requests();
+    let theirs = Oracle::run(&base, args, files);
+    let theirs_req = server.take_requests();
+    let fx = Fixture::new(config, files).await;
+    let ours = fx.run(&base, &format!("curl {args}")).await;
+    let ours_req = server.take_requests();
+    Pair { ours, ours_req, theirs, theirs_req, fx }
+}
+
+impl Pair {
+    /// Same requests on the wire, same exit code, same stdout.
+    pub fn assert_same(&self, what: &str) {
+        let Some(theirs) = &self.theirs else { return };
+        assert_eq!(
+            self.ours_req.iter().map(Wire::of).collect::<Vec<_>>(),
+            self.theirs_req.iter().map(Wire::of).collect::<Vec<_>>(),
+            "{what}: request differs from real curl's (stderr: {})",
+            self.ours.err
+        );
+        assert_eq!(self.ours.code as i32, theirs.code, "{what}: exit code; ours stderr: {}", self.ours.err);
+        assert_eq!(
+            self.ours.text_out().as_bytes(),
+            theirs.stdout.as_slice(),
+            "{what}: stdout"
+        );
+    }
+
+    /// Same requests and exit code; stdout is not compared (`-i` and `-I`
+    /// print header names lower-cased and sorted, curl prints them as sent).
+    pub fn assert_same_wire(&self, what: &str) {
+        let Some(theirs) = &self.theirs else { return };
+        assert_eq!(
+            self.ours_req.iter().map(Wire::of).collect::<Vec<_>>(),
+            self.theirs_req.iter().map(Wire::of).collect::<Vec<_>>(),
+            "{what}: request differs from real curl's"
+        );
+        assert_eq!(self.ours.code as i32, theirs.code, "{what}: exit code");
+    }
+
+    pub fn body(&self) -> &[u8] {
+        &self.ours_req.first().expect("a request was sent").body
+    }
+}

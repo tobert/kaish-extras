@@ -82,6 +82,9 @@ pub struct ReadRepo {
     ceiling: PathBuf,
     objects: gix_odb::Handle,
     refs: gix_ref::file::Store,
+    /// The shortest abbreviation `short_oid` prints, computed on first use
+    /// because it reads pack index headers and the config file.
+    abbrev_floor: std::sync::OnceLock<usize>,
 }
 
 /// The object store as a reader sees it (feasibility section 7, F1).
@@ -558,6 +561,7 @@ impl ReadRepo {
             ceiling,
             objects,
             refs,
+            abbrev_floor: std::sync::OnceLock::new(),
         })
     }
 
@@ -738,6 +742,92 @@ impl ReadRepo {
     // write: a sibling module cannot write an object through it because the
     // type has no method to. The `write_shaped_identifiers` scan (D.1) is the
     // second line.
+
+    /// `oid` abbreviated as git's `core.abbrev` does: the shortest prefix, at
+    /// least [`ReadRepo::abbrev_floor`] long, that no other object in the
+    /// repository shares. `git log --oneline` prints this.
+    pub(crate) fn short_oid(&self, oid: &gix_hash::ObjectId) -> Result<String, GitError> {
+        let hex = oid.to_string();
+        let mut len = self.abbrev_floor()?.min(hex.len());
+        while len < hex.len() {
+            let prefix = gix_hash::Prefix::new(oid, len).map_err(|e| {
+                GitError::repository(self.operation, "abbreviating an oid", &self.git_dir, e)
+            })?;
+            match self.objects.lookup_prefix(prefix, None).map_err(|e| {
+                GitError::repository(self.operation, "abbreviating an oid", &self.git_dir, e)
+            })? {
+                // Another object shares the prefix: one more character.
+                Some(Err(())) => len += 1,
+                _ => break,
+            }
+        }
+        Ok(hex[..len].to_string())
+    }
+
+    /// The shortest abbreviation printed, git's `core.abbrev`: a number of
+    /// characters (4 to 40; more prints the whole oid), a false boolean for
+    /// the whole oid, or `auto` (the default). See [`parse_core_abbrev`].
+    ///
+    /// `auto` is 7 for a small repository and grows with the number of
+    /// objects in packs, as `find_unique_abbrev` does: half the bit length of
+    /// the count, rounded up. 16384 packed objects print 8 characters, 65536
+    /// print 9. Loose objects are not counted, as in git (checked against git
+    /// 2.56 with 20000 of them). Not matched: objects in an alternate store,
+    /// which git counts and this does not, so a repository borrowing a large
+    /// one can print one character fewer than git for the floor. The
+    /// uniqueness check in [`ReadRepo::short_oid`] still covers every object
+    /// the store can reach.
+    fn abbrev_floor(&self) -> Result<usize, GitError> {
+        if let Some(floor) = self.abbrev_floor.get() {
+            return Ok(*floor);
+        }
+        let configured = self.config_values("core", "abbrev")?.pop().map(|(_, v)| v);
+        let floor = match configured.as_deref().map(str::trim) {
+            None => self.auto_abbrev()?,
+            Some(value) => match parse_core_abbrev(value) {
+                Ok(Some(n)) => n,
+                Ok(None) => self.auto_abbrev()?,
+                Err(reason) => {
+                    return Err(GitError::repository(
+                        self.operation,
+                        format!("reading core.abbrev = {value:?}"),
+                        &self.git_dir,
+                        reason,
+                    ))
+                }
+            },
+        };
+        Ok(*self.abbrev_floor.get_or_init(|| floor))
+    }
+
+    /// `auto`: half the bit length of the packed object count, rounded up,
+    /// and at least 7.
+    fn auto_abbrev(&self) -> Result<usize, GitError> {
+        let op = self.operation;
+        let mut packed: u64 = 0;
+        let records = self
+            .objects
+            .store_ref()
+            .structure()
+            .map_err(|e| GitError::repository(op, "counting packed objects", &self.git_dir, e))?;
+        for record in records {
+            match record {
+                gix_odb::store::structure::Record::Index { path, .. } => {
+                    let idx = gix_pack::index::File::at(&path, gix_hash::Kind::Sha1)
+                        .map_err(|e| GitError::repository(op, "counting packed objects", &path, e))?;
+                    packed += u64::from(idx.num_objects());
+                }
+                gix_odb::store::structure::Record::MultiIndex { path, .. } => {
+                    let midx = gix_pack::multi_index::File::at(&path, Some(1 << 26))
+                        .map_err(|e| GitError::repository(op, "counting packed objects", &path, e))?;
+                    packed += u64::from(midx.num_objects());
+                }
+                _ => {}
+            }
+        }
+        let bits = (u64::BITS - packed.leading_zeros()) as usize;
+        Ok(bits.div_ceil(2).max(7))
+    }
 
     /// The object store, for reading trees and blobs.
     pub(crate) fn objects(&self) -> OdbRead<'_> {
@@ -2178,6 +2268,52 @@ fn normalize(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// git's reading of `core.abbrev`, checked against git 2.56: `auto` in any
+/// case is `None` (compute it); an empty value or a false boolean (`no`,
+/// `off`, `false`, any case) is the whole 40-character oid; anything else is
+/// an integer in decimal, hex (`0x10`) or octal (`010`), with an optional
+/// `k`/`m`/`g` suffix. A number past 40 prints the whole oid; one under 4 is
+/// refused, as git refuses it. Other words (`true`, `yes`) are refused.
+fn parse_core_abbrev(value: &str) -> Result<Option<usize>, std::io::Error> {
+    const HEX_LEN: i128 = 40;
+    const MINIMUM: i128 = 4;
+    let bad = |what: String| std::io::Error::new(std::io::ErrorKind::InvalidData, what);
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    if value.is_empty()
+        || ["no", "off", "false"].iter().any(|word| value.eq_ignore_ascii_case(word))
+    {
+        return Ok(Some(HEX_LEN as usize));
+    }
+    let (negative, digits) = match value.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, value.strip_prefix('+').unwrap_or(value)),
+    };
+    let (digits, factor) = match digits.chars().last().map(|c| c.to_ascii_lowercase()) {
+        Some('k') => (&digits[..digits.len() - 1], 1i128 << 10),
+        Some('m') => (&digits[..digits.len() - 1], 1i128 << 20),
+        Some('g') => (&digits[..digits.len() - 1], 1i128 << 30),
+        _ => (digits, 1),
+    };
+    let (radix, digits) = if let Some(hex) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+        (16, hex)
+    } else if digits.len() > 1 && digits.starts_with('0') {
+        (8, &digits[1..])
+    } else {
+        (10, digits)
+    };
+    let number = i128::from_str_radix(digits, radix)
+        .ok()
+        .filter(|_| !digits.starts_with(['+', '-']))
+        .ok_or_else(|| bad(format!("{value:?} is not a number, 'auto' or a false boolean")))?;
+    let number = if negative { -number } else { number } * factor;
+    if number < MINIMUM {
+        return Err(bad(format!("abbrev length {number} is out of range; git needs at least {MINIMUM}")));
+    }
+    Ok(Some(number.min(HEX_LEN) as usize))
 }
 
 #[cfg(test)]
