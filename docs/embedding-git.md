@@ -295,12 +295,17 @@ code that could write does not exist** — and the two facts below are what
 keep that from being a false sense of safety.
 
 1. **The code does not exist.** `ReadRepo` (`src/repo.rs`) assembles its
-   object store, ref store, and parsed config itself and never lends them
-   out; there is no facade `Repository` handle a caller could reach a ref
-   transaction or index writer through. Every write-shaped gitoxide
+   object store, ref store, and parsed config itself. It lends the first two
+   to the verbs only as `OdbRead` and `RefsRead`, borrowed wrappers that have
+   find, header, exists and iterate and no write trait, no transaction and
+   no `Deref` to the real handle (`the_handles_a_read_repo_lends_cannot_write`,
+   `src/repo.rs`). There is no facade `Repository` handle a caller could
+   reach a ref transaction or index writer through. Every write-shaped gitoxide
    identifier (`gix-ref`'s `transaction`/`prepare`/`commit`, `gix-index`'s
-   `write_to`/`write`, `gix_object::Write`) is asserted absent outside a
-   `verbs/write/` module that does not exist in this build
+   `write_to`/`write`, `gix_object::Write`) is asserted absent outside
+   `src/verbs/write/` and `src/verbs/write.rs`, which are compiled only with
+   the `commit` cargo feature; the scan reads source files, so it runs the
+   same with the feature on or off
    (`write_shaped_plumbing_appears_only_under_verbs_write`,
    `tests/write_shaped_identifiers.rs`).
 2. **Isolation by construction.** Nothing is loaded that this crate did not
@@ -478,6 +483,37 @@ themselves need, granted as a side effect of satisfying this precondition.
 Decide that deliberately — a dedicated mount scoped to exactly the common
 dir, if your backend supports one, is narrower than widening an existing
 allowed-tree entry to cover it.
+
+## The commit profile (in progress)
+
+Design: `docs/design/git-write-profile.md`. This section says what exists, and
+it is deliberately short: **nothing writes yet.**
+
+After phase 1a, a build with the `commit` cargo feature (off by default) has:
+
+- `GitConfig::with_commit_profile()`, which returns a `WritableGitConfig`.
+  `tool()` accepts either config. `git info` then reports the `commit`
+  profile and the `commit` feature.
+- `WritableGitConfig::with_rewrite_policy`, `with_hooks`, `with_identity` and
+  `without_verb`, and the types they take: `RewritePolicy` (default
+  `Unpublished`), `GitHooks` with `HookContext`, `HookOutput` and `HookError`,
+  and `Identity`. No verb reads them yet.
+- Scaffolding under `src/verbs/write/` that no verb calls: `WriteRepo`, the
+  write-containment walk (design section 6.1), and the check that refuses a
+  reflog message containing a line break.
+- Two tests for the read surface. The read verbs still leave the repository
+  byte-identical with `commit` compiled in and a `WritableGitConfig`
+  installed, and every refused write spelling does too.
+
+It does **not** have: any write verb. `git add`, `git commit` and the rest are
+still refused as read-only, with a `WritableGitConfig` as well, and
+`git info`'s `verbs` list is unchanged. Installing the profile today changes
+what `git info` reports and nothing else. Hooks and identity settings are
+stored and ignored. Write containment is a function with tests, not yet a
+guard on any write.
+
+The `commit` feature adds no dependency: `cargo tree -i gix-command`,
+`gix-filter` and `gix-transport` stay empty with it on, and CI asserts that.
 
 ## What this tool does not protect you from
 

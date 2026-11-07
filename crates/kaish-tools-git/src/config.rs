@@ -10,6 +10,10 @@
 //! which verbs exist. There is no `with_verb`, so no config edit anywhere can
 //! widen the surface past what the constructor granted.
 //!
+//! With the `commit` feature, [`GitConfig::with_commit_profile`] returns a
+//! [`WritableGitConfig`] — a different type, which is the only way to reach
+//! the write settings. It is still subtractive for verbs.
+//!
 //! One knob is not subtractive and is not about verbs:
 //! [`GitConfig::with_patch_renderer`] (`textdiff` only) replaces the text
 //! `git diff --patch` prints. It adds no verb, no flag, and no read the caps
@@ -20,26 +24,32 @@
 //! A.1 that keeps a future `kaish-git-core` split mechanical.
 
 use std::collections::BTreeSet;
-#[cfg(feature = "textdiff")]
+#[cfg(any(feature = "textdiff", feature = "commit"))]
 use std::sync::Arc;
+
+#[cfg(feature = "commit")]
+use crate::hooks::GitHooks;
 
 #[cfg(feature = "textdiff")]
 use crate::renderer::PatchRenderer;
 
 /// A capability profile: the set of verbs an embedder is opting into.
 ///
-/// `#[non_exhaustive]` and, for now, single-variant. `Profile::Worktree` and
-/// `Profile::Commit` do not exist yet — not as unconstructible variants, not
-/// as `#[doc(hidden)]` placeholders. C.3 gates them behind a deliberate
-/// opt-in constructor that returns a *different* type, and none of that
-/// machinery is written, so the honest representation of "this build cannot
-/// write" is that there is nothing here to name.
+/// `#[non_exhaustive]`. `Profile::Commit` exists only in a build with the
+/// `commit` cargo feature, and only a [`WritableGitConfig`] (from
+/// [`GitConfig::with_commit_profile`]) carries it. `Profile::Worktree` does
+/// not exist yet. In a build without `commit` there is nothing to name for
+/// "this build can write".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum Profile {
     /// The read profile: every verb is proven read-only by the `.git`
     /// fingerprint test (architecture.md D.4).
     Read,
+    /// The commit profile (docs/design/git-write-profile.md). Phase 1a
+    /// installs the profile and enables no write verb.
+    #[cfg(feature = "commit")]
+    Commit,
 }
 
 impl Profile {
@@ -47,6 +57,8 @@ impl Profile {
     pub fn as_str(&self) -> &'static str {
         match self {
             Profile::Read => "read",
+            #[cfg(feature = "commit")]
+            Profile::Commit => "commit",
         }
     }
 }
@@ -237,6 +249,28 @@ impl GitConfig {
         }
     }
 
+    /// Enable the commit profile.
+    ///
+    /// Returns a different type, [`WritableGitConfig`], so a program that
+    /// never names it cannot hold a config that writes. The name says what it
+    /// enables and carries no authorization: per-command approval stays with
+    /// the embedder, through kaish `plan` (git-write-profile.md §2).
+    ///
+    /// In phase 1a the profile enables no verb: `git info` reports the
+    /// `commit` profile and the verb set does not change.
+    #[cfg(feature = "commit")]
+    pub fn with_commit_profile(mut self) -> WritableGitConfig {
+        self.profiles.insert(Profile::Commit);
+        WritableGitConfig {
+            read: self,
+            write: WriteSettings {
+                rewrite_policy: RewritePolicy::default(),
+                hooks: None,
+                identity: None,
+            },
+        }
+    }
+
     /// Subtract a verb from whatever the profiles allow.
     ///
     /// Subtraction only — there is no `with_verb`. Removing a verb removes it
@@ -318,6 +352,153 @@ impl Default for GitConfig {
     }
 }
 
+/// When a write may replace a commit that exists
+/// (git-write-profile.md §3).
+///
+/// Phase 1a defines the setting and nothing reads it yet: no verb moves a
+/// branch to a commit that is not a descendant of where it was.
+#[cfg(feature = "commit")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum RewritePolicy {
+    /// Never replace a commit that exists. `--amend` exits 2 (usage).
+    Refuse,
+    /// Replace a commit only when no `refs/remotes/*` ref reaches it. This
+    /// is the case that can never need a force push. The default.
+    #[default]
+    Unpublished,
+    /// Replace any commit on the current branch.
+    Allow,
+}
+
+/// A name and email for a commit's author or committer line.
+///
+/// The time is not part of it: git takes it from the clock or from
+/// `GIT_AUTHOR_DATE` / `GIT_COMMITTER_DATE` (git-write-profile.md §5.4).
+#[cfg(feature = "commit")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identity {
+    name: String,
+    email: String,
+}
+
+#[cfg(feature = "commit")]
+impl Identity {
+    /// An identity. Neither field may contain `<`, `>`, or a newline: git
+    /// strips them from a commit line, and this crate refuses them instead of
+    /// writing a different identity from the one given.
+    pub fn new(name: impl Into<String>, email: impl Into<String>) -> Result<Self, ConfigError> {
+        let (name, email) = (name.into(), email.into());
+        let bad = |s: &str| s.chars().any(|c| matches!(c, '<' | '>' | '\n' | '\r' | '\0'));
+        if name.trim().is_empty() || bad(&name) || bad(&email) {
+            return Err(ConfigError::UnusableIdentity { name, email });
+        }
+        Ok(Self { name, email })
+    }
+
+    /// The name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The email.
+    pub fn email(&self) -> &str {
+        &self.email
+    }
+}
+
+/// A [`GitConfig`] with the commit profile enabled.
+///
+/// Built only by [`GitConfig::with_commit_profile`]. It wraps the read config
+/// it came from, so the read verbs, tool name and limits are the ones already
+/// chosen, and adds the settings only the write side reads. The only change
+/// to the verb set is still subtraction.
+#[cfg(feature = "commit")]
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct WritableGitConfig {
+    read: GitConfig,
+    write: WriteSettings,
+}
+
+/// The settings only the write side reads.
+#[cfg(feature = "commit")]
+#[derive(Clone)]
+pub(crate) struct WriteSettings {
+    pub(crate) rewrite_policy: RewritePolicy,
+    pub(crate) hooks: Option<Arc<dyn GitHooks>>,
+    pub(crate) identity: Option<(Identity, Identity)>,
+}
+
+#[cfg(feature = "commit")]
+impl std::fmt::Debug for WritableGitConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WritableGitConfig")
+            .field("read", &self.read)
+            .field("rewrite_policy", &self.write.rewrite_policy)
+            .field("hooks", &self.write.hooks.as_ref().map(|_| "<installed>"))
+            .field("identity", &self.write.identity)
+            .finish()
+    }
+}
+
+#[cfg(feature = "commit")]
+impl WritableGitConfig {
+    /// Set when a write may replace a commit that exists. The default is
+    /// [`RewritePolicy::Unpublished`].
+    pub fn with_rewrite_policy(mut self, policy: RewritePolicy) -> Self {
+        self.write.rewrite_policy = policy;
+        self
+    }
+
+    /// Install a hook provider. Without one, a write refuses when the
+    /// repository has a hook git would run for it (git-write-profile.md §5.1).
+    /// Installing a second replaces the first.
+    pub fn with_hooks(mut self, hooks: Arc<dyn GitHooks>) -> Self {
+        self.write.hooks = Some(hooks);
+        self
+    }
+
+    /// Pin the author and committer. When set, kernel variables are not read
+    /// for identity (git-write-profile.md §5.4).
+    pub fn with_identity(mut self, author: Identity, committer: Identity) -> Self {
+        self.write.identity = Some((author, committer));
+        self
+    }
+
+    /// Subtract a verb. Same rule as [`GitConfig::without_verb`]: there is no
+    /// way to add one back.
+    pub fn without_verb(mut self, verb: Verb) -> Self {
+        self.read = self.read.without_verb(verb);
+        self
+    }
+
+    /// The read config this was built from, with `Profile::Commit` added.
+    ///
+    /// A clone of it is still a read config: `tool(config.read_config().clone())`
+    /// builds a tool with no write settings, which cannot write and which
+    /// `git info` reports as `read` only, whatever this config's own
+    /// `profiles()` lists.
+    pub fn read_config(&self) -> &GitConfig {
+        &self.read
+    }
+
+    /// The rewrite policy.
+    pub fn rewrite_policy(&self) -> RewritePolicy {
+        self.write.rewrite_policy
+    }
+
+    /// The pinned identity, `(author, committer)`, if any.
+    pub fn identity(&self) -> Option<&(Identity, Identity)> {
+        self.write.identity.as_ref()
+    }
+
+    /// Split into the read config and the write settings.
+    pub(crate) fn into_parts(self) -> (GitConfig, WriteSettings) {
+        (self.read, self.write)
+    }
+}
+
 /// A config an embedder built that cannot produce a working tool.
 ///
 /// Loud at registration time rather than at the first invocation: an embedder
@@ -343,6 +524,22 @@ pub enum ConfigError {
          instead"
     )]
     NoVerbsEnabled,
+
+    /// An identity with an empty name, or a name or email that contains `<`,
+    /// `>`, or a line break. Git would write a different identity from the
+    /// one given, so this crate refuses it.
+    #[cfg(feature = "commit")]
+    #[error(
+        "kaish-tools-git: identity name {name:?} / email {email:?} is not \
+         usable — the name must be non-empty and neither may contain '<', \
+         '>', or a line break"
+    )]
+    UnusableIdentity {
+        /// The rejected name.
+        name: String,
+        /// The rejected email.
+        email: String,
+    },
 }
 
 #[cfg(test)]
@@ -459,5 +656,25 @@ mod tests {
                 verb.profile()
             );
         }
+    }
+
+    /// Pins `RewritePolicy`'s variants and its default. The `match` has no
+    /// wildcard (inside the defining crate `#[non_exhaustive]` does not ask
+    /// for one), so adding or removing a variant stops this compiling and
+    /// forces the design doc (git-write-profile.md section 3) to be read
+    /// again. Counting a slice's length, as the integration test did, only
+    /// ever counted the slice.
+    #[cfg(feature = "commit")]
+    #[test]
+    fn rewrite_policy_variants_are_pinned_by_an_exhaustive_match() {
+        for policy in [RewritePolicy::Refuse, RewritePolicy::Unpublished, RewritePolicy::Allow] {
+            let name = match policy {
+                RewritePolicy::Refuse => "refuse",
+                RewritePolicy::Unpublished => "unpublished",
+                RewritePolicy::Allow => "allow",
+            };
+            assert_eq!(format!("{policy:?}").to_lowercase(), name);
+        }
+        assert_eq!(RewritePolicy::default(), RewritePolicy::Unpublished);
     }
 }

@@ -42,6 +42,14 @@ autotests = false
 default = ["textdiff"]
 textdiff = []
 
+# docs/design/git-write-profile.md W1: the write side. Off by default; a build
+# without it has no write code in it (architecture.md D.1). Phase 1a adds the
+# scaffolding only (the profile, `WritableGitConfig`, `WriteRepo`, write
+# containment, reflog-message validation) and no verb that writes. It adds no
+# dependency, and CI asserts the `gix-command` / `gix-transport` /
+# `gix-filter` tripwires with this feature on as well as off.
+commit = []
+
 # Path 2 plumbing pin set (docs/design/architecture.md, Co-architect note 3):
 # built directly on gix's low-level crates, skipping the `gix` facade crate
 # entirely. The facade links gix-command unconditionally (even with
@@ -183,6 +191,14 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 #   of this crate depends on but a compiler cannot check — what `$(git …)`
 #   binds, and what it carries.
 [dev-dependencies]
+# `gix-ref`'s `prepare` takes `gix_lock::acquire::Fail`, and the unit test that
+# writes a real per-worktree ref has to name it. Renamed to `lock` so the
+# `pins_match_the_manifest` scan (which reads every `gix-` line as a linked
+# pin, and `git info` reports that table) does not list a dev-only crate as
+# linked. Already in the graph under gix-ref. Phase 2 promotes it to a
+# `commit`-gated dependency, with a pin and a `GIX_PINS` row, when a verb
+# takes a lock.
+lock = { package = "gix-lock", version = "=24.0.0" }
 kaish-kernel = { workspace = true }
 sha2 = "0.10"
 tempfile = "3"
@@ -303,3 +319,17 @@ path = "tests/kaish_behavior_canary.rs"
 name = "big_repo"
 path = "tests/big_repo.rs"
 
+
+# Phase 1a of the commit profile: every refused write spelling leaves `.git`
+# byte-identical (feasibility §7, second fingerprint test). Runs with and
+# without `commit`; phase 1b fills the table as each verb lands.
+[[test]]
+name = "write_fingerprint"
+path = "tests/write_fingerprint.rs"
+
+# The `commit` feature's own surface: config, `git info`, hooks and identity
+# types. Compiles to nothing without the feature.
+[[test]]
+name = "commit_profile"
+path = "tests/commit_profile.rs"
+required-features = ["commit"]

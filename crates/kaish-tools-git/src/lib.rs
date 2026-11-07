@@ -102,6 +102,8 @@ compile_error!(
 mod config;
 #[cfg(not(target_family = "wasm"))]
 mod error;
+#[cfg(all(not(target_family = "wasm"), feature = "commit"))]
+mod hooks;
 #[cfg(not(target_family = "wasm"))]
 mod index_depth_guard;
 #[cfg(not(target_family = "wasm"))]
@@ -152,7 +154,11 @@ pub use renderer::{
 #[cfg(not(target_family = "wasm"))]
 pub use repo::ReadRepo;
 #[cfg(not(target_family = "wasm"))]
-pub use tool::{tool, GitTool};
+pub use tool::{tool, GitTool, ToolConfig};
+#[cfg(all(not(target_family = "wasm"), feature = "commit"))]
+pub use config::{Identity, RewritePolicy, WritableGitConfig};
+#[cfg(all(not(target_family = "wasm"), feature = "commit"))]
+pub use hooks::{GitHooks, HookContext, HookError, HookOutput};
 
 /// The gitoxide plumbing crates this build links, and the exact versions it
 /// is pinned to (architecture.md A.4).
@@ -194,7 +200,10 @@ pub fn gix_pins() -> std::collections::BTreeMap<String, String> {
 
 /// The cargo features this build was compiled with.
 ///
-/// `read` is unconditional: it is the profile, not an option. `textdiff` is
+/// `read` is unconditional: it is the profile, not an option. `commit` is
+/// reported when that cargo feature is on, whether or not the embedder
+/// installed the profile; `git info`'s `profiles` says which profile this
+/// tool was built with. `textdiff` is
 /// reported only when the cargo feature of that name is on, which is what
 /// makes `git info` answerable — an agent that read `--patch` in the schema
 /// and got exit 4 can find out from here whether the build has the code at
@@ -206,6 +215,9 @@ pub fn enabled_features() -> Vec<String> {
     let mut features = vec!["read".to_string()];
     if cfg!(feature = "textdiff") {
         features.push("textdiff".to_string());
+    }
+    if cfg!(feature = "commit") {
+        features.push("commit".to_string());
     }
     features
 }

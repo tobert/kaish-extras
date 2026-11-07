@@ -656,7 +656,7 @@ fn walk_untracked_and_ignored(
 struct Walker<'a> {
     op: &'static str,
     work_dir: &'a Path,
-    objects: &'a gix_odb::Handle,
+    objects: crate::repo::OdbRead<'a>,
     tracked: &'a BTreeSet<String>,
     tracked_dirs: &'a BTreeSet<String>,
     opts: &'a StatusOptions,
@@ -784,7 +784,7 @@ impl Walker<'_> {
         let bstr: &BStr = rel.into();
         let platform = self
             .stack
-            .at_entry(bstr, mode, self.objects)
+            .at_entry(bstr, mode, &self.objects)
             .map_err(|e| GitError::repository(self.op, "consulting .gitignore", self.work_dir, e))?;
         Ok(platform.excluded_kind().is_some())
     }
