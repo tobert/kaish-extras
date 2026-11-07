@@ -88,8 +88,8 @@ pub(crate) struct DiffArgs {
     pub to: Option<String>,
 
     /// Restrict the comparison to these paths. Repeatable. A literal path
-    /// matches itself and everything under it; `*`, `**`, `?` and `[...]`
-    /// are globs over the whole repo-relative path. Git pathspec magic
+    /// matches itself and everything under it; `*`, `?` and `[...]` make a
+    /// glob. A glob matches the whole repo-relative path from its start, and `*` and `?` match `/` too: `ca*` matches `ca.txt` and `cab/x` but not `d/ca.txt`, and `*.txt` matches `d/ca.txt`. Git pathspec magic
     /// (`:(exclude)`, `:!`, `:/`) is refused by name, never matched as a
     /// literal path.
     #[arg(long = "path", value_name = "PATH")]

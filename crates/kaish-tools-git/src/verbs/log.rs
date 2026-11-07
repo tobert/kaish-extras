@@ -77,7 +77,7 @@ pub(crate) struct LogArgs {
     pub limit: usize,
 
     /// Restrict history to commits that touched these literal paths or simple
-    /// globs (`*`, `**`, `?`). Repeatable. Git pathspec magic (`:(exclude)`,
+    /// globs (`*`, `?`, `[...]`). A glob matches the whole repo-relative path from its start, and `*` and `?` match `/` too: `ca*` matches `ca.txt` and `cab/x` but not `d/ca.txt`, and `*.txt` matches `d/ca.txt`. Repeatable. Git pathspec magic (`:(exclude)`,
     /// `:!`, `:/`) is a loud usage error, never silently matched.
     #[arg(long = "path", value_name = "PATH")]
     pub path: Vec<String>,

@@ -7,13 +7,17 @@
 //! divergence an agent cannot see and cannot debug.
 //!
 //! The accepted surface is deliberately smaller than git's: a literal path
-//! (matching itself and anything beneath it) or a simple glob (`*`, `**`, `?`,
-//! `[...]`). Git's pathspec *magic* — `:(exclude)`, `:!`, `:/`, the signature
+//! (matching itself and anything beneath it) or a simple glob (`*`, `?`,
+//! `[...]`, and `\\` as the escape). A glob follows git's non-magic pathspec
+//! (dir.c `match_pathspec_item`): it is wildmatched against the WHOLE
+//! repo-relative path, anchored at the start, with no `WM_PATHNAME`, so `*`
+//! and `?` cross `/` and `**` is two stars. `ca*` matches `ca.txt` and
+//! `cab/x` and not `d/ca.txt`; `*.txt` matches `d/ca.txt`. This is not
+//! gitignore's rule (a pattern without a slash matches the basename), which
+//! is what this module used before. Git's pathspec *magic* — `:(exclude)`, `:!`, `:/`, the signature
 //! letters — is a loud usage error rather than a silent near-match, because
 //! quietly treating `:(exclude)docs` as a literal path named `:(exclude)docs`
 //! would answer a question nobody asked.
-
-use gix_object::bstr::BStr;
 
 use crate::error::GitError;
 
@@ -27,8 +31,10 @@ pub(crate) struct PathFilter {
 enum Spec {
     /// A literal path: matches itself and anything under it.
     Literal(Vec<u8>),
-    /// A glob, matched against the whole repo-relative path.
-    Glob(gix_glob::Pattern),
+    /// A path with glob characters. Git tries the text as a literal first
+    /// (a file named `a[1].txt` matches the spec `a[1].txt`), then as a
+    /// wildmatch on the whole path.
+    Glob(Vec<u8>),
 }
 
 impl PathFilter {
@@ -49,16 +55,8 @@ impl PathFilter {
             if normalized.is_empty() {
                 continue;
             }
-            if normalized.contains(['*', '?', '[']) {
-                match gix_glob::Pattern::from_bytes(normalized.as_bytes()) {
-                    Some(pattern) => specs.push(Spec::Glob(pattern)),
-                    None => {
-                        return Err(GitError::Usage {
-                            operation: op,
-                            message: format!("path '{raw}' is not a usable glob"),
-                        })
-                    }
-                }
+            if normalized.contains(['*', '?', '[', '\\']) {
+                specs.push(Spec::Glob(normalized.as_bytes().to_vec()));
             } else {
                 specs.push(Spec::Literal(normalized.as_bytes().to_vec()));
             }
@@ -78,22 +76,18 @@ impl PathFilter {
             return true;
         }
         self.specs.iter().any(|spec| match spec {
-            Spec::Literal(lit) => {
-                path == lit.as_slice() || (path.len() > lit.len() && path.starts_with(lit) && path[lit.len()] == b'/')
-            }
+            Spec::Literal(lit) => literal_matches(lit, path),
             Spec::Glob(pattern) => {
-                let bstr: &BStr = path.into();
-                let basename = path.iter().rposition(|b| *b == b'/').map(|p| p + 1);
-                pattern.matches_repo_relative_path(
-                    bstr,
-                    basename,
-                    Some(false),
-                    gix_glob::pattern::Case::Sensitive,
-                    gix_glob::wildmatch::Mode::empty(),
-                )
+                literal_matches(pattern, path)
+                    || gix_glob::wildmatch(pattern.as_slice().into(), path.into(), gix_glob::wildmatch::Mode::empty())
             }
         })
     }
+}
+
+/// The path is `lit` or lies under it.
+fn literal_matches(lit: &[u8], path: &[u8]) -> bool {
+    path == lit || (path.len() > lit.len() && path.starts_with(lit) && path[lit.len()] == b'/')
 }
 
 /// Recognize git pathspec magic, returning the offending token if present.
@@ -142,14 +136,29 @@ mod tests {
         assert!(filter.matches("anything/at/all"));
     }
 
-    /// A glob is matched against the whole repo-relative path, so `*.rs` finds
-    /// a file at any depth — the behavior both `status` and `log` rely on.
+    /// The table measured against git 2.56 (`git ls-files -- '<spec>'` over
+    /// these paths): a glob is wildmatched against the whole path, anchored at
+    /// the start, and `*` crosses `/`.
     #[test]
-    fn glob_filter_matches_at_any_depth() {
-        let filter = PathFilter::parse("log", &["*.rs".into()]).expect("parses");
-        assert!(filter.matches("lib.rs"));
-        assert!(filter.matches("src/verbs/log.rs"));
-        assert!(!filter.matches("README.md"));
+    fn a_glob_matches_the_whole_path_as_git_does() {
+        let paths = ["ca.txt", "cb.txt", "cab/x", "d/ca.txt", "d/e/ca.txt", "a1.txt", "a[1].txt", "d/other.md"];
+        for (spec, want) in [
+            ("*.txt", vec!["a1.txt", "a[1].txt", "ca.txt", "cb.txt", "d/ca.txt", "d/e/ca.txt"]),
+            ("ca*", vec!["ca.txt", "cab/x"]),
+            ("d/*", vec!["d/ca.txt", "d/e/ca.txt", "d/other.md"]),
+            ("d", vec!["d/ca.txt", "d/e/ca.txt", "d/other.md"]),
+            ("?a.txt", vec!["ca.txt"]),
+            ("**/ca.txt", vec!["d/ca.txt", "d/e/ca.txt"]),
+            ("*/ca.txt", vec!["d/ca.txt", "d/e/ca.txt"]),
+            ("a[1].txt", vec!["a1.txt", "a[1].txt"]),
+            ("a\\[1\\].txt", vec!["a[1].txt"]),
+            ("c*b", vec![]),
+        ] {
+            let filter = PathFilter::parse("log", &[spec.into()]).expect("parses");
+            let mut got: Vec<&str> = paths.iter().copied().filter(|p| filter.matches(p)).collect();
+            got.sort();
+            assert_eq!(got, want, "spec {spec:?}");
+        }
     }
 
     /// Magic is refused for every verb that shares this filter, with the exit

@@ -249,6 +249,11 @@ path = "tests/show.rs"
 name = "diff"
 path = "tests/diff.rs"
 
+# A pathspec glob selects what git's does in status, log and diff, on a twin.
+[[test]]
+name = "pathspec_glob"
+path = "tests/pathspec_glob.rs"
+
 # Empty with `--no-default-features`; the whole file is gated on `textdiff`.
 [[test]]
 name = "textdiff"

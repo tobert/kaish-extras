@@ -87,8 +87,8 @@ pub(crate) struct StatusArgs {
     #[arg(short = 's', long = "short", visible_alias = "porcelain", default_value_t = false)]
     pub short: bool,
 
-    /// Restrict to paths under these literal paths or simple globs (`*`, `**`,
-    /// `?`). Repeatable. Git pathspec magic (`:(exclude)`, `:!`, `:/`) is a
+    /// Restrict to paths under these literal paths or simple globs (`*`, `?`,
+    /// `[...]`). A glob matches the whole repo-relative path from its start, and `*` and `?` match `/` too: `ca*` matches `ca.txt` and `cab/x` but not `d/ca.txt`, and `*.txt` matches `d/ca.txt`. Repeatable. Git pathspec magic (`:(exclude)`, `:!`, `:/`) is a
     /// loud usage error, never silently matched.
     #[arg(long = "path", value_name = "PATH")]
     pub path: Vec<String>,
