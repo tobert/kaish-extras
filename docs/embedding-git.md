@@ -628,14 +628,20 @@ alone makes one, as in git. `switch -c` and `checkout -b` make the branch at
 HEAD, point `HEAD` at it, and append `checkout: moving from <old> to <new>` to
 `logs/HEAD` themselves, under one `HEAD.lock`; the index and the working tree
 are not touched, and a start point is accepted only when it names the commit
-HEAD is on. `switch <branch>`, `checkout <branch>`, `checkout <path>`,
+HEAD is on (`HEAD` is resolved like any other start point, so on an unborn HEAD
+it refuses, exit 1). `switch <branch>`, `checkout <branch>`, `checkout <path>`,
 `switch -C`, `checkout -B`, `-d`, `-D`, `-m`, `-M`, `-c`, `-C`, `-f`, `-s` and
 the upstream flags are refused with the command to type instead. Every
-creation passes the containment walk over the ref, its lock, its reflog,
-`logs/HEAD` and `packed-refs` before it writes, so a planted link refuses it
-(exit 4); a lock that exists is never removed (exit 4). An annotated tag writes
-its object before the ref, so a refusal after that says objects remain. The
-differences from git are `docs/issues.md` W34-W39.
+creation passes the containment walk over what it writes before it writes: a
+branch walks the ref, its lock, its reflog and `packed-refs`; `switch -c` and
+`checkout -b` add `logs/HEAD`; a tag walks the ref, its lock and `packed-refs`
+and the directories above its (unwritten) log path, so a directory at the log
+path does not stop it, as in git. A planted link refuses (exit 4); a lock that
+exists is never removed (exit 4). An annotated tag writes its object before the
+ref, and a commit writes its objects before the branch moves, so a refusal or
+an I/O failure after that says the objects remain, that nothing refers to them
+and that `git gc` prunes them. The differences from git are `docs/issues.md`
+W34-W47.
 
 What the verbs do not do, stated plainly:
 

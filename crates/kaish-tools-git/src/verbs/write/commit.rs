@@ -43,7 +43,7 @@ use crate::verbs::write::relpath::{os, show, RelPath};
 use crate::verbs::write::repo::WriteRepo;
 use crate::verbs::write::spec::{Outcome, SpecSet};
 use crate::verbs::write::stage;
-use crate::verbs::write::state::{config_last, ensure_writable_with, hooks_dir, StagePolicy};
+use crate::verbs::write::state::{config_bool, config_last, ensure_writable_with, hooks_dir, StagePolicy};
 use crate::verbs::write::tree::{self, Item};
 
 const OP: &str = "commit";
@@ -480,7 +480,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
 
     let mut writer = BlobWriter::new(repo, OP);
     if let Some(tx) = tx.as_mut() {
-        apply_to_index(repo, &mut writer, tx, &prepared.plan)?;
+        apply_to_index(repo, &mut writer, tx, &prepared.plan).map_err(GitError::after_objects)?;
     } else {
         // Plain commit: nothing is staged here, but a plan with files is
         // impossible without -a or --only.
@@ -550,9 +550,9 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
     let mut buf = Vec::new();
     gix_object::WriteTo::write_to(&commit, &mut buf)
         .map_err(|e| GitError::repository(OP, "encoding the commit", Path::new("."), e))?;
-    let commit_id = writer.write_object(gix_object::Kind::Commit, &buf)?;
+    let commit_id = writer.write_object(gix_object::Kind::Commit, &buf).map_err(GitError::after_objects)?;
     // The objects reach the disk before the ref that names them.
-    writer.sync()?;
+    writer.sync().map_err(GitError::after_objects)?;
 
     let kind = if amended.is_some() {
         "commit (amend)"
@@ -712,9 +712,8 @@ fn check_not_empty(items: &Map, head_map: &Map, allow_empty: bool, command: &str
 
 /// Settings that would make this shell's commit differ from git's.
 fn ensure_commit_settings(repo: &WriteRepo, command: &str) -> Result<(), GitError> {
-    let truthy = |v: &str| matches!(v.to_ascii_lowercase().as_str(), "" | "true" | "yes" | "on" | "1");
     for (section, key, shown) in [("commit", "gpgsign", "commit.gpgSign"), ("tag", "gpgsign", "tag.gpgSign")] {
-        if config_last(repo, section, key)?.is_some_and(|v| truthy(&v)) {
+        if config_bool(repo, command, section, key, shown)? == Some(true) {
             return refuse(
                 4,
                 command,

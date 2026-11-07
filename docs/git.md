@@ -869,7 +869,9 @@ nothing to start from (exit 1). A start that is a remote-tracking branch makes
 git write tracking configuration, which this shell never does: it refuses
 (exit 4) unless `--no-track` is given.
 
-**A tag** at `<rev>` (HEAD by default) can name any object. `-a` makes an
+**A tag** at `<rev>` (HEAD by default) can name a commit, a tag, a tree or a
+blob, given as a branch, a tag, a ref, an object id or a `~N`/`^` suffix on one
+of those. `HEAD^{tree}` and `HEAD:<path>` are not parsed (exit 2, W43). `-a` makes an
 annotated tag, and so do `-m` and `-F`; there is no editor, so `-a` alone
 refuses. The tag object is git's, byte for byte: `object`, `type`, `tag`,
 `tagger` (the committer identity, with its date), a blank line and the
@@ -883,7 +885,8 @@ reflogs are git's: `branch: Created from HEAD` on the branch and
 `checkout: moving from <old> to <new>` on `HEAD` (`<old>` is the full oid when
 HEAD was detached). A start point must name the commit HEAD is on; for any
 other, `git branch <name> <start>` makes the branch without switching to it.
-On an unborn HEAD only `HEAD` changes. `--json` returns `branch`, `ref`,
+`HEAD` is a start point like any other: on an unborn HEAD it refuses (exit 1).
+With no start point, an unborn HEAD changes only `HEAD`. `--json` returns `branch`, `ref`,
 `commit`, `previous` and `detached`.
 
 **Refused, with the next step in the text:** `branch -d -D -m -M -c -C -f` and
@@ -891,7 +894,7 @@ On an unborn HEAD only `HEAD` changes. `--json` returns `branch`, `ref`,
 and `tag -a` without a message; `switch <branch>`, `checkout <branch>` and
 `checkout <path>` (they write files); `switch -C`, `checkout -B`, `--detach`,
 `--orphan`, `-f` and `-m` on either. The differences from git, and the cost of
-the name check, are `docs/issues.md` W34-W39.
+the name check, are `docs/issues.md` W34-W47.
 
 ## Non-goals
 

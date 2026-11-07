@@ -23,7 +23,7 @@ use gix_index::hash::ObjectId;
 use gix_ref::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
 use gix_ref::Target;
 
-use crate::error::GitError;
+use crate::error::{GitError, Wrote};
 use crate::verbs::write::ident::Signature;
 use crate::verbs::write::refusal::{refuse, Override};
 use crate::verbs::write::reflog::copy_message;
@@ -200,7 +200,7 @@ fn apply_move(
         // The branch has already moved. The error must say so, or an agent
         // reads a failure and makes the same commit a second time.
         append_head_reflog(repo, kind, old, new, &sig, message).map_err(|e| match e {
-            GitError::Repository { operation, what, path, source } => GitError::Repository {
+            GitError::Repository { operation, what, path, source, .. } => GitError::Repository {
                 operation,
                 what: format!(
                     "{} and '{refname}' now points at {new}, so do not run the command again; \
@@ -209,6 +209,7 @@ fn apply_move(
                 ),
                 path,
                 source,
+                wrote: Wrote::Described,
             },
             other => other,
         })?;
@@ -261,7 +262,7 @@ pub(crate) fn create_ref(
     new: ObjectId,
     log: Option<(&str, &Signature)>,
 ) -> Result<(), GitError> {
-    let checked = repo.check_ref_write(full, false)?;
+    let checked = if log.is_some() { repo.check_ref_write(full, false)? } else { repo.check_ref_write_unlogged(full)? };
     refuse_if_ref_locked(repo, command, &checked, full)?;
     let message = log.map(|(m, _)| copy_message(m)).unwrap_or_default();
     let edit = RefEdit {
@@ -281,8 +282,8 @@ pub(crate) fn create_ref(
         email: c.email.as_str().into(),
         time,
     });
-    let prepared = repo
-        .refs()
+    let store = if log.is_some() { repo.refs() } else { repo.refs_unlogged() };
+    let prepared = store
         .transaction()
         .prepare([edit], gix_lock::acquire::Fail::Immediately, gix_lock::acquire::Fail::Immediately)
         .map_err(|e| prepare_error(kind, command, full, None, repo, e))?;
@@ -369,7 +370,7 @@ pub(crate) fn switch_head(repo: &WriteRepo, s: &HeadSwitch<'_>) -> Result<(), Gi
         };
         append_head_reflog(repo, kind, Some(oid), oid, &sig, &copy_message(&format!("checkout: moving from {from} to {to}")))
             .map_err(|e| match e {
-                GitError::Repository { operation, what, path, source } => GitError::Repository {
+                GitError::Repository { operation, what, path, source, .. } => GitError::Repository {
                     operation,
                     what: format!(
                         "{} and HEAD now names '{}', so do not run the command again; only {what} failed (logs/HEAD lacks this entry)",
@@ -377,6 +378,7 @@ pub(crate) fn switch_head(repo: &WriteRepo, s: &HeadSwitch<'_>) -> Result<(), Gi
                     ),
                     path,
                     source,
+                    wrote: Wrote::Described,
                 },
                 other => other,
             })?;
@@ -385,9 +387,10 @@ pub(crate) fn switch_head(repo: &WriteRepo, s: &HeadSwitch<'_>) -> Result<(), Gi
 }
 
 /// The early check for creating `full`: the containment walk over its write
-/// set and a look for its lock files, before any object is written.
+/// set and a look for its lock files, before any object is written. For a ref
+/// that gets no reflog (a tag): its log path is not part of the walk.
 pub(crate) fn precheck_ref(repo: &WriteRepo, command: &str, full: &str) -> Result<(), GitError> {
-    let checked = repo.check_ref_write(full, false)?;
+    let checked = repo.check_ref_write_unlogged(full)?;
     refuse_if_ref_locked(repo, command, &checked, full)
 }
 

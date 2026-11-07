@@ -37,8 +37,6 @@ use support::{Fingerprint, RichRepo, StrictBackend, TestCtx};
 
 /// `(argv, exit code)`: refused by the router, whatever the profile.
 const ROUTER_REFUSED: &[(&[&str], i64)] = &[
-    (&["switch", "-c", "topic"], 2),
-    (&["checkout", "-b", "topic"], 2),
     (&["update-ref", "HEAD", "HEAD"], 2),
     (&["stash"], 2),
     (&["clean", "-fd"], 2),
@@ -57,6 +55,8 @@ const READ_ONLY_REFUSED: &[(&[&str], i64)] = &[
     (&["commit", "--amend", "--no-edit"], 2),
     (&["commit", "--no-verify", "-m", "x"], 2),
     (&["var", "GIT_AUTHOR_IDENT"], 2),
+    (&["switch", "-c", "topic"], 2),
+    (&["checkout", "-b", "topic"], 2),
     (&["add", "README.md"], 2),
     (&["add", "-A"], 2),
     (&["add", "."], 2),
@@ -204,9 +204,28 @@ async fn commit_profile_refusals_have_five_parts_and_the_router_does_not_say_rea
         }
     }
     // And the read-only config keeps its text for every router refusal.
-    for (argv, _) in ROUTER_REFUSED.iter().chain(READ_ONLY_REFUSED).filter(|(a, _)| a[0] == "commit" || a[0] == "switch") {
+    for (argv, _) in ROUTER_REFUSED.iter().chain(READ_ONLY_REFUSED).filter(|(a, _)| matches!(a[0], "commit" | "switch" | "checkout")) {
         let r = run(&repo, GitConfig::read_only().into(), argv).await;
         assert!(r.err.contains("read-only"), "git {argv:?}: {}", r.err);
+    }
+}
+
+/// Under the commit profile `switch -c` and `checkout -b` are real verbs. The
+/// harness seeds no identity, so each exits 2 for that reason and for no other,
+/// and writes nothing. (They used to sit in the router table, where the exit
+/// code matched for the wrong reason.)
+#[cfg(feature = "commit")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switch_c_and_checkout_b_without_an_identity_refuse_for_that_reason_and_write_nothing() {
+    let repo = RichRepo::build();
+    let scratch = repo.scratch();
+    for argv in [&["switch", "-c", "topic"][..], &["checkout", "-b", "topic"][..]] {
+        let before = Fingerprint::take(&scratch);
+        let r = run(&repo, GitConfig::read_only().with_commit_profile().into(), argv).await;
+        assert_eq!(r.code, 2, "git {argv:?}: {}", r.err);
+        assert!(r.err.contains("identity") || r.err.contains("GIT_COMMITTER"), "git {argv:?} must refuse for the missing identity: {}", r.err);
+        assert!(!r.err.contains("read-only") && !r.err.contains("not supported"), "git {argv:?}: {}", r.err);
+        assert_eq!(Fingerprint::take(&scratch).differences_from(&before), Vec::<String>::new(), "git {argv:?}");
     }
 }
 

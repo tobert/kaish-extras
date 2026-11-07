@@ -1890,3 +1890,43 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
     `core.commentString` refuse an annotated tag, whose `#` lines this drops.
   - `tag -F -` and `-F` of a file over 1 MiB or not UTF-8 refuse, as for
     `commit -F` (W22).
+- **W40 — `core.logAllRefUpdates=false` refuses `branch` and `switch -c` in a
+  non-bare repository.** Git makes the ref and writes no log (checked on git
+  2.56: `git branch x` exits 0 and `logs/refs/heads/x` is absent). This shell
+  always writes the reflog, so `ensure_reflog_on` refuses (exit 4). Failing
+  case: `log_all_ref_updates_false_makes_the_branch_with_no_log_as_git_does`
+  in `tests/write_refs.rs`, ignored.
+- **W41 — `branch.autoSetupMerge=simple` refuses a start git would not track.**
+  With `simple`, git writes tracking only when the new branch has the start's
+  name; for `git branch other origin/feat` it writes none. This shell refuses
+  (exit 4) any start under `refs/remotes/` unless `--no-track` is given (see
+  W38). Failing case: `auto_setup_merge_simple_writes_no_tracking_when_the_names_differ`,
+  ignored.
+- **W42 — `@{-1}` is not a start point.** Git expands it to the previous
+  branch; the revision parser has no `@{...}` form and exits 2. Failing case:
+  `at_minus_one_is_a_start_point_as_in_git`, ignored.
+- **W43 — a tag target of `HEAD^{tree}` or `HEAD:<path>` exits 2.** Git tags
+  the tree or the blob. The same object given by its id works (pinned in
+  `a_tag_of_a_tree_or_a_blob_is_made_as_git_makes_it`). Failing case:
+  `a_tag_target_may_be_a_tree_or_blob_spelling`, ignored.
+- **W44 — an existing log file for a new tag.** Git appends the tag's line to a
+  file that already exists at `logs/refs/tags/<name>` (checked: a stale file
+  gains `tag: tagging ...`); this shell writes no tag log. Failing case:
+  `an_existing_log_file_for_a_new_tag_is_appended_to_as_git_does`, ignored.
+- **W45 — a name whose directory part ends in `.` fails.** `git branch a./b` and
+  `git tag a./b` succeed. The check for a ref above the name asks gix for
+  `refs/heads/a.`, which gix calls an invalid ref name, so the verb exits 1
+  with "reading ref 'refs/heads/a.'". A bug, not a policy. Failing case:
+  `a_name_with_a_directory_part_ending_in_a_dot_is_accepted_as_git_accepts_it`,
+  ignored.
+- **W46 — `commit` refuses on `tag.gpgSign`.** `ensure_commit_settings` checks
+  `tag.gpgSign` beside `commit.gpgSign`; git's `commit` reads only the latter.
+  The refusal is conservative (nothing is written wrongly), and a bad
+  `tag.gpgSign` value now refuses a commit too. Left as it was.
+- **W47 — booleans are read from the last value only.** Git's configuration
+  set parses the last value of a key; `git_config` callbacks parse every one,
+  so a bad earlier value that a later one overrides stops some git commands.
+  This shell parses the last value (one parser, `parse_git_bool`, matching
+  `git config --type=bool`). A key with no `=` is told from `key =` by
+  `ReadRepo::config_entries`; the older `config_values` paired a bare key with
+  the value of the next key and no longer does.

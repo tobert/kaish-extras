@@ -262,7 +262,7 @@ const NAMES: &[&str] = &[
     "HEAD", "-x", "--x", "-", "a..b", "a.lock", "a@{b", "a/", "ok-1", "b/c@", "@", "a b", "a~1", "a^", "a:b", "a?b", "a*b",
     "a[b", "a\\b", ".a", "a.", "/a", "a//b", "a/.b", "a.lock/b", "", "é", "a/b.lock", "refs/heads/z", "heads/q", "FETCH_HEAD",
     "a@b", "a\tb", "x\u{7f}", "@{", "a.b", "a..", "..", ".", "ok.lockx", "A", "a\u{1}b", "m/", "@{-1}", "ok@", "ok/-x", "-ok",
-    "ok-", "ok_1", "ok.1", "123", "ok/./x2", "ok/..", "ok\u{3000}x",
+    "ok-", "ok_1", "ok.1", "123", "ok/./x2", "ok/..", "ok\u{3000}x", "a.LOCK",
 ];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -445,6 +445,11 @@ async fn a_linked_worktree_creates_in_the_common_dir_and_logs_head_in_its_own() 
     assert!(log.contains("\tcheckout: moving from side to moved\n"), "{log}");
     assert!(log.contains("\tcheckout: moving from moved to n/m\n"), "{log}");
     assert_eq!(std::fs::read_to_string(first_dir(&p.ours).join("HEAD")).expect("HEAD"), "ref: refs/heads/n/m\n");
+    // The worktree's own logs/HEAD, byte for byte against git's, which
+    // `assert_same` (the common directory's logs) does not see.
+    let own = |repo: &Path| std::fs::read(first_dir(repo).join("logs/HEAD")).expect("worktree logs/HEAD");
+    assert!(own(&p.ours) == own(&p.twin), "worktree logs/HEAD differs\nours: {:?}\ntwin: {:?}", String::from_utf8_lossy(&own(&p.ours)), String::from_utf8_lossy(&own(&p.twin)));
+    assert!(!own(&p.ours).is_empty());
     // The main worktree's HEAD is untouched.
     assert_eq!(std::fs::read_to_string(p.ours.join(".git/HEAD")).expect("HEAD"), "ref: refs/heads/main\n");
     assert!(p.ours.join(".git/logs/refs/heads/n/m").is_file(), "branch logs live in the common dir");
@@ -1330,4 +1335,392 @@ async fn through_a_real_kernel_branch_tag_and_switch_work() {
     let obj = git_raw(&root, &["cat-file", "-p", "v2"]).1;
     assert!(obj.contains("tagger Kernel Author <kernel@example.org> 1785578400 +0000\n\nsecond release\n"), "{obj}");
     assert_eq!(git_raw(&root, &["fsck", "--strict"]).0, 0);
+}
+
+// ── review fixes: HEAD as a start point, git's booleans, objects that remain ──
+
+fn append_config(dir: &Path, text: &str) {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().append(true).open(dir.join(".git/config")).expect("config");
+    f.write_all(text.as_bytes()).expect("write config");
+}
+
+/// `switch -c <name> HEAD` resolves HEAD like any other start point. On an
+/// unborn HEAD git fails ("invalid reference: HEAD"); this build used to exit
+/// 0, print "Switched to a new branch" and make no branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_of_head_on_an_unborn_head_refuses_in_both_spellings() {
+    for (verb, flag, start) in [("switch", "-c", "HEAD"), ("checkout", "-b", "HEAD"), ("switch", "-c", "@"), ("checkout", "-b", "@")] {
+        let p = Pair::new(&|_| {});
+        let before = support::Fingerprint::take(&p.git_dir(true));
+        let r = p.ours("", &[verb, flag, "first", start]).await;
+        assert_eq!(r.code, 1, "{verb} {start}: {}", r.err);
+        assert!(!r.err.contains("Switched to a new branch"), "{verb} {start}: {}", r.err);
+        assert!(!r.text_out().contains("Switched"), "{verb} {start}");
+        assert!(r.err.contains("has no commits yet") && r.err.contains("Nothing was changed."), "{verb} {start}: {}", r.err);
+        assert_eq!(support::Fingerprint::take(&p.git_dir(true)).differences_from(&before), Vec::<String>::new());
+        assert_eq!(std::fs::read_to_string(p.ours.join(".git/HEAD")).expect("HEAD"), "ref: refs/heads/main\n");
+        // Git refuses too, and leaves HEAD on main.
+        let (code, _, gerr) = p.twin(&[verb, flag, "first", start]);
+        assert_ne!(code, 0, "git {verb} {start}: {gerr}");
+        assert_eq!(std::fs::read_to_string(p.twin.join(".git/HEAD")).expect("HEAD"), "ref: refs/heads/main\n");
+    }
+    // Negative control: a born HEAD still takes the same start.
+    let p = Pair::new(&base);
+    assert_eq!(p.ours("", &["switch", "-c", "ok", "HEAD"]).await.code, 0);
+    assert_eq!(p.twin(&["switch", "-c", "ok", "HEAD"]).0, 0);
+    p.assert_same("born HEAD");
+}
+
+/// The values the review and git's `git_config_bool` disagree on, run against
+/// `git config --type=bool` as the oracle. A value git reads as true refuses
+/// the write; false lets it proceed; a bad one refuses and names the key and
+/// the value (exit 4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signing_settings_are_read_as_git_reads_a_boolean() {
+    // None is a key written with no `=`.
+    let values: &[Option<&str>] = &[
+        None, Some(""), Some("true"), Some("TRUE"), Some("yes"), Some("on"), Some("1"), Some("2"), Some("-1"), Some("0"),
+        Some("0x10"), Some("1k"), Some("false"), Some("no"), Some("off"), Some("maybe"), Some("08"), Some("2g"), Some("1kb"),
+    ];
+    let (mut yes, mut no, mut bad) = (0, 0, 0);
+    for (section, key, argv) in [
+        ("commit", "gpgSign", vec!["commit", "--allow-empty", "-m", "m"]),
+        ("tag", "gpgSign", vec!["tag", "t"]),
+        ("tag", "gpgSign", vec!["tag", "-a", "t", "-m", "m"]),
+    ] {
+        for value in values {
+            let p = Pair::new(&base);
+            // A second key follows, so a key with no `=` cannot be read as the
+            // value of the key after it.
+            let line = match value {
+                None => format!("[{section}]\n\t{key}\n\tzzz = false\n"),
+                Some(v) => format!("[{section}]\n\t{key} = {v}\n\tzzz = false\n"),
+            };
+            for dir in [&p.ours, &p.twin] {
+                append_config(dir, &line);
+            }
+            let name = format!("{section}.{key}");
+            let (code, out, gerr) = p.twin(&["config", "--type=bool", &name]);
+            let before = support::Fingerprint::take(&p.git_dir(true));
+            let r = p.ours("", &argv).await;
+            let label = format!("{name}={value:?} {argv:?}");
+            match (code, out.trim()) {
+                (0, "true") => {
+                    yes += 1;
+                    assert_eq!(r.code, 4, "[{label}] git signs, ours must refuse: {}", r.err);
+                    assert!(r.err.contains(&format!("{name} is true")), "[{label}] {}", r.err);
+                    assert!(r.err.contains("Nothing was changed."), "[{label}] {}", r.err);
+                    assert_eq!(support::Fingerprint::take(&p.git_dir(true)).differences_from(&before), Vec::<String>::new(), "[{label}] wrote");
+                }
+                (0, "false") => {
+                    no += 1;
+                    assert_eq!(r.code, 0, "[{label}] git does not sign: {}", r.err);
+                }
+                (c, _) => {
+                    bad += 1;
+                    assert_ne!(c, 0, "{gerr}");
+                    assert_eq!(r.code, 4, "[{label}] git dies on a bad boolean: {}", r.err);
+                    let shown = value.expect("a key with no = is never bad");
+                    assert!(r.err.contains(&name) && r.err.contains(&format!("'{shown}'")), "[{label}] names key and value: {}", r.err);
+                    assert!(r.err.contains("Nothing was changed."), "[{label}] {}", r.err);
+                    assert_eq!(support::Fingerprint::take(&p.git_dir(true)).differences_from(&before), Vec::<String>::new(), "[{label}] wrote");
+                }
+            }
+        }
+    }
+    // Negative controls: every outcome happened.
+    assert!(yes >= 24 && no >= 12 && bad >= 12, "yes {yes}, no {no}, bad {bad}");
+}
+
+/// `commit.gpgSign=2` is true to git, which signs. This shell never signs, so it
+/// writes no commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_gpgsign_2_writes_no_commit() {
+    let p = Pair::new(&base);
+    append_config(&p.ours, "[commit]\n\tgpgSign = 2\n");
+    let head = git_raw(&p.ours, &["rev-parse", "HEAD"]).1;
+    let before = support::Fingerprint::take(&p.git_dir(true));
+    let r = p.ours("", &["commit", "--allow-empty", "-m", "unsigned"]).await;
+    assert_eq!(r.code, 4, "{}", r.err);
+    assert_eq!(git_raw(&p.ours, &["rev-parse", "HEAD"]).1, head);
+    assert_eq!(git_raw(&p.ours, &["rev-list", "--count", "--all"]).1, git_raw(&p.twin, &["rev-list", "--count", "--all"]).1);
+    assert_eq!(support::Fingerprint::take(&p.git_dir(true)).differences_from(&before), Vec::<String>::new());
+}
+
+fn running_as_root() -> bool {
+    let probe = tempfile::tempdir().expect("tempdir");
+    let dir = probe.path().join("d");
+    std::fs::create_dir(&dir).expect("dir");
+    let mut perm = std::fs::metadata(&dir).expect("meta").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o555);
+    std::fs::set_permissions(&dir, perm).expect("chmod");
+    let writable = std::fs::write(dir.join("f"), b"x").is_ok();
+    let mut perm = std::fs::metadata(&dir).expect("meta").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+    std::fs::set_permissions(&dir, perm).expect("chmod back");
+    writable
+}
+
+fn chmod(path: &Path, mode: u32) {
+    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode)).expect("chmod");
+}
+
+/// An annotated tag's object is written before its ref. A ref that cannot be
+/// created (an I/O error, not a refusal) must say the object remains.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_annotated_tag_whose_ref_cannot_be_made_says_its_object_remains() {
+    if running_as_root() {
+        eprintln!("skipped: root ignores directory modes");
+        return;
+    }
+    let p = Pair::new(&base);
+    // The twin makes the same bytes, so its tag id is the one ours writes.
+    assert_eq!(p.twin(&["tag", "-a", "v1", "-m", "m"]).0, 0);
+    let tag_id = git_raw(&p.twin, &["rev-parse", "v1"]).1.trim().to_string();
+    assert_eq!(git_raw(&p.ours, &["cat-file", "-t", &tag_id]).0 != 0, true, "the object is not there yet");
+    let tags = p.ours.join(".git/refs/tags");
+    chmod(&tags, 0o555);
+    let before_refs = git_raw(&p.ours, &["for-each-ref"]).1;
+    let r = p.ours("", &["tag", "-a", "v1", "-m", "m"]).await;
+    chmod(&tags, 0o755);
+    assert_ne!(r.code, 0, "{}", r.err);
+    assert!(r.err.contains("stay in the object database") && r.err.contains("git gc prunes"), "{}", r.err);
+    assert!(r.err.contains("no ref or index changed"), "{}", r.err);
+    assert!(!r.err.contains("Nothing was changed."), "{}", r.err);
+    let (code, kind, _) = git_raw(&p.ours, &["cat-file", "-t", &tag_id]);
+    assert!(code == 0 && kind.trim() == "tag", "the tag object remains: {kind}");
+    assert_eq!(git_raw(&p.ours, &["for-each-ref"]).1, before_refs, "no ref was made");
+    assert!(lockfiles(&p.ours.join(".git")).is_empty());
+    // A lightweight tag writes no object and so claims none.
+    chmod(&tags, 0o555);
+    let r = p.ours("", &["tag", "light"]).await;
+    chmod(&tags, 0o755);
+    assert_ne!(r.code, 0);
+    assert!(!r.err.contains("object database"), "{}", r.err);
+}
+
+/// The same for a commit: the ref cannot be moved after the objects exist.
+/// The lock check passes (nothing is locked), and the lock cannot be taken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_commit_whose_branch_cannot_move_says_its_objects_remain() {
+    if running_as_root() {
+        eprintln!("skipped: root ignores directory modes");
+        return;
+    }
+    let p = Pair::new(&base);
+    let heads = p.ours.join(".git/refs/heads");
+    let head = git_raw(&p.ours, &["rev-parse", "HEAD"]).1;
+    let count = |d: &Path| git_raw(d, &["count-objects"]).1;
+    let objects_before = count(&p.ours);
+    chmod(&heads, 0o555);
+    let r = p.ours("", &["commit", "--allow-empty", "-m", "blocked"]).await;
+    chmod(&heads, 0o755);
+    assert_ne!(r.code, 0, "{}", r.err);
+    assert!(r.err.contains("stay in the object database") && r.err.contains("git gc prunes"), "{}", r.err);
+    assert!(!r.err.contains("Nothing was changed."), "{}", r.err);
+    assert_eq!(git_raw(&p.ours, &["rev-parse", "HEAD"]).1, head, "the branch did not move");
+    assert_ne!(count(&p.ours), objects_before, "the commit object was written");
+    assert!(lockfiles(&p.ours.join(".git")).is_empty());
+}
+
+/// A directory at `logs/refs/tags/<name>` does not stop git from making the
+/// tag, because a tag has no log to write. It did stop this build.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_directory_where_a_tag_log_would_be_does_not_block_the_tag() {
+    let p = Pair::new(&base);
+    for dir in [&p.ours, &p.twin] {
+        std::fs::create_dir_all(dir.join(".git/logs/refs/tags/x")).expect("dir");
+        std::fs::write(dir.join(".git/logs/refs/tags/x/inside"), "keep\n").expect("file");
+    }
+    assert_eq!(p.twin(&["tag", "x"]).0, 0, "git makes the tag");
+    let r = p.ours("", &["tag", "x"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(p.twin(&["tag", "-a", "y", "-m", "m"]).0, 0);
+    for dir in [&p.ours, &p.twin] {
+        std::fs::create_dir_all(dir.join(".git/logs/refs/tags/z")).expect("dir");
+        std::fs::write(dir.join(".git/logs/refs/tags/z/inside"), "keep\n").expect("file");
+    }
+    assert_eq!(p.twin(&["tag", "-a", "z", "-m", "m"]).0, 0);
+    assert_eq!(p.ours("", &["tag", "-a", "y", "-m", "m"]).await.code, 0);
+    assert_eq!(p.ours("", &["tag", "-a", "z", "-m", "m"]).await.code, 0);
+    p.assert_same("tag log directories");
+    // Negative control: a branch's log directory still stops the branch
+    // (git: "there are still logs under").
+    for dir in [&p.ours, &p.twin] {
+        std::fs::create_dir_all(dir.join(".git/logs/refs/heads/b")).expect("dir");
+        std::fs::write(dir.join(".git/logs/refs/heads/b/inside"), "keep\n").expect("file");
+    }
+    assert_ne!(p.twin(&["branch", "b"]).0, 0);
+    assert_ne!(p.ours("", &["branch", "b"]).await.code, 0);
+}
+
+// ── pins ───────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tag_of_an_annotated_tag_is_a_tag_object_of_type_tag_like_git_makes_it() {
+    let p = Pair::new(&|d| {
+        base(d);
+        support::git(d, &["tag", "-a", "inner", "-m", "inner message"]);
+    });
+    let r = p.ours("", &["tag", "-a", "outer", "-m", "outer message", "inner"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(p.twin(&["tag", "-a", "outer", "-m", "outer message", "inner"]).0, 0);
+    p.assert_same("tag of a tag");
+    p.assert_tag_same("outer");
+    let body = git_raw(&p.ours, &["cat-file", "tag", "outer"]).1;
+    assert!(body.contains("\ntype tag\n"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tag_with_a_branch_s_name_keeps_the_short_name_in_the_checkout_log() {
+    // A tag named for the branch HEAD is on, and a tag named for the branch
+    // being made: `checkout: moving from main to next` is unchanged by either.
+    for verb in [("switch", "-c"), ("checkout", "-b")] {
+        let p = Pair::new(&|d| {
+            base(d);
+            support::git(d, &["tag", "main"]);
+            support::git(d, &["tag", "next"]);
+        });
+        let r = p.ours("", &[verb.0, verb.1, "next"]).await;
+        assert_eq!(r.code, 0, "{}", r.err);
+        let (code, _, gerr) = p.twin(&[verb.0, verb.1, "next"]);
+        assert_eq!(code, 0, "{gerr}");
+        p.assert_same("tag shares the name");
+        assert!(read_log(&p.ours, "logs/HEAD").ends_with("\tcheckout: moving from main to next\n"));
+        // And back again, from a branch that shares its name with a tag.
+        assert_eq!(p.ours("", &[verb.0, verb.1, "after"]).await.code, 0);
+        assert_eq!(p.twin(&[verb.0, verb.1, "after"]).0, 0);
+        p.assert_same("from the shared name");
+        assert!(read_log(&p.ours, "logs/HEAD").ends_with("\tcheckout: moving from next to after\n"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_symlinked_logs_head_does_not_affect_branch_or_tag() {
+    let p = Pair::new(&base);
+    let victim = p.fx.path("victim");
+    std::fs::write(&victim, "precious\n").expect("victim");
+    let log = p.ours.join(".git/logs/HEAD");
+    std::fs::remove_file(&log).expect("log");
+    std::os::unix::fs::symlink(&victim, &log).expect("plant");
+    for argv in [vec!["branch", "b1"], vec!["tag", "t1"], vec!["tag", "-a", "t2", "-m", "m"], vec!["branch", "b2", "HEAD~1"]] {
+        let r = p.ours("", &argv).await;
+        assert_eq!(r.code, 0, "{argv:?}: {}", r.err);
+    }
+    assert_eq!(std::fs::read_to_string(&victim).expect("victim"), "precious\n", "wrote through the link");
+    // Negative control: a switch does write logs/HEAD, so it must refuse.
+    let r = p.ours("", &["switch", "-c", "moved"]).await;
+    assert_eq!(r.code, 4, "{}", r.err);
+    assert_eq!(std::fs::read_to_string(&victim).expect("victim"), "precious\n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_symlinked_head_refuses_switch_in_both_spellings_and_writes_nothing() {
+    for argv in [vec!["switch", "-c", "x"], vec!["checkout", "-b", "x"]] {
+        let p = Pair::new(&base);
+        let target = p.fx.path("head-target");
+        std::fs::copy(p.ours.join(".git/HEAD"), &target).expect("copy");
+        let head = p.ours.join(".git/HEAD");
+        std::fs::remove_file(&head).expect("rm");
+        std::os::unix::fs::symlink(&target, &head).expect("plant");
+        let before = std::fs::read(&target).expect("target");
+        let refs_before = git_raw(&p.ours, &["for-each-ref"]).1;
+        let r = p.ours("", &argv).await;
+        assert_ne!(r.code, 0, "{argv:?}: {}", r.err);
+        assert!(!r.err.contains("Switched to a new branch"), "{}", r.err);
+        assert_eq!(std::fs::read(&target).expect("target"), before, "{argv:?}: wrote through HEAD");
+        assert!(std::fs::symlink_metadata(&head).expect("HEAD").file_type().is_symlink(), "{argv:?}: the link was replaced");
+        assert_eq!(git_raw(&p.ours, &["for-each-ref"]).1, refs_before, "{argv:?}: a branch appeared");
+    }
+}
+
+/// BUG, found by the review's §2.1 row: git accepts a name whose directory
+/// part ends in a dot (`a./b`), because only the whole name may not end in
+/// one. This build asks gix for the ref `refs/heads/a.` while it walks the
+/// name's prefixes, and gix says that is not a valid ref name, so the verb
+/// fails (exit 1) instead of making the ref.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "BUG: a name with a directory part ending in a dot (a./b) fails in the prefix walk; git accepts it"]
+async fn a_name_with_a_directory_part_ending_in_a_dot_is_accepted_as_git_accepts_it() {
+    for (verb, name) in [("branch", "a./b"), ("tag", "a./b"), ("branch", "dot./x.LOCK")] {
+        let p = Pair::new(&base);
+        let (code, _, gerr) = p.twin(&[verb, name]);
+        assert_eq!(code, 0, "git {verb} {name}: {gerr}");
+        let r = p.ours("", &[verb, name]).await;
+        assert_eq!(r.code, 0, "{verb} {name}: {}", r.err);
+        p.assert_same(name);
+    }
+}
+
+// ── divergences filed in docs/issues.md (W40-W44), each ignored until fixed ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "W40: core.logAllRefUpdates=false in a non-bare repository refuses; git makes the ref with no log"]
+async fn log_all_ref_updates_false_makes_the_branch_with_no_log_as_git_does() {
+    let p = Pair::new(&|d| {
+        base(d);
+        support::git(d, &["config", "core.logAllRefUpdates", "false"]);
+    });
+    assert_eq!(p.twin(&["branch", "nolog"]).0, 0);
+    let r = p.ours("", &["branch", "nolog"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    p.assert_same("logAllRefUpdates=false");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "W41: branch.autoSetupMerge=simple refuses a start under refs/remotes whose name differs; git writes no tracking"]
+async fn auto_setup_merge_simple_writes_no_tracking_when_the_names_differ() {
+    let p = Pair::new(&|d| {
+        base(d);
+        support::git(d, &["config", "remote.origin.url", "/nowhere"]);
+        support::git(d, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+        support::git(d, &["update-ref", "refs/remotes/origin/feat", "HEAD"]);
+        support::git(d, &["config", "branch.autoSetupMerge", "simple"]);
+    });
+    assert_eq!(p.twin(&["branch", "other", "origin/feat"]).0, 0);
+    assert_eq!(git_raw(&p.twin, &["config", "--get-regexp", "^branch\\.other"]).0, 1, "git wrote no tracking");
+    let r = p.ours("", &["branch", "other", "origin/feat"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    p.assert_same("autoSetupMerge=simple");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "W42: @{-1} is not expanded as a start point"]
+async fn at_minus_one_is_a_start_point_as_in_git() {
+    let p = Pair::new(&|d| {
+        base(d);
+        support::git(d, &["switch", "-q", "-c", "other"]);
+        support::git(d, &["switch", "-q", "main"]);
+    });
+    assert_eq!(p.twin(&["branch", "prev", "@{-1}"]).0, 0);
+    let r = p.ours("", &["branch", "prev", "@{-1}"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    p.assert_same("@{-1}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "W43: a tag target written as HEAD^{tree} or HEAD:path is not resolved; git tags the tree or the blob"]
+async fn a_tag_target_may_be_a_tree_or_blob_spelling() {
+    let p = Pair::new(&base);
+    for target in ["HEAD^{tree}", "HEAD:a.txt"] {
+        let name = format!("t-{}", target.len());
+        assert_eq!(p.twin(&["tag", &name, target]).0, 0, "git tags {target}");
+        let r = p.ours("", &["tag", &name, target]).await;
+        assert_eq!(r.code, 0, "{target}: {}", r.err);
+    }
+    p.assert_same("tree and blob spellings");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "W44: a log file that exists for a new tag gets the tag's line in git; this writes none"]
+async fn an_existing_log_file_for_a_new_tag_is_appended_to_as_git_does() {
+    let p = Pair::new(&base);
+    for dir in [&p.ours, &p.twin] {
+        std::fs::create_dir_all(dir.join(".git/logs/refs/tags")).expect("dir");
+        std::fs::write(dir.join(".git/logs/refs/tags/x"), "stale\n").expect("log");
+    }
+    assert_eq!(p.twin(&["tag", "x"]).0, 0);
+    assert_eq!(p.ours("", &["tag", "x"]).await.code, 0);
+    p.assert_same("stale tag log");
 }

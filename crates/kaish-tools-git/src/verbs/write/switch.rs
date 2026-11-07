@@ -25,7 +25,7 @@ use kaish_tool_api::GlobalFlags;
 
 use crate::error::GitError;
 use crate::verbs::write::branch::{
-    blocked_refusal, exists_refusal, refuse_hooks, tracking_implied, tracking_refusal, RefsEnv,
+    blocked_refusal, exists_refusal, refuse_hooks, tracking_implied, tracking_refusal, unborn_refusal, RefsEnv,
 };
 use crate::verbs::write::ident::{self, KernelVars};
 use crate::verbs::write::refmove::{self, HeadSwitch, MoveKind};
@@ -253,7 +253,12 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &SwitchCreate) -> Resul
         return Err(blocked_refusal(cmd, "branch", &opts.name, &why));
     }
     let shown = opts.start.clone().unwrap_or_else(|| "HEAD".to_string());
-    if let Some(start) = opts.start.as_deref().filter(|s| *s != "HEAD") {
+    if let Some(start) = opts.start.as_deref() {
+        // Git resolves a start of HEAD like any other, so on an unborn HEAD it
+        // fails there ("invalid reference: HEAD") instead of switching.
+        if head_oid.is_none() && matches!(start, "HEAD" | "@") {
+            return Err(unborn_refusal(cmd, head.branch.as_deref()));
+        }
         if !opts.no_track && tracking_implied(repo, start)? {
             return Err(tracking_refusal(cmd, start, &opts.name));
         }

@@ -2629,6 +2629,7 @@ const REF_EXAMPLES: &[(&str, &str)] = &[
     ("Create a lightweight tag at HEAD", "git tag v0.2.0"),
     ("Create an annotated tag", "git tag -a v0.2.0 -m 'Release 0.2.0'"),
     ("Start a branch at HEAD and switch to it", "git switch -c feature-x"),
+    ("Start a branch at HEAD and switch to it, in checkout's spelling", "git checkout -b feature-x"),
 ];
 
 impl GitTool {
@@ -3637,6 +3638,38 @@ mod tests {
                     "disabling {verb:?} dropped {other:?}'s example too: {remaining:?}"
                 );
             }
+        }
+    }
+
+    /// Every write verb has an example in a tool that can write. A read-only
+    /// tool publishes none of them, and subtracting a verb drops its own.
+    #[cfg(feature = "commit")]
+    #[test]
+    fn every_write_verb_has_an_example_and_a_read_only_tool_publishes_none() {
+        let writer = tool(GitConfig::read_only().with_commit_profile()).expect("config");
+        let codes: Vec<&str> = writer.examples().into_iter().map(|(_, code)| code).collect();
+        for verb in Verb::WRITE {
+            assert!(
+                codes.iter().any(|code| verb_of(code) == Some(*verb)),
+                "{verb:?} has no example, so help git would never name it: {codes:?}"
+            );
+        }
+
+        let reader = tool(GitConfig::read_only()).expect("config");
+        let shown: Vec<&str> = reader.examples().into_iter().map(|(_, code)| code).collect();
+        for (_, code) in REF_EXAMPLES {
+            assert!(!shown.contains(code), "a read-only tool published the write example {code:?}");
+        }
+        // Negative control: the read-only tool still publishes its own.
+        assert!(shown.contains(&"git branch") && shown.contains(&"git tag"), "{shown:?}");
+
+        for verb in [Verb::Switch, Verb::Checkout] {
+            let narrowed = tool(GitConfig::read_only().with_commit_profile().without_verb(verb)).expect("config");
+            let left: Vec<&str> = narrowed.examples().into_iter().map(|(_, code)| code).collect();
+            assert!(!left.iter().any(|code| verb_of(code) == Some(verb)), "{verb:?} example survived: {left:?}");
+            // The other spelling keeps its own example.
+            let other = if verb == Verb::Switch { Verb::Checkout } else { Verb::Switch };
+            assert!(left.iter().any(|code| verb_of(code) == Some(other)), "{other:?} lost its example: {left:?}");
         }
     }
 

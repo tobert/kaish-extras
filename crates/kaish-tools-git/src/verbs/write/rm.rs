@@ -134,7 +134,7 @@ fn delete_one(repo: &WriteRepo, path: &[u8]) -> Result<(), GitError> {
 /// Say what the failed deletion at `paths[n]` left behind, and the command
 /// that finishes the job.
 fn partial_failure(e: GitError, paths: &[RelPath], n: usize) -> GitError {
-    let GitError::Repository { operation, what, path, source } = e else { return e };
+    let GitError::Repository { operation, what, path, source, wrote } = e else { return e };
     let rest = show_all(&paths[n..], " ");
     let state = if n == 0 {
         "Nothing was removed.".to_string()
@@ -146,6 +146,7 @@ fn partial_failure(e: GitError, paths: &[RelPath], n: usize) -> GitError {
         what: format!("{what} ({state} After fixing the cause, run: git rm {rest})"),
         path,
         source,
+        wrote,
     }
 }
 

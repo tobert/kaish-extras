@@ -1,9 +1,10 @@
 //! Names for the refs `branch`, `tag` and `switch -c` create
 //! (git-write-profile.md §4, §6).
 //!
-//! The rule is git's `strbuf_check_branch_ref` and `strbuf_check_tag_ref`
-//! (branch.c, tag.c): the name is not `HEAD`, does not start with `-`, and
-//! `refs/heads/<name>` (`refs/tags/<name>`) passes `check_refname_format`.
+//! The rule is the one git applies to a new branch and to a new tag (checked
+//! against git 2.56: `git tag HEAD`, `git branch HEAD` and `-x` all refuse): the
+//! name is not `HEAD`, does not start with `-`, and `refs/heads/<name>`
+//! (`refs/tags/<name>`) passes `check_refname_format`.
 //! `gix-ref` owns the format check; `tests/write_refs.rs` holds a table of
 //! names against real git so a difference between the two shows as a failure.
 //!

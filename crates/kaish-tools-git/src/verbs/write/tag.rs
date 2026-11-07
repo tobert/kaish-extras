@@ -33,7 +33,7 @@ use crate::verbs::write::refname::{self, RefKind};
 use crate::verbs::write::refusal::{refuse, Override};
 use crate::verbs::write::repo::WriteRepo;
 use crate::verbs::write::spec::Outcome;
-use crate::verbs::write::state::config_last;
+use crate::verbs::write::state::{config_bool, config_last};
 
 const OP: &str = "tag";
 
@@ -167,20 +167,16 @@ pub(crate) fn cleanup(raw: &str) -> String {
     out
 }
 
-fn truthy(v: &str) -> bool {
-    matches!(v.to_ascii_lowercase().as_str(), "" | "true" | "yes" | "on" | "1")
-}
-
 /// Settings that would make this shell's tag differ from git's.
 fn ensure_tag_settings(repo: &WriteRepo, command: &str, annotated: bool) -> Result<(), GitError> {
     let bad = |what: String, fix: String| refuse::<()>(4, command, what, fix, Override::Repository);
-    if config_last(repo, "tag", "gpgsign")?.is_some_and(|v| truthy(&v)) {
+    if config_bool(repo, command, "tag", "gpgsign", "tag.gpgSign")? == Some(true) {
         bad(
             "tag.gpgSign is true in this repository, and this shell never signs.".to_string(),
             "Create the tag with real git, outside this shell, or turn signing off for this repository: git config tag.gpgSign false.".to_string(),
         )?;
     }
-    if annotated && config_last(repo, "tag", "forcesignannotated")?.is_some_and(|v| truthy(&v)) {
+    if annotated && config_bool(repo, command, "tag", "forcesignannotated", "tag.forceSignAnnotated")? == Some(true) {
         bad(
             "tag.forceSignAnnotated is true in this repository, and this shell never signs.".to_string(),
             "Create the tag with real git, outside this shell, or turn it off for this repository: git config tag.forceSignAnnotated false.".to_string(),
@@ -268,7 +264,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &TagCreate) -> Result<O
     bytes.extend_from_slice(body.as_bytes());
     let mut writer = BlobWriter::new(repo, OP);
     let tag_id = writer.write_object(gix_object::Kind::Tag, &bytes)?;
-    writer.sync()?;
+    writer.sync().map_err(GitError::after_objects)?;
     refmove::create_ref(repo, MoveKind::TAG, cmd, &full, tag_id, None).map_err(GitError::after_objects)?;
     Ok(outcome(opts, &full, tag_id, target, "annotated"))
 }
