@@ -1281,6 +1281,20 @@ impl GitTool {
         }
     }
 
+    /// The rewrite policy's name, for refusals; `None` without the profile.
+    fn policy_name(&self) -> Option<&'static str> {
+        #[cfg(feature = "commit")]
+        if let Some(s) = self.write_settings() {
+            use crate::config::RewritePolicy;
+            return Some(match s.rewrite_policy {
+                RewritePolicy::Refuse => "refuse",
+                RewritePolicy::Unpublished => "unpublished",
+                RewritePolicy::Allow => "allow",
+            });
+        }
+        None
+    }
+
     /// The tool's description. A tool with write settings says what it writes
     /// and what it never does; the read-only text must not be shown to it.
     fn description(&self) -> String {
@@ -1298,12 +1312,15 @@ impl GitTool {
 #[cfg(feature = "commit")]
 fn operations_of(verb: &str) -> &'static [&'static str] {
     match verb {
-        "add" | "restore" | "reset" => &["git.index"],
+        "add" | "restore" => &["git.index"],
+        // `reset <rev>` moves the branch, which can drop commits.
+        "reset" => &["git.index", "git.ref", "git.rewrite"],
         // `rm` deletes the working-tree file unless --cached.
         "rm" => &["git.index", "fs.remove"],
         "mv" => &["git.index", "fs.rename"],
-        // `--amend` is refused today; the id is declared anyway because the
-        // schema is reflected before argv is known (git-write-profile.md §2).
+        // `--amend` replaces a commit; the leaf declares it for every
+        // spelling because the schema is reflected before argv is known
+        // (git-write-profile.md §2).
         "commit" => &["git.index", "git.commit", "git.ref", "git.rewrite"],
         _ => &[],
     }
@@ -1395,6 +1412,20 @@ impl GitTool {
                     format!("git add {flag} asks questions on a terminal, and this shell has none."),
                     "Stage whole files instead, for example: git add <path>.",
                     verbs::write::refusal::Override::Repository,
+                )
+                .into_error(),
+            );
+        }
+        if parsed.all && parsed.update {
+            // Git exits 128 on this pair; 2 is this shell's code for a
+            // command line that cannot be run, as for `reset --soft --mixed`.
+            return failure(
+                verbs::write::refusal::Refusal::new(
+                    2,
+                    command,
+                    "The options -u/--update and -A/--all cannot be used together: -A stages new files and -u stages tracked files only.",
+                    "Pick one: git add -A, or git add -u.",
+                    verbs::write::refusal::Override::Never,
                 )
                 .into_error(),
             );
@@ -1512,6 +1543,7 @@ impl GitTool {
     }
 
     async fn run_reset(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
+        use verbs::write::reset::Mode;
         const OP: &str = "reset";
         if let Err(e) = verb_enabled(&self.config, Verb::Reset, OP) {
             return failure(e);
@@ -1522,11 +1554,30 @@ impl GitTool {
         };
         parsed.global.apply(ctx);
         let command = command_text(OP, argv);
-        let refused = if parsed.hard {
+        let modes: Vec<&str> = [
+            (parsed.soft, "--soft"),
+            (parsed.mixed, "--mixed"),
+            (parsed.hard, "--hard"),
+            (parsed.merge, "--merge"),
+            (parsed.keep, "--keep"),
+        ]
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, f)| *f)
+        .collect();
+        let refused = if modes.len() > 1 {
+            Some(verbs::write::refusal::refuse::<()>(
+                2,
+                &command,
+                format!("{} cannot be used together: each picks what the reset changes.", modes.join(" and ")),
+                "Pick one: git reset --soft <rev>, or git reset --mixed <rev>.",
+                verbs::write::refusal::Override::Never,
+            ))
+        } else if parsed.hard {
             Some(verbs::write::unstage::refuse_reset_hard::<()>(&command))
-        } else if parsed.soft || parsed.merge || parsed.keep {
-            let flag = if parsed.soft { "--soft" } else if parsed.merge { "--merge" } else { "--keep" };
-            Some(verbs::write::unstage::refuse_reset_revision::<()>(&command, &format!("git reset {flag}")))
+        } else if parsed.merge || parsed.keep {
+            let flag = if parsed.merge { "--merge" } else { "--keep" };
+            Some(verbs::write::unstage::refuse_reset_worktree_mode::<()>(&command, flag))
         } else if parsed.patch {
             Some(verbs::write::refusal::refuse::<()>(
                 2,
@@ -1542,6 +1593,19 @@ impl GitTool {
             return failure(e);
         }
         let ops = operands(&parsed.operands, argv);
+        let vars = match verbs::write::ident::KernelVars::read(&command, ctx) {
+            Ok(v) => v,
+            Err(e) => return failure(e),
+        };
+        let Some(settings) = self.write_settings() else {
+            return failure(GitError::VerbNotEnabled { operation: OP });
+        };
+        let env = verbs::write::reset::ResetEnv {
+            hooks: settings.hooks.clone(),
+            identity: settings.identity.clone(),
+            policy: settings.rewrite_policy,
+        };
+        let soft = parsed.soft;
         self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, base| {
             // `HEAD` may lead the operands, as in `git reset HEAD file`. Any
             // other word that names a revision is the revision form.
@@ -1567,18 +1631,39 @@ impl GitTool {
                     _ => (None, all),
                 }
             };
-            if let Some(rev) = rev {
-                if rev != "HEAD" {
-                    return verbs::write::unstage::refuse_reset_revision(
-                        &command,
-                        &format!("git reset {rev}"),
-                    );
-                }
+            if soft && !paths.is_empty() {
+                return verbs::write::refusal::refuse(
+                    2,
+                    &command,
+                    "git reset --soft moves the branch, and a path names index entries, so the two cannot be done together.",
+                    "Unstage the path: git reset -- <path>. Or move the branch: git reset --soft <rev>.",
+                    verbs::write::refusal::Override::Never,
+                );
             }
-            let specs = base.repo_paths(OP, &paths)?;
-            verbs::write::unstage::run(
+            // The unstage forms: no revision, or HEAD, without --soft. They
+            // move nothing, so no policy applies.
+            let moves = soft || rev.as_deref().is_some_and(|r| r != "HEAD");
+            if !moves {
+                let specs = base.repo_paths(OP, &paths)?;
+                return verbs::write::unstage::run(
+                    repo,
+                    &verbs::write::unstage::UnstageOptions { specs, operation: OP, command },
+                );
+            }
+            let rev = rev.unwrap_or_else(|| "HEAD".to_string());
+            if !paths.is_empty() {
+                let specs = base.repo_paths(OP, &paths)?;
+                return verbs::write::reset::run_paths(repo, &rev, specs, command);
+            }
+            verbs::write::reset::run(
                 repo,
-                &verbs::write::unstage::UnstageOptions { specs, operation: OP, command },
+                &env,
+                &verbs::write::reset::ResetOptions {
+                    rev,
+                    mode: if soft { Mode::Soft } else { Mode::Mixed },
+                    vars,
+                    command,
+                },
             )
         })
     }
@@ -1619,10 +1704,12 @@ impl GitTool {
 
         let raw_message = match &parsed.file {
             Some(file) => match read_message_file(ctx, file).await {
-                Ok(text) => text,
+                Ok(text) => Some(text),
                 Err(e) => return failure(e),
             },
-            None => verbs::write::message::join_paragraphs(&parsed.message),
+            // `--amend --no-edit` without -m: the old message stays.
+            None if parsed.message.is_empty() => None,
+            None => Some(verbs::write::message::join_paragraphs(&parsed.message)),
         };
         let author = match parsed
             .author
@@ -1652,6 +1739,7 @@ impl GitTool {
         let env = verbs::write::commit::CommitEnv {
             hooks: settings.hooks.clone(),
             identity: settings.identity.clone(),
+            policy: settings.rewrite_policy,
         };
         self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, base| {
             let specs = base.repo_paths(OP, &ops)?;
@@ -1660,6 +1748,7 @@ impl GitTool {
                 &env,
                 &verbs::write::commit::CommitOptions {
                     raw_message,
+                    amend: parsed.amend.then_some(verbs::write::commit::Amend { reset_author: parsed.reset_author }),
                     trailers,
                     all: parsed.all,
                     specs,
@@ -2027,7 +2116,13 @@ impl Tool for GitTool {
                 let known = argv
                     .first()
                     .and_then(|word| {
-                        crate::spelling::unsupported_verb(&schema.name, word, &self.config, self.is_writable())
+                        crate::spelling::unsupported_verb(
+                            &schema.name,
+                            word,
+                            &self.config,
+                            self.is_writable(),
+                            self.policy_name(),
+                        )
                     });
                 #[cfg(feature = "commit")]
                 if self.is_writable() {
@@ -2189,10 +2284,13 @@ const DESCRIPTION: &str =
 /// The description of a tool built with the commit profile.
 #[cfg(feature = "commit")]
 const COMMIT_DESCRIPTION: &str = "Read a git repository, change its index, and commit — shallow, safety-first. \
-Reads change nothing. The write verbs are add, rm, mv, restore --staged, reset (no revision) and commit: \
+Reads change nothing. The write verbs are add, rm, mv, restore --staged, reset and commit: \
 they write the index, and rm and mv also delete or rename the working-tree files they name; commit \
-writes a commit and moves the current branch. It never opens an editor (give the message with -m or -F), \
-never rewrites a commit, and takes the author and committer from the pinned identity or from \
+writes a commit and moves the current branch; commit --amend and reset --soft/--mixed <rev> replace \
+commits, which the embedding program's rewrite policy may refuse (by default when a remote-tracking ref \
+already has the commit). It never opens an editor (give the message with -m or -F, or keep it with \
+--amend --no-edit), never writes working-tree file content (reset --hard, --merge and --keep are refused), \
+and takes the author and committer from the pinned identity or from \
 GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, GIT_COMMITTER_NAME, GIT_COMMITTER_EMAIL and the *_DATE variables; \
 git var GIT_AUTHOR_IDENT shows which. \
 This git never runs hooks, filters or signing, and never reads user-level git configuration, \

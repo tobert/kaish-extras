@@ -76,6 +76,8 @@ pub(crate) struct AddArgs {
 
     /// Paths to stage, relative to the current directory: files, directories
     /// (everything below, except ignored files) or `*`/`?`/`[...]` patterns.
+    /// A pattern matches the whole path from the repository root, and `*` and
+    /// `?` match `/` too: `ca*` stages `ca.txt` and `cab/x` but not `d/ca.txt`.
     /// `.` is the current directory.
     #[arg(hide = true)]
     pub operands: Vec<String>,

@@ -675,8 +675,10 @@ async fn git_config_user_identity_refuses_naming_git_var() {
 /// Every refused spelling: exit code and the text that must appear. Run on a
 /// repository with a staged change; each must leave `.git` byte-identical.
 const REFUSED: &[(&[&str], i64, &str)] = &[
-    (&["commit", "--amend", "-m", "x"], 2, "--amend replaces a commit"),
-    (&["commit", "--amend", "--no-edit"], 2, "--amend replaces a commit"),
+    (&["commit", "--amend"], 2, "There is no editor in this shell; pass -m '<message>' or --no-edit."),
+    (&["commit", "--amend", "-a"], 2, "or --no-edit."),
+    (&["commit", "--no-edit"], 2, "only --amend has an old message"),
+    (&["commit", "--reset-author", "-m", "x"], 2, "no --amend here"),
     (&["commit", "--fixup", "HEAD", "-m", "x"], 2, "--fixup"),
     (&["commit", "--squash=HEAD", "-m", "x"], 2, "--squash"),
     (&["commit", "-S", "-m", "x"], 2, "never signs"),
@@ -723,15 +725,6 @@ async fn every_refused_commit_spelling_leaves_git_byte_identical_and_has_five_pa
     // The control: the same repository commits when asked properly.
     let r = p.ours("", &["commit", "-m", "ok"]).await;
     assert_eq!(r.code, 0, "{}", r.err);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn amend_refusal_names_the_next_command_and_never_suggests_reset() {
-    let p = Pair::new(&base);
-    let r = p.ours("", &["commit", "--amend", "-m", "x"]).await;
-    assert!(r.err.contains("git commit -m '<message>'"), "{}", r.err);
-    assert!(!r.err.contains("reset"), "{}", r.err);
-    assert!(r.err.contains("no flag that overrides"), "{}", r.err);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1256,6 +1249,34 @@ async fn a_refusal_after_objects_were_written_does_not_say_nothing_changed() {
     assert!(!r.err.contains("Nothing was changed"), "{}", r.err);
     assert!(r.err.contains("no ref or index changed") && r.err.contains("git gc prunes"), "{}", r.err);
     assert!(!r.err.contains("The commit object is on disk"), "the sentence is now the Wrote property: {}", r.err);
+
+    // The same three on the amend paths: the amended commit's tree is written
+    // before the hook runs and before the compare-and-swap, so each claims the
+    // objects and no more.
+    for (label, rec, argv) in [
+        ("amend, pre-commit rejection", Recorder { reject_pre_commit: true, ..Recorder::default() }, vec!["commit", "--amend", "-am", "x"]),
+        ("amend, lost swap", Recorder { race: Some(PathBuf::new()), ..Recorder::default() }, vec!["commit", "--amend", "-m", "x"]),
+    ] {
+        let p = Pair::new(&|d| {
+            base(d);
+            support::write_file(d, "a.txt", "tracked change\n");
+        });
+        let mut rec = rec;
+        if rec.race.is_some() {
+            rec.race = Some(p.ours.clone());
+        }
+        let before_state = state_outside_objects(&p.ours);
+        let before_objects = loose_objects(&p.ours);
+        let config = GitConfig::read_only().with_commit_profile().with_hooks(Arc::new(rec));
+        let r = run_tool_with(&p.fx.root(), "/mnt/ours", &argv, &default_vars(), config).await;
+        assert_eq!(r.code, 1, "[{label}] {}", r.err);
+        assert!(!r.err.contains("Nothing was changed"), "[{label}] it wrote a tree: {}", r.err);
+        assert!(r.err.contains("no ref or index changed") && r.err.contains("git gc prunes"), "[{label}] {}", r.err);
+        if label.ends_with("rejection") {
+            assert!(state_outside_objects(&p.ours) == before_state, "[{label}] a ref, reflog, the index or HEAD changed");
+        }
+        assert!(loose_objects(&p.ours).len() > before_objects.len(), "[{label}] the claim is that objects were written, and none were");
+    }
 }
 
 /// The refusals the tree writer raises come before any blob is written, so

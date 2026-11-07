@@ -739,6 +739,16 @@ impl GitError {
         }
     }
 
+    /// [`Self::after_objects`] for a refusal raised after `ORIG_HEAD` was
+    /// written (a `reset` whose branch move lost).
+    #[cfg(feature = "commit")]
+    pub(crate) fn after_orig_head(self) -> Self {
+        match self {
+            GitError::Refused { code, refusal } => GitError::Refused { code, refusal: Box::new(refusal.after_orig_head()) },
+            other => other,
+        }
+    }
+
     /// Build a [`GitError::Repository`] from an underlying error.
     pub fn repository(
         operation: &'static str,

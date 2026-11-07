@@ -1,6 +1,6 @@
 # kaish-git — the commit profile (design, 2026-11)
 
-Status: **draft**. Policy sections record Amy's rulings of 2026-11-06. The
+Status: **draft**; phases 1-3 built. Policy sections record Amy's rulings of 2026-11-06. The
 plumbing sections rest on `gix-write-feasibility-2026-11.md` (source-read,
 file:line into the pinned crates). Spellings and refusal wording rest on
 `git-write-survey-2026-11.md` (13 first-turn runs, 5 model families, plus a
@@ -132,21 +132,33 @@ pub enum RewritePolicy {
   move and not about a flag. The survey found one run that, told amend was
   off, did `reset --soft HEAD~1 && commit` instead: a policy that guards
   `--amend` alone does not hold.
-- **`Unpublished` reachability:** is `HEAD` an ancestor of (or equal to) any
-  ref under `refs/remotes/`? A walk down from each remote tip that looks for
-  HEAD costs the whole history behind the tip when the answer is "no", which
-  is the answer we want (feasibility §5). Use git's merge-base shape instead
-  (`paint_down_to_common`): walk from HEAD and every remote tip at once in
-  committer-time order, mark each commit with the sides that reach it, and
-  stop when every queued commit is reached by both. HEAD is published if a
-  remote side reaches HEAD itself. For HEAD one commit ahead of `origin/main`
-  this examines a few commits. Use commit-graph generation numbers when the
-  file exists. *(review)* This is **new code**, not `reach.rs`'s existing
-  `Reaches`, which is a single-sided walk and has exactly the cost problem
-  above. The walk keeps `reach.rs`'s 100,000-commit budget; exhausting
-  it refuses (a wrong "unpublished" is the dangerous error, a refusal is
-  not). A shallow repository refuses `--amend` under `Unpublished`: the
-  history that would answer is missing.
+- **`Unpublished` reachability** *(corrected in phase 3)*: a move from the
+  old tip O to the new tip N drops D, the commits reachable from O and not
+  from N. The move is allowed when **no commit in D is reachable from a ref
+  under `refs/remotes/`**. The first wording of this section asked only
+  whether HEAD is an ancestor of a remote ref, which is the same question for
+  `--amend` (N's parents are O's parents, so D is exactly {O}) and the wrong
+  one for `reset`: with `origin/main` at `HEAD~1`, `reset --soft HEAD~3`
+  drops `HEAD~1` and `HEAD~2`, which are published, while HEAD is not.
+  `tests/write_rewrite.rs` pins that case. A move that drops nothing (O is an
+  ancestor of, or equal to, N) is not a rewrite and passes every policy;
+  that is every plain commit and every forward `reset`. One function,
+  `verbs/write/rewrite.rs::check_move`, decides every branch move.
+  The walk is **new code**, `reach.rs`'s single-sided `Reaches` having the
+  cost problem of walking down from every remote tip: it paints commits with
+  three sides (from O, from N, from each remote tip) and finds a commit
+  painted O and remote and not N. No stop rule reads a commit date, because
+  committer dates are not ordered along parent edges and git's date-ordered
+  walk is unsound under skew. It stops when nothing is pending, when every
+  pending commit already carries N, or, with `objects/info/commit-graph`,
+  by generation number; the module comment states why each is sound and
+  the file is checked for consistency as the walk runs. The walk keeps
+  `reach.rs`'s 100,000-commit budget; exhausting it refuses (a wrong
+  "unpublished" is the dangerous error, a refusal is not). A shallow
+  repository refuses under `Unpublished` and, when the move needs the
+  history to show it drops nothing, under `Refuse`. With no remote-tracking
+  refs, nothing is published. Costs and trust limits are
+  docs/issues.md W29.
 - **What the remote-tracking refs can and cannot tell us.** They are the last
   fetch, not the remote. A commit pushed by another clone since the last fetch
   looks unpublished. The refusal text and `docs/git.md` say this in those
@@ -192,7 +204,7 @@ Spellings from the survey, each checked against real git when built:
 | `rm` | `<paths>`, `--cached`, `-r` | without `-f`, a path whose worktree differs from the index **or whose index differs from HEAD** — git's staged-changes check, naming `--cached` and `-f` *(review)* |
 | `mv` | `<src> <dst>`, `<src>... <dir>` | an untracked source, an existing destination without `-f`, a destination outside the work tree |
 | `restore --staged` | `<paths>`, `.` | `restore <file>` without `--staged` (W6) |
-| `reset` | no revision, `-- <paths>`, `<paths>`: unstage, as `restore --staged` | `reset <rev>` until phase 3, with §3's refusal; `--hard` always |
+| `reset` | no revision, `-- <paths>`, `<paths>`: unstage, as `restore --staged`; `--soft <rev>` and `--mixed <rev>`/`<rev>` (§3's policy); `<rev> -- <paths>` | `--hard`, `--merge`, `--keep` always (they write file content) |
 | `commit` | `-m` (repeatable; each a paragraph), `-F <file>`, `-a`/`-am`, `--only <paths>` and `<paths>`/`-- <paths>` (git's `--only` semantics: that path's working-tree content, other staged changes stay staged), `--trailer <k: v>` (git's trailer placement), `--allow-empty`, `--author`, `--amend` and `--amend --no-edit` (policy) | no `-m`/`-F` (and not `--amend --no-edit`): "there is no editor in this shell; pass -m". `--no-verify` with a hook present (§5.1). `-S`. `--fixup`/`--squash` (§3) |
 | `branch <name> [<start>]` | create only | `-d`/`-D`/`-m`/`-f` |
 | `tag <name> [<rev>]`, `tag -a <name> -m <msg>` | lightweight and annotated | `-d`, `-f`, `-s` |
@@ -493,6 +505,13 @@ corrected.
    `var GIT_AUTHOR_IDENT`, reflog, the `GitHooks` boundary. **Built**
    (docs/embedding-git.md, "The commit profile"); the differences from this
    design are docs/issues.md W13-W23.
-3. `RewritePolicy`, the two-sided reachability walk, `--amend`, and
-   `reset --soft|--mixed <rev>`.
+3. `RewritePolicy`, the three-sided reachability walk, `--amend`, and
+   `reset --soft|--mixed <rev>`. **Built** (docs/embedding-git.md, "The commit
+   profile"); the differences from this design are docs/issues.md W29-W32.
+   Checked against git 2.56 and different from the first draft: git writes
+   `ORIG_HEAD` for every `reset` with a revision and none for an amend; an
+   amend prints a `Date:` line except under `--reset-author`, and no
+   `(root-commit)` for an amended root; an amend that would leave the commit
+   empty refuses without `--allow-empty`; `--reset-author` with `--author`
+   refuses.
 4. `branch <name>`, `tag <name>`, `switch -c`/`checkout -b`.

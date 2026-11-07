@@ -249,6 +249,11 @@ path = "tests/show.rs"
 name = "diff"
 path = "tests/diff.rs"
 
+# A pathspec glob selects what git's does in status, log and diff, on a twin.
+[[test]]
+name = "pathspec_glob"
+path = "tests/pathspec_glob.rs"
+
 # Empty with `--no-default-features`; the whole file is gated on `textdiff`.
 [[test]]
 name = "textdiff"
@@ -343,4 +348,11 @@ required-features = ["commit"]
 [[test]]
 name = "write_commit"
 path = "tests/write_commit.rs"
+required-features = ["commit"]
+
+# Phase 3: `commit --amend`, `reset --soft|--mixed <rev>` and the rewrite
+# policy against real git on a twin repository.
+[[test]]
+name = "write_rewrite"
+path = "tests/write_rewrite.rs"
 required-features = ["commit"]

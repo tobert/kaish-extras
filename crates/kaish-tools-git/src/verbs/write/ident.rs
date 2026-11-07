@@ -188,6 +188,67 @@ pub(crate) fn resolve(
     })
 }
 
+/// The committer alone, for a command that makes no author line: `reset`
+/// (the reflog entry) and `commit --amend` (the author is the old commit's).
+pub(crate) fn resolve_committer(
+    command: &str,
+    pinned: Option<&(Identity, Identity)>,
+    vars: &KernelVars,
+    now: i64,
+) -> Result<Signature, GitError> {
+    if pinned.is_none() {
+        let name = vars.committer_name.is_some() || vars.author_name.is_some();
+        let email = vars.committer_email.is_some() || vars.author_email.is_some();
+        if !(name && email) {
+            return refuse(
+                2,
+                command,
+                "No committer identity is set: the variables GIT_COMMITTER_NAME and GIT_COMMITTER_EMAIL are not both set in this shell, and the program embedding this shell has not pinned an identity.",
+                "Set both, for example: export GIT_COMMITTER_NAME='Your Name' GIT_COMMITTER_EMAIL='you@example.com'.",
+                Override::Variables,
+            );
+        }
+    }
+    // `resolve` wants an author too. A stand-in fills the slot only when the
+    // author variables are unset, and then the committer variables are set
+    // (checked above), so the stand-in is never the committer.
+    let mut v = vars.clone();
+    // The author's date is not read either: a bad GIT_AUTHOR_DATE cannot
+    // refuse a command that makes no author line.
+    v.author_date = None;
+    if v.author_name.is_none() || v.author_email.is_none() {
+        v.author_name = Some("author".to_string());
+        v.author_email = Some("author@example.invalid".to_string());
+    }
+    Ok(resolve(command, pinned, &v, None, now)?.committer)
+}
+
+/// The identities of an amended commit: the author is the old commit's
+/// (name, email and date) unless `--author` replaces name and email, or
+/// `--reset-author` makes the author as new as a fresh commit's. The committer
+/// is new either way.
+pub(crate) fn resolve_amend(
+    command: &str,
+    pinned: Option<&(Identity, Identity)>,
+    vars: &KernelVars,
+    author_flag: Option<(String, String)>,
+    now: i64,
+    kept: &Signature,
+    reset_author: bool,
+) -> Result<Idents, GitError> {
+    if reset_author {
+        return resolve(command, pinned, vars, author_flag, now);
+    }
+    let committer = resolve_committer(command, pinned, vars, now)?;
+    // `--author` is the caller's text: checked before any object is written,
+    // as `resolve` checks it.
+    let (name, email) = match author_flag {
+        Some((n, e)) => check_identity(command, n, e)?,
+        None => (kept.name.clone(), kept.email.clone()),
+    };
+    Ok(Idents { author: Signature { name, email, seconds: kept.seconds, offset: kept.offset }, committer })
+}
+
 /// Refuse a name or email that git would strip or that would break a header
 /// line: git removes `<`, `>` and line breaks from an identity, so writing the
 /// text as given would store a different identity from the one asked for.

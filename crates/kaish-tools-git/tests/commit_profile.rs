@@ -207,7 +207,7 @@ fn write_leaves_declare_operations_and_the_root_lists_the_union() {
     let ops = |name: &str| leaf(&schema, name).operations.clone();
     assert_eq!(ops("add"), ["git.index"]);
     assert_eq!(ops("restore"), ["git.index"]);
-    assert_eq!(ops("reset"), ["git.index"]);
+    assert_eq!(ops("reset"), ["git.index", "git.ref", "git.rewrite"]);
     assert_eq!(ops("rm"), ["git.index", "fs.remove"]);
     assert_eq!(ops("mv"), ["git.index", "fs.rename"]);
     assert_eq!(ops("commit"), ["git.index", "git.commit", "git.ref", "git.rewrite"]);
@@ -234,9 +234,23 @@ fn a_subtracted_write_verb_leaves_the_union() {
     root.sort();
     assert_eq!(root, ["git.commit", "git.index", "git.ref", "git.rewrite"]);
     assert!(schema.subcommands.iter().all(|c| c.name != "rm" && c.name != "mv"));
-    // And with commit gone as well, only the index verbs' id is left.
+    // With commit gone as well, reset still moves the branch.
     let schema = kaish_tools_git::tool(
         GitConfig::read_only().with_commit_profile().without_verb(Verb::Rm).without_verb(Verb::Mv).without_verb(Verb::Commit),
+    )
+    .expect("tool")
+    .schema();
+    let mut root = schema.operations.clone();
+    root.sort();
+    assert_eq!(root, ["git.index", "git.ref", "git.rewrite"]);
+    // And with reset gone too, only the index verbs' id is left.
+    let schema = kaish_tools_git::tool(
+        GitConfig::read_only()
+            .with_commit_profile()
+            .without_verb(Verb::Rm)
+            .without_verb(Verb::Mv)
+            .without_verb(Verb::Commit)
+            .without_verb(Verb::Reset),
     )
     .expect("tool")
     .schema();
@@ -249,7 +263,7 @@ fn a_subtracted_write_verb_leaves_the_union() {
 fn the_commit_profile_description_is_not_the_read_only_one() {
     let w = kaish_tools_git::tool(GitConfig::read_only().with_commit_profile()).expect("tool").schema();
     assert!(!w.description.contains("read-only by construction"), "{}", w.description);
-    for must in ["never runs hooks", "user-level git configuration", "add, rm, mv, restore --staged, reset (no revision) and commit", "never rewrites a commit", "git var GIT_AUTHOR_IDENT"] {
+    for must in ["never runs hooks", "user-level git configuration", "add, rm, mv, restore --staged, reset and commit", "rewrite policy", "reset --hard, --merge and --keep are refused", "git var GIT_AUTHOR_IDENT"] {
         assert!(w.description.contains(must), "{must:?} missing: {}", w.description);
     }
     let r = kaish_tools_git::tool(GitConfig::read_only()).expect("tool").schema();

@@ -76,12 +76,18 @@ pub(crate) enum Wrote {
     /// Objects were written before the refusal. No ref, index or `HEAD`
     /// changed, and nothing refers to the objects.
     UnreachableObjects,
+    /// `ORIG_HEAD` (and its reflog, when it has one) was written before the
+    /// refusal. No branch, `HEAD`, index or object changed.
+    OrigHead,
 }
 
 impl Wrote {
     fn sentence(self) -> &'static str {
         match self {
             Wrote::Nothing => "Nothing was changed.",
+            Wrote::OrigHead => {
+                "ORIG_HEAD now names the tip from before this command, and no branch, HEAD or index changed."
+            }
             Wrote::UnreachableObjects => {
                 "Objects this command wrote stay in the object database, and no ref or index changed; nothing refers to those objects, and git gc prunes them."
             }
@@ -127,6 +133,12 @@ impl Refusal {
     /// The same refusal, raised after objects were written.
     pub(crate) fn after_objects(mut self) -> Self {
         self.wrote = Wrote::UnreachableObjects;
+        self
+    }
+
+    /// The same refusal, raised after `ORIG_HEAD` was written.
+    pub(crate) fn after_orig_head(mut self) -> Self {
+        self.wrote = Wrote::OrigHead;
         self
     }
 
@@ -193,5 +205,12 @@ mod tests {
     fn the_flag_override_names_the_flag_and_who_grants_it() {
         let text = Refusal::new(1, "git add x", "x is ignored.", "Run: git add -f x.", Override::Flag("-f")).to_string();
         assert!(text.contains("The flag -f overrides this; you grant it by typing it."), "{text}");
+    }
+
+    #[test]
+    fn a_refusal_after_orig_head_names_it_and_does_not_say_nothing_changed() {
+        let text = Refusal::new(1, "git reset", "HEAD moved.", "Run it again.", Override::Never).after_orig_head().to_string();
+        assert!(!text.contains("Nothing was changed"), "{text}");
+        assert!(text.contains("ORIG_HEAD now names the tip from before this command"), "{text}");
     }
 }

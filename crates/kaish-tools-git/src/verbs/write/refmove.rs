@@ -37,6 +37,35 @@ pub(crate) enum HeadTarget {
     Detached,
 }
 
+/// What a ref move is for, so its errors and refusals name the right
+/// operation. A reset says "reset", not "commit".
+#[derive(Clone, Copy)]
+pub(crate) struct MoveKind {
+    /// The operation name in repository errors.
+    pub(crate) op: &'static str,
+    /// Completes "moved while ...": "this commit was being made".
+    pub(crate) during: &'static str,
+    /// The next step after a lost race.
+    pub(crate) again: &'static str,
+    /// Says the move happened, for a failure after the branch moved.
+    pub(crate) done: &'static str,
+}
+
+impl MoveKind {
+    pub(crate) const COMMIT: MoveKind = MoveKind {
+        op: "commit",
+        during: "this commit was being made",
+        again: "make the commit again",
+        done: "the commit was made",
+    };
+    pub(crate) const RESET: MoveKind = MoveKind {
+        op: "reset",
+        during: "this reset was running",
+        again: "run the reset again",
+        done: "the reset was made",
+    };
+}
+
 /// Read what HEAD points at, from the store that will write.
 pub(crate) fn head_target(repo: &WriteRepo, op: &'static str) -> Result<HeadTarget, GitError> {
     let head = repo
@@ -60,15 +89,14 @@ pub(crate) fn move_head(
     message: &str,
     committer: &Signature,
 ) -> Result<(), GitError> {
-    let message = copy_message(message);
-    precheck(repo, command, target)?;
-    apply_move(repo, command, target, old, new, &message, committer)
+    move_head_as(repo, MoveKind::COMMIT, command, target, old, new, message, committer)
 }
 
-/// The move itself, after [`precheck`]. Separate so a test can reach the
-/// transaction with a lock file the precheck would have refused.
-fn apply_move(
+/// [`move_head`] for an operation other than a commit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn move_head_as(
     repo: &WriteRepo,
+    kind: MoveKind,
     command: &str,
     target: &HeadTarget,
     old: Option<ObjectId>,
@@ -76,7 +104,25 @@ fn apply_move(
     message: &str,
     committer: &Signature,
 ) -> Result<(), GitError> {
-    const OP: &str = "commit";
+    let message = copy_message(message);
+    precheck(repo, command, target)?;
+    apply_move(repo, kind, command, target, old, new, &message, committer)
+}
+
+/// The move itself, after [`precheck`]. Separate so a test can reach the
+/// transaction with a lock file the precheck would have refused.
+#[allow(clippy::too_many_arguments)]
+fn apply_move(
+    repo: &WriteRepo,
+    kind: MoveKind,
+    command: &str,
+    target: &HeadTarget,
+    old: Option<ObjectId>,
+    new: ObjectId,
+    message: &str,
+    committer: &Signature,
+) -> Result<(), GitError> {
+    let op = kind.op;
     let refname = match target {
         HeadTarget::Branch(full) => full.as_str(),
         HeadTarget::Detached => "HEAD",
@@ -91,9 +137,9 @@ fn apply_move(
                 let found = repo
                     .refs()
                     .try_find(full.as_str())
-                    .map_err(|e| GitError::repository(OP, format!("reading ref '{full}'"), repo.common_dir(), e))?;
+                    .map_err(|e| GitError::repository(op, format!("reading ref '{full}'"), repo.common_dir(), e))?;
                 if let Some(existing) = found {
-                    return cas_failure(command, refname, None, Some(&existing.target));
+                    return cas_failure(kind, command, refname, None, Some(&existing.target));
                 }
             }
             PreviousValue::MustNotExist
@@ -107,7 +153,7 @@ fn apply_move(
             new: Target::Object(new),
         },
         name: refname.try_into().map_err(|e| {
-            GitError::repository(OP, format!("naming '{refname}'"), repo.git_dir(), std::io::Error::other(format!("{e}")))
+            GitError::repository(op, format!("naming '{refname}'"), repo.git_dir(), std::io::Error::other(format!("{e}")))
         })?,
         deref: false,
     };
@@ -121,26 +167,27 @@ fn apply_move(
     // For a branch, hold HEAD.lock across the move. Dropped without a commit,
     // the Marker removes the lock and leaves HEAD as it was.
     let head_lock = match target {
-        HeadTarget::Branch(full) => Some(hold_head(repo, command, full)?),
+        HeadTarget::Branch(full) => Some(hold_head(repo, kind, command, full)?),
         HeadTarget::Detached => None,
     };
     let prepared = repo
         .refs()
         .transaction()
         .prepare([edit], gix_lock::acquire::Fail::Immediately, gix_lock::acquire::Fail::Immediately)
-        .map_err(|e| prepare_error(command, refname, old, repo, e))?;
+        .map_err(|e| prepare_error(kind, command, refname, old, repo, e))?;
     prepared
         .commit(Some(sig))
-        .map_err(|e| GitError::repository(OP, format!("moving '{refname}'"), repo.common_dir(), e))?;
+        .map_err(|e| GitError::repository(op, format!("moving '{refname}'"), repo.common_dir(), e))?;
     if head_lock.is_some() {
         // The branch has already moved. The error must say so, or an agent
         // reads a failure and makes the same commit a second time.
-        append_head_reflog(repo, old, new, &sig, message).map_err(|e| match e {
+        append_head_reflog(repo, kind, old, new, &sig, message).map_err(|e| match e {
             GitError::Repository { operation, what, path, source } => GitError::Repository {
                 operation,
                 what: format!(
-                    "the commit was made and '{refname}' now points at {new}, so do not run the command again; \
-                     only {what} failed (logs/HEAD lacks this entry)"
+                    "{} and '{refname}' now points at {new}, so do not run the command again; \
+                     only {what} failed (logs/HEAD lacks this entry)",
+                    kind.done
                 ),
                 path,
                 source,
@@ -153,16 +200,16 @@ fn apply_move(
 }
 
 /// Take `HEAD.lock` and confirm `HEAD` still names `full`.
-fn hold_head(repo: &WriteRepo, command: &str, full: &str) -> Result<gix_lock::Marker, GitError> {
+fn hold_head(repo: &WriteRepo, kind: MoveKind, command: &str, full: &str) -> Result<gix_lock::Marker, GitError> {
     use crate::verbs::write::containment::Leaf;
     let head = repo.check(std::path::Path::new("HEAD"), Leaf::File)?;
     let _ = repo.check(std::path::Path::new("HEAD.lock"), Leaf::File)?;
     let marker = gix_lock::Marker::acquire_to_hold_resource(&head, gix_lock::acquire::Fail::Immediately, None)
-        .map_err(|e| lock_error(command, "HEAD.lock", full, repo, e))?;
+        .map_err(|e| lock_error(kind, command, "HEAD.lock", full, repo, e))?;
     let now = repo
         .refs()
         .find("HEAD")
-        .map_err(|e| GitError::repository("commit", "reading HEAD", repo.git_dir(), e))?;
+        .map_err(|e| GitError::repository(kind.op, "reading HEAD", repo.git_dir(), e))?;
     match &now.target {
         Target::Symbolic(name) if name.as_bstr() == full => Ok(marker),
         other => {
@@ -173,8 +220,8 @@ fn hold_head(repo: &WriteRepo, command: &str, full: &str) -> Result<gix_lock::Ma
             refuse(
                 1,
                 command,
-                format!("HEAD moved while this commit was being made: it named '{full}' when the commit started and is now {now}."),
-                "Run git status to see where HEAD is now, then make the commit again.",
+                format!("HEAD moved while {}: it named '{full}' when it started and is now {now}.", kind.during),
+                format!("Run git status to see where HEAD is now, then {}.", kind.again),
                 Override::Never,
             )
         }
@@ -186,6 +233,7 @@ fn hold_head(repo: &WriteRepo, command: &str, full: &str) -> Result<gix_lock::Ma
 /// unborn branch (the same line gix-ref writes to the branch's own log).
 fn append_head_reflog(
     repo: &WriteRepo,
+    kind: MoveKind,
     old: Option<ObjectId>,
     new: ObjectId,
     committer: &gix_actor::SignatureRef<'_>,
@@ -198,13 +246,13 @@ fn append_head_reflog(
     committer
         .trim()
         .write_to(&mut line)
-        .map_err(|e| GitError::repository("commit", "writing the HEAD reflog line", repo.git_dir(), e))?;
+        .map_err(|e| GitError::repository(kind.op, "writing the HEAD reflog line", repo.git_dir(), e))?;
     line.push(b'\t');
     line.extend_from_slice(message.as_bytes());
     line.push(b'\n');
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| GitError::repository("commit", "creating logs/", repo.git_dir(), e))?;
+            .map_err(|e| GitError::repository(kind.op, "creating logs/", repo.git_dir(), e))?;
     }
     // One write call on an O_APPEND handle, so a concurrent appender's line
     // cannot land inside ours.
@@ -213,7 +261,7 @@ fn append_head_reflog(
         .create(true)
         .open(&path)
         .and_then(|mut f| f.write_all(&line))
-        .map_err(|e| GitError::repository("commit", "appending to logs/HEAD", repo.git_dir(), e))
+        .map_err(|e| GitError::repository(kind.op, "appending to logs/HEAD", repo.git_dir(), e))
 }
 
 /// Everything that can refuse a ref move before anything is written: the
@@ -282,15 +330,16 @@ fn lock_refusal(command: &str, shown: &str, refname: &str) -> GitError {
 
 /// Map a failed lock acquire: a lock that exists is the exit-4 refusal naming
 /// `shown`; anything else is a repository error.
-fn lock_error(command: &str, shown: &str, refname: &str, repo: &WriteRepo, source: gix_lock::acquire::Error) -> GitError {
+fn lock_error(kind: MoveKind, command: &str, shown: &str, refname: &str, repo: &WriteRepo, source: gix_lock::acquire::Error) -> GitError {
     if matches!(source, gix_lock::acquire::Error::PermanentlyLocked { .. }) {
         lock_refusal(command, shown, refname)
     } else {
-        GitError::repository("commit", format!("locking '{shown}'"), repo.common_dir(), source)
+        GitError::repository(kind.op, format!("locking '{shown}'"), repo.common_dir(), source)
     }
 }
 
 fn prepare_error(
+    kind: MoveKind,
     command: &str,
     refname: &str,
     old: Option<ObjectId>,
@@ -299,12 +348,12 @@ fn prepare_error(
 ) -> GitError {
     use gix_ref::file::transaction::prepare::Error as E;
     match e {
-        E::ReferenceOutOfDate { actual, .. } => cas_failure(command, refname, old, Some(&actual)).unwrap_err(),
-        E::MustNotExist { actual, .. } => cas_failure(command, refname, None, Some(&actual)).unwrap_err(),
-        E::MustExist { .. } => cas_failure(command, refname, old, None).unwrap_err(),
-        E::LockAcquire { source, .. } => lock_error(command, &format!("{refname}.lock"), refname, repo, source),
-        E::PackedTransactionAcquire(source) => lock_error(command, "packed-refs.lock", refname, repo, source),
-        other => GitError::repository("commit", format!("moving '{refname}'"), repo.common_dir(), other),
+        E::ReferenceOutOfDate { actual, .. } => cas_failure(kind, command, refname, old, Some(&actual)).unwrap_err(),
+        E::MustNotExist { actual, .. } => cas_failure(kind, command, refname, None, Some(&actual)).unwrap_err(),
+        E::MustExist { .. } => cas_failure(kind, command, refname, old, None).unwrap_err(),
+        E::LockAcquire { source, .. } => lock_error(kind, command, &format!("{refname}.lock"), refname, repo, source),
+        E::PackedTransactionAcquire(source) => lock_error(kind, command, "packed-refs.lock", refname, repo, source),
+        other => GitError::repository(kind.op, format!("moving '{refname}'"), repo.common_dir(), other),
     }
 }
 
@@ -318,6 +367,7 @@ fn target_text(t: Option<&Target>) -> String {
 
 /// The refusal for a ref that was not what this commit was built on.
 fn cas_failure(
+    kind: MoveKind,
     command: &str,
     refname: &str,
     expected: Option<ObjectId>,
@@ -328,10 +378,11 @@ fn cas_failure(
         1,
         command,
         format!(
-            "'{refname}' moved while this commit was being made: it was {expected} when the commit started and is now {}.",
+            "'{refname}' moved while {}: it was {expected} when it started and is now {}.",
+            kind.during,
             target_text(actual)
         ),
-        "Run git status to see where the branch is now, then make the commit again.",
+        format!("Run git status to see where the branch is now, then {}.", kind.again),
         Override::Never,
     )
 }
@@ -362,7 +413,7 @@ mod tests {
             let read = crate::repo::ReadRepo::discover("commit", &at, &ceiling).expect("discover");
             let repo = WriteRepo::open(read, crate::verbs::write::repo::WriteToken::test()).expect("open");
             let target = HeadTarget::Branch("refs/heads/main".to_string());
-            let _ = tx.send(apply_move(&repo, "git commit", &target, Some(old), new, "commit: t", &committer()));
+            let _ = tx.send(apply_move(&repo, MoveKind::COMMIT, "git commit", &target, Some(old), new, "commit: t", &committer()));
         });
         rx.recv_timeout(Duration::from_secs(10))
             .expect("the transaction did not return within 10s: gix-ref spins on a branch lock under a symbolic HEAD (W13)")
@@ -432,10 +483,36 @@ mod tests {
     fn a_head_that_names_another_branch_refuses_and_releases_its_lock() {
         let fx = Fixture::new();
         let repo = fx.write_repo(false);
-        let err = hold_head(&repo, "git commit", "refs/heads/side").map(|_| ()).expect_err("HEAD names main, not side");
+        let err = hold_head(&repo, MoveKind::COMMIT, "git commit", "refs/heads/side").map(|_| ()).expect_err("HEAD names main, not side");
         assert_eq!(err.exit_code(), 1, "{err}");
         assert!(err.to_string().contains("refs/heads/main"), "{err}");
         assert!(!fx.common().join("HEAD.lock").exists(), "the lock is released on the refusal path");
         assert_eq!(std::fs::read_to_string(fx.common().join("HEAD")).expect("HEAD"), "ref: refs/heads/main\n");
+    }
+
+    /// A reset that loses the race says "reset", not "commit": the wording
+    /// names the operation that ran, and leaves out the commit object a
+    /// reset never writes.
+    #[test]
+    fn a_lost_race_in_a_reset_is_worded_for_a_reset() {
+        let fx = Fixture::new();
+        let stale = ObjectId::from_hex(b"1111111111111111111111111111111111111111").expect("oid");
+        let new = ObjectId::from_hex(git_stdout(&fx.repo, &["rev-parse", "HEAD"]).as_bytes()).expect("oid");
+        let repo = fx.write_repo(false);
+        let target = HeadTarget::Branch("refs/heads/main".to_string());
+        let err = apply_move(&repo, MoveKind::RESET, "git reset --soft x", &target, Some(stale), new, "reset: moving to x", &committer())
+            .expect_err("the branch is not at the stale oid");
+        let text = err.to_string();
+        assert_eq!(err.exit_code(), 1, "{text}");
+        assert!(text.contains("moved while this reset was running"), "{text}");
+        assert!(text.contains("run the reset again"), "{text}");
+        assert!(!text.to_lowercase().contains("commit object"), "{text}");
+        assert!(!text.contains("make the commit again"), "{text}");
+
+        let err = hold_head(&repo, MoveKind::RESET, "git reset --soft x", "refs/heads/side").map(|_| ()).expect_err("HEAD names main");
+        let text = err.to_string();
+        assert!(text.contains("HEAD moved while this reset was running"), "{text}");
+        assert!(text.contains("run the reset again"), "{text}");
+        assert!(!text.contains("commit object"), "{text}");
     }
 }

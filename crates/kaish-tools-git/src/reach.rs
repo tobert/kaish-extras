@@ -41,6 +41,7 @@ pub(crate) const MAX_ANCESTRY_COMMITS: u64 = 100_000;
 pub(crate) struct Budget {
     operation: &'static str,
     examined: u64,
+    limit: u64,
 }
 
 impl Budget {
@@ -49,7 +50,15 @@ impl Budget {
         Budget {
             operation,
             examined: 0,
+            limit: MAX_ANCESTRY_COMMITS,
         }
+    }
+
+    /// A budget with a smaller limit, so a test can reach exhaustion without
+    /// building a repository of 100,000 commits.
+    #[cfg(all(test, feature = "commit"))]
+    pub(crate) fn with_limit(operation: &'static str, limit: u64) -> Self {
+        Budget { operation, examined: 0, limit }
     }
 
     /// How many commits have been read so far.
@@ -58,7 +67,7 @@ impl Budget {
     }
 
     /// A commit's parent oids, charged against the budget.
-    fn parents(&mut self, repo: &ReadRepo, oid: ObjectId) -> Result<Vec<ObjectId>, GitError> {
+    pub(crate) fn parents(&mut self, repo: &ReadRepo, oid: ObjectId) -> Result<Vec<ObjectId>, GitError> {
         self.charge()?;
         let mut buf = Vec::new();
         let commit = repo.objects().find_commit(&oid, &mut buf).map_err(|e| {
@@ -67,12 +76,29 @@ impl Budget {
         Ok(commit.parents().collect())
     }
 
+    /// A commit's parent oids and committer time (seconds, clamped to `u32`),
+    /// charged against the budget. The time is for ordering a walk only.
+    #[cfg(feature = "commit")]
+    pub(crate) fn info(&mut self, repo: &ReadRepo, oid: ObjectId) -> Result<(Vec<ObjectId>, u32), GitError> {
+        self.charge()?;
+        let mut buf = Vec::new();
+        let commit = repo.objects().find_commit(&oid, &mut buf).map_err(|e| {
+            GitError::repository(self.operation, "reading a commit", repo.git_dir(), e)
+        })?;
+        let when = commit
+            .committer()
+            .ok()
+            .and_then(|c| c.time().ok())
+            .map_or(0, |t| t.seconds.clamp(0, i64::from(u32::MAX) - 1) as u32);
+        Ok((commit.parents().collect(), when))
+    }
+
     fn charge(&mut self) -> Result<(), GitError> {
         self.examined += 1;
-        if self.examined > MAX_ANCESTRY_COMMITS {
+        if self.examined > self.limit {
             return Err(GitError::AncestryBudgetExhausted {
                 operation: self.operation,
-                limit: MAX_ANCESTRY_COMMITS,
+                limit: self.limit,
             });
         }
         Ok(())
