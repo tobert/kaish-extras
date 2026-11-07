@@ -573,7 +573,9 @@ impl GitTool {
             let path = match (&path_arg, rev.contains(':')) {
                 (None, true) => String::new(),
                 (arg, _) => PathBase::new(&resolved, &repo)
-                    .repo_path(OP, arg.as_deref().unwrap_or(""))?,
+                    .repo_path(OP, arg.as_deref().unwrap_or(""))?
+                    .trim_end_matches('/')
+                    .to_string(),
             };
             let opts = verbs::ls::LsOptions {
                 rev,
@@ -1531,7 +1533,8 @@ impl GitTool {
         let command = command_text(OP, argv);
         let ops = operands(&parsed.operands, argv).all();
         self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, base| {
-            let paths = base.repo_paths(OP, &ops)?;
+            // `mv` and `ls` take paths, not pathspecs: a trailing `/` stays off.
+            let paths: Vec<String> = base.repo_paths(OP, &ops)?.into_iter().map(|p| p.trim_end_matches('/').to_string()).collect();
             verbs::write::mv::run(
                 repo,
                 &verbs::write::mv::MvOptions { paths, force: parsed.force, command },
@@ -2212,7 +2215,13 @@ impl PathBase {
                 other => segments.push(other.to_string()),
             }
         }
-        Ok(segments.join("/"))
+        let mut path = segments.join("/");
+        // A trailing `/` names a directory in a pathspec (`d/` does not match
+        // a file `d`), and the rest of this function would drop it.
+        if spec.ends_with('/') && !path.is_empty() {
+            path.push('/');
+        }
+        Ok(path)
     }
 }
 

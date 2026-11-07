@@ -1813,13 +1813,6 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   in name order that reaches it. `reset <rev>` accepts the read side's
   revision grammar: `HEAD~N`, `^`, branches, tags, oids; `@{...}`, `^{tree}`
   and `A..B` are refused by the revision parser.
-- **W33 — a trailing `/` in a pathspec still matches a file.** `PathFilter`
-  (`pathfilter.rs`, `parse`) strips a trailing `/` before it builds a
-  `Spec::Literal`, so the spec `d/` matches a file named `d`. Git 2.56.0 matches
-  only a directory: with `d` a tracked file, `git ls-files -- d/` prints
-  nothing and `git ls-files -- d` prints `d`. It affects every verb that takes
-  a pathspec, and it predates the commit profile. The fix is to keep the
-  trailing `/` in the spec and match directories only.
 - **W34 — the hook provider is not called for `branch`, `tag`, `switch -c`,
   `checkout -b` or `reset`.** `GitHooks` has `pre_commit`, `commit_msg` and
   `post_commit` and nothing for a ref update. Without a provider these verbs

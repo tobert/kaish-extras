@@ -23,6 +23,10 @@ pub(crate) struct SpecSet {
 
 struct Item {
     text: String,
+    /// `text` without its trailing `/`, the path the spec names.
+    plain: String,
+    /// The spec ended in `/`: it names a directory, never a file.
+    dir_only: bool,
     filter: PathFilter,
     glob: bool,
     matched: bool,
@@ -37,8 +41,11 @@ impl SpecSet {
     pub(crate) fn new(op: &'static str, specs: &[String]) -> Result<Self, GitError> {
         let mut items = Vec::new();
         for s in specs {
+            let plain = s.trim_end_matches('/');
             items.push(Item {
                 text: s.clone(),
+                plain: plain.to_string(),
+                dir_only: plain.len() != s.len(),
                 filter: PathFilter::parse(op, std::slice::from_ref(s))?,
                 glob: is_glob(s),
                 matched: false,
@@ -82,9 +89,10 @@ impl SpecSet {
         !hits.is_empty()
     }
 
-    /// Whether a spec names `path` exactly (not a glob, not a parent).
-    pub(crate) fn names_exactly(&self, path: &[u8]) -> bool {
-        self.items.iter().any(|i| !i.glob && i.text.as_bytes() == path)
+    /// Whether a spec names `path` exactly (not a glob, not a parent). A spec
+    /// with a trailing `/` names a directory, so it never names a file.
+    pub(crate) fn names_exactly(&self, path: &[u8], is_dir: bool) -> bool {
+        self.items.iter().any(|i| !i.glob && i.plain.as_bytes() == path && (is_dir || !i.dir_only))
     }
 
     /// Whether a directory could hold a match: a spec is the directory, above
@@ -93,25 +101,26 @@ impl SpecSet {
         let below = |outer: &[u8], inner: &[u8]| inner.len() > outer.len() && inner.starts_with(outer) && inner[outer.len()] == b'/';
         self.items.is_empty()
             || self.items.iter().any(|i| {
-                let text = i.text.as_bytes();
+                let text = i.plain.as_bytes();
                 i.glob || text.is_empty() || text == dir || dir.is_empty() || below(dir, text) || below(text, dir)
             })
     }
 
-    pub(crate) fn literals(&self) -> Vec<String> {
-        self.items.iter().filter(|i| !i.glob && !i.text.is_empty()).map(|i| i.text.clone()).collect()
+    /// The path each literal spec names, and whether it ended in `/`.
+    pub(crate) fn literals(&self) -> Vec<(String, bool)> {
+        self.items.iter().filter(|i| !i.glob && !i.plain.is_empty()).map(|i| (i.plain.clone(), i.dir_only)).collect()
     }
 
-    pub(crate) fn mark_literal(&mut self, path: &[u8]) {
+    pub(crate) fn mark_literal(&mut self, path: &[u8], is_dir: bool) {
         for i in &mut self.items {
-            if !i.glob && i.text.as_bytes() == path {
+            if !i.glob && i.plain.as_bytes() == path && (is_dir || !i.dir_only) {
                 i.matched = true;
             }
         }
     }
 
-    pub(crate) fn is_marked(&self, text: &str) -> bool {
-        self.items.iter().any(|i| i.text == text && i.matched)
+    pub(crate) fn is_marked(&self, plain: &str, dir_only: bool) -> bool {
+        self.items.iter().any(|i| i.plain == plain && i.dir_only == dir_only && i.matched)
     }
 
     /// The specs that matched nothing.

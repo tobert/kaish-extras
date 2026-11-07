@@ -544,6 +544,58 @@ async fn rm_of_an_untracked_path_is_a_pathspec_error() {
     assert!(r.err.contains("'u.txt' did not match"), "{}", r.err);
 }
 
+/// `git reset -- <pathspec>` exits 0 and changes nothing when the pathspec
+/// matches no entry; this shell refuses (exit 1). Found while measuring W33.
+#[ignore = "BUG: reset -- <unmatched pathspec> refuses here; git exits 0 and unstages nothing"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_with_an_unmatched_pathspec_is_not_an_error_in_git() {
+    let (r, t, p) = both(&staged_edits, &["reset", "--", "nomatch"], "reset -- nomatch").await;
+    assert_eq!(t.0, 0, "git: {}", t.2);
+    assert_eq!(r.code, 0, "{}", r.err);
+    p.assert_same("reset -- nomatch");
+}
+
+/// W33: a trailing `/` in a pathspec names a directory only. `a.txt/` is
+/// refused where `a.txt` is a file; `d/` and `d//` reach into the directory.
+/// The row for a file spelled with a slash is held to git's exit status
+/// (nonzero) and an unchanged index; the directory rows to git's result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trailing_slash_in_a_pathspec_matches_a_directory_only_in_the_index_verbs() {
+    let setup = |d: &Path| {
+        staged_edits(d);
+        support::write_file(d, "d/e/f.txt", "foxtrot two\n");
+        support::git(d, &["add", "d/e/f.txt"]);
+        support::write_file(d, "d/c.txt", "charlie three\n");
+    };
+    // Refused by both: the file is not a directory.
+    for (label, args) in [
+        ("add file/", vec!["add", "a.txt/"]),
+        ("rm file/", vec!["rm", "b.txt/"]),
+        ("rm --cached file/", vec!["rm", "--cached", "b.txt/"]),
+        ("restore --staged file/", vec!["restore", "--staged", "a.txt/"]),
+    ] {
+        let (r, t, p) = both(&setup, &args, label).await;
+        assert_ne!(t.0, 0, "[{label}] git must refuse (negative control): {}", t.2);
+        assert_ne!(r.code, 0, "[{label}] we must refuse like git");
+        p.assert_same(label);
+    }
+    // Accepted by both, with the same result.
+    for (label, args) in [
+        ("add dir/", vec!["add", "d/"]),
+        ("add dir//", vec!["add", "d//"]),
+        ("add -u dir/", vec!["add", "-u", "d/"]),
+        ("rm -r dir/", vec!["rm", "-r", "-f", "d/e/"]),
+        ("rm -r --cached dir/", vec!["rm", "-r", "-f", "--cached", "d/"]),
+        ("restore --staged dir/", vec!["restore", "--staged", "d/"]),
+        ("reset -- dir/", vec!["reset", "--", "d/"]),
+    ] {
+        let (r, t, p) = both(&setup, &args, label).await;
+        assert_eq!(t.0, 0, "[{label}] git: {}", t.2);
+        assert_eq!(r.code, 0, "[{label}] {}", r.err);
+        p.assert_same(label);
+    }
+}
+
 // ── mv ──────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

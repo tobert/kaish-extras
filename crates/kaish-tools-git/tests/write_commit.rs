@@ -503,6 +503,25 @@ async fn only_commits_the_named_paths_and_leaves_other_staged_changes_like_git()
     }
 }
 
+/// W33: `a/` names a directory, so `commit a/` is refused where `a` is a file
+/// (git: "did not match any file(s) known to git"), and `d/` commits the
+/// directory like `d`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trailing_slash_commits_a_directory_and_refuses_a_file() {
+    let p = Pair::new(&only_setup);
+    let before = support::Fingerprint::take(&p.ours.join(".git"));
+    let r = p.ours("", &["commit", "a/", "-m", "x"]).await;
+    assert_ne!(r.code, 0, "{}", r.err);
+    assert!(support::Fingerprint::take(&p.ours.join(".git")).differences_from(&before).is_empty());
+    assert_ne!(p.twin(&["commit", "-q", "a/", "-m", "x"]).0, 0, "git refuses it too");
+
+    let p = Pair::new(&only_setup);
+    let r = p.ours("", &["commit", "d/", "-m", "dir"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(p.twin(&["commit", "-q", "d/", "-m", "dir"]).0, 0);
+    p.assert_same("commit d/");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn only_refuses_a_path_git_does_not_know_and_commits_nothing() {
     let p = Pair::new(&only_setup);
