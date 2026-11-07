@@ -76,6 +76,23 @@ impl Budget {
         Ok(commit.parents().collect())
     }
 
+    /// A commit's parent oids and committer time (seconds, clamped to `u32`),
+    /// charged against the budget. The time is for ordering a walk only.
+    #[cfg(feature = "commit")]
+    pub(crate) fn info(&mut self, repo: &ReadRepo, oid: ObjectId) -> Result<(Vec<ObjectId>, u32), GitError> {
+        self.charge()?;
+        let mut buf = Vec::new();
+        let commit = repo.objects().find_commit(&oid, &mut buf).map_err(|e| {
+            GitError::repository(self.operation, "reading a commit", repo.git_dir(), e)
+        })?;
+        let when = commit
+            .committer()
+            .ok()
+            .and_then(|c| c.time().ok())
+            .map_or(0, |t| t.seconds.clamp(0, i64::from(u32::MAX) - 1) as u32);
+        Ok((commit.parents().collect(), when))
+    }
+
     fn charge(&mut self) -> Result<(), GitError> {
         self.examined += 1;
         if self.examined > self.limit {

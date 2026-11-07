@@ -1741,9 +1741,21 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   checked against the graph (a parent with an equal or higher generation, or a
   commit that gains a side after it was expanded, restarts the walk without the
   graph), but a graph that is consistently wrong is trusted: the file is part
-  of the repository. Only a single `commit-graph` file is exercised by tests;
-  a split chain is read through the same call. A symlink at `objects/info`,
-  `commit-graph` or `commit-graphs` makes the file ignored, not followed.
+  of the repository. Both a single `commit-graph` and a split chain
+  (`commit-graphs/commit-graph-chain`, as `git gc` and fetch write) are read
+  and tested, two layers included. A symlink at `objects/info`, `commit-graph`
+  or anything in `commit-graphs/` makes the graph ignored, not followed.
+  Without a graph the heap is ordered by committer time as a priority only (no
+  stop rule reads it), and an amend of a commit a remote ref names stops after
+  two reads. Measured on an 11,171-commit clone with no graph (commits
+  examined, before and after): amend with `origin/main` = HEAD 11,171 -> 2;
+  amend with `origin/main` = HEAD~1 2 -> 2; `reset --soft HEAD~3` with
+  `origin/main` = HEAD~1 11,171 -> 11,171; amend plus a remote on an unrelated
+  3,000-commit line 14,171 -> 14,171. The last two stay whole-history walks:
+  proving that no pending commit reaches a dropped one needs generation
+  numbers or exhaustion, and `git commit-graph write --reachable` makes them
+  short. `cargo test -p kaish-tools-git --features commit --lib measure --
+  --ignored --nocapture` with `KAISH_MEASURE_REPO` set repeats it.
   Remote-tracking refs are the last fetch: a commit pushed from another clone
   since looks unpublished. Under `Unpublished`, a shallow repository refuses
   (exit 4) even when no remote ref exists, and with no remote-tracking refs at

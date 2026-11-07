@@ -47,6 +47,19 @@
 //!   can only paint its ancestors, which have lower generations, so none can
 //!   reach a commit at or above that line.
 //!
+//! * *E1, the old tip is itself dropped and published.* If O carries `R`
+//!   and not `N`, and every seed of the new side carries `O`, the verdict is
+//!   "published, O" at once. A seed carrying `O` is an ancestor of O (or O
+//!   itself, which the caller excludes). `N` reaches O only through some seed
+//!   s, which would make O an ancestor of s; with s an ancestor of O that is a
+//!   cycle, and a commit graph has none. So O never gains `N`, and O is dropped
+//!   and reachable from a remote tip. An amended root commit has no seeds and
+//!   passes vacuously. This is what makes "amend HEAD when `origin/main` is
+//!   HEAD" cost two reads instead of the whole history.
+//!
+//! Without a graph the heap is ordered by committer time, newest first, as a
+//! priority only (see `Painter::key_of`): the stop rules above never read it.
+//!
 //! Commits the graph lacks have no generation and sort above every commit
 //! that has one, which is sound because a commit in the graph never has a
 //! parent outside it. The ordering assumption is **checked as the walk runs**:
@@ -65,6 +78,8 @@
 //! W24).
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
+
+use std::path::Path;
 
 use gix_index::hash::ObjectId;
 
@@ -107,7 +122,7 @@ pub(crate) fn check_move(
     old: Option<ObjectId>,
     new: &NewTip,
 ) -> Result<(), GitError> {
-    check_move_with(repo, chk, old, new, Budget::new(OP))
+    check_move_with(repo, chk, old, new, &mut Budget::new(OP))
 }
 
 fn check_move_with(
@@ -115,7 +130,7 @@ fn check_move_with(
     chk: &MoveCheck<'_>,
     old: Option<ObjectId>,
     new: &NewTip,
-    mut budget: Budget,
+    budget: &mut Budget,
 ) -> Result<(), GitError> {
     // Nothing to drop on an unborn branch.
     let Some(old) = old else { return Ok(()) };
@@ -135,7 +150,7 @@ fn check_move_with(
             // A shallow repository cannot show that old is an ancestor.
             refuse_shallow(repo, chk)?;
             let graph = Graph::load(repo);
-            if budget_ok(reaches(repo, graph.as_ref(), &mut budget, &seeds, old), chk)? {
+            if budget_ok(reaches(repo, graph.as_ref(), budget, &seeds, old), chk)? {
                 return Ok(());
             }
         }
@@ -149,7 +164,7 @@ fn check_move_with(
         return Ok(());
     }
     let graph = Graph::load(repo);
-    let verdict = match paint(repo, graph.as_ref(), &mut budget, old, &seeds, &tips) {
+    let verdict = match paint(repo, graph.as_ref(), budget, old, &seeds, &tips) {
         Err(Trouble::Graph) => {
             // The graph disagrees with itself. Start over without it, on a
             // fresh meter: the first attempt's reads were wasted, not owed.
@@ -244,23 +259,33 @@ fn budget_refusal(e: GitError, chk: &MoveCheck<'_>) -> GitError {
 
 // ── the commit-graph ────────────────────────────────────────────────────────
 
-/// The generation numbers of `objects/info/commit-graph`, when it exists and
-/// no link stands on the way to it.
+/// The generation numbers of `objects/info/commit-graph` or of the layers of
+/// `objects/info/commit-graphs/`, when they exist and no link stands on the
+/// way to them.
 struct Graph(gix_commitgraph::Graph);
 
 impl Graph {
     fn load(repo: &WriteRepo) -> Option<Graph> {
         let info = repo.common_dir().join("objects").join("info");
+        let chain_dir = info.join("commit-graphs");
         // A link in this path could aim the mapping outside the mount. Not
         // reading the file only costs speed: the walk is exact without it.
-        for p in [info.clone(), info.join("commit-graph"), info.join("commit-graphs")] {
-            match std::fs::symlink_metadata(&p) {
-                Ok(m) if m.file_type().is_symlink() => return None,
-                _ => {}
+        let is_link = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink());
+        for p in [info.clone(), info.join("commit-graph"), chain_dir.clone()] {
+            if is_link(&p) {
+                return None;
             }
         }
-        let has = |name: &str| info.join(name).exists();
-        if !has("commit-graph") && !has("commit-graphs") {
+        // A split graph is a directory of layers named by `commit-graph-chain`.
+        // Every file in it is checked, listed or not.
+        if let Ok(entries) = std::fs::read_dir(&chain_dir) {
+            for e in entries {
+                if e.map_or(true, |e| is_link(&e.path())) {
+                    return None;
+                }
+            }
+        }
+        if !info.join("commit-graph").exists() && !chain_dir.join("commit-graph-chain").exists() {
             return None;
         }
         // An unreadable graph is a missing one, for the same reason.
@@ -374,7 +399,11 @@ struct Painter<'a> {
     graph: Option<&'a Graph>,
     budget: &'a mut Budget,
     flags: HashMap<ObjectId, u8>,
-    parents: HashMap<ObjectId, Vec<ObjectId>>,
+    /// Parents and committer time of every commit read.
+    parents: HashMap<ObjectId, (Vec<ObjectId>, u32)>,
+    /// The seeds of the new-tip side.
+    new_seeds: Vec<ObjectId>,
+    old: ObjectId,
     /// The flags a commit had when it was last expanded.
     expanded: HashMap<ObjectId, u8>,
     heap: BinaryHeap<(u32, ObjectId)>,
@@ -401,6 +430,8 @@ fn paint(
         budget,
         flags: HashMap::new(),
         parents: HashMap::new(),
+        new_seeds: new_seeds.to_vec(),
+        old,
         expanded: HashMap::new(),
         heap: BinaryHeap::new(),
         pending: HashSet::new(),
@@ -430,7 +461,7 @@ impl Painter<'_> {
         if new == old {
             return Ok(());
         }
-        let k = key(self.graph, &oid);
+        let k = self.key_of(oid)?;
         if self.graph.is_some() && k != u32::MAX && self.expanded.contains_key(&oid) {
             // A commit in generation order is final when popped.
             return Err(Trouble::Graph);
@@ -465,13 +496,34 @@ impl Painter<'_> {
         hit.first().copied()
     }
 
-    fn parents_of(&mut self, oid: ObjectId) -> Result<Vec<ObjectId>, GitError> {
-        if let Some(p) = self.parents.get(&oid) {
-            return Ok(p.clone());
+    fn info_of(&mut self, oid: ObjectId) -> Result<&(Vec<ObjectId>, u32), GitError> {
+        if !self.parents.contains_key(&oid) {
+            let i = self.budget.info(self.repo.read(), oid)?;
+            self.parents.insert(oid, i);
         }
-        let p = self.budget.parents(self.repo.read(), oid)?;
-        self.parents.insert(oid, p.clone());
-        Ok(p)
+        Ok(&self.parents[&oid])
+    }
+
+    fn parents_of(&mut self, oid: ObjectId) -> Result<Vec<ObjectId>, GitError> {
+        Ok(self.info_of(oid)?.0.clone())
+    }
+
+    /// The heap key. With a graph it is the generation, which the stop rules
+    /// rely on. Without one it is the committer time, newest first: a
+    /// **priority only**, so that the walk looks at the likely-recent commits
+    /// first. No stop rule reads it, and a commit whose flags widen is queued
+    /// again, so a wrong order (clock skew) costs reads and never the verdict.
+    fn key_of(&mut self, oid: ObjectId) -> Result<u32, GitError> {
+        if self.graph.is_some() {
+            return Ok(key(self.graph, &oid));
+        }
+        Ok(self.info_of(oid)?.1)
+    }
+
+    /// The early exit for a dropped, published tip (module comment, E1).
+    fn old_tip_is_dropped_and_published(&self) -> bool {
+        let f = self.flags.get(&self.old).copied().unwrap_or(0);
+        f & (O | R | N) == O | R && self.new_seeds.iter().all(|s| self.flags.get(s).is_some_and(|sf| sf & O != 0))
     }
 
     fn run(&mut self) -> Result<Verdict, Trouble> {
@@ -479,6 +531,10 @@ impl Painter<'_> {
         loop {
             if self.pending.is_empty() {
                 return Ok(self.verdict());
+            }
+            // E1.
+            if self.old_tip_is_dropped_and_published() {
+                return Ok(Verdict::Published(self.old));
             }
             // S1.
             if self.pending_non_n == 0 && !drain {
@@ -533,7 +589,6 @@ impl Painter<'_> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::path::Path;
     use crate::verbs::write::fixtures::{git_stdout, Fixture};
 
     fn oid(repo: &Path, rev: &str) -> ObjectId {
@@ -620,7 +675,7 @@ mod tests {
             &chk(RewritePolicy::Unpublished),
             Some(head),
             &NewTip::Existing(back),
-            Budget::with_limit(OP, 3),
+            &mut Budget::with_limit(OP, 3),
         )
         .expect_err("three reads cannot decide");
         let text = err.to_string();
@@ -726,5 +781,133 @@ mod tests {
         // A link on the way refuses the file: the walk falls back to exact.
         std::fs::remove_file(fx.repo.join(".git/objects/info/commit-graph")).expect("rm");
         assert!(Graph::load(&repo).is_none());
+    }
+
+    /// `n` linear commits (one file changed each, a minute apart) in a
+    /// fraction of the time `git commit` would take, ending at `main`.
+    fn bulk_history(repo: &Path, n: usize) {
+        use std::io::Write;
+        let mut stream = String::new();
+        for i in 0..n {
+            let (ts, msg, body) = (1_600_000_000 + i * 60, format!("c{i}"), format!("{i}\n"));
+            stream.push_str(&format!(
+                "commit refs/heads/bulk\ncommitter T <t@x> {ts} +0000\ndata {}\n{msg}\nM 100644 inline f\ndata {}\n{body}\n",
+                msg.len(),
+                body.len()
+            ));
+        }
+        let mut child = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(["fast-import", "--quiet"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("git fast-import");
+        child.stdin.take().expect("stdin").write_all(stream.as_bytes()).expect("stream");
+        assert!(child.wait().expect("wait").success());
+        git_stdout(repo, &["update-ref", "refs/heads/main", "refs/heads/bulk"]);
+        git_stdout(repo, &["reset", "-q", "--hard"]);
+    }
+
+    /// Without a graph the walk used to pop commits in oid order, and an
+    /// amend of a published HEAD read the whole history to find out. These
+    /// bounds fail against that: the published case read all 2,000.
+    #[test]
+    fn an_amend_check_without_a_graph_reads_a_few_commits_not_the_history() {
+        let fx = Fixture::new();
+        bulk_history(&fx.repo, 2000);
+        assert!(!fx.repo.join(".git/objects/info/commit-graph").exists());
+        let repo = fx.write_repo(false);
+        let head = oid(&fx.repo, "HEAD");
+        let parents = vec![oid(&fx.repo, "HEAD~1")];
+        let amend = MoveCheck { command: "git commit --amend", mover: Mover::Amend, policy: RewritePolicy::Unpublished };
+        for (tip, published) in [("HEAD", true), ("HEAD~1", false)] {
+            publish(&fx.repo, "origin/main", tip);
+            let mut budget = Budget::new(OP);
+            let r = check_move_with(&repo, &amend, Some(head), &NewTip::Replacement(parents.clone()), &mut budget);
+            assert_eq!(r.is_err(), published, "origin/main at {tip}: {r:?}");
+            assert!(budget.examined() <= 12, "origin/main at {tip}: read {} commits of 2000", budget.examined());
+        }
+    }
+
+    /// A graph in layers, as `git gc` and fetch write it: the same verdicts,
+    /// the graph really used (generation numbers from both layers), and a walk
+    /// that stops long before the history ends.
+    #[test]
+    fn a_split_commit_graph_chain_is_read_and_used() {
+        let fx = Fixture::new();
+        let r = &fx.repo;
+        bulk_history(r, 400);
+        git_stdout(r, &["commit-graph", "write", "--reachable", "--split=no-merge"]);
+        commits(r, 5);
+        git_stdout(r, &["commit-graph", "write", "--reachable", "--split=no-merge"]);
+        let chain = std::fs::read_to_string(r.join(".git/objects/info/commit-graphs/commit-graph-chain")).expect("a chain");
+        assert_eq!(chain.lines().count(), 2, "two layers: {chain}");
+        assert!(!r.join(".git/objects/info/commit-graph").exists());
+
+        let repo = fx.write_repo(false);
+        let graph = Graph::load(&repo).expect("the chain loads");
+        let (top, bottom) = (graph.generation(&oid(r, "HEAD")).expect("upper layer"), graph.generation(&oid(r, "HEAD~100")).expect("lower layer"));
+        assert!(top > bottom && bottom >= 1, "{top} {bottom}");
+
+        let head = oid(r, "HEAD");
+        let amend = MoveCheck { command: "git commit --amend", mover: Mover::Amend, policy: RewritePolicy::Unpublished };
+        let parents = vec![oid(r, "HEAD~1")];
+        for (tip, published) in [("HEAD", true), ("HEAD~1", false), ("HEAD~3", false)] {
+            publish(r, "origin/main", tip);
+            let mut budget = Budget::new(OP);
+            let v = check_move_with(&repo, &amend, Some(head), &NewTip::Replacement(parents.clone()), &mut budget);
+            assert_eq!(v.is_err(), published, "{tip}: {v:?}");
+            assert!(budget.examined() <= 12, "{tip}: read {} of 405 commits", budget.examined());
+        }
+        // A reset across the layers: HEAD~2 is published, HEAD~7 is below it.
+        publish(r, "origin/main", "HEAD~2");
+        let mut budget = Budget::new(OP);
+        let reset = chk(RewritePolicy::Unpublished);
+        assert!(check_move_with(&repo, &reset, Some(head), &NewTip::Existing(oid(r, "HEAD~7")), &mut budget).is_err());
+        assert!(budget.examined() < 40, "the graph bounds the walk: read {}", budget.examined());
+        check_move_with(&repo, &reset, Some(head), &NewTip::Existing(oid(r, "HEAD~2")), &mut Budget::new(OP)).expect("only unpublished commits dropped");
+    }
+
+    /// Not a test: a measurement on a real clone, run by hand.
+    /// `KAISH_MEASURE_REPO=<scratch clone> cargo test -p kaish-tools-git
+    /// --features commit --lib measure -- --ignored --nocapture`. It rewrites
+    /// `refs/remotes/*` in that clone. With `refs/remotes/orphan/x` set to an
+    /// unrelated line, it also measures that shape.
+    #[test]
+    #[ignore = "a measurement against a scratch clone named by KAISH_MEASURE_REPO"]
+    fn measure_commits_examined_on_a_clone() {
+        let path = std::path::PathBuf::from(std::env::var("KAISH_MEASURE_REPO").expect("KAISH_MEASURE_REPO"));
+        let ceiling = path.parent().expect("parent").canonicalize().expect("ceiling");
+        let read = crate::repo::ReadRepo::discover("commit", &path, &ceiling).expect("discover");
+        let repo = WriteRepo::open(read, crate::verbs::write::repo::WriteToken::test()).expect("open");
+        assert!(Graph::load(&repo).is_none(), "delete objects/info/commit-graph* first");
+        let has_orphan = git_stdout(&path, &["for-each-ref", "refs/remotes/orphan/x"]).contains("refs/remotes/orphan/x");
+        let head = oid(&path, "HEAD");
+        let shapes: [(&str, &str, Vec<ObjectId>, bool); 4] = [
+            ("amend, origin/main = HEAD (published)", "HEAD", vec![oid(&path, "HEAD~1")], false),
+            ("amend, origin/main = HEAD~1 (unpublished)", "HEAD~1", vec![oid(&path, "HEAD~1")], false),
+            ("reset --soft HEAD~3, origin/main = HEAD~1", "HEAD~1", vec![oid(&path, "HEAD~3")], false),
+            ("amend, origin/main = HEAD~1, plus a remote on an unrelated line", "HEAD~1", vec![oid(&path, "HEAD~1")], true),
+        ];
+        for (label, origin, seeds, with_orphan) in shapes {
+            if with_orphan && !has_orphan {
+                println!("{label}: skipped, no refs/remotes/orphan/x");
+                continue;
+            }
+            // Built by hand: remote_tips() keeps one name per commit, and a
+            // clone's origin/HEAD sorts before origin/main.
+            let mut tips = vec![("origin/main".to_string(), oid(&path, origin))];
+            if with_orphan {
+                tips.push(("orphan/x".to_string(), oid(&path, "refs/remotes/orphan/x")));
+            }
+            let mut budget = Budget::new(OP);
+            let v = paint(&repo, None, &mut budget, head, &seeds, &tips);
+            let verdict = match v {
+                Ok(Verdict::Published(_)) => "published",
+                Ok(Verdict::Unpublished) => "unpublished",
+                Err(_) => "error",
+            };
+            println!("{label}: {verdict}, {} commits examined", budget.examined());
+        }
     }
 }
