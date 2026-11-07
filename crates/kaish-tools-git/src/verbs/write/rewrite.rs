@@ -346,6 +346,7 @@ fn remote_tips(repo: &WriteRepo) -> Result<Vec<(String, ObjectId)>, GitError> {
     let mut tips: Vec<(String, ObjectId)> = Vec::new();
     for reference in all {
         let reference = reference.map_err(|e| GitError::repository(OP, "reading a ref", repo.git_dir(), e))?;
+        // The name only reaches the refusal text (display-only); no ref is written from it.
         let full = String::from_utf8_lossy(reference.name.as_bstr()).into_owned();
         let Some(short_name) = full.strip_prefix("refs/remotes/") else { continue };
         // A symbolic ref whose chain ends nowhere names no commit.

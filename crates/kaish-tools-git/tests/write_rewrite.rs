@@ -507,7 +507,8 @@ async fn every_nothing_was_changed_refusal_of_amend_and_reset_leaves_git_byte_id
         staged(d);
         publish(d, "HEAD");
     };
-    let mut cases: Vec<(&str, fn(&Path), RewritePolicy, Vec<&str>)> = vec![
+    type Case<'a> = (&'a str, fn(&Path), RewritePolicy, Vec<&'a str>);
+    let mut cases: Vec<Case> = vec![
         ("amend, unborn branch", |_| {}, RewritePolicy::Allow, vec!["commit", "--amend", "-m", "x"]),
         ("amend, no message", staged, RewritePolicy::Allow, vec!["commit", "--amend"]),
         ("amend, reset-author with author", staged, RewritePolicy::Allow, vec!["commit", "--amend", "--no-edit", "--reset-author", "--author", "Z <z@example.org>"]),

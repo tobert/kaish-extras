@@ -1469,25 +1469,33 @@ async fn a_version_4_index_is_read_and_rewritten_as_version_2() {
     p.assert_same("v4 index");
 }
 
-// ── found while writing the T5 tests, not fixed here (docs/issues.md W25) ───
+// ── a pathspec glob matches the whole path, as git does ────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "W25: PathFilter matches a glob without a slash against the basename; git matches the whole path"]
 async fn a_glob_without_a_slash_matches_the_whole_path_as_git_does() {
     let setup = |d: &Path| {
         base(d);
         support::write_file(d, "ca.txt", "root\n");
+        support::write_file(d, "cab/x", "dir\n");
         support::write_file(d, "d/ca.txt", "nested\n");
+        support::write_file(d, "a1.txt", "one\n");
+        support::write_file(d, "a[1].txt", "bracket\n");
     };
-    let (r, t, p) = both(&setup, &["add", "ca*"], "glob").await;
-    assert_eq!((r.code, i64::from(t.0)), (0, 0), "{}", r.err);
-    p.assert_same("add ca*");
+    // Each spec on a fresh pair, so what one stages cannot hide another.
+    for spec in ["ca*", "*.txt", "d/*", "?a.txt", "**/ca.txt", "a[1].txt", "c*b"] {
+        let (r, t, p) = both(&setup, &["add", spec], "glob").await;
+        assert_eq!(r.code == 0, t.0 == 0, "add {spec}: ours {} / git {}", r.err, t.2);
+        p.assert_same(&format!("add {spec}"));
+    }
+    // The cases the table cannot tell apart if the rule is a basename match.
+    let (_, _, p) = both(&setup, &["add", "ca*"], "glob").await;
+    let staged = support::git(&p.ours, &["ls-files"]);
+    assert!(staged.contains("ca.txt") && !staged.contains("d/ca.txt"), "ca* staged: {staged}");
 }
 
 // ── pins from the review: behavior no test covered ─────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "W27: add accepts -A with -u and runs; git refuses with exit 128"]
 async fn add_with_both_all_and_update_is_refused_as_git_refuses_it() {
     let setup = |d: &Path| {
         base(d);
@@ -1500,7 +1508,8 @@ async fn add_with_both_all_and_update_is_refused_as_git_refuses_it() {
         let r = p.ours("", &args).await;
         let (code, _, twin_err) = p.twin(&args);
         assert_eq!(code, 128, "git: {twin_err}");
-        assert_ne!(r.code, 0, "{args:?} must not run: {}", r.err);
+        assert_eq!(r.code, 2, "{args:?} must not run: {}", r.err);
+        assert!(r.err.contains("-u/--update and -A/--all cannot be used together") && r.err.contains("Nothing was changed."), "{}", r.err);
         assert!(support::Fingerprint::take(&p.ours).differences_from(&fp).is_empty(), "{args:?} changed the repository");
         p.assert_same(&args.join(" "));
     }

@@ -1746,20 +1746,9 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   asked for version 4 loses it until real git runs `git update-index
   --index-version 4`. `tests/write_index.rs`
   (`a_version_4_index_is_read_and_rewritten_as_version_2`) pins it.
-- **W25 — a pathspec glob without a `/` matches the basename.** The shared
-  `PathFilter` matches `*.rs` at any depth, as the read verbs want, and
-  `caf*` against `d/caf.txt`. Git's pathspec has no such rule: `caf*` matches a
-  path that starts with `caf`, and `*` crosses `/`. So `git add 'ca*'` here
-  stages `d/caf.txt` and git's does not. Found by the T5 tests; they use a glob
-  (`*af?.txt`) on which both agree.
 - **W26 — `rm` stops at the first deletion failure.** Git continues past it and
   warns; this shell stops, stages the deletions that happened and names the
   rest, so the next command is exact. See W8 for the earlier shape.
-- **W27 — `add -A -u` runs here; git refuses it.** Git exits 128 with
-  "options '-u/--update' and '-A/--all' cannot be used together" and changes
-  nothing. `AddArgs` accepts both, and `-u` wins. Found by the pin test
-  `add_with_both_all_and_update_is_refused_as_git_refuses_it`, which is
-  `#[ignore]`d until the verb refuses the pair.
 - **W28 — `mv` into `.git` refuses here; git moves the file.** `git mv a.txt
   .git/x` prints "invalid path '.git/x'" and still renames the file into `.git`
   and stages the deletion of `a.txt` (measured on git 2.56.0). This shell

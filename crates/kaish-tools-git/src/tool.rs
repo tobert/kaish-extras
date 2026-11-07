@@ -1408,6 +1408,20 @@ impl GitTool {
                 .into_error(),
             );
         }
+        if parsed.all && parsed.update {
+            // Git exits 128 on this pair; 2 is this shell's code for a
+            // command line that cannot be run, as for `reset --soft --mixed`.
+            return failure(
+                verbs::write::refusal::Refusal::new(
+                    2,
+                    command,
+                    "The options -u/--update and -A/--all cannot be used together: -A stages new files and -u stages tracked files only.",
+                    "Pick one: git add -A, or git add -u.",
+                    verbs::write::refusal::Override::Never,
+                )
+                .into_error(),
+            );
+        }
         let ops = operands(&parsed.operands, argv).all();
         self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, base| {
             let specs = base.repo_paths(OP, &ops)?;
