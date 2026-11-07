@@ -1823,13 +1823,6 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   An embedder that installs a provider to run `pre-commit` therefore loses the
   `reference-transaction` check for these verbs. The fix is a `GitHooks`
   method for a ref update, called with the ref, old and new value.
-- **W35 — `commit` keeps no trailing form feed or vertical tab, and git
-  does.** `message::cleanup` strips `\x0c` and `\x0b` from the end of a line;
-  git's `isspace` is space, tab, newline and carriage return, so git keeps them
-  (checked on git 2.56: `commit -m $'a\f'` and `tag -a -m $'a\f'` both store
-  `a\f\n`). `tag` has its own cleanup with git's set. The failing case for
-  `commit` is `a_trailing_form_feed_or_vertical_tab_stays_in_the_message_as_in_git`
-  in `tests/write_commit.rs`, ignored until the cleanup changes.
 - **W36 — an empty directory where a ref goes is refused.** A directory at
   `refs/heads/x` (left behind when its last branch was deleted) makes git
   remove it and create the branch. The containment walk wants a regular file

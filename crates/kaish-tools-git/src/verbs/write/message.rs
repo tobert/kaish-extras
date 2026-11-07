@@ -25,14 +25,16 @@ pub(crate) fn join_paragraphs(parts: &[String]) -> String {
     out
 }
 
-/// git's `strbuf_stripspace` without comment stripping: trailing whitespace
-/// off every line, runs of blank lines collapsed to one, leading and trailing
+/// git's `strbuf_stripspace` without comment stripping: trailing space, tab and
+/// carriage return off every line, runs of blank lines collapsed to one, leading and trailing
 /// blank lines dropped, and one final `\n` when anything is left.
 pub(crate) fn cleanup(raw: &str) -> String {
     let mut out = String::new();
     let mut pending_blank = false;
     for line in raw.split('\n') {
-        let line = line.trim_end_matches(|c: char| c.is_ascii_whitespace() || c == '\u{b}');
+        // Git's `isspace` is space, tab, newline and carriage return, so a trailing
+        // form feed or vertical tab stays, and a line of only one is not blank.
+        let line = line.trim_end_matches([' ', '\t', '\r']);
         if line.is_empty() {
             pending_blank = !out.is_empty();
             continue;
