@@ -308,6 +308,8 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
     let mut prepared = prepare(repo, &snap.state, snap.mtime, &policy, &head_map, opts)?;
     let message = final_message(opts)?;
     check_not_empty(&prepared.items, &head_map, opts.allow_empty, cmd)?;
+    // Every refusal the tree writer could raise comes before the first blob.
+    validate_tree(repo, cmd, &prepared)?;
 
     let mut tx: Option<IndexTx> = None;
     if writes_index {
@@ -315,6 +317,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
         if locked.snap.bytes != snap.bytes {
             prepared = prepare(repo, locked.state(), locked.snap.mtime, &policy, &head_map, opts)?;
             check_not_empty(&prepared.items, &head_map, opts.allow_empty, cmd)?;
+            validate_tree(repo, cmd, &prepared)?;
         }
         tx = Some(locked);
     }
@@ -328,7 +331,8 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
         debug_assert!(prepared.plan.files.is_empty());
     }
     let items: Vec<Item> = prepared.items.iter().map(|(p, (id, m))| Item { path: p.clone(), mode: *m, id: *id }).collect();
-    let tree_id = tree::write_tree(repo, &mut writer, cmd, items)?;
+    // Blobs may be on disk by now: a refusal from here on says so.
+    let tree_id = tree::write_tree(repo, &mut writer, cmd, items).map_err(GitError::after_objects)?;
 
     // Hooks. The tree is written; a refusal here leaves unreachable objects.
     let tree_hex = tree_id.to_string();
@@ -346,12 +350,12 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
     if let Some(h) = env.hooks.as_ref() {
         match h.pre_commit(&ctx) {
             Ok(out) => note(&mut err, &out.message),
-            Err(e) => return hook_refusal(cmd, "pre-commit", &e.message),
+            Err(e) => return hook_refusal(cmd, "pre-commit", &e.message).map_err(GitError::after_objects),
         }
         let mut text = message.clone();
         match h.commit_msg(&ctx, &mut text) {
             Ok(out) => note(&mut err, &out.message),
-            Err(e) => return hook_refusal(cmd, "commit-msg", &e.message),
+            Err(e) => return hook_refusal(cmd, "commit-msg", &e.message).map_err(GitError::after_objects),
         }
         if text != message {
             // Git cleans the file again after the hook has been at it.
@@ -363,7 +367,8 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
                     "The commit-msg hook left the message empty.",
                     "Run the commit again with a message: git commit -m '<message>'.",
                     Override::Never,
-                );
+                )
+                .map_err(GitError::after_objects);
             }
         }
     }
@@ -389,7 +394,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
 
     let kind = if old.is_none() { "commit (initial)" } else { "commit" };
     let reflog = format!("{kind}: {}", message::subject(&message));
-    refmove::move_head(repo, cmd, &target, old, commit_id, &reflog, &idents.committer)?;
+    refmove::move_head(repo, cmd, &target, old, commit_id, &reflog, &idents.committer).map_err(GitError::after_objects)?;
 
     if let Some(tx) = tx {
         // The ref has moved; the index follows, as in git. A failure here
@@ -440,6 +445,21 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
             "committer": idents.committer.ident_line(),
         }),
     })
+}
+
+/// Run the tree writer's checks on the final path map, writing nothing.
+fn validate_tree(repo: &WriteRepo, cmd: &str, prepared: &Prepared) -> Result<(), GitError> {
+    let items: Vec<Item> = prepared.items.iter().map(|(p, (id, m))| Item { path: p.clone(), mode: *m, id: *id }).collect();
+    let planned = prepared.plan.files.iter().map(|s| s.id).collect();
+    tree::validate_tree(repo, cmd, items, &planned)?;
+    // Every planned blob's object path passes containment before the first is
+    // written, so a planted link at a later blob's directory refuses with no
+    // blob on disk.
+    let vet = BlobWriter::new(repo, OP);
+    for staged in &prepared.plan.files {
+        vet.vet(&staged.id)?;
+    }
+    Ok(())
 }
 
 fn note(err: &mut String, text: &str) {
@@ -662,7 +682,8 @@ fn build_only(
             }
             Err(e) => return Err(GitError::repository(OP, "reading a working-tree path", &abs, e)),
         };
-        if *mode == Some(Mode::COMMIT) {
+        // A gitlink whose path is now a file or a link is committed as one.
+        if *mode == Some(Mode::COMMIT) && meta.is_dir() {
             if let Some(id) = add::gitlink_head(repo, &abs)? {
                 let stat = gix_index::fs::Metadata::from_path_no_follow(&abs)
                     .ok()
@@ -684,7 +705,7 @@ fn build_only(
             cmd,
             format!("The pathspec '{missing}' did not match any file known to git, and --only commits tracked paths."),
             format!("Stage it first, then commit: git add {missing}, then git commit -m '<message>'."),
-            Override::Never,
+            Override::Repository,
         );
     }
     plan.removals.sort();

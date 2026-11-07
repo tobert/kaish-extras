@@ -587,7 +587,8 @@ These exist only in a tool built with the `commit` feature and given a
 the index, and `rm` and `mv` also delete or rename the working-tree files they
 name. Nothing here writes file content into the working tree. Every refusal has
 five parts: the command, the reason, one exact next command, whether an
-override exists and who grants it, and "Nothing was changed."
+override exists and who grants it, and what was written: "Nothing was changed."
+(`.git` is byte-identical) for a refusal that comes before any write.
 
 ```sh
 kaish> git add src/main.rs
@@ -658,7 +659,11 @@ These exist only in a tool built with the `commit` feature and given a
 `WritableGitConfig`. `commit` writes a commit from the index and moves the
 current branch; `var` prints the identity the next commit will use. Every
 refusal has five parts: the command, the reason, one exact next command,
-whether an override exists and who grants it, and "Nothing was changed."
+whether an override exists and who grants it, and what was written. A refusal
+that comes before any write says "Nothing was changed." A refusal that comes
+after the commit's objects were written (a hook provider that rejects the
+tree, or a branch that moved before the ref update) says that no ref or index
+changed, that the objects remain, and that `git gc` prunes them.
 
 ```sh
 kaish> git commit -m 'Fix the parser'

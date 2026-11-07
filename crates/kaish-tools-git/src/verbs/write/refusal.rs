@@ -10,7 +10,16 @@
 //! 2. the reason, in one clause,
 //! 3. one exact next command,
 //! 4. whether an override exists, and who grants it,
-//! 5. "Nothing was changed."
+//! 5. what was written: [`Wrote`].
+//!
+//! The last part is a property of the refusal, not a fixed sentence. A refusal
+//! raised before any write says "Nothing was changed." A refusal raised after
+//! the commit's objects were written (a hook that rejects the tree it was
+//! handed, a branch that moved before the ref update) says so: the objects
+//! stay in the object database, no ref or index changed, and `git gc` prunes
+//! them. `tests/write_fingerprint.rs` holds both claims to the bytes: a
+//! "Nothing was changed." refusal leaves `.git` byte-identical, and the other
+//! leaves every ref, the index and `HEAD` byte-identical.
 //!
 //! The fields are separate so a unit test can check each part is present;
 //! [`Refusal`] renders them as one paragraph.
@@ -59,9 +68,30 @@ impl Override {
     }
 }
 
+/// What a refusal left on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Wrote {
+    /// The refusal came before any write: `.git` is byte-identical.
+    Nothing,
+    /// Objects were written before the refusal. No ref, index or `HEAD`
+    /// changed, and nothing refers to the objects.
+    UnreachableObjects,
+}
+
+impl Wrote {
+    fn sentence(self) -> &'static str {
+        match self {
+            Wrote::Nothing => "Nothing was changed.",
+            Wrote::UnreachableObjects => {
+                "Objects this command wrote stay in the object database, and no ref or index changed; nothing refers to those objects, and git gc prunes them."
+            }
+        }
+    }
+}
+
 /// One refusal, rendered as five parts.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Refusal {
+pub struct Refusal {
     /// The exit code: 1 (a git-level no), 2 (usage or policy) or 4 (state or
     /// content this build will not write through).
     pub(crate) code: i64,
@@ -73,6 +103,7 @@ pub(crate) struct Refusal {
     /// The one exact next command, as a full sentence ending in a period.
     pub(crate) next: String,
     pub(crate) overridable: Override,
+    pub(crate) wrote: Wrote,
 }
 
 impl Refusal {
@@ -89,11 +120,18 @@ impl Refusal {
             reason: reason.into(),
             next: next.into(),
             overridable,
+            wrote: Wrote::Nothing,
         }
     }
 
+    /// The same refusal, raised after objects were written.
+    pub(crate) fn after_objects(mut self) -> Self {
+        self.wrote = Wrote::UnreachableObjects;
+        self
+    }
+
     pub(crate) fn into_error(self) -> GitError {
-        GitError::Refused { code: self.code, text: self.to_string() }
+        GitError::Refused { code: self.code, refusal: Box::new(self) }
     }
 }
 
@@ -101,11 +139,12 @@ impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}: refused. {} {} {} Nothing was changed.",
+            "{}: refused. {} {} {} {}",
             self.command,
             self.reason,
             self.next,
-            self.overridable.sentence()
+            self.overridable.sentence(),
+            self.wrote.sentence()
         )
     }
 }
@@ -141,6 +180,13 @@ mod tests {
             let found = text[at..].find(part).unwrap_or_else(|| panic!("{part:?} missing or out of order: {text}"));
             at += found + part.len();
         }
+    }
+
+    #[test]
+    fn a_refusal_after_objects_says_what_was_written_and_not_that_nothing_changed() {
+        let text = Refusal::new(1, "git commit", "A hook said no.", "Fix it.", Override::Embedder).after_objects().to_string();
+        assert!(!text.contains("Nothing was changed"), "{text}");
+        assert!(text.contains("no ref or index changed") && text.contains("git gc prunes"), "{text}");
     }
 
     #[test]

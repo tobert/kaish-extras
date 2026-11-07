@@ -29,7 +29,7 @@ before 0.14 (kaish `docs/EMBEDDING.md`, "Why this, and not a gate").
 | W12 | Oracle tests: a commit we write is byte-identical to the one real git writes from the same index, identity, and dates | §8 |
 | W13 | Every directory a write touches is `lstat`-checked from the root of the store it lands in (git dir or common dir); a symlink refuses the write | §6.1 |
 | W16 | `reset --soft`/`--mixed <rev>` lands with `--amend`, under the same `RewritePolicy` | §3 |
-| W17 | Every refusal names the command, the reason, one exact next command, whether an override exists and who grants it, and says nothing was changed | §3 |
+| W17 | Every refusal names the command, the reason, one exact next command, whether an override exists and who grants it, and says what was written: nothing (`.git` byte-identical), or, when the refusal comes after the commit's objects were written, that unreachable objects remain and no ref or index changed | §3 |
 | W14 | Identity: the embedder may pin it on `WritableGitConfig`; otherwise kernel variables; neither refuses | §5.4 |
 | W15 | Loose objects are fsynced before the ref transaction that makes them reachable | §6 |
 
@@ -158,13 +158,20 @@ pub enum RewritePolicy {
   invented override flags (`--allow-rewrite`, `GIT_ALLOW_HISTORY_REWRITE=1`)
   when the text did not say whether one exists. Every refusal therefore
   carries five parts: the command, the reason in one clause, one exact next
-  command, whether an override exists and who grants it, and "nothing was
-  changed".
+  command, whether an override exists and who grants it, and what was
+  written. "Nothing was changed." only when `.git` is byte-identical; a refusal
+  after the commit's objects were written (a hook that rejects the tree it was
+  handed, a branch that moved before the ref update) says that objects remain,
+  that no ref or index changed, and that `git gc` prunes them (W15).
 
   > git commit --amend: refused. HEAD a1b2c3d is on origin/main, and this
   > shell does not rewrite published commits. Make a new commit instead:
   > git commit -m '<message>'. There is no flag that overrides this; the
   > policy is set by the program embedding this shell. Nothing was changed.
+  >
+  > (A refusal raised after objects were written ends instead with: Objects
+  > this command wrote stay in the object database, and no ref or index
+  > changed; nothing refers to those objects, and git gc prunes them.)
 
   Never suggest `reset --soft` as the recovery: it is itself a rewrite.
 - **The plumbing is not a side door.** `commit-tree`, `update-ref`,
@@ -273,8 +280,11 @@ real scripts, run its own checks, or decline. Without a provider:
   the host's git configuration says.
 
 `core.hooksPath` is repo-local config we already read deliberately (D.2). A
-`hooksPath` outside the mount is reported by name only, never resolved
-(existence-oracle rule, as G4).
+`hooksPath` that is absolute or leaves the working tree is refused by name
+without being resolved (existence-oracle rule, as G4). A relative one is
+resolved inside the working tree through the containment `lstat` walk; a
+symbolic link on the way, or as its last component, refuses (exit 4) naming
+`core.hooksPath`, and is not read through.
 
 ### 5.2 Signing
 
@@ -355,10 +365,12 @@ Amy, 2026-11-06: the embedder pins, kernel variables are the fallback.
   2.56: `commit: <subject>`, `commit (amend): <subject>`,
   `commit (initial): <subject>`, `branch: Created from HEAD`,
   `checkout: moving from <old> to <new>`). gix writes no `HEAD` line for a
-  symbolic update, so `switch -c` appends its `checkout:` line itself. A
-  message containing `\n` or `\r` is refused before the transaction:
-  gix-ref 0.66 declares that check and never runs it, so a newline would
-  forge a second reflog line. The reflog is what makes an amend
+  symbolic update, so `switch -c` appends its `checkout:` line itself. gix-ref 0.66
+  declares a check for a line break in the message and never runs it, so a
+  newline would forge a second reflog line. The message is therefore copied as
+  git's `copy_reflog_msg` does (refs.c): leading whitespace dropped, each run
+  of space, tab, newline and carriage return one space, trailing whitespace
+  dropped. A commit subject with a carriage return commits, as in git. The reflog is what makes an amend
   recoverable, so `Unpublished` and `Allow` depend on it.
 - **What `add` reads** *(review)*: `lstat`, never `open`-then-`fstat`. A
   symlink stages as mode `120000` with the link text (`readlink`) as its
@@ -424,9 +436,14 @@ before any verb.
   `verbs/write_extra.rs` is scanned). `WriteRepo` lives in that directory.
   `ReadRepo` also lends only `OdbRead` and `RefsRead`, which have no write
   method, so the scan is the second line.
-- A new fingerprint test runs every *refused* write spelling and asserts
-  `.git` unchanged. A refusal that wrote half a transaction is the failure
-  mode this catches.
+- A new fingerprint test (`tests/write_fingerprint.rs`) runs the refused write
+  spellings that need no hook or race to reach, and asserts `.git` unchanged.
+  A refusal that wrote half a transaction is the failure mode this catches.
+  The refusals that need a hook provider or a lost race to reach
+  (`tests/write_commit.rs`) are held to the same bytes: those that claim
+  "Nothing was changed." leave `.git` byte-identical, and those raised after
+  objects were written say so and leave every ref, reflog, the index and
+  `HEAD` byte-identical.
 
 ## 8. Tests
 

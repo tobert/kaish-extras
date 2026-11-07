@@ -26,7 +26,7 @@ use gix_ref::Target;
 use crate::error::GitError;
 use crate::verbs::write::ident::Signature;
 use crate::verbs::write::refusal::{refuse, Override};
-use crate::verbs::write::reflog::validate_message;
+use crate::verbs::write::reflog::copy_message;
 use crate::verbs::write::repo::WriteRepo;
 
 /// What HEAD names right now.
@@ -60,9 +60,9 @@ pub(crate) fn move_head(
     message: &str,
     committer: &Signature,
 ) -> Result<(), GitError> {
-    let message = validate_message("commit", message)?;
+    let message = copy_message(message);
     precheck(repo, command, target)?;
-    apply_move(repo, command, target, old, new, message, committer)
+    apply_move(repo, command, target, old, new, &message, committer)
 }
 
 /// The move itself, after [`precheck`]. Separate so a test can reach the
@@ -173,7 +173,7 @@ fn hold_head(repo: &WriteRepo, command: &str, full: &str) -> Result<gix_lock::Ma
             refuse(
                 1,
                 command,
-                format!("HEAD moved while this commit was being made: it named '{full}' when the commit started and is now {now}. The commit object is on disk and no ref names it."),
+                format!("HEAD moved while this commit was being made: it named '{full}' when the commit started and is now {now}."),
                 "Run git status to see where HEAD is now, then make the commit again.",
                 Override::Never,
             )
@@ -328,7 +328,7 @@ fn cas_failure(
         1,
         command,
         format!(
-            "'{refname}' moved while this commit was being made: it was {expected} when the commit started and is now {}. The commit object is on disk and no ref names it.",
+            "'{refname}' moved while this commit was being made: it was {expected} when the commit started and is now {}.",
             target_text(actual)
         ),
         "Run git status to see where the branch is now, then make the commit again.",

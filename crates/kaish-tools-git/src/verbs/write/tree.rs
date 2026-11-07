@@ -8,6 +8,7 @@
 //! before both, and the oracle test in `tests/write_commit.rs` commits a
 //! repository built to trip any other order.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use gix_index::entry::Mode;
@@ -36,7 +37,31 @@ pub(crate) fn write_tree(
     repo: &WriteRepo,
     writer: &mut BlobWriter<'_>,
     command: &str,
+    items: Vec<Item>,
+) -> Result<ObjectId, GitError> {
+    build_root(repo, Some(writer), command, items, &BTreeSet::new())
+}
+
+/// Run every check [`write_tree`] runs, and write nothing. `planned` holds the
+/// ids of blobs the caller has not written yet; an entry naming one of them is
+/// not "missing from the object database". A tree that passes here is refused
+/// for none of the reasons that would otherwise come after the blobs are on
+/// disk.
+pub(crate) fn validate_tree(
+    repo: &WriteRepo,
+    command: &str,
+    items: Vec<Item>,
+    planned: &BTreeSet<ObjectId>,
+) -> Result<(), GitError> {
+    build_root(repo, None, command, items, planned).map(|_| ())
+}
+
+fn build_root(
+    repo: &WriteRepo,
+    writer: Option<&mut BlobWriter<'_>>,
+    command: &str,
     mut items: Vec<Item>,
+    planned: &BTreeSet<ObjectId>,
 ) -> Result<ObjectId, GitError> {
     items.sort_by(|a, b| a.path.cmp(&b.path));
     if let Some(w) = items.windows(2).find(|w| w[0].path == w[1].path) {
@@ -48,7 +73,7 @@ pub(crate) fn write_tree(
             Override::Repository,
         );
     }
-    build(repo, writer, command, &items, 0, 0)
+    build(repo, writer, planned, command, &items, 0, 0)
 }
 
 /// The first `/`-separated component, and the rest, when more follow.
@@ -79,7 +104,8 @@ fn bad_component(name: &[u8]) -> bool {
 
 fn build(
     repo: &WriteRepo,
-    writer: &mut BlobWriter<'_>,
+    mut writer: Option<&mut BlobWriter<'_>>,
+    planned: &BTreeSet<ObjectId>,
     command: &str,
     items: &[Item],
     prefix_len: usize,
@@ -108,7 +134,7 @@ fn build(
                     );
                 };
                 // A gitlink names a commit in another repository.
-                if kind != EntryKind::Commit && !repo.objects().exists(&item.id) {
+                if kind != EntryKind::Commit && !planned.contains(&item.id) && !repo.objects().exists(&item.id) {
                     return refuse(
                         4,
                         command,
@@ -129,7 +155,7 @@ fn build(
                     .iter()
                     .take_while(|n| n.path.len() > dir_len && n.path[prefix_len..dir_len] == item.path[prefix_len..dir_len])
                     .count();
-                let id = build(repo, writer, command, &items[i..end], dir_len, depth + 1)?;
+                let id = build(repo, writer.as_deref_mut(), planned, command, &items[i..end], dir_len, depth + 1)?;
                 entries.push(Entry { mode: EntryKind::Tree.into(), filename: BString::from(name), oid: id });
                 i = end;
             }
@@ -150,7 +176,10 @@ fn build(
     gix_object::Tree { entries }
         .write_to(&mut buf)
         .map_err(|e| GitError::repository("commit", "encoding a tree", Path::new("."), e))?;
-    writer.write_object(Kind::Tree, &buf)
+    match writer {
+        Some(w) => w.write_object(Kind::Tree, &buf),
+        None => Ok(ObjectId::null(gix_index::hash::Kind::Sha1)),
+    }
 }
 
 fn sort_key(e: &Entry) -> Vec<u8> {

@@ -141,8 +141,11 @@ pub(crate) fn ensure_writable_with(repo: &WriteRepo, command: &str, index_hook: 
 /// The directory git looks for hooks in: `core.hooksPath` when the
 /// repository sets it at all, else `<common dir>/hooks`.
 ///
-/// A `hooksPath` outside the working tree is refused, not followed: this
-/// shell cannot look there, so it cannot tell which hooks would run.
+/// A relative `hooksPath` is resolved inside the working tree through the same
+/// `lstat` walk every write uses, so a symbolic link in it refuses and is not
+/// read through. A path that is absolute or leaves the working tree is refused
+/// too, without being resolved: this shell cannot look there, so it cannot tell
+/// which hooks would run. Both refusals name `core.hooksPath`.
 pub(crate) fn hooks_dir(repo: &WriteRepo, command: &str) -> Result<std::path::PathBuf, GitError> {
     match config_last(repo, "core", "hookspath")? {
         None => Ok(repo.common_dir().join("hooks")),
@@ -150,15 +153,31 @@ pub(crate) fn hooks_dir(repo: &WriteRepo, command: &str) -> Result<std::path::Pa
             let p = Path::new(&path);
             let inside = !p.is_absolute()
                 && p.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir));
-            match (inside, repo.read().work_dir()) {
-                (true, Some(work)) => Ok(work.join(p)),
-                _ => refuse(
+            if !inside || repo.read().work_dir().is_none() {
+                return refuse(
                     4,
                     command,
                     "core.hooksPath points outside the working tree, so this shell cannot tell whether a hook would run.",
                     "Use real git for this write, outside this shell, for example: git add <path>.",
                     Override::Repository,
-                ),
+                );
+            }
+            let through_link = |at: &str, found: &str| {
+                refuse(
+                    4,
+                    command,
+                    format!("core.hooksPath is '{path}', and '{at}' on the way to it is {found}. This shell does not read through a link, so it cannot tell whether a hook would run."),
+                    "Use real git for this write, outside this shell, for example: git add <path>.",
+                    Override::Repository,
+                )
+            };
+            match repo.check_worktree_any(p) {
+                // The walk lets a link stand as the last component; the
+                // hook files are read inside it, so it is refused here.
+                Ok(dir) if std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink()) => through_link(&path, "a symbolic link"),
+                Ok(dir) => Ok(dir),
+                Err(GitError::WriteThroughLink { found, path: at, .. }) => through_link(&at, found),
+                Err(e) => Err(e),
             }
         }
     }

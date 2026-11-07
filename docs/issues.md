@@ -1634,8 +1634,9 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
 - **W9 — attribute matcher.** `[attr]` macros are expanded to depth 5; a
   quoted pattern, or a pattern with a backslash, is treated as "may match" and
   refuses when its line names a conversion. `core.attributesFile` refuses.
-- **W10 — `core.hooksPath` inside the tree** is resolved for the
-  `post-index-change` check only.
+- **W10 — `core.hooksPath` inside the tree** is resolved through the
+  containment walk, for the `post-index-change` check and for `commit`'s hook
+  scan. A link on the way refuses, naming the setting.
 - **W11 — residuals of the phase 1a containment review.** The source scan
   (`tests/write_shaped_identifiers.rs`) does not match a turbofish call
   (`.transaction::<T>(`). The `.git` component guard does not cover
@@ -1680,10 +1681,13 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   `gix-imara-diff` Myers (the L-series imprecision on log `--stat` applies),
   and a side over 16 MiB is left out of them with a note on stderr.
 - **W15 — a leftover loose object after a hook rejection.** `commit -a` and
-  `--only` write their blobs and trees before `pre_commit` runs (the hook is
-  given the tree oid). A rejection or a lost compare-and-swap leaves those
-  objects unreachable; the index and branch are untouched. `git gc` prunes
-  them.
+  `--only` write their blobs, and every commit writes its trees, before
+  `pre_commit` runs (the hook is given the tree oid). A rejection or a lost
+  compare-and-swap leaves those objects unreachable; the index and branch are
+  untouched. The refusal says so (`Wrote::UnreachableObjects`) and is tested
+  against the bytes; `git gc` prunes the objects. Every check that can run
+  before the first object is written does (message, identity, tree validity,
+  containment of every blob's path, hook presence).
 - **W16 — `--trailer` is stricter than git.** A trailer with no `:`/`=`, no
   value, or a key outside letters, digits and `-` is refused (git writes
   `Key:`). `trailer.*` configuration (`trailer.<token>.key`, `.command`,
@@ -1699,7 +1703,9 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   oracle test compares with git. RFC 2822 dates, `YYYY-MM-DD` alone and
   relative dates ("2 weeks ago") are refused. Git strips "crud" characters
   from the ends of a name and an email; this trims whitespace only and
-  refuses `<`, `>` and line breaks (`Identity::new`).
+  refuses `<`, `>` and line breaks (`Identity::new`), for `--author` on a
+  pinned identity too. Git removes them instead: `--author $'A\nB <a@b.c>'`
+  commits as author `AB`.
 - **W18 — path validation is ours.** The tree writer refuses an index path
   whose component is empty, `.`, `..` or `.git` in any case. It does not use
   `gix-validate`'s fuller rule (NTFS and HFS spellings of `.git`, trailing

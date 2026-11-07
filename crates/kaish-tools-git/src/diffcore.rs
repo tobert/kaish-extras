@@ -387,9 +387,12 @@ fn load_both(
         (Loaded::Gitlink, _) | (_, Loaded::Gitlink) => return Ok(Sides::Gitlink),
         _ => return Ok(Sides::OverCap),
     };
-    // A NUL byte is git's own binary heuristic, and a binary file has no line
-    // count worth reporting and no hunks worth rendering.
-    if old.contains(&0) || new.contains(&0) {
+    // Git's binary heuristic (`buffer_is_binary`, xdiff-interface.c): a NUL
+    // byte in the first 8000 bytes. A binary file has no line count worth
+    // reporting and no hunks worth rendering.
+    const FIRST_FEW_BYTES: usize = 8000;
+    let binary = |bytes: &[u8]| bytes[..bytes.len().min(FIRST_FEW_BYTES)].contains(&0);
+    if binary(old) || binary(new) {
         return Ok(Sides::Binary);
     }
     Ok(Sides::Text {
