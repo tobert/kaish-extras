@@ -587,7 +587,8 @@ These exist only in a tool built with the `commit` feature and given a
 the index, and `rm` and `mv` also delete or rename the working-tree files they
 name. Nothing here writes file content into the working tree. Every refusal has
 five parts: the command, the reason, one exact next command, whether an
-override exists and who grants it, and "Nothing was changed."
+override exists and who grants it, and what was written: "Nothing was changed."
+(`.git` is byte-identical) for a refusal that comes before any write.
 
 ```sh
 kaish> git add src/main.rs
@@ -618,10 +619,11 @@ What refuses, with the exit code:
 | Spelling | Exit | Why |
 |---|---|---|
 | `add -p`, `add -i`, `restore -p`, `reset -p` | 2 | no terminal |
-| `add <ignored path>` | 1 | git's hint: `git add -f <path>` |
+| `add <ignored file or directory>`, named exactly | 1 | git's hint: `git add -f <path>` |
 | `add` of a nested repository the index does not track | 4 | names it |
 | `add <file real git would convert>` | 4 | names the attribute or setting |
-| any pathspec that matches nothing | 1 | |
+| any pathspec that matches nothing, a glob that matches only ignored files included | 1 | |
+| `index` file of zero bytes | 1 | git refuses it too ("index file smaller than expected") |
 | `rm` of a path with staged or local changes | 1 | `--cached` or `-f` |
 | `rm <dir>` without `-r` | 1 | |
 | `mv` untracked or missing source, existing destination without `-f`, a directory into itself, a missing destination parent | 1 | |
@@ -642,11 +644,19 @@ copies those index entries from that revision and moves nothing.
 - `reset` and `restore --staged` do not print "Unstaged changes after reset"
   and do not refresh the stat of entries they restore. `reset`, `reset HEAD`
   and `reset -- <path>` write no `ORIG_HEAD` or reflog line; git writes both
-  for the first two, even though HEAD does not move (`docs/issues.md` W25).
+  for the first two, even though HEAD does not move (`docs/issues.md` W30).
 - `restore --staged` and `reset` give a restored entry an all-zero stat, as git
   does; an entry that already matches HEAD is left alone.
 - `add` reads whole files: a file over 128 MiB refuses (git streams).
-- `add` names a non-UTF-8 file name in a refusal and does not stage it.
+- A path that is not UTF-8 is kept as the bytes it is, in the index, in a tree
+  and on disk, by every verb here. A message that names such a path shows git's
+  C-quoted form (`"caf\351.txt"`), which is not the path itself; a path on the
+  command line must be UTF-8, so a glob such as `*af?.txt` is how to name one.
+- A partial `rm` failure (a file that cannot be deleted) stops at the first
+  failure, stages the deletions that happened, and says which paths are left
+  and the command to run. Git continues past the failure and warns.
+- An index in version 4 is read and written back as version 2
+  (docs/issues.md W24).
 - `rm` and `mv` do not support `-n`, `-q`, `-v` or `-k`.
 
 ## `git commit` and `git var` — what the built verbs do
@@ -655,7 +665,11 @@ These exist only in a tool built with the `commit` feature and given a
 `WritableGitConfig`. `commit` writes a commit from the index and moves the
 current branch; `var` prints the identity the next commit will use. Every
 refusal has five parts: the command, the reason, one exact next command,
-whether an override exists and who grants it, and "Nothing was changed."
+whether an override exists and who grants it, and what was written. A refusal
+that comes before any write says "Nothing was changed." A refusal that comes
+after the commit's objects were written (a hook provider that rejects the
+tree, or a branch that moved before the ref update) says that no ref or index
+changed, that the objects remain, and that `git gc` prunes them.
 
 ```sh
 kaish> git commit -m 'Fix the parser'
@@ -822,7 +836,7 @@ the policy is unless it is `Allow`.
 - No "Unstaged changes after reset" list; entries a `--mixed` reset restores
   get an all-zero stat.
 - Amend refuses a commit with an `encoding` header or a non-UTF-8 message.
-- Costs, trust and smaller differences: `docs/issues.md` W24-W27.
+- Costs, trust and smaller differences: `docs/issues.md` W29-W32.
 
 ## Non-goals
 

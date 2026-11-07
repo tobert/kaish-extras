@@ -120,7 +120,12 @@ pub(crate) fn resolve(
     now: i64,
 ) -> Result<Idents, GitError> {
     if let Some((author, committer)) = pinned {
-        let (name, email) = author_flag.unwrap_or_else(|| (author.name().to_string(), author.email().to_string()));
+        // The pinned identities were checked when they were built; `--author`
+        // is the caller's text and is checked here, as on the unpinned path.
+        let (name, email) = match author_flag {
+            Some((n, e)) => check_identity(command, n, e)?,
+            None => (author.name().to_string(), author.email().to_string()),
+        };
         return Ok(Idents {
             author: Signature { name, email, seconds: now, offset: 0 },
             committer: Signature {
@@ -175,20 +180,8 @@ pub(crate) fn resolve(
     // Git's committer date is the clock unless GIT_COMMITTER_DATE is set; it
     // does not borrow the author's.
     let (c_secs, c_off) = when("GIT_COMMITTER_DATE", &vars.committer_date)?;
-    let check = |name: String, email: String| -> Result<(String, String), GitError> {
-        match Identity::new(name.trim(), email.trim()) {
-            Ok(i) => Ok((i.name().to_string(), i.email().to_string())),
-            Err(_) => refuse(
-                2,
-                command,
-                format!("The identity '{}' <{}> cannot be written: a name must not be empty, and neither field may hold '<', '>' or a line break.", name.trim(), email.trim()),
-                "Set both to plain text, for example: export GIT_AUTHOR_NAME='Your Name' GIT_AUTHOR_EMAIL='you@example.com'.",
-                Override::Variables,
-            ),
-        }
-    };
-    let (a_name, a_email) = check(a_name, a_email)?;
-    let (c_name, c_email) = check(c_name, c_email)?;
+    let (a_name, a_email) = check_identity(command, a_name, a_email)?;
+    let (c_name, c_email) = check_identity(command, c_name, c_email)?;
     Ok(Idents {
         author: Signature { name: a_name, email: a_email, seconds: a_secs, offset: a_off },
         committer: Signature { name: c_name, email: c_email, seconds: c_secs, offset: c_off },
@@ -247,8 +240,29 @@ pub(crate) fn resolve_amend(
         return resolve(command, pinned, vars, author_flag, now);
     }
     let committer = resolve_committer(command, pinned, vars, now)?;
-    let (name, email) = author_flag.unwrap_or_else(|| (kept.name.clone(), kept.email.clone()));
+    // `--author` is the caller's text: checked before any object is written,
+    // as `resolve` checks it.
+    let (name, email) = match author_flag {
+        Some((n, e)) => check_identity(command, n, e)?,
+        None => (kept.name.clone(), kept.email.clone()),
+    };
     Ok(Idents { author: Signature { name, email, seconds: kept.seconds, offset: kept.offset }, committer })
+}
+
+/// Refuse a name or email that git would strip or that would break a header
+/// line: git removes `<`, `>` and line breaks from an identity, so writing the
+/// text as given would store a different identity from the one asked for.
+fn check_identity(command: &str, name: String, email: String) -> Result<(String, String), GitError> {
+    match Identity::new(name.trim(), email.trim()) {
+        Ok(i) => Ok((i.name().to_string(), i.email().to_string())),
+        Err(_) => refuse(
+            2,
+            command,
+            format!("The identity '{}' <{}> cannot be written: a name must not be empty, and neither field may hold '<', '>' or a line break.", name.trim().escape_debug(), email.trim().escape_debug()),
+            "Set both to plain text, for example: export GIT_AUTHOR_NAME='Your Name' GIT_AUTHOR_EMAIL='you@example.com', or pass --author 'Your Name <you@example.com>'.",
+            Override::Variables,
+        ),
+    }
 }
 
 /// `--author 'Name <email>'`. Git also accepts a pattern that it looks up

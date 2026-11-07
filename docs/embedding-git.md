@@ -550,7 +550,7 @@ and the embedder sets the policy. The refusal text for `commit-tree`,
 `Unpublished` (exit 4), and a walk past 100,000 commits (exit 1) in a
 repository with no `objects/info/commit-graph`. With no remote-tracking refs,
 nothing counts as published. Cost, trust and the other limits are
-`docs/issues.md` W24-W27.
+`docs/issues.md` W29-W32.
 
 **What `commit` does with your hooks and identity.**
 
@@ -571,8 +571,8 @@ nothing counts as published. Cost, trust and the other limits are
   commit, exit 4, naming it; a `reset` refuses for `reference-transaction`; so does
   `--no-verify` when one is present. "Present" is an executable regular file
   or a link, not a `.sample`, in `<common dir>/hooks` or the directory
-  `core.hooksPath` names (any value counts; a path outside the working tree
-  refuses by name). With a `GitHooks` provider, `pre_commit` gets the tree oid
+  `core.hooksPath` names (any value counts; a path outside the working tree, or
+  through a symbolic link, refuses by name). With a `GitHooks` provider, `pre_commit` gets the tree oid
   before the commit object is written (its `Err` aborts, exit 1),
   `commit_msg` may rewrite the message (git cleans it again afterward), and
   `post_commit` runs after the ref moved, its failures reported on stderr and
@@ -583,17 +583,21 @@ nothing counts as published. Cost, trust and the other limits are
   tool description says so.
 
 **Order of a commit.** Refusals first, from an unlocked read (a refusal leaves
-`.git` byte-identical, which `tests/write_commit.rs` asserts for every refused
-spelling); then, for `-a` and `--only`, `index.lock`; blobs, trees and the
+`.git` byte-identical, which `tests/write_fingerprint.rs` and
+`tests/write_commit.rs` assert for the refusals that say "Nothing was changed.");
+then, for `-a` and `--only`, `index.lock`; blobs, trees and the
 commit as loose objects, all fsynced; then one `gix-ref` transaction on the branch
 HEAD names (on `HEAD` itself when detached), compare-and-swap against the oid read at the
 start, with reflog lines in git's format in the branch's log and in
 `logs/HEAD` (for a branch, `HEAD.lock` is held across the move and the
-`logs/HEAD` line is appended here, not by gix-ref); then the index rename. A branch that moved in between fails with
+`logs/HEAD` line is appended here, not by gix-ref); then, for `-a` and `--only`
+only, the index rename (a plain commit does not rewrite the index, W20). A branch that moved in between fails with
 exit 1 naming the ref and both oids. A stale lock is never removed (exit 4).
 gix-ref 0.66.0 hangs when the branch's lock exists and it is given a symbolic
 HEAD edit, so it is never given one; the locks are also looked at first, to
-refuse before any object is written (`docs/issues.md`, W13).
+refuse before any object is written (`docs/issues.md`, W13). The refusals that
+come after objects exist (`pre_commit` is handed the tree id, W15; a branch that
+moved) say so: objects remain, no ref or index changed, `git gc` prunes them.
 
 What the verbs do not do, stated plainly:
 
@@ -626,8 +630,10 @@ Write safety, in the order it applies:
 
 1. Refusals first. A verb decides everything it will refuse from a read-only
    snapshot of the index and the working tree, before it creates a file. A
-   refusal leaves `.git` byte-identical, directory mtimes included
-   (`tests/write_fingerprint.rs`).
+   refusal that says "Nothing was changed." leaves `.git` byte-identical,
+   directory mtimes included (`tests/write_fingerprint.rs`, and the commit
+   refusals in `tests/write_commit.rs`). Every blob's object path passes
+   containment before the first blob is written.
 2. Then `index.lock` is created exclusively, the index is read again under it,
    and the plan is rebuilt if the bytes changed. A lock that already exists is
    never removed: exit 4, naming it.

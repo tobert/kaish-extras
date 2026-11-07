@@ -676,26 +676,12 @@ pub enum GitError {
     /// refusal, 4 for a repository state or content this build will not write
     /// through, 1 for a git-level "no".
     #[cfg(feature = "commit")]
-    #[error("{text}")]
+    #[error("{refusal}")]
     Refused {
         /// The exit code of this refusal.
         code: i64,
-        /// The five-part text.
-        text: String,
-    },
-
-    /// A reflog message contained a line break, which would forge a second
-    /// reflog line. Exit 2.
-    #[cfg(feature = "commit")]
-    #[error(
-        "git {operation}: nothing was written. The reflog message would \
-         contain a line break, which git's reflog format cannot hold. Remove \
-         the line break (and any carriage return) from the first line of the \
-         commit message and run the command again"
-    )]
-    ReflogMessageLineBreak {
-        /// The verb that was asked for.
-        operation: &'static str,
+        /// The five parts, and what the refusal left on disk.
+        refusal: Box<crate::verbs::write::refusal::Refusal>,
     },
 }
 
@@ -720,8 +706,6 @@ impl GitError {
             | GitError::PatchRendererFailed { .. }
             | GitError::NoSuchPath { .. } => 1,
             #[cfg(feature = "commit")]
-            GitError::ReflogMessageLineBreak { .. } => 2,
-            #[cfg(feature = "commit")]
             GitError::Refused { code, .. } => *code,
             GitError::Usage { .. }
             | GitError::NoVerb { .. }
@@ -742,6 +726,26 @@ impl GitError {
             #[cfg(feature = "commit")]
             GitError::WriteThroughLink { .. } | GitError::WriteRootOutsideMount { .. } => 4,
             GitError::VerbNotEnabled { .. } => 5,
+        }
+    }
+
+    /// Mark a refusal as raised after objects were written, so its text says so
+    /// instead of "Nothing was changed." Any other error is returned as it is.
+    #[cfg(feature = "commit")]
+    pub(crate) fn after_objects(self) -> Self {
+        match self {
+            GitError::Refused { code, refusal } => GitError::Refused { code, refusal: Box::new(refusal.after_objects()) },
+            other => other,
+        }
+    }
+
+    /// [`Self::after_objects`] for a refusal raised after `ORIG_HEAD` was
+    /// written (a `reset` whose branch move lost).
+    #[cfg(feature = "commit")]
+    pub(crate) fn after_orig_head(self) -> Self {
+        match self {
+            GitError::Refused { code, refusal } => GitError::Refused { code, refusal: Box::new(refusal.after_orig_head()) },
+            other => other,
         }
     }
 

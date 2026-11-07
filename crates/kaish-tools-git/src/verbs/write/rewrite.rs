@@ -75,7 +75,7 @@
 //! generation shifted so that order is preserved but a parent edge is
 //! missing) is trusted; the file is part of the repository, and a repository
 //! that forges its own object store has other ways to mislead (docs/issues.md
-//! W24).
+//! W29).
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
 

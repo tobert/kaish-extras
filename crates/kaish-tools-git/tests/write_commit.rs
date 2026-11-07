@@ -572,10 +572,19 @@ async fn a_linked_worktree_commits_with_head_and_index_in_its_own_git_dir() {
     assert_eq!(git_raw(&twin_wt, &["commit", "-q", "-m", "in worktree"]).0, 0);
     let ours_wt = p.ours.parent().expect("parent").join("ours-wt");
     assert_eq!(git_raw(&ours_wt, &["rev-parse", "HEAD"]).1, git_raw(&twin_wt, &["rev-parse", "HEAD"]).1);
-    // The branch ref lives in the common dir; HEAD's log in the worktree's.
-    assert!(read_log(&p.ours, "logs/refs/heads/side").contains("\tcommit: in worktree"));
-    let wt_logs = std::fs::read_dir(p.ours.join(".git/worktrees")).expect("worktrees").next().expect("one").expect("entry").path().join("logs/HEAD");
-    assert!(std::fs::read_to_string(wt_logs).expect("worktree HEAD log").contains("\tcommit: in worktree"));
+    // The branch ref and its log live in the common dir; HEAD's log in the
+    // worktree's. Both are byte-equal to git's, this shell's hand-written
+    // append to the worktree's logs/HEAD included.
+    let first_dir = |repo: &Path| {
+        std::fs::read_dir(repo.join(".git/worktrees")).expect("worktrees").next().expect("one").expect("entry").path()
+    };
+    let (ours_head_log, twin_head_log) = (std::fs::read(first_dir(&p.ours).join("logs/HEAD")).expect("log"), std::fs::read(first_dir(&p.twin).join("logs/HEAD")).expect("log"));
+    assert!(ours_head_log == twin_head_log, "worktree logs/HEAD differs\nours: {:?}\ntwin: {:?}", String::from_utf8_lossy(&ours_head_log), String::from_utf8_lossy(&twin_head_log));
+    let (ours_side, twin_side) = (read_log(&p.ours, "logs/refs/heads/side"), read_log(&p.twin, "logs/refs/heads/side"));
+    assert_eq!(ours_side, twin_side, "logs/refs/heads/side differs");
+    assert!(ours_side.contains("\tcommit: in worktree"), "{ours_side}");
+    // HEAD in the common dir is the main worktree's: untouched.
+    assert_eq!(read_log(&p.ours, "logs/HEAD"), read_log(&p.twin, "logs/HEAD"));
     assert_eq!(git_raw(&ours_wt, &["fsck", "--strict"]).0, 0);
     // main did not move.
     assert_eq!(git_raw(&p.ours, &["rev-parse", "main"]).1, git_raw(&p.twin, &["rev-parse", "main"]).1);
@@ -1031,4 +1040,507 @@ async fn through_a_real_kernel_f_reads_the_message_from_the_vfs_and_variables_co
     let missing = kernel.execute("git commit -F /v/blobs/nope.txt").await.expect("commit");
     assert_eq!(missing.code, 2, "{}", missing.err);
     assert!(missing.err.contains("could not be read"), "{}", missing.err);
+}
+
+// ── non-UTF-8 paths survive every commit spelling (review T5) ──────────────
+
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+
+fn tree_z(repo: &Path) -> Vec<u8> {
+    let out = Command::new("git")
+        .args(["ls-tree", "-r", "-z", "HEAD"])
+        .current_dir(repo)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("run git");
+    assert!(out.status.success());
+    out.stdout
+}
+
+fn write_bytes_path(root: &Path, rel: &[u8], contents: &str) {
+    let path = root.join(OsStr::from_bytes(rel));
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(path, contents).expect("write");
+}
+
+const LATIN1: &[u8] = b"caf\xe9.txt";
+const LATIN1_IN_D: &[u8] = b"d/caf\xe9.txt";
+
+fn base_with_latin1(dir: &Path) {
+    base(dir);
+    write_bytes_path(dir, LATIN1, "latin one\n");
+    write_bytes_path(dir, LATIN1_IN_D, "latin two\n");
+    support::git(dir, &["add", "-A"]);
+    support::git(dir, &["commit", "-qm", "latin1"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_commit_keeps_a_non_utf8_entry_byte_for_byte() {
+    type Setup = fn(&Path);
+    let cases: Vec<(&str, Setup, Vec<&str>)> = vec![
+        ("plain", |d| {
+            base_with_latin1(d);
+            support::write_file(d, "a.txt", "alpha two\n");
+            support::git(d, &["add", "a.txt"]);
+        }, vec!["-m", "x"]),
+        ("-a edits", |d| {
+            base_with_latin1(d);
+            write_bytes_path(d, LATIN1, "latin edited\n");
+            write_bytes_path(d, LATIN1_IN_D, "latin two edited\n");
+        }, vec!["-a", "-m", "x"]),
+        ("-a deletion", |d| {
+            base_with_latin1(d);
+            std::fs::remove_file(d.join(OsStr::from_bytes(LATIN1_IN_D))).expect("rm");
+        }, vec!["-a", "-m", "x"]),
+        ("--only glob", |d| {
+            base_with_latin1(d);
+            write_bytes_path(d, LATIN1, "latin edited\n");
+            write_bytes_path(d, LATIN1_IN_D, "latin two edited\n");
+            support::write_file(d, "a.txt", "alpha two\n");
+        }, vec!["-m", "x", "*af?.txt"]),
+    ];
+    for (label, setup, args) in cases {
+        let p = Pair::new(&setup);
+        let mut ours = vec!["commit"];
+        ours.extend(&args);
+        let r = p.ours("", &ours).await;
+        assert_eq!(r.code, 0, "[{label}] {}", r.err);
+        let (code, _, err) = p.twin(&ours);
+        assert_eq!(code, 0, "[{label}] git: {err}");
+        let (a, b) = (tree_z(&p.ours), tree_z(&p.twin));
+        assert!(a == b, "[{label}] ls-tree -r -z HEAD differs\nours: {:?}\ntwin: {:?}", String::from_utf8_lossy(&a), String::from_utf8_lossy(&b));
+        p.assert_same(label);
+    }
+}
+
+// ── an identity cannot forge a header line (review T6) ─────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_author_flag_with_a_line_break_or_bracket_is_refused_pinned_or_not() {
+    let hostile = [
+        "A\ncommitter Evil <e@e>",
+        "A <e\n@e>",
+        "A\rB <e@e>",
+        "A> <e@e>",
+        "A <e@e\ncommitter Evil <x@x>>",
+    ];
+    let pinned = GitConfig::read_only().with_commit_profile().with_identity(
+        Identity::new("Pinned Author", "pa@example.org").expect("identity"),
+        Identity::new("Pinned Committer", "pc@example.org").expect("identity"),
+    );
+    let plain = GitConfig::read_only().with_commit_profile();
+    for (label, config) in [("pinned", pinned), ("unpinned", plain)] {
+        for author in hostile {
+            let p = Pair::new(&|d| {
+                base(d);
+                support::write_file(d, "a.txt", "changed\n");
+                support::git(d, &["add", "a.txt"]);
+            });
+            let fp = support::Fingerprint::take(&p.ours);
+            let r = run_tool_with(&p.fx.root(), "/mnt/ours", &["commit", "-m", "x", "--author", author], &default_vars(), config.clone()).await;
+            let after = git_raw(&p.ours, &["cat-file", "-p", "HEAD"]).1;
+            let committers = after.lines().take_while(|l| !l.is_empty()).filter(|l| l.starts_with("committer ")).count();
+            assert_eq!(committers, 1, "[{label}] {author:?}: a header line was forged:\n{after}");
+            assert_eq!(r.code, 2, "[{label}] {author:?}: {}", r.err);
+            assert!(support::Fingerprint::take(&p.ours).differences_from(&fp).is_empty(), "[{label}] {author:?}: a refusal changed the repository");
+            assert!(git_raw(&p.ours, &["fsck", "--strict"]).0 == 0);
+        }
+    }
+}
+
+// ── the reflog message is git's copy_reflog_msg (review T4) ────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reflog_messages_collapse_whitespace_as_git_does() {
+    for (label, message) in [
+        ("carriage return", "sub\rject"),
+        ("tabs", "sub\tject\twith\t\ttabs"),
+        ("runs of spaces", "a    b  c"),
+        ("form feed and vertical tab are not whitespace to git", "a\u{b}b\u{c}c"),
+        ("two lines", "first line\nsecond line"),
+        ("trailing carriage return", "subject\r"),
+        ("leading tab", "\tindented subject"),
+        ("many", "a \t\r b"),
+    ] {
+        let p = Pair::new(&|d| {
+            base(d);
+            support::write_file(d, "a.txt", "changed\n");
+            support::git(d, &["add", "a.txt"]);
+        });
+        let r = p.ours("", &["commit", "-m", message]).await;
+        assert_eq!(r.code, 0, "[{label}] {}", r.err);
+        let (code, _, err) = p.twin(&["commit", "-m", message]);
+        assert_eq!(code, 0, "[{label}] git: {err}");
+        for log in ["logs/HEAD", "logs/refs/heads/main"] {
+            let (a, b) = (std::fs::read(p.ours.join(".git").join(log)).expect("log"), std::fs::read(p.twin.join(".git").join(log)).expect("log"));
+            assert!(a == b, "[{label}] {log} differs\nours: {:?}\ntwin: {:?}", String::from_utf8_lossy(&a), String::from_utf8_lossy(&b));
+        }
+        p.assert_same(label);
+    }
+}
+
+// ── what a refusal says it wrote is what it wrote (review T1-T3) ───────────
+
+/// Every file under `.git` except the object database, by path, with bytes.
+fn state_outside_objects(repo: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        for e in std::fs::read_dir(dir).expect("read_dir") {
+            let p = e.expect("entry").path();
+            let rel = p.strip_prefix(root).expect("under").display().to_string();
+            if rel == "objects" {
+                continue;
+            }
+            if p.is_dir() {
+                walk(root, &p, out);
+            } else {
+                out.insert(rel, std::fs::read(&p).unwrap_or_default());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    let git = repo.join(".git");
+    walk(&git, &git, &mut out);
+    out
+}
+
+fn loose_objects(repo: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let root = repo.join(".git/objects");
+    for e in std::fs::read_dir(&root).expect("objects") {
+        let p = e.expect("entry").path();
+        if p.is_dir() && p.file_name().is_some_and(|n| n.len() == 2) {
+            for f in std::fs::read_dir(&p).expect("fan-out") {
+                out.push(format!("{}/{}", p.file_name().expect("n").to_string_lossy(), f.expect("f").file_name().to_string_lossy()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A refusal after the commit's objects exist says so, and the claim holds:
+/// objects were written, and no ref, reflog, index or HEAD changed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refusal_after_objects_were_written_does_not_say_nothing_changed() {
+    // pre-commit rejection (the hook is handed the tree id, so the tree exists).
+    let p = Pair::new(&|d| {
+        base(d);
+        support::write_file(d, "a.txt", "tracked change\n");
+    });
+    let before_state = state_outside_objects(&p.ours);
+    let before_objects = loose_objects(&p.ours);
+    let rec = Arc::new(Recorder { reject_pre_commit: true, ..Recorder::default() });
+    let config = GitConfig::read_only().with_commit_profile().with_hooks(rec);
+    let r = run_tool_with(&p.fx.root(), "/mnt/ours", &["commit", "-am", "x"], &default_vars(), config).await;
+    assert_eq!(r.code, 1, "{}", r.err);
+    assert!(!r.err.contains("Nothing was changed"), "it wrote a tree: {}", r.err);
+    assert!(r.err.contains("no ref or index changed") && r.err.contains("git gc prunes"), "{}", r.err);
+    assert!(state_outside_objects(&p.ours) == before_state, "a ref, reflog, the index or HEAD changed");
+    assert!(loose_objects(&p.ours).len() > before_objects.len(), "the claim is that objects were written, and none were");
+
+    // A lost compare-and-swap.
+    let p = Pair::new(&staged_change);
+    let rec = Arc::new(Recorder { race: Some(p.ours.clone()), ..Recorder::default() });
+    let config = GitConfig::read_only().with_commit_profile().with_hooks(rec);
+    let r = run_tool_with(&p.fx.root(), "/mnt/ours", &["commit", "-m", "x"], &default_vars(), config).await;
+    assert_eq!(r.code, 1, "{}", r.err);
+    assert!(!r.err.contains("Nothing was changed"), "{}", r.err);
+    assert!(r.err.contains("no ref or index changed") && r.err.contains("git gc prunes"), "{}", r.err);
+    assert!(!r.err.contains("The commit object is on disk"), "the sentence is now the Wrote property: {}", r.err);
+
+    // The same three on the amend paths: the amended commit's tree is written
+    // before the hook runs and before the compare-and-swap, so each claims the
+    // objects and no more.
+    for (label, rec, argv) in [
+        ("amend, pre-commit rejection", Recorder { reject_pre_commit: true, ..Recorder::default() }, vec!["commit", "--amend", "-am", "x"]),
+        ("amend, lost swap", Recorder { race: Some(PathBuf::new()), ..Recorder::default() }, vec!["commit", "--amend", "-m", "x"]),
+    ] {
+        let p = Pair::new(&|d| {
+            base(d);
+            support::write_file(d, "a.txt", "tracked change\n");
+        });
+        let mut rec = rec;
+        if rec.race.is_some() {
+            rec.race = Some(p.ours.clone());
+        }
+        let before_state = state_outside_objects(&p.ours);
+        let before_objects = loose_objects(&p.ours);
+        let config = GitConfig::read_only().with_commit_profile().with_hooks(Arc::new(rec));
+        let r = run_tool_with(&p.fx.root(), "/mnt/ours", &argv, &default_vars(), config).await;
+        assert_eq!(r.code, 1, "[{label}] {}", r.err);
+        assert!(!r.err.contains("Nothing was changed"), "[{label}] it wrote a tree: {}", r.err);
+        assert!(r.err.contains("no ref or index changed") && r.err.contains("git gc prunes"), "[{label}] {}", r.err);
+        if label.ends_with("rejection") {
+            assert!(state_outside_objects(&p.ours) == before_state, "[{label}] a ref, reflog, the index or HEAD changed");
+        }
+        assert!(loose_objects(&p.ours).len() > before_objects.len(), "[{label}] the claim is that objects were written, and none were");
+    }
+}
+
+/// The refusals the tree writer raises come before any blob is written, so
+/// they keep the plain claim, held to the bytes: `.git` is identical, objects
+/// included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tree_refusal_in_commit_a_comes_before_the_first_blob() {
+    let p = Pair::new(&|d| {
+        base(d);
+        // An entry the index trusts (assume-unchanged) whose blob is missing.
+        support::git(d, &["update-index", "--add", "--info-only", "--cacheinfo", "100644,1111111111111111111111111111111111111111,ghost.txt"]);
+        support::git(d, &["update-index", "--assume-unchanged", "ghost.txt"]);
+        support::write_file(d, "ghost.txt", "ghost\n");
+        support::write_file(d, "a.txt", "alpha changed\n");
+    });
+    let fp = support::Fingerprint::take(&p.ours);
+    let r = p.ours("", &["commit", "-a", "-m", "x"]).await;
+    assert_eq!(r.code, 4, "{}", r.err);
+    assert!(r.err.contains("ghost.txt") && r.err.contains("does not hold"), "{}", r.err);
+    assert!(r.err.trim_end().ends_with("Nothing was changed."), "{}", r.err);
+    let diffs = support::Fingerprint::take(&p.ours).differences_from(&fp);
+    assert!(diffs.is_empty(), "the refusal claims nothing changed: {diffs:?}");
+}
+
+/// Hook rejection, lost swap and tree refusal in one place for the claim in
+/// docs/embedding-git.md: a refusal that says "Nothing was changed." leaves
+/// `.git` byte-identical.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_nothing_was_changed_refusal_of_commit_leaves_git_byte_identical() {
+    for (label, setup, argv) in [
+        ("empty message", staged_change as fn(&Path), vec!["commit", "-m", ""]),
+        ("nothing to commit", base, vec!["commit", "-m", "x"]),
+        ("--only unknown path", staged_change, vec!["commit", "-m", "x", "nomatch"]),
+        ("author with a line break", staged_change, vec!["commit", "-m", "x", "--author", "A\nB <a@b.c>"]),
+    ] {
+        let p = Pair::new(&setup);
+        let fp = support::Fingerprint::take(&p.ours);
+        let r = p.ours("", &argv).await;
+        assert_ne!(r.code, 0, "[{label}] {}", r.err);
+        assert!(r.err.trim_end().ends_with("Nothing was changed."), "[{label}] {}", r.err);
+        let diffs = support::Fingerprint::take(&p.ours).differences_from(&fp);
+        assert!(diffs.is_empty(), "[{label}] {diffs:?}");
+    }
+}
+
+// ── pins from the second review (GLM) ──────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_planted_link_at_a_later_blob_stops_commit_a_before_any_blob_is_written() {
+    let first = (0..).map(|n| format!("first {n}\n")).find(|c| blob_hex(c)[..2] != blob_hex("second\n")[..2]).expect("content");
+    let p = Pair::new(&|d| {
+        base(d);
+    });
+    support::write_file(&p.ours, "a.txt", &first);
+    support::write_file(&p.ours, "b.txt", "second\n");
+    let (first_hex, second_hex) = (blob_hex(&first), blob_hex("second\n"));
+    let outside = p.fx.path("elsewhere-7f3a");
+    std::fs::create_dir_all(&outside).expect("outside");
+    std::os::unix::fs::symlink(&outside, p.ours.join(format!(".git/objects/{}", &second_hex[..2]))).expect("plant");
+    let r = p.ours("", &["commit", "-a", "-m", "x"]).await;
+    assert_eq!(r.code, 4, "{}", r.err);
+    assert!(r.err.contains("nothing was written"), "{}", r.err);
+    assert!(!p.ours.join(format!(".git/objects/{}/{}", &first_hex[..2], &first_hex[2..])).exists(), "the first blob was written before the second was vetted");
+    assert_eq!(std::fs::read_dir(&outside).expect("outside").count(), 0, "wrote through the link");
+}
+
+fn blob_hex(content: &str) -> String {
+    use std::io::Write as _;
+    let mut child = Command::new("git")
+        .args(["hash-object", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("git");
+    child.stdin.take().expect("stdin").write_all(content.as_bytes()).expect("write");
+    String::from_utf8(child.wait_with_output().expect("wait").stdout).expect("utf8").trim().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_branch_ref_that_is_a_link_out_of_the_repository_refuses_the_commit() {
+    let p = Pair::new(&|d| {
+        staged_change(d);
+        support::git(d, &["branch", "feat"]);
+        support::git(d, &["checkout", "-q", "feat"]);
+        support::git(d, &["checkout", "-q", "main"]);
+        support::git(d, &["symbolic-ref", "HEAD", "refs/heads/feat"]);
+    });
+    let outside = p.fx.path("elsewhere-feat");
+    std::fs::write(&outside, git_raw(&p.ours, &["rev-parse", "main"]).1).expect("outside ref");
+    let feat = p.ours.join(".git/refs/heads/feat");
+    std::fs::remove_file(&feat).expect("rm");
+    std::os::unix::fs::symlink(&outside, &feat).expect("plant");
+    let before = std::fs::read(&outside).expect("outside");
+    let r = p.ours("", &["commit", "-m", "x"]).await;
+    assert_eq!(r.code, 4, "{}", r.err);
+    assert!(!r.err.contains("elsewhere-feat"), "named the link target: {}", r.err);
+    assert_eq!(std::fs::read(&outside).expect("outside"), before, "wrote through the link");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_first_commit_on_an_unborn_nested_branch_matches_git_byte_for_byte() {
+    let p = Pair::new(&|d| {
+        support::git(d, &["symbolic-ref", "HEAD", "refs/heads/feat/x"]);
+        support::write_file(d, "a", "a\n");
+        support::git(d, &["add", "a"]);
+    });
+    assert_eq!(p.ours("", &["commit", "-m", "first"]).await.code, 0);
+    assert_eq!(p.twin(&["commit", "-q", "-m", "first"]).0, 0);
+    assert_eq!(git_raw(&p.ours, &["rev-parse", "HEAD"]).1, git_raw(&p.twin, &["rev-parse", "HEAD"]).1);
+    for log in ["logs/HEAD", "logs/refs/heads/feat/x"] {
+        assert_eq!(read_log(&p.ours, log), read_log(&p.twin, log), "{log}");
+    }
+    assert_eq!(std::fs::read(p.ours.join(".git/refs/heads/feat/x")).expect("ref"), std::fs::read(p.twin.join(".git/refs/heads/feat/x")).expect("ref"));
+    assert_eq!(git_raw(&p.ours, &["fsck", "--strict"]).0, 0);
+}
+
+// ── pins from the first review ─────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plain_commit_does_not_rewrite_the_index() {
+    let p = Pair::new(&staged_change);
+    let before = std::fs::read(p.ours.join(".git/index")).expect("index");
+    let mtime = std::fs::metadata(p.ours.join(".git/index")).expect("meta").modified().expect("mtime");
+    assert_eq!(p.ours("", &["commit", "-m", "x"]).await.code, 0);
+    assert!(std::fs::read(p.ours.join(".git/index")).expect("index") == before, "a plain commit rewrote the index");
+    assert_eq!(std::fs::metadata(p.ours.join(".git/index")).expect("meta").modified().expect("mtime"), mtime);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn allow_empty_with_a_parent_matches_git() {
+    let p = Pair::new(&base);
+    assert_eq!(p.ours("", &["commit", "--allow-empty", "-m", "again"]).await.code, 0);
+    assert_eq!(p.twin(&["commit", "-q", "--allow-empty", "-m", "again"]).0, 0);
+    p.assert_same("--allow-empty with a parent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_commit_on_a_packed_branch_leaves_packed_refs_alone_and_matches_git() {
+    let setup = |d: &Path| {
+        staged_change(d);
+        support::git(d, &["pack-refs", "--all"]);
+    };
+    let p = Pair::new(&setup);
+    assert!(p.ours.join(".git/packed-refs").exists());
+    assert!(!p.ours.join(".git/refs/heads/main").exists(), "the branch must be packed only");
+    let packed_before = std::fs::read(p.ours.join(".git/packed-refs")).expect("packed");
+    let r = p.ours("", &["commit", "-m", "x"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(p.twin(&["commit", "-q", "-m", "x"]).0, 0);
+    // The new value is a loose ref, as git writes it; the packed entry is the
+    // old one in git too, and the two repositories' files are byte-equal.
+    assert_eq!(std::fs::read(p.ours.join(".git/packed-refs")).expect("packed"), packed_before);
+    assert!(std::fs::read(p.ours.join(".git/packed-refs")).expect("p") == std::fs::read(p.twin.join(".git/packed-refs")).expect("p"), "packed-refs differs from git's");
+    assert_eq!(std::fs::read(p.ours.join(".git/refs/heads/main")).expect("loose"), std::fs::read(p.twin.join(".git/refs/heads/main")).expect("loose"));
+    assert_eq!(git_raw(&p.ours, &["show-ref"]).1, git_raw(&p.twin, &["show-ref"]).1);
+    p.assert_same("packed branch");
+}
+
+// ── a gitlink replaced by a file (review T9) ───────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_gitlink_replaced_by_a_regular_file_is_committed_as_a_file() {
+    let setup = |dir: &Path| {
+        base(dir);
+        support::git(dir, &["init", "-q", "-b", "main", "inner"]);
+        let inner = dir.join("inner");
+        support::write_file(&inner, "z.txt", "z\n");
+        support::git(&inner, &["add", "."]);
+        support::git(&inner, &["commit", "-qm", "inner one"]);
+        support::git(dir, &["add", "inner"]);
+        support::git(dir, &["commit", "-qm", "add inner"]);
+        std::fs::remove_dir_all(&inner).expect("rm inner");
+        support::write_file(dir, "inner", "now a plain file\n");
+    };
+    for args in [vec!["commit", "-a", "-m", "x"], vec!["commit", "-m", "x", "inner"]] {
+        let p = Pair::new(&setup);
+        let r = p.ours("", &args).await;
+        assert_eq!(r.code, 0, "{args:?}: {}", r.err);
+        let (code, _, err) = p.twin(&args);
+        assert_eq!(code, 0, "{args:?}: {err}");
+        assert!(git_raw(&p.ours, &["ls-tree", "HEAD", "inner"]).1.starts_with("100644 blob"), "{args:?}");
+        p.assert_same(&args.join(" "));
+    }
+}
+
+// ── git's binary rule looks at the first 8000 bytes only (review T10) ──────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_nul_after_the_first_8000_bytes_does_not_make_a_file_binary() {
+    let mut late = "line\n".repeat(1700).into_bytes(); // 8500 bytes
+    late.extend_from_slice(b"after\0nul\nmore\n");
+    let mut early = b"nul\0here\n".to_vec();
+    early.extend_from_slice("line\n".repeat(1700).as_bytes());
+    for (label, bytes) in [("NUL after 8000", late), ("NUL in the first bytes", early)] {
+        let bytes2 = bytes.clone();
+        let setup = move |d: &Path| {
+            base(d);
+            std::fs::write(d.join("data.bin"), &bytes2).expect("write");
+            support::git(d, &["add", "data.bin"]);
+        };
+        let p = Pair::new(&setup);
+        let r = p.ours("", &["commit", "-m", "x"]).await;
+        assert_eq!(r.code, 0, "[{label}] {}", r.err);
+        let (code, gout, err) = p.twin(&["commit", "-m", "x"]);
+        assert_eq!(code, 0, "[{label}] {err}");
+        assert_eq!(r.text_out(), gout, "[{label}] the summary differs from git's");
+    }
+}
+
+// ── the --only refusal does not claim a thing this shell does (review T13) ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committing_an_untracked_path_points_at_git_add_and_does_not_say_never() {
+    let p = Pair::new(&|d| {
+        staged_change(d);
+        support::write_file(d, "u.txt", "untracked\n");
+    });
+    let r = p.ours("", &["commit", "-m", "x", "u.txt"]).await;
+    assert_eq!(r.code, 1, "{}", r.err);
+    assert!(r.err.contains("git add u.txt"), "{}", r.err);
+    assert!(!r.err.contains("never does it"), "git add then commit does exactly this: {}", r.err);
+    // And that route works.
+    assert_eq!(p.ours("", &["add", "u.txt"]).await.code, 0);
+    assert_eq!(p.ours("", &["commit", "-m", "x", "u.txt"]).await.code, 0);
+}
+
+// ── core.hooksPath is resolved through the lstat walk (review T15) ─────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hooks_path_through_a_link_refuses_naming_the_setting_and_reads_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    for (label, hooks_path, plant) in [
+        ("linked directory", "link/hooks", "dir"),
+        ("linked leaf", "hooks-link", "leaf"),
+        ("leaves the tree", "../elsewhere", "none"),
+        ("absolute", "/nonexistent-hooks-dir", "none"),
+    ] {
+        let p = Pair::new(&staged_change);
+        let outside = p.fx.path("outside-hooks");
+        std::fs::create_dir_all(outside.join("hooks")).expect("outside");
+        // A hook outside, which would be read if the link were followed.
+        let hook = outside.join("hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").expect("hook");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        match plant {
+            "dir" => std::os::unix::fs::symlink(&outside, p.ours.join("link")).expect("link"),
+            "leaf" => std::os::unix::fs::symlink(outside.join("hooks"), p.ours.join("hooks-link")).expect("link"),
+            _ => {}
+        }
+        support::git(&p.ours, &["config", "core.hooksPath", hooks_path]);
+        let fp = support::Fingerprint::take(&p.ours.join(".git"));
+        let r = p.ours("", &["commit", "-m", "x"]).await;
+        assert_eq!(r.code, 4, "[{label}] {}", r.err);
+        assert!(r.err.contains("core.hooksPath"), "[{label}] {}", r.err);
+        assert!(!r.err.contains("pre-commit hook"), "[{label}] read the hook through the link: {}", r.err);
+        assert!(!r.err.contains("outside-hooks"), "[{label}] named the target: {}", r.err);
+        assert!(support::Fingerprint::take(&p.ours.join(".git")).differences_from(&fp).is_empty(), "[{label}]");
+    }
+    // Negative controls: a real directory inside the tree, and one that does not exist.
+    for hooks_path in ["githooks", "missing/dir"] {
+        let p = Pair::new(&staged_change);
+        std::fs::create_dir_all(p.ours.join("githooks")).expect("dir");
+        support::git(&p.ours, &["config", "core.hooksPath", hooks_path]);
+        let r = p.ours("", &["commit", "-m", "x"]).await;
+        assert_eq!(r.code, 0, "[{hooks_path}] {}", r.err);
+    }
 }

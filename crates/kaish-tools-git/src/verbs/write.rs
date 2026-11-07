@@ -30,6 +30,7 @@ pub(crate) mod objects;
 pub(crate) mod refusal;
 pub(crate) mod reset;
 pub(crate) mod rewrite;
+pub(crate) mod relpath;
 pub(crate) mod rm;
 pub(crate) mod repo;
 pub(crate) mod spec;

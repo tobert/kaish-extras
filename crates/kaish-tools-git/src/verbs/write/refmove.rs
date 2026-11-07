@@ -26,7 +26,7 @@ use gix_ref::Target;
 use crate::error::GitError;
 use crate::verbs::write::ident::Signature;
 use crate::verbs::write::refusal::{refuse, Override};
-use crate::verbs::write::reflog::validate_message;
+use crate::verbs::write::reflog::copy_message;
 use crate::verbs::write::repo::WriteRepo;
 
 /// What HEAD names right now.
@@ -45,8 +45,6 @@ pub(crate) struct MoveKind {
     pub(crate) op: &'static str,
     /// Completes "moved while ...": "this commit was being made".
     pub(crate) during: &'static str,
-    /// What is on disk when the compare-and-swap loses.
-    pub(crate) leftover: &'static str,
     /// The next step after a lost race.
     pub(crate) again: &'static str,
     /// Says the move happened, for a failure after the branch moved.
@@ -57,14 +55,12 @@ impl MoveKind {
     pub(crate) const COMMIT: MoveKind = MoveKind {
         op: "commit",
         during: "this commit was being made",
-        leftover: " The commit object is on disk and no ref names it.",
         again: "make the commit again",
         done: "the commit was made",
     };
     pub(crate) const RESET: MoveKind = MoveKind {
         op: "reset",
         during: "this reset was running",
-        leftover: "",
         again: "run the reset again",
         done: "the reset was made",
     };
@@ -108,9 +104,9 @@ pub(crate) fn move_head_as(
     message: &str,
     committer: &Signature,
 ) -> Result<(), GitError> {
-    let message = validate_message(kind.op, message)?;
+    let message = copy_message(message);
     precheck(repo, command, target)?;
-    apply_move(repo, kind, command, target, old, new, message, committer)
+    apply_move(repo, kind, command, target, old, new, &message, committer)
 }
 
 /// The move itself, after [`precheck`]. Separate so a test can reach the
@@ -224,7 +220,7 @@ fn hold_head(repo: &WriteRepo, kind: MoveKind, command: &str, full: &str) -> Res
             refuse(
                 1,
                 command,
-                format!("HEAD moved while {}: it named '{full}' when it started and is now {now}.{}", kind.during, kind.leftover),
+                format!("HEAD moved while {}: it named '{full}' when it started and is now {now}.", kind.during),
                 format!("Run git status to see where HEAD is now, then {}.", kind.again),
                 Override::Never,
             )
@@ -382,10 +378,9 @@ fn cas_failure(
         1,
         command,
         format!(
-            "'{refname}' moved while {}: it was {expected} when it started and is now {}.{}",
+            "'{refname}' moved while {}: it was {expected} when it started and is now {}.",
             kind.during,
-            target_text(actual),
-            kind.leftover
+            target_text(actual)
         ),
         format!("Run git status to see where the branch is now, then {}.", kind.again),
         Override::Never,

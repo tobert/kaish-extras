@@ -24,7 +24,6 @@ use std::sync::Arc;
 use clap::Parser;
 use gix_index::entry::{Flags, Mode};
 use gix_index::hash::ObjectId;
-use gix_object::bstr::ByteSlice as _;
 use kaish_tool_api::GlobalFlags;
 
 use crate::config::{Identity, RewritePolicy};
@@ -40,6 +39,7 @@ use crate::verbs::write::objects::BlobWriter;
 use crate::verbs::write::refmove::{self, HeadTarget};
 use crate::verbs::write::rewrite::{self, MoveCheck, Mover, NewTip};
 use crate::verbs::write::refusal::{refuse, Override};
+use crate::verbs::write::relpath::{os, show, RelPath};
 use crate::verbs::write::repo::WriteRepo;
 use crate::verbs::write::spec::{Outcome, SpecSet};
 use crate::verbs::write::stage;
@@ -357,9 +357,18 @@ fn read_amended(repo: &WriteRepo, cmd: &str, oid: ObjectId) -> Result<Amended, G
     let time = a
         .time()
         .map_err(|e| GitError::repository(OP, "reading the author date to amend", repo.git_dir(), e))?;
+    let (Ok(name), Ok(email)) = (std::str::from_utf8(a.name), std::str::from_utf8(a.email)) else {
+        return refuse(
+            4,
+            cmd,
+            "The author of the commit to amend is not valid UTF-8, and this shell reads only UTF-8 identities.",
+            "Make a new commit instead: git commit -m '<message>'.",
+            Override::Repository,
+        );
+    };
     let author = ident::Signature {
-        name: a.name.to_str_lossy().into_owned(),
-        email: a.email.to_str_lossy().into_owned(),
+        name: name.to_string(),
+        email: email.to_string(),
         seconds: time.seconds,
         offset: time.offset,
     };
@@ -374,7 +383,7 @@ fn read_amended(repo: &WriteRepo, cmd: &str, oid: ObjectId) -> Result<Amended, G
     Ok(Amended { parents: c.parents().collect(), author, message: message.to_string(), extra_headers })
 }
 
-type Map = BTreeMap<String, (ObjectId, Mode)>;
+type Map = BTreeMap<RelPath, (ObjectId, Mode)>;
 
 /// The index change a commit makes, and the tree it commits.
 struct Prepared {
@@ -455,6 +464,8 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
     let mut prepared = prepare(repo, &snap.state, snap.mtime, &policy, &head_map, opts)?;
     let message = final_message(opts, amended.as_ref().map(|a| a.message.as_str()))?;
     check_not_empty(&prepared.items, &base_map, opts.allow_empty || merge_amend, cmd, amended.is_some())?;
+    // Every refusal the tree writer could raise comes before the first blob.
+    validate_tree(repo, cmd, &prepared)?;
 
     let mut tx: Option<IndexTx> = None;
     if writes_index {
@@ -462,6 +473,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
         if locked.snap.bytes != snap.bytes {
             prepared = prepare(repo, locked.state(), locked.snap.mtime, &policy, &head_map, opts)?;
             check_not_empty(&prepared.items, &base_map, opts.allow_empty || merge_amend, cmd, amended.is_some())?;
+            validate_tree(repo, cmd, &prepared)?;
         }
         tx = Some(locked);
     }
@@ -475,7 +487,8 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
         debug_assert!(prepared.plan.files.is_empty());
     }
     let items: Vec<Item> = prepared.items.iter().map(|(p, (id, m))| Item { path: p.clone(), mode: *m, id: *id }).collect();
-    let tree_id = tree::write_tree(repo, &mut writer, cmd, items)?;
+    // Blobs may be on disk by now: a refusal from here on says so.
+    let tree_id = tree::write_tree(repo, &mut writer, cmd, items).map_err(GitError::after_objects)?;
 
     // Hooks. The tree is written; a refusal here leaves unreachable objects.
     let tree_hex = tree_id.to_string();
@@ -493,12 +506,12 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
     if let Some(h) = env.hooks.as_ref() {
         match h.pre_commit(&ctx) {
             Ok(out) => note(&mut err, &out.message),
-            Err(e) => return hook_refusal(cmd, "pre-commit", &e.message),
+            Err(e) => return hook_refusal(cmd, "pre-commit", &e.message).map_err(GitError::after_objects),
         }
         let mut text = message.clone();
         match h.commit_msg(&ctx, &mut text) {
             Ok(out) => note(&mut err, &out.message),
-            Err(e) => return hook_refusal(cmd, "commit-msg", &e.message),
+            Err(e) => return hook_refusal(cmd, "commit-msg", &e.message).map_err(GitError::after_objects),
         }
         if text != message {
             // Git cleans the file again after the hook has been at it.
@@ -510,7 +523,8 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
                     "The commit-msg hook left the message empty.",
                     "Run the commit again with a message: git commit -m '<message>'.",
                     Override::Never,
-                );
+                )
+                .map_err(GitError::after_objects);
             }
         }
     }
@@ -548,7 +562,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
         "commit"
     };
     let reflog = format!("{kind}: {}", message::subject(&message));
-    refmove::move_head(repo, cmd, &target, old, commit_id, &reflog, &idents.committer)?;
+    refmove::move_head(repo, cmd, &target, old, commit_id, &reflog, &idents.committer).map_err(GitError::after_objects)?;
 
     if let Some(tx) = tx {
         // The ref has moved; the index follows, as in git. A failure here
@@ -610,6 +624,21 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
             "committer": idents.committer.ident_line(),
         }),
     })
+}
+
+/// Run the tree writer's checks on the final path map, writing nothing.
+fn validate_tree(repo: &WriteRepo, cmd: &str, prepared: &Prepared) -> Result<(), GitError> {
+    let items: Vec<Item> = prepared.items.iter().map(|(p, (id, m))| Item { path: p.clone(), mode: *m, id: *id }).collect();
+    let planned = prepared.plan.files.iter().map(|s| s.id).collect();
+    tree::validate_tree(repo, cmd, items, &planned)?;
+    // Every planned blob's object path passes containment before the first is
+    // written, so a planted link at a later blob's directory refuses with no
+    // blob on disk.
+    let vet = BlobWriter::new(repo, OP);
+    for staged in &prepared.plan.files {
+        vet.vet(&staged.id)?;
+    }
+    Ok(())
 }
 
 fn note(err: &mut String, text: &str) {
@@ -786,7 +815,7 @@ fn prepare(
         .filter(|e| e.stage() == gix_index::entry::Stage::Unconflicted)
         // Intent-to-add entries are not committed: git's write-tree skips them.
         .filter(|e| !e.flags.contains(Flags::INTENT_TO_ADD))
-        .map(|e| (e.path(state).to_str_lossy().into_owned(), (e.id, e.mode)))
+        .map(|e| (e.path(state).to_owned(), (e.id, e.mode)))
         .collect();
     let plan = if opts.all {
         add::build(
@@ -816,12 +845,12 @@ fn build_only(
     let tracked = Tracked::all(state);
     // Known paths: the index's and HEAD's, as git's `list_paths` overlays
     // HEAD's tree on the index to match against.
-    let mut known: BTreeMap<&str, Option<Mode>> = BTreeMap::new();
+    let mut known: BTreeMap<&[u8], Option<Mode>> = BTreeMap::new();
     for (p, (_, m)) in head_map {
-        known.insert(p.as_str(), Some(*m));
+        known.insert(p.as_slice(), Some(*m));
     }
     for t in &tracked {
-        known.insert(t.path.as_str(), Some(t.mode));
+        known.insert(t.path.as_slice(), Some(t.mode));
     }
     let mut plan = Plan::default();
     let mut attrs = AttributeReader::new(repo, cmd);
@@ -829,14 +858,14 @@ fn build_only(
         if !specs.matches(path) {
             continue;
         }
-        let tr = tracked.iter().find(|t| t.path == *path);
+        let tr = tracked.iter().find(|t| t.path.as_slice() == *path);
         if tr.is_some_and(|t| t.flags.contains(Flags::SKIP_WORKTREE) || t.flags.contains(Flags::ASSUME_VALID)) {
             continue;
         }
-        let abs = match repo.check_worktree_any(Path::new(path)) {
+        let abs = match repo.check_worktree_any(os(path)) {
             Ok(p) => p,
             Err(GitError::WriteThroughLink { found: "not a directory", .. }) => {
-                plan.removals.push((*path).to_string());
+                plan.removals.push((*path).into());
                 continue;
             }
             Err(e) => return Err(e),
@@ -844,23 +873,24 @@ fn build_only(
         let meta = match std::fs::symlink_metadata(&abs) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                plan.removals.push((*path).to_string());
+                plan.removals.push((*path).into());
                 continue;
             }
             Err(e) => return Err(GitError::repository(OP, "reading a working-tree path", &abs, e)),
         };
-        if *mode == Some(Mode::COMMIT) {
+        // A gitlink whose path is now a file or a link is committed as one.
+        if *mode == Some(Mode::COMMIT) && meta.is_dir() {
             if let Some(id) = add::gitlink_head(repo, &abs)? {
                 let stat = gix_index::fs::Metadata::from_path_no_follow(&abs)
                     .ok()
                     .and_then(|m| gix_index::entry::Stat::from_fs(&m).ok())
                     .unwrap_or_default();
-                plan.gitlinks.push(((*path).to_string(), id, stat));
+                plan.gitlinks.push(((*path).into(), id, stat));
             }
             continue;
         }
         if meta.is_dir() {
-            plan.removals.push((*path).to_string());
+            plan.removals.push((*path).into());
             continue;
         }
         plan.files.push(stage::inspect(repo, &mut attrs, policy, cmd, path, *mode)?);
@@ -871,7 +901,7 @@ fn build_only(
             cmd,
             format!("The pathspec '{missing}' did not match any file known to git, and --only commits tracked paths."),
             format!("Stage it first, then commit: git add {missing}, then git commit -m '<message>'."),
-            Override::Never,
+            Override::Repository,
         );
     }
     plan.removals.sort();
@@ -887,20 +917,21 @@ fn overlay(map: &mut Map, plan: &Plan) {
     let adds = plan
         .files
         .iter()
-        .map(|s| (s.rel.as_str(), s.id, s.mode))
-        .chain(plan.gitlinks.iter().map(|(p, id, _)| (p.as_str(), *id, Mode::COMMIT)));
+        .map(|s| (s.rel.as_slice(), s.id, s.mode))
+        .chain(plan.gitlinks.iter().map(|(p, id, _)| (p.as_slice(), *id, Mode::COMMIT)));
     for (path, id, mode) in adds {
         let mut cur = path;
-        while let Some(i) = cur.rfind('/') {
+        while let Some(i) = cur.iter().rposition(|b| *b == b'/') {
             cur = &cur[..i];
             map.remove(cur);
         }
-        let below = format!("{path}/");
-        let doomed: Vec<String> = map.range(below.clone()..).take_while(|(k, _)| k.starts_with(&below)).map(|(k, _)| k.clone()).collect();
+        let mut below: RelPath = path.into();
+        below.push(b'/');
+        let doomed: Vec<RelPath> = map.range(below.clone()..).take_while(|(k, _)| k.starts_with(&below)).map(|(k, _)| k.clone()).collect();
         for k in doomed {
             map.remove(&k);
         }
-        map.insert(path.to_string(), (id, mode));
+        map.insert(path.into(), (id, mode));
     }
 }
 
@@ -933,14 +964,15 @@ struct Summary {
 /// lines. A rename shows as a delete and a create.
 fn summarize(repo: &WriteRepo, before: &Map, after: &Map, err: &mut String) -> Result<Summary, GitError> {
     use crate::diffcore::{line_delta, LineDelta, Side};
-    let mut paths: Vec<&String> = before.keys().chain(after.keys()).collect();
+    let mut paths: Vec<&RelPath> = before.keys().chain(after.keys()).collect();
     paths.sort();
     paths.dedup();
     let (mut files, mut ins, mut del) = (0usize, 0u64, 0u64);
     let mut modes = String::new();
-    let mut over: Vec<&str> = Vec::new();
+    let mut over: Vec<String> = Vec::new();
     for path in paths {
         let (old, new) = (before.get(path), after.get(path));
+        let shown = show(path);
         if old == new {
             continue;
         }
@@ -951,10 +983,10 @@ fn summarize(repo: &WriteRepo, before: &Map, after: &Map, err: &mut String) -> R
             Some((id, _)) => Side::Object(*id),
         };
         match (old, new) {
-            (None, Some((_, m))) => modes.push_str(&format!(" create mode {:06o} {path}\n", m.bits())),
-            (Some((_, m)), None) => modes.push_str(&format!(" delete mode {:06o} {path}\n", m.bits())),
+            (None, Some((_, m))) => modes.push_str(&format!(" create mode {:06o} {shown}\n", m.bits())),
+            (Some((_, m)), None) => modes.push_str(&format!(" delete mode {:06o} {shown}\n", m.bits())),
             (Some((_, a)), Some((_, b))) if a != b => {
-                modes.push_str(&format!(" mode change {:06o} => {:06o} {path}\n", a.bits(), b.bits()));
+                modes.push_str(&format!(" mode change {:06o} => {:06o} {shown}\n", a.bits(), b.bits()));
             }
             _ => {}
         }
@@ -977,7 +1009,7 @@ fn summarize(repo: &WriteRepo, before: &Map, after: &Map, err: &mut String) -> R
                 ins += added;
                 del += deleted;
             }
-            LineDelta::OverCap => over.push(path.as_str()),
+            LineDelta::OverCap => over.push(shown),
             LineDelta::Binary | LineDelta::Gitlink => {}
         }
     }
@@ -1023,7 +1055,7 @@ mod tests {
             ..Plan::default()
         };
         overlay(&mut map, &plan);
-        let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+        let keys: Vec<String> = map.keys().map(|k| show(k)).collect();
         assert_eq!(keys, ["a/inner", "d"]);
     }
 }

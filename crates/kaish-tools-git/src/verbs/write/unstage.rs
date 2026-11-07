@@ -16,6 +16,7 @@ use crate::verbs::write::add::Tracked;
 use crate::verbs::write::head;
 use crate::verbs::write::indexfile::{self, IndexTx, Snapshot, Upsert};
 use crate::verbs::write::refusal::{refuse, Override};
+use crate::verbs::write::relpath::{show, RelPath};
 use crate::verbs::write::repo::WriteRepo;
 use crate::verbs::write::spec::{Outcome, SpecSet};
 use crate::verbs::write::state::ensure_writable;
@@ -142,11 +143,11 @@ pub(crate) fn refuse_reset_worktree_mode<T>(command: &str, flag: &str) -> Result
 }
 
 struct Plan {
-    restore: Vec<(String, gix_index::hash::ObjectId, Mode)>,
-    remove: Vec<String>,
+    restore: Vec<(RelPath, gix_index::hash::ObjectId, Mode)>,
+    remove: Vec<RelPath>,
 }
 
-type TreeMap = std::collections::BTreeMap<String, (gix_index::hash::ObjectId, Mode)>;
+type TreeMap = std::collections::BTreeMap<RelPath, (gix_index::hash::ObjectId, Mode)>;
 
 /// An index change planned and, when there is one, locked and applied in
 /// memory. [`Prepared::finish`] writes it.
@@ -208,31 +209,31 @@ impl Prepared {
     }
 
     pub(crate) fn paths(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.plan.restore.iter().map(|(p, _, _)| p.clone()).collect();
-        v.extend(self.plan.remove.iter().cloned());
+        let mut v: Vec<String> = self.plan.restore.iter().map(|(p, _, _)| show(p)).collect();
+        v.extend(self.plan.remove.iter().map(|p| show(p)));
         v.sort();
         v
     }
 }
 
 fn report(plan: &Plan) -> Outcome {
-    let mut unstaged: Vec<&str> = plan.restore.iter().map(|(p, _, _)| p.as_str()).collect();
-    unstaged.extend(plan.remove.iter().map(String::as_str));
+    let mut unstaged: Vec<String> = plan.restore.iter().map(|(p, _, _)| show(p)).collect();
+    unstaged.extend(plan.remove.iter().map(|p| show(p)));
     unstaged.sort();
     Outcome { text: String::new(), err: String::new(), json: serde_json::json!({ "unstaged": unstaged }) }
 }
 
 fn build(
     state: &gix_index::State,
-    head_map: &TreeMap,
+    head_map: &std::collections::BTreeMap<RelPath, (gix_index::hash::ObjectId, Mode)>,
     opts: &UnstageOptions,
 ) -> Result<Plan, GitError> {
     let mut specs = SpecSet::new(opts.operation, &opts.specs)?;
     let tracked = Tracked::all(state);
-    let index: std::collections::BTreeMap<&str, &Tracked> = tracked.iter().map(|t| (t.path.as_str(), t)).collect();
+    let index: std::collections::BTreeMap<&[u8], &Tracked> = tracked.iter().map(|t| (t.path.as_slice(), t)).collect();
     let mut plan = Plan { restore: Vec::new(), remove: Vec::new() };
-    let paths: std::collections::BTreeSet<&str> =
-        index.keys().copied().chain(head_map.keys().map(String::as_str)).collect();
+    let paths: std::collections::BTreeSet<&[u8]> =
+        index.keys().copied().chain(head_map.keys().map(|k| k.as_slice())).collect();
     for path in paths {
         if !specs.matches(path) {
             continue;
@@ -240,11 +241,11 @@ fn build(
         match (index.get(path), head_map.get(path)) {
             (Some(t), Some((id, mode))) => {
                 if t.id != *id || t.mode != *mode {
-                    plan.restore.push((path.to_string(), *id, *mode));
+                    plan.restore.push((path.into(), *id, *mode));
                 }
             }
-            (None, Some((id, mode))) => plan.restore.push((path.to_string(), *id, *mode)),
-            (Some(_), None) => plan.remove.push(path.to_string()),
+            (None, Some((id, mode))) => plan.restore.push((path.into(), *id, *mode)),
+            (Some(_), None) => plan.remove.push(path.into()),
             (None, None) => {}
         }
     }

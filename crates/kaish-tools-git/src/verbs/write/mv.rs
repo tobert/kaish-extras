@@ -18,6 +18,7 @@ use crate::error::GitError;
 use crate::verbs::write::add::Tracked;
 use crate::verbs::write::indexfile::{self, IndexTx, Snapshot, Upsert};
 use crate::verbs::write::refusal::{refuse, Override};
+use crate::verbs::write::relpath::RelPath;
 use crate::verbs::write::repo::WriteRepo;
 use crate::verbs::write::spec::Outcome;
 use crate::verbs::write::state::ensure_writable;
@@ -60,7 +61,7 @@ struct Move {
     src: String,
     dst: String,
     /// Index entries carried along: (old path, new path).
-    entries: Vec<(String, String)>,
+    entries: Vec<(RelPath, RelPath)>,
 }
 
 pub(crate) fn run(repo: &WriteRepo, opts: &MvOptions) -> Result<Outcome, GitError> {
@@ -99,7 +100,7 @@ pub(crate) fn run(repo: &WriteRepo, opts: &MvOptions) -> Result<Outcome, GitErro
     let mut upserts = Vec::new();
     {
         let state = tx.state_mut();
-        let moved: BTreeSet<&str> = moves.iter().flat_map(|m| m.entries.iter().map(|(o, _)| o.as_str())).collect();
+        let moved: BTreeSet<&[u8]> = moves.iter().flat_map(|m| m.entries.iter().map(|(o, _)| o.as_slice())).collect();
         for t in Tracked::all(state) {
             if let Some((_, new)) = moves.iter().flat_map(|m| m.entries.iter()).find(|(o, _)| *o == t.path) {
                 upserts.push(Upsert { path: new.clone(), stat: t.stat, id: t.id, mode: t.mode });
@@ -142,7 +143,7 @@ fn build(repo: &WriteRepo, state: &gix_index::State, opts: &MvOptions) -> Result
         );
     }
     let tracked = Tracked::all(state);
-    let tracked_paths: BTreeSet<&str> = tracked.iter().map(|t| t.path.as_str()).collect();
+    let tracked_paths: BTreeSet<&[u8]> = tracked.iter().map(|t| t.path.as_slice()).collect();
     let mut moves = Vec::new();
     let mut dsts = BTreeSet::new();
     for src in sources {
@@ -158,7 +159,7 @@ fn build(repo: &WriteRepo, state: &gix_index::State, opts: &MvOptions) -> Result
         let abs_src = any_leaf(repo, src)?;
         let src_meta = std::fs::symlink_metadata(&abs_src);
         let below = format!("{src}/");
-        let entries: Vec<&Tracked> = tracked.iter().filter(|t| t.path == *src || t.path.starts_with(&below)).collect();
+        let entries: Vec<&Tracked> = tracked.iter().filter(|t| t.path.as_slice() == src.as_bytes() || t.path.starts_with(below.as_bytes())).collect();
         let bad = |why: &str| {
             refuse::<Vec<Move>>(
                 1,
@@ -199,9 +200,9 @@ fn build(repo: &WriteRepo, state: &gix_index::State, opts: &MvOptions) -> Result
         let abs_dst = any_leaf(repo, &dst)?;
         let dst_below = format!("{dst}/");
         let exists_on_disk = std::fs::symlink_metadata(&abs_dst);
-        let in_index = tracked_paths.contains(dst.as_str()) || tracked.iter().any(|t| t.path.starts_with(&dst_below));
+        let in_index = tracked_paths.contains(dst.as_bytes()) || tracked.iter().any(|t| t.path.starts_with(dst_below.as_bytes()));
         if exists_on_disk.is_ok() || in_index {
-            let dir_there = exists_on_disk.as_ref().is_ok_and(|m| m.is_dir()) || tracked.iter().any(|t| t.path.starts_with(&dst_below));
+            let dir_there = exists_on_disk.as_ref().is_ok_and(|m| m.is_dir()) || tracked.iter().any(|t| t.path.starts_with(dst_below.as_bytes()));
             if !opts.force || dir_there {
                 return refuse(
                     1,
@@ -226,7 +227,11 @@ fn build(repo: &WriteRepo, state: &gix_index::State, opts: &MvOptions) -> Result
         }
         let entries = entries
             .iter()
-            .map(|t| (t.path.clone(), format!("{dst}{}", &t.path[src.len()..])))
+            .map(|t| {
+                let mut new: RelPath = dst.as_bytes().into();
+                new.extend_from_slice(&t.path[src.len()..]);
+                (t.path.clone(), new)
+            })
             .collect();
         moves.push(Move { src: src.clone(), dst, entries });
     }

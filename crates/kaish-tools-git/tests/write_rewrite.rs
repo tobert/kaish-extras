@@ -499,6 +499,33 @@ async fn reset_to_a_missing_revision_refuses_and_changes_nothing() {
     }
 }
 
+/// Every amend or reset refusal that says "Nothing was changed." leaves `.git`
+/// byte-identical, objects included. Each case is a different refusal site.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_nothing_was_changed_refusal_of_amend_and_reset_leaves_git_byte_identical() {
+    let published = |d: &Path| {
+        staged(d);
+        publish(d, "HEAD");
+    };
+    let mut cases: Vec<(&str, fn(&Path), RewritePolicy, Vec<&str>)> = vec![
+        ("amend, unborn branch", |_| {}, RewritePolicy::Allow, vec!["commit", "--amend", "-m", "x"]),
+        ("amend, no message", staged, RewritePolicy::Allow, vec!["commit", "--amend"]),
+        ("amend, reset-author with author", staged, RewritePolicy::Allow, vec!["commit", "--amend", "--no-edit", "--reset-author", "--author", "Z <z@example.org>"]),
+        ("amend, author with a line break", staged, RewritePolicy::Allow, vec!["commit", "--amend", "--no-edit", "--author", "A\nB <a@b.c>"]),
+        ("amend, fixup", staged, RewritePolicy::Allow, vec!["commit", "--amend", "--fixup", "HEAD"]),
+    ];
+    cases.push(("amend of a published commit under refuse", published, RewritePolicy::Refuse, vec!["commit", "--amend", "-m", "x"]));
+    cases.push(("amend of a published commit under unpublished", published, RewritePolicy::Unpublished, vec!["commit", "--amend", "-m", "x"]));
+    cases.push(("reset past a published commit under unpublished", published, RewritePolicy::Unpublished, vec!["reset", "--mixed", "HEAD~1"]));
+    cases.push(("reset under refuse", staged, RewritePolicy::Refuse, vec!["reset", "--soft", "HEAD~1"]));
+    for (label, setup, policy, argv) in cases {
+        let p = Pair::new(&setup);
+        let before = support::Fingerprint::take(&p.git_dir());
+        let r = p.ours_with(policy, &argv).await;
+        p.refused_unchanged(&r, &before, label);
+    }
+}
+
 // ── the policy matrix: negative controls ────────────────────────────────────
 
 fn short_head(p: &Pair) -> String {

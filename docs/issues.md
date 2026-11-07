@@ -1622,8 +1622,9 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   `git status`.
 - **W5 — hooks.** Only `post-index-change` is checked for index writes. The
   other hooks belong to `commit` (phase 2) and the `GitHooks` boundary.
-- **W6 — large files and non-UTF-8 names.** `add` reads a file whole (128 MiB
-  cap) and refuses a non-UTF-8 name.
+- **W6 — large files.** `add` reads a file whole (128 MiB cap). A non-UTF-8
+  name is kept as bytes by every verb (see `relpath.rs`); a message shows
+  it C-quoted, and a command-line path must be UTF-8.
 - **W7 — gitlinks.** An existing gitlink is updated to the nested repository's
   HEAD when it is a repository of its own; a nested repository not tracked as a
   submodule refuses where git warns and adds an embedded repository.
@@ -1633,8 +1634,9 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
 - **W9 — attribute matcher.** `[attr]` macros are expanded to depth 5; a
   quoted pattern, or a pattern with a backslash, is treated as "may match" and
   refuses when its line names a conversion. `core.attributesFile` refuses.
-- **W10 — `core.hooksPath` inside the tree** is resolved for the
-  `post-index-change` check only.
+- **W10 — `core.hooksPath` inside the tree** is resolved through the
+  containment walk, for the `post-index-change` check and for `commit`'s hook
+  scan. A link on the way refuses, naming the setting.
 - **W11 — residuals of the phase 1a containment review.** The source scan
   (`tests/write_shaped_identifiers.rs`) does not match a turbofish call
   (`.transaction::<T>(`). The `.git` component guard does not cover
@@ -1642,6 +1644,11 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   folding). The hard-link refusal (`st_nlink > 1` on in-place targets) is
   unix-only. None reachable on the Linux CI today; each wants a fixture on the
   platform it names before a fix.
+- **W12 — `gix-lock` is a renamed dev-dependency.** Phase 1a added
+  `lock = { package = "gix-lock", version = "=24.0.0" }` for tests only, renamed
+  so `pins_match_the_manifest` does not count it as linked. Phase 2's ref
+  transactions link it for real: promote it to a pinned, `commit`-gated
+  dependency with a `GIX_PINS` row then.
 
 ## git write — phase 2 (commit), what is left
 
@@ -1674,10 +1681,13 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   `gix-imara-diff` Myers (the L-series imprecision on log `--stat` applies),
   and a side over 16 MiB is left out of them with a note on stderr.
 - **W15 — a leftover loose object after a hook rejection.** `commit -a` and
-  `--only` write their blobs and trees before `pre_commit` runs (the hook is
-  given the tree oid). A rejection or a lost compare-and-swap leaves those
-  objects unreachable; the index and branch are untouched. `git gc` prunes
-  them.
+  `--only` write their blobs, and every commit writes its trees, before
+  `pre_commit` runs (the hook is given the tree oid). A rejection or a lost
+  compare-and-swap leaves those objects unreachable; the index and branch are
+  untouched. The refusal says so (`Wrote::UnreachableObjects`) and is tested
+  against the bytes; `git gc` prunes the objects. Every check that can run
+  before the first object is written does (message, identity, tree validity,
+  containment of every blob's path, hook presence).
 - **W16 — `--trailer` is stricter than git.** A trailer with no `:`/`=`, no
   value, or a key outside letters, digits and `-` is refused (git writes
   `Key:`). `trailer.*` configuration (`trailer.<token>.key`, `.command`,
@@ -1693,7 +1703,9 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   oracle test compares with git. RFC 2822 dates, `YYYY-MM-DD` alone and
   relative dates ("2 weeks ago") are refused. Git strips "crud" characters
   from the ends of a name and an email; this trims whitespace only and
-  refuses `<`, `>` and line breaks (`Identity::new`).
+  refuses `<`, `>` and line breaks (`Identity::new`), for `--author` on a
+  pinned identity too. Git removes them instead: `--author $'A\nB <a@b.c>'`
+  commits as author `AB`.
 - **W18 — path validation is ours.** The tree writer refuses an index path
   whose component is empty, `.`, `..` or `.git` in any case. It does not use
   `gix-validate`'s fuller rule (NTFS and HFS spellings of `.git`, trailing
@@ -1727,10 +1739,38 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   (add's rule for a spec that matches many); a nested repository that is
   already a gitlink is updated to its HEAD. Intent-to-add entries are left
   out of the tree and stay in the index, as git does.
+- **W24 — an index in version 4 is rewritten as version 2.** `gix-index` reads
+  version 4 (path-prefix compression, which `feature.manyFiles` and
+  `index.version=4` turn on) and writes version 2 or 3. Every entry, mode and id
+  survives and git reads the result; the file gets larger, and a repository that
+  asked for version 4 loses it until real git runs `git update-index
+  --index-version 4`. `tests/write_index.rs`
+  (`a_version_4_index_is_read_and_rewritten_as_version_2`) pins it.
+- **W25 — a pathspec glob without a `/` matches the basename.** The shared
+  `PathFilter` matches `*.rs` at any depth, as the read verbs want, and
+  `caf*` against `d/caf.txt`. Git's pathspec has no such rule: `caf*` matches a
+  path that starts with `caf`, and `*` crosses `/`. So `git add 'ca*'` here
+  stages `d/caf.txt` and git's does not. Found by the T5 tests; they use a glob
+  (`*af?.txt`) on which both agree.
+- **W26 — `rm` stops at the first deletion failure.** Git continues past it and
+  warns; this shell stops, stages the deletions that happened and names the
+  rest, so the next command is exact. See W8 for the earlier shape.
+- **W27 — `add -A -u` runs here; git refuses it.** Git exits 128 with
+  "options '-u/--update' and '-A/--all' cannot be used together" and changes
+  nothing. `AddArgs` accepts both, and `-u` wins. Found by the pin test
+  `add_with_both_all_and_update_is_refused_as_git_refuses_it`, which is
+  `#[ignore]`d until the verb refuses the pair.
+- **W28 — `mv` into `.git` refuses here; git moves the file.** `git mv a.txt
+  .git/x` prints "invalid path '.git/x'" and still renames the file into `.git`
+  and stages the deletion of `a.txt` (measured on git 2.56.0). This shell
+  refuses with exit 4 and changes nothing. The refusal is deliberate, and the
+  difference is why
+  `mv_into_the_git_directory_changes_nothing_and_its_negative_controls_move`
+  does not compare the result with a twin.
 
 ## git write — phase 3 (amend, reset, the rewrite policy), what is left
 
-- **W24 — what the rewrite check trusts, and what it costs.** The walk
+- **W29 — what the rewrite check trusts, and what it costs.** The walk
   (`verbs/write/rewrite.rs`) reads no commit date. Without
   `objects/info/commit-graph` it runs to exhaustion: the commits behind each
   remote tip that the dropped commits do not reach, and for a published verdict
@@ -1760,7 +1800,7 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   since looks unpublished. Under `Unpublished`, a shallow repository refuses
   (exit 4) even when no remote ref exists, and with no remote-tracking refs at
   all a non-shallow repository allows every rewrite.
-- **W25 — `reset` and `ORIG_HEAD`.** `reset --soft|--mixed <rev>`, with or
+- **W30 — `reset` and `ORIG_HEAD`.** `reset --soft|--mixed <rev>`, with or
   without `--soft` and a revision other than `HEAD`, writes `ORIG_HEAD` (the
   old tip) and `reset: moving to <rev as typed>` in the branch's log and
   `logs/HEAD`, as git does, including when the tip does not change. The
@@ -1772,7 +1812,7 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   the reflog line, where git falls back to its own identity detection. `reset
   --mixed` prints no "Unstaged changes after reset" (W4). `reset <rev> --
   <path>` is supported and moves nothing.
-- **W26 — what `--amend` cannot carry over.** A commit with an `encoding`
+- **W31 — what `--amend` cannot carry over.** A commit with an `encoding`
   header, or a message that is not UTF-8, refuses the amend (exit 4). Other
   extra headers are copied; `gpgsig` and `gpgsig-sha256` are dropped, as git
   drops them. The author's date is copied as `seconds +hhmm`: a timestamp git
@@ -1780,7 +1820,7 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   `--reset-author` with `--author` refuses, as git does. The summary's `Date:`
   line is the author's date in git's default format, left out under
   `--reset-author`, as git does.
-- **W27 — the refusal names one commit and one ref.** A rewrite that drops
+- **W32 — the refusal names one commit and one ref.** A rewrite that drops
   several published commits names one of them (the highest in generation
   order with a graph, the lowest oid without) and the first remote-tracking ref
   in name order that reaches it. `reset <rev>` accepts the read side's

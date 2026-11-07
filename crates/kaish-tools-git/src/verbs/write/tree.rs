@@ -8,6 +8,7 @@
 //! before both, and the oracle test in `tests/write_commit.rs` commits a
 //! repository built to trip any other order.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use gix_index::entry::Mode;
@@ -20,12 +21,13 @@ use crate::error::GitError;
 use crate::verbs::status::MAX_STATUS_TREE_DEPTH;
 use crate::verbs::write::objects::BlobWriter;
 use crate::verbs::write::refusal::{refuse, Override};
+use crate::verbs::write::relpath::{show, RelPath};
 use crate::verbs::write::repo::WriteRepo;
 
 /// One file-like entry of the tree to write: a blob, a link or a gitlink.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Item {
-    pub(crate) path: String,
+    pub(crate) path: RelPath,
     pub(crate) mode: Mode,
     pub(crate) id: ObjectId,
 }
@@ -35,19 +37,49 @@ pub(crate) fn write_tree(
     repo: &WriteRepo,
     writer: &mut BlobWriter<'_>,
     command: &str,
-    mut items: Vec<Item>,
+    items: Vec<Item>,
 ) -> Result<ObjectId, GitError> {
-    items.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+    build_root(repo, Some(writer), command, items, &BTreeSet::new())
+}
+
+/// Run every check [`write_tree`] runs, and write nothing. `planned` holds the
+/// ids of blobs the caller has not written yet; an entry naming one of them is
+/// not "missing from the object database". A tree that passes here is refused
+/// for none of the reasons that would otherwise come after the blobs are on
+/// disk.
+pub(crate) fn validate_tree(
+    repo: &WriteRepo,
+    command: &str,
+    items: Vec<Item>,
+    planned: &BTreeSet<ObjectId>,
+) -> Result<(), GitError> {
+    build_root(repo, None, command, items, planned).map(|_| ())
+}
+
+fn build_root(
+    repo: &WriteRepo,
+    writer: Option<&mut BlobWriter<'_>>,
+    command: &str,
+    mut items: Vec<Item>,
+    planned: &BTreeSet<ObjectId>,
+) -> Result<ObjectId, GitError> {
+    items.sort_by(|a, b| a.path.cmp(&b.path));
     if let Some(w) = items.windows(2).find(|w| w[0].path == w[1].path) {
         return refuse(
             4,
             command,
-            format!("The index lists '{}' twice at stage 0.", w[0].path),
+            format!("The index lists '{}' twice at stage 0.", show(&w[0].path)),
             "Repair the index with real git, outside this shell: git add <path>.",
             Override::Repository,
         );
     }
-    build(repo, writer, command, &items, 0, 0)
+    build(repo, writer, planned, command, &items, 0, 0)
+}
+
+/// The first `/`-separated component, and the rest, when more follow.
+fn split_first_component(rest: &[u8]) -> Option<(&[u8], &[u8])> {
+    let i = rest.iter().position(|b| *b == b'/')?;
+    Some((&rest[..i], &rest[i + 1..]))
 }
 
 fn kind_of(mode: Mode) -> Option<EntryKind> {
@@ -66,13 +98,14 @@ fn kind_of(mode: Mode) -> Option<EntryKind> {
 
 /// A path component git would refuse to put in a tree. Checked on every
 /// component of every entry, because a hostile index can name anything.
-fn bad_component(name: &str) -> bool {
-    name.is_empty() || name == "." || name == ".." || name.eq_ignore_ascii_case(".git") || name.contains('\0')
+fn bad_component(name: &[u8]) -> bool {
+    name.is_empty() || name == b"." || name == b".." || name.eq_ignore_ascii_case(b".git") || name.contains(&0)
 }
 
 fn build(
     repo: &WriteRepo,
-    writer: &mut BlobWriter<'_>,
+    mut writer: Option<&mut BlobWriter<'_>>,
+    planned: &BTreeSet<ObjectId>,
     command: &str,
     items: &[Item],
     prefix_len: usize,
@@ -86,7 +119,7 @@ fn build(
     while i < items.len() {
         let item = &items[i];
         let rest = &item.path[prefix_len..];
-        match rest.split_once('/') {
+        match split_first_component(rest) {
             None => {
                 if bad_component(rest) {
                     return bad_path(command, &item.path);
@@ -95,17 +128,17 @@ fn build(
                     return refuse(
                         4,
                         command,
-                        format!("'{}' has an index mode this shell does not write into a tree.", item.path),
+                        format!("'{}' has an index mode this shell does not write into a tree.", show(&item.path)),
                         "Repair the index with real git, outside this shell: git add <path>.",
                         Override::Repository,
                     );
                 };
                 // A gitlink names a commit in another repository.
-                if kind != EntryKind::Commit && !repo.objects().exists(&item.id) {
+                if kind != EntryKind::Commit && !planned.contains(&item.id) && !repo.objects().exists(&item.id) {
                     return refuse(
                         4,
                         command,
-                        format!("The index names an object for '{}' that the object database does not hold.", item.path),
+                        format!("The index names an object for '{}' that the object database does not hold.", show(&item.path)),
                         "Stage the file again: git add <path>.",
                         Override::Repository,
                     );
@@ -120,9 +153,9 @@ fn build(
                 let dir_len = prefix_len + name.len() + 1;
                 let end = i + items[i..]
                     .iter()
-                    .take_while(|n| n.path.len() > dir_len && n.path.as_bytes()[prefix_len..dir_len] == item.path.as_bytes()[prefix_len..dir_len])
+                    .take_while(|n| n.path.len() > dir_len && n.path[prefix_len..dir_len] == item.path[prefix_len..dir_len])
                     .count();
-                let id = build(repo, writer, command, &items[i..end], dir_len, depth + 1)?;
+                let id = build(repo, writer.as_deref_mut(), planned, command, &items[i..end], dir_len, depth + 1)?;
                 entries.push(Entry { mode: EntryKind::Tree.into(), filename: BString::from(name), oid: id });
                 i = end;
             }
@@ -134,7 +167,7 @@ fn build(
         return refuse(
             4,
             command,
-            format!("The index holds both a file and a directory named '{}'.", w[0].filename),
+            format!("The index holds both a file and a directory named '{}'.", show(&w[0].filename)),
             "Repair the index with real git, outside this shell: git rm --cached <path>.",
             Override::Repository,
         );
@@ -143,7 +176,10 @@ fn build(
     gix_object::Tree { entries }
         .write_to(&mut buf)
         .map_err(|e| GitError::repository("commit", "encoding a tree", Path::new("."), e))?;
-    writer.write_object(Kind::Tree, &buf)
+    match writer {
+        Some(w) => w.write_object(Kind::Tree, &buf),
+        None => Ok(ObjectId::null(gix_index::hash::Kind::Sha1)),
+    }
 }
 
 fn sort_key(e: &Entry) -> Vec<u8> {
@@ -154,11 +190,11 @@ fn sort_key(e: &Entry) -> Vec<u8> {
     key
 }
 
-fn bad_path<T>(command: &str, path: &str) -> Result<T, GitError> {
+fn bad_path<T>(command: &str, path: &[u8]) -> Result<T, GitError> {
     refuse(
         4,
         command,
-        format!("'{path}' has a component git never stores in a tree: empty, '.', '..' or '.git'."),
+        format!("'{}' has a component git never stores in a tree: empty, '.', '..' or '.git'.", show(path)),
         "Remove the entry with real git, outside this shell: git rm --cached <path>.",
         Override::Repository,
     )
@@ -183,9 +219,9 @@ mod tests {
 
     #[test]
     fn dangerous_components_are_refused() {
-        for bad in ["", ".", "..", ".git", ".GIT", ".Git"] {
+        for bad in [&b""[..], b".", b"..", b".git", b".GIT", b".Git"] {
             assert!(bad_component(bad), "{bad:?}");
         }
-        assert!(!bad_component(".gitignore"));
+        assert!(!bad_component(b".gitignore"));
     }
 }

@@ -122,11 +122,15 @@ pub(crate) fn run(repo: &WriteRepo, env: &ResetEnv, opts: &ResetOptions) -> Resu
         }
     };
 
+    let wrote_orig_head = old.is_some();
     if let Some(old) = old {
         write_orig_head(repo, old, &committer)?;
     }
     let message = format!("reset: moving to {}", opts.rev);
-    refmove::move_head_as(repo, MoveKind::RESET, cmd, &target, old, new, &message, &committer)?;
+    // A refusal from here on (a lost compare-and-swap, a HEAD that moved)
+    // comes after ORIG_HEAD was written, and says so.
+    refmove::move_head_as(repo, MoveKind::RESET, cmd, &target, old, new, &message, &committer)
+        .map_err(|e| if wrote_orig_head { e.after_orig_head() } else { e })?;
 
     let unstaged = prepared.as_ref().map(unstage::Prepared::paths).unwrap_or_default();
     if let Some(p) = prepared {
