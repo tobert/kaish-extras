@@ -666,8 +666,10 @@ async fn git_config_user_identity_refuses_naming_git_var() {
 /// Every refused spelling: exit code and the text that must appear. Run on a
 /// repository with a staged change; each must leave `.git` byte-identical.
 const REFUSED: &[(&[&str], i64, &str)] = &[
-    (&["commit", "--amend", "-m", "x"], 2, "--amend replaces a commit"),
-    (&["commit", "--amend", "--no-edit"], 2, "--amend replaces a commit"),
+    (&["commit", "--amend"], 2, "There is no editor in this shell; pass -m '<message>' or --no-edit."),
+    (&["commit", "--amend", "-a"], 2, "or --no-edit."),
+    (&["commit", "--no-edit"], 2, "only --amend has an old message"),
+    (&["commit", "--reset-author", "-m", "x"], 2, "no --amend here"),
     (&["commit", "--fixup", "HEAD", "-m", "x"], 2, "--fixup"),
     (&["commit", "--squash=HEAD", "-m", "x"], 2, "--squash"),
     (&["commit", "-S", "-m", "x"], 2, "never signs"),
@@ -714,15 +716,6 @@ async fn every_refused_commit_spelling_leaves_git_byte_identical_and_has_five_pa
     // The control: the same repository commits when asked properly.
     let r = p.ours("", &["commit", "-m", "ok"]).await;
     assert_eq!(r.code, 0, "{}", r.err);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn amend_refusal_names_the_next_command_and_never_suggests_reset() {
-    let p = Pair::new(&base);
-    let r = p.ours("", &["commit", "--amend", "-m", "x"]).await;
-    assert!(r.err.contains("git commit -m '<message>'"), "{}", r.err);
-    assert!(!r.err.contains("reset"), "{}", r.err);
-    assert!(r.err.contains("no flag that overrides"), "{}", r.err);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

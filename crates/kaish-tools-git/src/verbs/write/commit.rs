@@ -2,8 +2,10 @@
 //!
 //! Accepts `-m` (repeatable, one paragraph each), `-F <file>`, `-a`,
 //! `--only <paths>` / `<paths>` / `-- <paths>`, `--trailer`, `--allow-empty`,
-//! `--author` and `--no-verify` (see below). Refuses everything that needs an
-//! editor, a terminal, a signer, or a commit rewrite.
+//! `--author`, `--no-verify` (see below) and `--amend` (with `--no-edit` and
+//! `--reset-author`). Refuses everything that needs an editor, a
+//! terminal or a signer. `--amend` is a branch move that drops the old tip, so
+//! it goes through [`rewrite::check_move`] before anything is written.
 //!
 //! The order of a commit is the design's (§6): the index lock first when the
 //! index changes (`-a`, `--only`), then blobs, trees, the commit, an fsync of
@@ -25,7 +27,7 @@ use gix_index::hash::ObjectId;
 use gix_object::bstr::ByteSlice as _;
 use kaish_tool_api::GlobalFlags;
 
-use crate::config::Identity;
+use crate::config::{Identity, RewritePolicy};
 use crate::error::GitError;
 use crate::hooks::{GitHooks, HookContext};
 use crate::verbs::write::add::{self, AddOptions, Plan, Tracked};
@@ -36,6 +38,7 @@ use crate::verbs::write::indexfile::{self, IndexTx, Snapshot, Upsert};
 use crate::verbs::write::message::{self, Trailer};
 use crate::verbs::write::objects::BlobWriter;
 use crate::verbs::write::refmove::{self, HeadTarget};
+use crate::verbs::write::rewrite::{self, MoveCheck, Mover, NewTip};
 use crate::verbs::write::refusal::{refuse, Override};
 use crate::verbs::write::repo::WriteRepo;
 use crate::verbs::write::spec::{Outcome, SpecSet};
@@ -48,6 +51,9 @@ const OP: &str = "commit";
 /// The hooks git runs for a commit, in the order it runs them. A provider is
 /// told which of them exist.
 const COMMIT_HOOKS: &[&str] = &["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "reference-transaction"];
+
+/// Git also runs `post-rewrite` after an amend.
+const AMEND_HOOKS: &[&str] = &["post-rewrite"];
 
 /// The most bytes of one blob the summary counts lines in.
 const SUMMARY_BLOB_CAP: u64 = 16 * 1024 * 1024;
@@ -108,14 +114,24 @@ pub(crate) struct CommitArgs {
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
 
-    /// Refused: replacing a commit is not available in this shell yet. Make a
-    /// new commit with `git commit -m '<message>'`.
+    /// Replace the current commit with a new one made from the index. The
+    /// author (name, email and date) stays unless --author or --reset-author
+    /// is given. Give the new message with -m or -F, or keep the old one with
+    /// --no-edit; there is no editor. Refused when the rewrite policy forbids
+    /// it: by default, when a remote-tracking ref (the last fetch, not the
+    /// remote) already has the commit.
     #[arg(long = "amend")]
     pub amend: bool,
 
-    /// Refused with --amend; see --amend.
+    /// With --amend, keep the commit's message (trailers and cleanup still
+    /// apply). -m or -F wins when given.
     #[arg(long = "no-edit")]
     pub no_edit: bool,
+
+    /// With --amend, make the author the identity in the variables, with the
+    /// current time, instead of the old commit's.
+    #[arg(long = "reset-author")]
+    pub reset_author: bool,
 
     /// Refused: this shell has no autosquash. Make a normal commit.
     #[arg(long = "fixup", value_name = "COMMIT")]
@@ -170,15 +186,6 @@ impl CommitArgs {
     /// The refusals that need no repository. `command` is the text as typed.
     pub(crate) fn refuse_flags(&self, command: &str) -> Result<(), GitError> {
         let no_message = "Pass the message with -m, for example: git commit -m '<message>'.";
-        if self.amend {
-            return refuse(
-                2,
-                command,
-                "--amend replaces a commit, and this shell does not do that yet.",
-                "Make a new commit instead: git commit -m '<message>'.",
-                Override::Embedder,
-            );
-        }
         if self.fixup.is_some() || self.squash.is_some() {
             let flag = if self.fixup.is_some() { "--fixup" } else { "--squash" };
             return refuse(
@@ -228,13 +235,46 @@ impl CommitArgs {
                 Override::Never,
             );
         }
-        if self.no_edit {
-            return refuse(2, command, "--no-edit applies to --amend, which is not available.", no_message, Override::Never);
+        if self.no_edit && !self.amend {
+            return refuse(
+                2,
+                command,
+                "--no-edit keeps the old message, and only --amend has an old message.",
+                "Give the message: git commit -m '<message>', or amend: git commit --amend --no-edit.",
+                Override::Never,
+            );
+        }
+        if self.reset_author && !self.amend {
+            return refuse(
+                2,
+                command,
+                "--reset-author renews the author of an amended commit, and there is no --amend here.",
+                "Amend: git commit --amend --no-edit --reset-author.",
+                Override::Never,
+            );
+        }
+        if self.reset_author && self.author.is_some() {
+            return refuse(
+                2,
+                command,
+                "--reset-author and --author both choose the author, and git refuses the pair.",
+                "Use one: git commit --amend --no-edit --author 'Name <email>', or git commit --amend --no-edit --reset-author.",
+                Override::Never,
+            );
         }
         if !self.message.is_empty() && self.file.is_some() {
             return refuse(2, command, "-m and -F both give the message.", "Use one of them.", Override::Never);
         }
-        if self.message.is_empty() && self.file.is_none() {
+        if self.amend && self.message.is_empty() && self.file.is_none() && !self.no_edit {
+            return refuse(
+                2,
+                command,
+                "There is no editor in this shell; pass -m '<message>' or --no-edit.",
+                "Give the new message: git commit --amend -m '<message>', or keep the old one: git commit --amend --no-edit.",
+                Override::Never,
+            );
+        }
+        if !self.amend && self.message.is_empty() && self.file.is_none() {
             return refuse(
                 2,
                 command,
@@ -247,10 +287,16 @@ impl CommitArgs {
     }
 }
 
+/// What `--amend` carries.
+pub(crate) struct Amend {
+    pub(crate) reset_author: bool,
+}
+
 pub(crate) struct CommitOptions {
     /// The message as given, before cleanup: `-m` paragraphs joined, or the
-    /// file's text.
-    pub(crate) raw_message: String,
+    /// file's text. `None` is `--amend --no-edit`: the old message stays.
+    pub(crate) raw_message: Option<String>,
+    pub(crate) amend: Option<Amend>,
     pub(crate) trailers: Vec<Trailer>,
     pub(crate) all: bool,
     /// Repo-relative paths; non-empty means `--only`.
@@ -267,6 +313,65 @@ pub(crate) struct CommitOptions {
 pub(crate) struct CommitEnv {
     pub(crate) hooks: Option<Arc<dyn GitHooks>>,
     pub(crate) identity: Option<(Identity, Identity)>,
+    pub(crate) policy: RewritePolicy,
+}
+
+/// The parts of the commit being amended that the new one is built from.
+struct Amended {
+    parents: Vec<ObjectId>,
+    author: ident::Signature,
+    message: String,
+    extra_headers: Vec<(gix_object::bstr::BString, gix_object::bstr::BString)>,
+}
+
+/// Read the commit `--amend` replaces. Refuses what it cannot carry over
+/// exactly: an `encoding` header, or a message that is not UTF-8.
+fn read_amended(repo: &WriteRepo, cmd: &str, oid: ObjectId) -> Result<Amended, GitError> {
+    use gix_object::FindExt;
+    let mut buf = Vec::new();
+    let c = repo
+        .objects()
+        .find_commit(&oid, &mut buf)
+        .map_err(|e| GitError::repository(OP, "reading the commit to amend", repo.git_dir(), e))?;
+    if c.encoding.is_some() {
+        return refuse(
+            4,
+            cmd,
+            "The commit to amend has an encoding header, and this shell writes commits without one.",
+            "Make a new commit instead: git commit -m '<message>'.",
+            Override::Repository,
+        );
+    }
+    let Ok(message) = std::str::from_utf8(c.message) else {
+        return refuse(
+            4,
+            cmd,
+            "The message of the commit to amend is not valid UTF-8, and this shell reads only UTF-8 messages.",
+            "Give a new message: git commit --amend -m '<message>'.",
+            Override::Repository,
+        );
+    };
+    let a = c
+        .author()
+        .map_err(|e| GitError::repository(OP, "reading the author to amend", repo.git_dir(), e))?;
+    let time = a
+        .time()
+        .map_err(|e| GitError::repository(OP, "reading the author date to amend", repo.git_dir(), e))?;
+    let author = ident::Signature {
+        name: a.name.to_str_lossy().into_owned(),
+        email: a.email.to_str_lossy().into_owned(),
+        seconds: time.seconds,
+        offset: time.offset,
+    };
+    // Git carries the other headers over and drops a signature, which no
+    // longer matches.
+    let extra_headers = c
+        .extra_headers
+        .iter()
+        .filter(|(k, _)| *k != "gpgsig" && *k != "gpgsig-sha256")
+        .map(|(k, v)| ((*k).to_owned(), v.as_ref().to_owned()))
+        .collect();
+    Ok(Amended { parents: c.parents().collect(), author, message: message.to_string(), extra_headers })
 }
 
 type Map = BTreeMap<String, (ObjectId, Mode)>;
@@ -284,12 +389,10 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
     ensure_commit_settings(repo, cmd)?;
     let only = !opts.specs.is_empty();
     let writes_index = opts.all || only;
-    let (hooks_dir, present) = scan_hooks(repo, cmd, writes_index)?;
+    let (hooks_dir, present) = scan_hooks(repo, cmd, writes_index, opts.amend.is_some())?;
     if env.hooks.is_none() {
         refuse_hooks(cmd, &present, opts.no_verify)?;
     }
-    let idents = ident::resolve(cmd, env.identity.as_ref(), &opts.vars, opts.author.clone(), ident::now())?;
-
     let head = repo.read().head()?;
     let target = refmove::head_target(repo, OP)?;
     // Walk the ref's whole write set and look for its locks before any object
@@ -301,20 +404,64 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
         .as_deref()
         .map(|hex| ObjectId::from_hex(hex.as_bytes()).map_err(|e| GitError::repository(OP, "reading HEAD", repo.git_dir(), e)))
         .transpose()?;
+    let amended = match (&opts.amend, old) {
+        (None, _) => None,
+        (Some(_), None) => {
+            return refuse(
+                1,
+                cmd,
+                "There is no commit to amend: this branch has no commits yet.",
+                "Make the first commit: git commit -m '<message>'.",
+                Override::Never,
+            )
+        }
+        (Some(_), Some(oid)) => Some(read_amended(repo, cmd, oid)?),
+    };
+    if let Some(a) = &amended {
+        // Before any object is written: a refusal leaves `.git` as it was.
+        rewrite::check_move(
+            repo,
+            &MoveCheck { command: cmd, mover: Mover::Amend, policy: env.policy },
+            old,
+            &NewTip::Replacement(a.parents.clone()),
+        )?;
+    }
+    let idents = match (&amended, &opts.amend) {
+        (Some(a), Some(am)) => ident::resolve_amend(
+            cmd,
+            env.identity.as_ref(),
+            &opts.vars,
+            opts.author.clone(),
+            ident::now(),
+            &a.author,
+            am.reset_author,
+        )?,
+        _ => ident::resolve(cmd, env.identity.as_ref(), &opts.vars, opts.author.clone(), ident::now())?,
+    };
     let head_map = head::flatten(repo, OP)?;
+    // What "nothing changed" is measured against: HEAD's tree for a commit,
+    // the amended commit's first parent's for an amend.
+    let base_map = match &amended {
+        None => head_map.clone(),
+        Some(a) => match a.parents.first() {
+            Some(p) => head::flatten_commit(repo, OP, *p)?,
+            None => Map::new(),
+        },
+    };
+    let merge_amend = amended.as_ref().is_some_and(|a| a.parents.len() > 1);
 
     // Plan from an unlocked read, so a refusal creates no file in `.git`.
     let snap = Snapshot::read(repo, cmd)?;
     let mut prepared = prepare(repo, &snap.state, snap.mtime, &policy, &head_map, opts)?;
-    let message = final_message(opts)?;
-    check_not_empty(&prepared.items, &head_map, opts.allow_empty, cmd)?;
+    let message = final_message(opts, amended.as_ref().map(|a| a.message.as_str()))?;
+    check_not_empty(&prepared.items, &base_map, opts.allow_empty || merge_amend, cmd, amended.is_some())?;
 
     let mut tx: Option<IndexTx> = None;
     if writes_index {
         let locked = IndexTx::lock(repo, cmd)?;
         if locked.snap.bytes != snap.bytes {
             prepared = prepare(repo, locked.state(), locked.snap.mtime, &policy, &head_map, opts)?;
-            check_not_empty(&prepared.items, &head_map, opts.allow_empty, cmd)?;
+            check_not_empty(&prepared.items, &base_map, opts.allow_empty || merge_amend, cmd, amended.is_some())?;
         }
         tx = Some(locked);
     }
@@ -375,11 +522,17 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
         committer: idents.committer.to_actor(),
         encoding: None,
         message: message.as_str().into(),
-        extra_headers: Vec::new(),
+        extra_headers: amended.as_ref().map(|a| a.extra_headers.clone()).unwrap_or_default(),
     };
-    if let Some(parent) = old {
-        commit.parents.push(parent);
+    match &amended {
+        Some(a) => commit.parents.extend(a.parents.iter().copied()),
+        None => {
+            if let Some(parent) = old {
+                commit.parents.push(parent);
+            }
+        }
     }
+    let is_root = commit.parents.is_empty();
     let mut buf = Vec::new();
     gix_object::WriteTo::write_to(&commit, &mut buf)
         .map_err(|e| GitError::repository(OP, "encoding the commit", Path::new("."), e))?;
@@ -387,7 +540,13 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
     // The objects reach the disk before the ref that names them.
     writer.sync()?;
 
-    let kind = if old.is_none() { "commit (initial)" } else { "commit" };
+    let kind = if amended.is_some() {
+        "commit (amend)"
+    } else if old.is_none() {
+        "commit (initial)"
+    } else {
+        "commit"
+    };
     let reflog = format!("{kind}: {}", message::subject(&message));
     refmove::move_head(repo, cmd, &target, old, commit_id, &reflog, &idents.committer)?;
 
@@ -410,8 +569,10 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
             ),
         );
     }
-    let summary = summarize(repo, &head_map, &prepared.items, &mut err)?;
+    let summary = summarize(repo, &base_map, &prepared.items, &mut err)?;
     let short = commit_id.to_string()[..7].to_string();
+    // Git says "root-commit" for a commit made on an unborn branch, not for an
+    // amended root commit.
     let label = match (&head.branch, old.is_none()) {
         (_, true) if detached => "detached HEAD (root-commit)".to_string(),
         (Some(b), true) => format!("{b} (root-commit)"),
@@ -423,6 +584,14 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
     if idents.author.name != idents.committer.name || idents.author.email != idents.committer.email {
         text.push_str(&format!(" Author: {} <{}>\n", idents.author.name, idents.author.email));
     }
+    if amended.is_some() && !opts.amend.as_ref().is_some_and(|a| a.reset_author) {
+        // Git shows the author date on an amend, where it can differ from the
+        // committer's. With --reset-author the date is the committer's, and
+        // git leaves the line out.
+        let when = gix_date::Time::new(idents.author.seconds, idents.author.offset)
+            .format_or_unix(gix_date::time::format::DEFAULT);
+        text.push_str(&format!(" Date: {when}\n"));
+    }
     text.push_str(&summary.text);
     Ok(Outcome {
         text: if opts.quiet { String::new() } else { text },
@@ -430,9 +599,10 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
         json: serde_json::json!({
             "commit": commit_id.to_string(),
             "tree": tree_hex,
-            "parent": old.map(|o| o.to_string()),
+            "parent": commit.parents.first().map(|o| o.to_string()),
+            "amended": amended.as_ref().and(old).map(|o| o.to_string()),
             "branch": head.branch,
-            "root": old.is_none(),
+            "root": is_root,
             "files_changed": summary.files,
             "insertions": summary.insertions,
             "deletions": summary.deletions,
@@ -470,8 +640,13 @@ fn index_after_commit(e: &GitError, commit: ObjectId) -> GitError {
 }
 
 /// The cleaned message with trailers, refusing an empty one as git does.
-fn final_message(opts: &CommitOptions) -> Result<String, GitError> {
-    let cleaned = message::cleanup(&opts.raw_message);
+fn final_message(opts: &CommitOptions, kept: Option<&str>) -> Result<String, GitError> {
+    let raw = match (&opts.raw_message, kept) {
+        (Some(m), _) => m.as_str(),
+        (None, Some(k)) => k,
+        (None, None) => "",
+    };
+    let cleaned = message::cleanup(raw);
     if cleaned.is_empty() {
         return refuse(
             1,
@@ -484,9 +659,18 @@ fn final_message(opts: &CommitOptions) -> Result<String, GitError> {
     Ok(message::add_trailers(&cleaned, &opts.trailers))
 }
 
-fn check_not_empty(items: &Map, head_map: &Map, allow_empty: bool, command: &str) -> Result<(), GitError> {
+fn check_not_empty(items: &Map, head_map: &Map, allow_empty: bool, command: &str, amend: bool) -> Result<(), GitError> {
     if allow_empty || items != head_map {
         return Ok(());
+    }
+    if amend {
+        return refuse(
+            1,
+            command,
+            "Amending would leave HEAD's commit empty: its tree would be the same as its parent's.",
+            "To amend anyway: git commit --amend --allow-empty -m '<message>'.",
+            Override::Flag("--allow-empty"),
+        );
     }
     refuse(
         1,
@@ -537,7 +721,7 @@ fn ensure_commit_settings(repo: &WriteRepo, command: &str) -> Result<(), GitErro
 
 /// A hook file git would run: a regular file with an execute bit, or a link
 /// (which this shell does not follow), and not a `.sample`.
-fn hook_present(dir: &Path, name: &str) -> bool {
+pub(crate) fn hook_present(dir: &Path, name: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     match std::fs::symlink_metadata(dir.join(name)) {
         Ok(m) if m.file_type().is_symlink() => true,
@@ -546,9 +730,12 @@ fn hook_present(dir: &Path, name: &str) -> bool {
     }
 }
 
-fn scan_hooks(repo: &WriteRepo, command: &str, writes_index: bool) -> Result<(std::path::PathBuf, Vec<String>), GitError> {
+fn scan_hooks(repo: &WriteRepo, command: &str, writes_index: bool, amend: bool) -> Result<(std::path::PathBuf, Vec<String>), GitError> {
     let dir = hooks_dir(repo, command)?;
     let mut names: Vec<&str> = COMMIT_HOOKS.to_vec();
+    if amend {
+        names.extend_from_slice(AMEND_HOOKS);
+    }
     if writes_index {
         names.push("post-index-change");
     }

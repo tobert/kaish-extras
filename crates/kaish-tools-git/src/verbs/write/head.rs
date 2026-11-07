@@ -15,8 +15,25 @@ use crate::verbs::write::repo::WriteRepo;
 
 /// Every non-tree entry of HEAD's tree, by path. Empty on an unborn branch.
 pub(crate) fn flatten(repo: &WriteRepo, op: &'static str) -> Result<BTreeMap<String, (ObjectId, Mode)>, GitError> {
+    match repo.read().head_tree_id()? {
+        Some(root) => flatten_tree(repo, op, root),
+        None => Ok(BTreeMap::new()),
+    }
+}
+
+/// [`flatten`] for the tree of any commit.
+pub(crate) fn flatten_commit(repo: &WriteRepo, op: &'static str, commit: ObjectId) -> Result<BTreeMap<String, (ObjectId, Mode)>, GitError> {
+    let mut buf = Vec::new();
+    let tree = repo
+        .objects()
+        .find_commit(&commit, &mut buf)
+        .map_err(|e| GitError::repository(op, "reading a commit", repo.git_dir(), e))?
+        .tree();
+    flatten_tree(repo, op, tree)
+}
+
+fn flatten_tree(repo: &WriteRepo, op: &'static str, root: ObjectId) -> Result<BTreeMap<String, (ObjectId, Mode)>, GitError> {
     let mut out = BTreeMap::new();
-    let Some(root) = repo.read().head_tree_id()? else { return Ok(out) };
     // An explicit stack, so a deep tree cannot overflow ours.
     let mut stack: Vec<(ObjectId, String, usize)> = vec![(root, String::new(), 0)];
     let mut buf = Vec::new();

@@ -676,11 +676,11 @@ async fn restore_without_staged_and_reset_revision_forms_refuse() {
         (vec!["restore", "--worktree", "a.txt"], 2, "overwrites file content", "git restore --staged <path>"),
         (vec!["restore", "--staged", "--worktree", "a.txt"], 2, "overwrites file content", "git restore --staged <path>"),
         (vec!["reset", "--hard"], 2, "discards working-tree changes", "git reset -- <path>"),
-        (vec!["reset", "--hard", "HEAD~1"], 2, "discards working-tree changes", "git reset -- <path>"),
-        (vec!["reset", "--soft", "HEAD~1"], 2, "moves the branch", "git reset -- <path>"),
-        (vec!["reset", "--mixed", "HEAD~1"], 2, "moves the branch", "git reset -- <path>"),
-        (vec!["reset", "HEAD~1"], 2, "moves the branch", "git reset -- <path>"),
-        (vec!["reset", "main"], 2, "moves the branch", "git reset -- <path>"),
+        (vec!["reset", "--hard", "HEAD~1"], 2, "discards working-tree changes", "git reset --soft <rev>"),
+        (vec!["reset", "--merge", "HEAD~1"], 2, "writes working-tree files", "git reset --soft <rev>"),
+        (vec!["reset", "--keep", "HEAD~1"], 2, "writes working-tree files", "git reset --soft <rev>"),
+        (vec!["reset", "--soft", "--mixed", "HEAD"], 2, "cannot be used together", "git reset --soft <rev>"),
+        (vec!["reset", "--soft", "HEAD", "a.txt"], 2, "cannot be done together", "git reset -- <path>"),
         (vec!["reset", "-p"], 2, "terminal", "git reset -- <path>"),
     ] {
         let fp = support::Fingerprint::take(&p.ours);

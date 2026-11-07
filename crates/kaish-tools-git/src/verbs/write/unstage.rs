@@ -59,14 +59,18 @@ pub(crate) struct RestoreArgs {
 #[derive(Parser, Debug)]
 #[command(
     name = "reset",
-    about = "Unstage paths: put their index entries back to HEAD's. Takes no revision other than HEAD, moves no branch, and never writes the working tree"
+    about = "Unstage paths, or move the branch to a revision with --soft or --mixed (subject to the rewrite policy). Never writes the working tree; --hard, --merge and --keep are refused"
 )]
 pub(crate) struct ResetArgs {
-    /// Reset the index only. This is the default and the only mode that runs.
+    /// Move the branch to the revision and put the whole index back to its
+    /// tree. The default. The working tree is not touched. Refused by the
+    /// rewrite policy when the move drops commits the policy protects.
     #[arg(long = "mixed")]
     pub mixed: bool,
 
-    /// Refused: moving the branch is a history rewrite this shell does not do.
+    /// Move the branch to the revision and change nothing else: the index and
+    /// the working tree stay. Refused by the rewrite policy when the move drops
+    /// commits the policy protects.
     #[arg(long = "soft")]
     pub soft: bool,
 
@@ -74,11 +78,11 @@ pub(crate) struct ResetArgs {
     #[arg(long = "hard")]
     pub hard: bool,
 
-    /// Refused: moving the branch is a history rewrite this shell does not do.
+    /// Refused: it writes working-tree files, which this shell never does.
     #[arg(long = "merge")]
     pub merge: bool,
 
-    /// Refused: moving the branch is a history rewrite this shell does not do.
+    /// Refused: it writes working-tree files, which this shell never does.
     #[arg(long = "keep")]
     pub keep: bool,
 
@@ -117,22 +121,22 @@ pub(crate) fn refuse_restore_worktree<T>(command: &str) -> Result<T, GitError> {
     )
 }
 
-pub(crate) fn refuse_reset_revision<T>(command: &str, what: &str) -> Result<T, GitError> {
-    refuse(
-        2,
-        command,
-        format!("{what} moves the branch, which rewrites history, and this shell does not do that."),
-        "To unstage files without moving anything, run: git reset -- <path>.",
-        Override::Embedder,
-    )
-}
-
 pub(crate) fn refuse_reset_hard<T>(command: &str) -> Result<T, GitError> {
     refuse(
         2,
         command,
         "git reset --hard discards working-tree changes, which this shell never does.",
-        "To unstage files, run: git reset -- <path>.",
+        "To unstage files, run: git reset -- <path>. To move the branch and keep the files as they are, run: git reset --soft <rev>.",
+        Override::Never,
+    )
+}
+
+pub(crate) fn refuse_reset_worktree_mode<T>(command: &str, flag: &str) -> Result<T, GitError> {
+    refuse(
+        2,
+        command,
+        format!("git reset {flag} writes working-tree files, which this shell never does."),
+        "To move the branch and keep the files as they are, run: git reset --soft <rev>. To move it and unstage everything, run: git reset <rev>.",
         Override::Never,
     )
 }
@@ -140,6 +144,15 @@ pub(crate) fn refuse_reset_hard<T>(command: &str) -> Result<T, GitError> {
 struct Plan {
     restore: Vec<(String, gix_index::hash::ObjectId, Mode)>,
     remove: Vec<String>,
+}
+
+type TreeMap = std::collections::BTreeMap<String, (gix_index::hash::ObjectId, Mode)>;
+
+/// An index change planned and, when there is one, locked and applied in
+/// memory. [`Prepared::finish`] writes it.
+pub(crate) struct Prepared {
+    tx: Option<IndexTx>,
+    plan: Plan,
 }
 
 pub(crate) fn run(repo: &WriteRepo, opts: &UnstageOptions) -> Result<Outcome, GitError> {
@@ -157,14 +170,21 @@ pub(crate) fn run(repo: &WriteRepo, opts: &UnstageOptions) -> Result<Outcome, Gi
         );
     }
     let head_map = head::flatten(repo, op)?;
+    prepare(repo, opts, &head_map)?.finish(repo)
+}
+
+/// Plan the change that puts the index entries for `opts.specs` (all of them
+/// when empty) back to `tree`'s, and lock the index when there is a change.
+/// The caller has already run `ensure_writable`.
+pub(crate) fn prepare(repo: &WriteRepo, opts: &UnstageOptions, tree: &TreeMap) -> Result<Prepared, GitError> {
     let snap = Snapshot::read(repo, &opts.command)?;
-    let mut plan = build(&snap.state, &head_map, opts)?;
+    let mut plan = build(&snap.state, tree, opts)?;
     if plan.restore.is_empty() && plan.remove.is_empty() {
-        return Ok(report(&plan));
+        return Ok(Prepared { tx: None, plan });
     }
     let mut tx = IndexTx::lock(repo, &opts.command)?;
     if tx.snap.bytes != snap.bytes {
-        plan = build(tx.state(), &head_map, opts)?;
+        plan = build(tx.state(), tree, opts)?;
     }
     for p in &plan.remove {
         indexfile::remove(tx.state_mut(), p);
@@ -175,8 +195,24 @@ pub(crate) fn run(repo: &WriteRepo, opts: &UnstageOptions) -> Result<Outcome, Gi
         .map(|(path, id, mode)| Upsert { path: path.clone(), stat: Stat::default(), id: *id, mode: *mode })
         .collect();
     indexfile::upsert_all(tx.state_mut(), upserts);
-    tx.commit(repo)?;
-    Ok(report(&plan))
+    Ok(Prepared { tx: Some(tx), plan })
+}
+
+impl Prepared {
+    pub(crate) fn finish(self, repo: &WriteRepo) -> Result<Outcome, GitError> {
+        let out = report(&self.plan);
+        if let Some(tx) = self.tx {
+            tx.commit(repo)?;
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn paths(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.plan.restore.iter().map(|(p, _, _)| p.clone()).collect();
+        v.extend(self.plan.remove.iter().cloned());
+        v.sort();
+        v
+    }
 }
 
 fn report(plan: &Plan) -> Outcome {
@@ -188,7 +224,7 @@ fn report(plan: &Plan) -> Outcome {
 
 fn build(
     state: &gix_index::State,
-    head_map: &std::collections::BTreeMap<String, (gix_index::hash::ObjectId, Mode)>,
+    head_map: &TreeMap,
     opts: &UnstageOptions,
 ) -> Result<Plan, GitError> {
     let mut specs = SpecSet::new(opts.operation, &opts.specs)?;

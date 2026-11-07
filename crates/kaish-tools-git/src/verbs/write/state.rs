@@ -180,3 +180,20 @@ fn ensure_no_index_hook(repo: &WriteRepo, command: &str) -> Result<(), GitError>
     }
     Ok(())
 }
+
+/// Refuse when `core.logAllRefUpdates` is off: this shell always writes the
+/// reflog, and a branch move that differs from git's there is not one to make.
+pub(crate) fn ensure_reflog_on(repo: &WriteRepo, command: &str) -> Result<(), GitError> {
+    if config_last(repo, "core", "logallrefupdates")?
+        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "false" | "no" | "off" | "0" | "never"))
+    {
+        return refuse(
+            4,
+            command,
+            "core.logAllRefUpdates is off, and this shell always writes the reflog.",
+            "Use real git, outside this shell, or turn it on: git config core.logAllRefUpdates true.",
+            Override::Repository,
+        );
+    }
+    Ok(())
+}

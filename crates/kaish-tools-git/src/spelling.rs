@@ -25,6 +25,13 @@ const WRITE_VERBS: &[&str] = &[
     "update-ref",
 ];
 
+/// Plumbing that writes objects or moves refs. A tool with the commit profile
+/// refuses these by name, and says what the rewrite policy is: a caller that
+/// was refused `--amend` and reaches for `commit-tree` plus `update-ref`
+/// (12 of 20 cells in the write survey's second turn) gets the same answer
+/// again (git-write-profile.md §3).
+const PLUMBING: &[&str] = &["commit-tree", "update-ref", "hash-object", "write-tree"];
+
 /// git read commands this build has no verb for, each with the sentences
 /// that name a verb answering the same question. A sentence is shown only
 /// when every verb it names is enabled ([`runnable`]): an embedder may
@@ -81,7 +88,24 @@ pub(crate) fn unsupported_verb(
     word: &str,
     config: &GitConfig,
     writable: bool,
+    policy: Option<&str>,
 ) -> Option<GitError> {
+    if writable && PLUMBING.contains(&word) {
+        let policy_text = match policy {
+            Some(p) if p != "allow" => format!(
+                " The rewrite policy is {p}, set by the program embedding this shell, and plumbing would bypass it; there is no flag that overrides it."
+            ),
+            _ => String::new(),
+        };
+        return Some(GitError::UnsupportedVerb {
+            tool: tool.to_string(),
+            verb: word.to_string(),
+            reason: format!(
+                "not supported: this git has the commit profile's verbs and never writes objects or moves refs by plumbing.{policy_text} \
+                 To record the index, run: git commit -m '<message>'."
+            ),
+        });
+    }
     let (mut reason, next): (String, &[&str]) = if WRITE_VERBS.contains(&word) {
         (write_verb_reason(word, config, writable), &["'git status' lists what is changed.", "'git diff' shows each change."])
     } else {

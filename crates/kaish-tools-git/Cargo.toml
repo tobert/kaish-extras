@@ -334,3 +334,10 @@ required-features = ["commit"]
 name = "write_commit"
 path = "tests/write_commit.rs"
 required-features = ["commit"]
+
+# Phase 3: `commit --amend`, `reset --soft|--mixed <rev>` and the rewrite
+# policy against real git on a twin repository.
+[[test]]
+name = "write_rewrite"
+path = "tests/write_rewrite.rs"
+required-features = ["commit"]
