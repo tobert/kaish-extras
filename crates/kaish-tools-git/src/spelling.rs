@@ -63,8 +63,7 @@ const READ_VERBS: &[(&str, &[&str])] = &[
 pub(crate) fn runnable(sentence: &str, config: &GitConfig) -> bool {
     sentence.match_indices("git ").all(|(i, _)| {
         let rest = &sentence[i + 4..];
-        let named = Verb::ALL
-            .iter()
+        let named = Verb::known()
             .filter(|v| {
                 let word = v.as_str();
                 rest.starts_with(word)
@@ -72,20 +71,20 @@ pub(crate) fn runnable(sentence: &str, config: &GitConfig) -> bool {
             })
             .max_by_key(|v| v.as_str().len());
         // "this git is read-only" names no verb.
-        named.is_none_or(|v| config.has(*v))
+        named.is_none_or(|v| config.has(v))
     })
 }
 
 /// The refusal for a git command this build has no verb for, or `None` when
 /// the word is not a git command it knows.
-pub(crate) fn unsupported_verb(tool: &str, word: &str, config: &GitConfig) -> Option<GitError> {
+pub(crate) fn unsupported_verb(
+    tool: &str,
+    word: &str,
+    config: &GitConfig,
+    writable: bool,
+) -> Option<GitError> {
     let (mut reason, next): (String, &[&str]) = if WRITE_VERBS.contains(&word) {
-        (
-            "not supported: this git is read-only. It inspects the repository and \
-             never stages, commits, switches or rewrites anything."
-                .to_string(),
-            &["'git status' lists what is changed.", "'git diff' shows each change."],
-        )
+        (write_verb_reason(word, config, writable), &["'git status' lists what is changed.", "'git diff' shows each change."])
     } else {
         let (_, next) = READ_VERBS.iter().find(|(name, _)| *name == word)?;
         ("not supported by this git.".to_string(), next)
@@ -99,6 +98,39 @@ pub(crate) fn unsupported_verb(tool: &str, word: &str, config: &GitConfig) -> Op
         verb: word.to_string(),
         reason,
     })
+}
+
+/// Why a git command that changes a repository is not available here. The
+/// text depends on what this tool was configured with: a read-only tool never
+/// stages, but a tool with the commit profile does, and saying "read-only" to
+/// it would be false.
+fn write_verb_reason(word: &str, config: &GitConfig, writable: bool) -> String {
+    if !writable {
+        return "not supported: this git is read-only. It inspects the repository and \
+                never stages, commits, switches or rewrites anything."
+            .to_string();
+    }
+    #[cfg(feature = "commit")]
+    {
+        let provided: Vec<&str> = Verb::WRITE.iter().filter(|v| config.has(**v)).map(|v| v.as_str()).collect();
+        if Verb::WRITE.iter().any(|v| v.as_str() == word) {
+            return format!(
+                "not available: the program embedding this shell turned '{word}' off. \
+                 This git has the verbs: {}.",
+                provided.join(", ")
+            );
+        }
+        format!(
+            "not supported: this git has the commit profile's verbs ({}) and no '{word}'. \
+             It does not run hooks, sign, or move branches.",
+            provided.join(", ")
+        )
+    }
+    #[cfg(not(feature = "commit"))]
+    {
+        let _ = (word, config);
+        "not supported: this git is read-only.".to_string()
+    }
 }
 
 /// Flags git has that a verb here refuses, with the reason and the next step.

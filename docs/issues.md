@@ -1592,3 +1592,86 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   compute.
 - **S5 — `git diff --cached <rev>` (a revision against the index).** No
   `RevToIndex` endpoint exists; refused naming the two comparisons that do.
+
+
+## git write — phase 1b (index verbs), what is left
+
+- **W1 — add atomicity.** `git add a ignored.log` stages `a` and exits 1 in git;
+  here the whole command refuses. Kept: a half-staged result is worse for an
+  agent than a refusal it can fix and rerun.
+- **W2 — write: racy smudge.** The rule follows git's `ce_smudge_racily_clean_entry`
+  against the OLD index file's mtime, which git uses (`istate->timestamp`) and is
+  never later than the new index's. Stat match is looser than git's (mtime
+  second and size), so the smudge applies to a superset. Git compares seconds
+  only unless built with `USE_NSEC`; this does too. The design text says "the
+  new index file's mtime": the new file's mtime is not known until it is
+  written, and the old one is the threshold that closes the hidden-edit window.
+  Design doc to be corrected.
+- **W3 — refusals take no lock.** The design says to take `index.lock` first. A
+  refusal that created and removed the lock would move `.git`'s mtime, and the
+  fingerprint test treats that as a write. So a verb plans from an unlocked
+  snapshot, locks, re-reads, and re-plans if the bytes changed. The written
+  state is always the locked read. A refusal found only in the re-plan (a race)
+  does touch `.git`.
+- **W4 — `reset`/`restore --staged`/`add` do not refresh.** Git's `reset` runs
+  `refresh_index` and prints "Unstaged changes after reset"; `add` refreshes
+  nothing it does not stage. Entries we restore keep a zero stat until a read
+  refreshes them in memory. Costs one content compare per entry on the next
+  `git status`.
+- **W5 — hooks.** Only `post-index-change` is checked for index writes. The
+  other hooks belong to `commit` (phase 2) and the `GitHooks` boundary.
+- **W6 — large files.** `add` reads a file whole (128 MiB cap). A non-UTF-8
+  name is kept as bytes by every verb (see `relpath.rs`); a message shows
+  it C-quoted, and a command-line path must be UTF-8.
+- **W7 — gitlinks.** An existing gitlink is updated to the nested repository's
+  HEAD when it is a repository of its own; a nested repository not tracked as a
+  submodule refuses where git warns and adds an embedded repository.
+- **W8 — `rm`/`mv` partial failure.** `mv` undoes completed renames if a later
+  one fails; `rm` deletes files before the index commits, so a failure between
+  leaves files gone and the index unchanged (`git status` shows them deleted).
+- **W9 — attribute matcher.** `[attr]` macros are expanded to depth 5; a
+  quoted pattern, or a pattern with a backslash, is treated as "may match" and
+  refuses when its line names a conversion. `core.attributesFile` refuses.
+- **W10 — `core.hooksPath` inside the tree** is resolved for the
+  `post-index-change` check only.
+- **W11 — residuals of the phase 1a containment review.** The source scan
+  (`tests/write_shaped_identifiers.rs`) does not match a turbofish call
+  (`.transaction::<T>(`). The `.git` component guard does not cover
+  HFS+-ignorable code points or trailing dots and spaces (Windows/macOS name
+  folding). The hard-link refusal (`st_nlink > 1` on in-place targets) is
+  unix-only. None reachable on the Linux CI today; each wants a fixture on the
+  platform it names before a fix.
+- **W12 — `gix-lock` is a renamed dev-dependency.** Phase 1a added
+  `lock = { package = "gix-lock", version = "=24.0.0" }` for tests only, renamed
+  so `pins_match_the_manifest` does not count it as linked. Phase 2's ref
+  transactions link it for real: promote it to a pinned, `commit`-gated
+  dependency with a `GIX_PINS` row then.
+- **W24 — an index in version 4 is rewritten as version 2.** `gix-index` reads
+  version 4 (path-prefix compression, which `feature.manyFiles` and
+  `index.version=4` turn on) and writes version 2 or 3. Every entry, mode and id
+  survives and git reads the result; the file gets larger, and a repository that
+  asked for version 4 loses it until real git runs `git update-index
+  --index-version 4`. `tests/write_index.rs`
+  (`a_version_4_index_is_read_and_rewritten_as_version_2`) pins it.
+- **W25 — a pathspec glob without a `/` matches the basename.** The shared
+  `PathFilter` matches `*.rs` at any depth, as the read verbs want, and
+  `caf*` against `d/caf.txt`. Git's pathspec has no such rule: `caf*` matches a
+  path that starts with `caf`, and `*` crosses `/`. So `git add 'ca*'` here
+  stages `d/caf.txt` and git's does not. Found by the T5 tests; they use a glob
+  (`*af?.txt`) on which both agree.
+- **W26 — `rm` stops at the first deletion failure.** Git continues past it and
+  warns; this shell stops, stages the deletions that happened and names the
+  rest, so the next command is exact. See W8 for the earlier shape.
+- **W27 — `add -A -u` runs here; git refuses it.** Git exits 128 with
+  "options '-u/--update' and '-A/--all' cannot be used together" and changes
+  nothing. `AddArgs` accepts both, and `-u` wins. Found by the pin test
+  `add_with_both_all_and_update_is_refused_as_git_refuses_it`, which is
+  `#[ignore]`d until the verb refuses the pair.
+- **W28 — `mv` into `.git` refuses here; git moves the file.** `git mv a.txt
+  .git/x` prints "invalid path '.git/x'" and still renames the file into `.git`
+  and stages the deletion of `a.txt` (measured on git 2.56.0). This shell
+  refuses with exit 4 and changes nothing. The refusal is deliberate, and the
+  difference is why
+  `mv_into_the_git_directory_changes_nothing_and_its_negative_controls_move`
+  does not compare the result with a twin.
+

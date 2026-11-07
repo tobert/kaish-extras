@@ -5,6 +5,7 @@
 #[path = "support.rs"]
 mod support;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use kaish_tool_api::Tool;
@@ -39,22 +40,35 @@ fn the_commit_profile_is_added_by_name_and_only_by_name() {
     assert_eq!(Profile::Commit.as_str(), "commit");
 }
 
-/// Phase 1a enables no verb. Compared against a literal list, not against
-/// another config built the same way: a mutation that adds a verb to the
-/// commit profile (or maps one to `Profile::Commit`) breaks this, and
-/// comparing `read_only()` to itself would not. Phase 1b changes the list
-/// on purpose, verb by verb.
+/// The commit profile adds exactly the index verbs, and the read profile
+/// never has them. Phase 2 and later change this assertion on purpose.
 #[test]
-fn the_commit_profile_enables_exactly_the_read_verbs_for_now() {
-    let writable = GitConfig::read_only().with_commit_profile();
-    let names: Vec<&str> = writable.read_config().verbs().map(|v| v.as_str()).collect();
-    assert_eq!(
-        names,
-        ["info", "status", "log", "ls", "show", "diff", "branch", "tag", "worktree list"]
-    );
-    for verb in writable.read_config().verbs() {
-        assert_eq!(verb.profile(), Profile::Read, "{verb:?} is not a read verb");
+fn the_commit_profile_adds_exactly_the_index_verbs() {
+    let read: BTreeSet<Verb> = GitConfig::read_only().verbs().collect();
+    assert_eq!(read, Verb::ALL.iter().copied().collect::<BTreeSet<_>>(), "the read profile publishes exactly Verb::ALL");
+    for v in Verb::WRITE {
+        assert!(!read.contains(v), "{v:?} must not be in the read profile");
     }
+    let writable: BTreeSet<Verb> =
+        GitConfig::read_only().with_commit_profile().read_config().verbs().collect();
+    let want: BTreeSet<Verb> = read.iter().chain(Verb::WRITE.iter()).copied().collect();
+    assert_eq!(writable, want);
+    let names: Vec<&str> = Verb::WRITE.iter().map(|v| v.as_str()).collect();
+    assert_eq!(names, ["add", "rm", "mv", "restore", "reset"]);
+    for v in Verb::WRITE {
+        assert_eq!(v.profile(), Profile::Commit);
+    }
+}
+
+/// A verb subtracted before the profile is installed stays subtracted, and
+/// installing the profile does not bring back a read verb.
+#[test]
+fn installing_the_profile_does_not_restore_a_subtracted_verb() {
+    let w = GitConfig::read_only().without_verb(Verb::Log).with_commit_profile();
+    assert!(!w.read_config().has(Verb::Log));
+    assert!(w.read_config().has(Verb::Add));
+    let w = w.without_verb(Verb::Add);
+    assert!(!w.read_config().has(Verb::Add));
 }
 
 #[test]
@@ -115,10 +129,22 @@ async fn git_info_shows_the_profile() {
 
     let commit = info(&repo, GitConfig::read_only().with_commit_profile().into()).await;
     assert_eq!(commit["capabilities"]["profiles"], serde_json::json!(["read", "commit"]));
-    assert_eq!(
-        commit["capabilities"]["verbs"], read["capabilities"]["verbs"],
-        "no write verb yet, so the verb list is unchanged"
-    );
+    let verbs = |j: &serde_json::Value| -> Vec<String> {
+        j["capabilities"]["verbs"]
+            .as_array()
+            .expect("verbs")
+            .iter()
+            .map(|v| v.as_str().expect("name").to_string())
+            .collect()
+    };
+    let (read_verbs, commit_verbs) = (verbs(&read), verbs(&commit));
+    for v in Verb::WRITE {
+        assert!(!read_verbs.contains(&v.as_str().to_string()), "{v:?} in the read report");
+        assert!(commit_verbs.contains(&v.as_str().to_string()), "{v:?} missing from the commit report");
+    }
+    for v in &read_verbs {
+        assert!(commit_verbs.contains(v), "the commit profile lost {v}");
+    }
 
     let features = |j: &serde_json::Value| -> Vec<String> {
         j["capabilities"]["features"]
@@ -167,4 +193,54 @@ fn tool_accepts_both_configs_and_validates_both() {
         kaish_tools_git::tool(GitConfig::read_only().with_tool_name("a b").with_commit_profile())
             .is_err()
     );
+}
+
+fn leaf<'a>(schema: &'a kaish_types::ToolSchema, name: &str) -> &'a kaish_types::ToolSchema {
+    schema.subcommands.iter().find(|c| c.name == name).unwrap_or_else(|| panic!("no leaf {name}"))
+}
+
+/// Each write leaf declares the effect ids of design §2, the root lists their
+/// union, and the read profile declares none anywhere.
+#[test]
+fn write_leaves_declare_operations_and_the_root_lists_the_union() {
+    let schema = kaish_tools_git::tool(GitConfig::read_only().with_commit_profile()).expect("tool").schema();
+    let ops = |name: &str| leaf(&schema, name).operations.clone();
+    assert_eq!(ops("add"), ["git.index"]);
+    assert_eq!(ops("restore"), ["git.index"]);
+    assert_eq!(ops("reset"), ["git.index"]);
+    assert_eq!(ops("rm"), ["git.index", "fs.remove"]);
+    assert_eq!(ops("mv"), ["git.index", "fs.rename"]);
+    let mut root = schema.operations.clone();
+    root.sort();
+    assert_eq!(root, ["fs.remove", "fs.rename", "git.index"]);
+    for read in ["info", "status", "log", "ls", "show", "diff", "branch", "tag"] {
+        assert!(ops(read).is_empty(), "{read} must declare no effect");
+    }
+
+    let read_only = kaish_tools_git::tool(GitConfig::read_only()).expect("tool").schema();
+    assert!(read_only.operations.is_empty());
+    assert!(read_only.subcommands.iter().all(|c| c.operations.is_empty()));
+}
+
+/// A subtracted write verb takes its operations out of the root union.
+#[test]
+fn a_subtracted_write_verb_leaves_the_union() {
+    let schema = kaish_tools_git::tool(GitConfig::read_only().with_commit_profile().without_verb(Verb::Rm).without_verb(Verb::Mv))
+        .expect("tool")
+        .schema();
+    assert_eq!(schema.operations, ["git.index"]);
+    assert!(schema.subcommands.iter().all(|c| c.name != "rm" && c.name != "mv"));
+}
+
+/// The description a tool with write verbs publishes must not claim to be
+/// read-only, and must say what it never does.
+#[test]
+fn the_commit_profile_description_is_not_the_read_only_one() {
+    let w = kaish_tools_git::tool(GitConfig::read_only().with_commit_profile()).expect("tool").schema();
+    assert!(!w.description.contains("read-only by construction"), "{}", w.description);
+    for must in ["never runs hooks", "user-level git configuration", "add, rm, mv, restore --staged and reset"] {
+        assert!(w.description.contains(must), "{must:?} missing: {}", w.description);
+    }
+    let r = kaish_tools_git::tool(GitConfig::read_only()).expect("tool").schema();
+    assert!(r.description.contains("read-only by construction"));
 }

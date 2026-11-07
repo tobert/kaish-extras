@@ -69,6 +69,10 @@ pub(crate) enum Leaf {
     /// makes them on purpose. A link, a directory or anything not a regular
     /// file still refuses.
     Replaced,
+    /// A name the walk only reads, deletes or renames: a regular file or a
+    /// symbolic link, never followed. The link count does not matter, because
+    /// unlink and rename change the directory entry and not the inode.
+    Entry,
 }
 
 /// Which root a path under the git directory lands in.
@@ -90,18 +94,20 @@ pub(crate) enum Leaf {
 /// `.lock`, or beneath the base; `refs/worktreex` is not `refs/worktree`.
 /// For a plain repository both roots are the same directory.
 pub(crate) fn root_for(rel: &Path) -> Root {
+    use std::os::unix::ffi::OsStrExt as _;
     let joined = rel
         .components()
         .filter_map(|c| match c {
-            Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+            Component::Normal(n) => Some(n.as_bytes().to_vec()),
             _ => None,
         })
         .collect::<Vec<_>>()
-        .join("/");
+        .join(&b'/');
     let at = |base: &str| {
+        let base = base.as_bytes();
         joined == base
-            || joined.strip_suffix(".lock") == Some(base)
-            || joined.strip_prefix(base).is_some_and(|rest| rest.starts_with('/'))
+            || joined.strip_suffix(b".lock".as_slice()) == Some(base)
+            || joined.strip_prefix(base).is_some_and(|rest| rest.starts_with(b"/"))
     };
     const PER_WORKTREE_INSIDE_COMMON: &[&str] = &[
         "info/sparse-checkout",
@@ -218,7 +224,7 @@ pub(crate) fn check_beneath(
         // What the write needs at this component: the last one is the leaf
         // kind, every earlier one is a directory.
         let needs_dir = !last || leaf == Leaf::Dir;
-        if ty.is_symlink() {
+        if ty.is_symlink() && !(last && leaf == Leaf::Entry) {
             return Err(refuse(
                 &seen,
                 "a symbolic link",
@@ -229,7 +235,11 @@ pub(crate) fn check_beneath(
             return Err(refuse(&seen, "not a directory", THEN_NOT_DIR));
         }
         if !needs_dir {
-            if !ty.is_file() {
+            if leaf == Leaf::Entry {
+                if ty.is_dir() {
+                    return Err(refuse(&seen, "a directory", THEN_NOT_FILE));
+                }
+            } else if !ty.is_file() {
                 return Err(refuse(&seen, "not a regular file", THEN_NOT_FILE));
             }
             if leaf == Leaf::File && has_other_hard_links(&meta) {
@@ -291,7 +301,7 @@ fn has_other_hard_links(_meta: &std::fs::Metadata) -> bool {
 /// A relative path as a refusal shows it: `/`-separated, lossy.
 fn shown(path: &Path) -> String {
     path.components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .map(|c| c.as_os_str().to_string_lossy().into_owned()) // display-only
         .collect::<Vec<_>>()
         .join("/")
 }
@@ -657,6 +667,35 @@ mod tests {
             let err = repo.check(Path::new(rel), Leaf::File).expect_err(rel);
             assert_eq!(err.exit_code(), 4, "{rel}");
         }
+    }
+
+    /// A hard link is invisible to the `lstat` walk: the path is a regular
+    /// file in the repository, and the inode is also named outside the mount.
+    /// A write that reaches the inode changes both.
+    #[test]
+    fn a_hard_linked_file_is_refused_for_a_write_and_not_for_an_unlink() {
+        let fx = Fixture::new();
+        let repo = fx.write_repo(false);
+        let outside_file = fx.outside.join("logs_head");
+        let planted = repo.common_dir().join("logs/HEAD");
+        std::fs::remove_file(&planted).expect("main logs/HEAD exists after a commit");
+        std::fs::hard_link(&outside_file, &planted).expect("hard link");
+        let before = std::fs::read(&outside_file).expect("outside");
+
+        let err = repo.check(Path::new("logs/HEAD"), Leaf::File).expect_err("must refuse");
+        assert_eq!(err.exit_code(), 4);
+        let text = err.to_string();
+        assert!(text.contains("'logs/HEAD' in the git directory is a file with other hard links"), "{text}");
+        assert!(!text.contains(&fx.scratch().display().to_string()), "leaked a host path: {text}");
+        assert_eq!(std::fs::read(&outside_file).expect("outside"), before);
+
+        // Unlink and rename change the directory entry, not the inode.
+        repo.check(Path::new("logs/HEAD"), Leaf::Entry).expect("an entry walk does not care about the link count");
+
+        // The negative control: the same file with one link passes.
+        std::fs::remove_file(&planted).expect("unlink");
+        std::fs::write(&planted, "ordinary\n").expect("ordinary file");
+        repo.check(Path::new("logs/HEAD"), Leaf::File).expect("a file with one link is fine");
     }
 
     #[test]

@@ -734,8 +734,14 @@ fn attach<T: serde::Serialize>(table: OutputData, model: &T, what: &str) -> Outp
 /// anything above ASCII (`core.quotePath`, on by default) — and `None` when
 /// the path prints as itself.
 pub(crate) fn quote_c_style(prefix: &str, path: &str) -> Option<String> {
+    quote_c_style_bytes(prefix, path.as_bytes())
+}
+
+/// [`quote_c_style`] for a path that is bytes.
+pub(crate) fn quote_c_style_bytes(prefix: &str, path: &[u8]) -> Option<String> {
     let needs = path
-        .bytes()
+        .iter()
+        .copied()
         .any(|b| b < 0x20 || b == 0x7f || b == b'"' || b == b'\\' || b >= 0x80);
     if !needs {
         return None;
@@ -743,7 +749,7 @@ pub(crate) fn quote_c_style(prefix: &str, path: &str) -> Option<String> {
     let mut out = String::with_capacity(path.len() + prefix.len() + 4);
     out.push('"');
     out.push_str(prefix);
-    for b in path.bytes() {
+    for b in path.iter().copied() {
         match b {
             b'"' => out.push_str("\\\""),
             b'\\' => out.push_str("\\\\"),

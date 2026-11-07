@@ -669,6 +669,21 @@ pub enum GitError {
         what: &'static str,
     },
 
+    /// A write verb refused. Carries the five parts every refusal names
+    /// (git-write-profile.md §3, W17): the command, the reason, one exact next
+    /// command, whether an override exists and who grants it, and that nothing
+    /// was changed. The exit code is the refusal's own: 2 for a usage or policy
+    /// refusal, 4 for a repository state or content this build will not write
+    /// through, 1 for a git-level "no".
+    #[cfg(feature = "commit")]
+    #[error("{text}")]
+    Refused {
+        /// The exit code of this refusal.
+        code: i64,
+        /// The five-part text.
+        text: String,
+    },
+
     /// A reflog message contained a line break, which would forge a second
     /// reflog line. Exit 2.
     #[cfg(feature = "commit")]
@@ -706,6 +721,8 @@ impl GitError {
             | GitError::NoSuchPath { .. } => 1,
             #[cfg(feature = "commit")]
             GitError::ReflogMessageLineBreak { .. } => 2,
+            #[cfg(feature = "commit")]
+            GitError::Refused { code, .. } => *code,
             GitError::Usage { .. }
             | GitError::NoVerb { .. }
             | GitError::UnsupportedVerb { .. }

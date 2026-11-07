@@ -486,31 +486,87 @@ allowed-tree entry to cover it.
 
 ## The commit profile (in progress)
 
-Design: `docs/design/git-write-profile.md`. This section says what exists, and
-it is deliberately short: **nothing writes yet.**
+Design: `docs/design/git-write-profile.md`. This section says what exists as of
+phase 1b: **the index verbs write; `commit` does not exist yet.**
 
-After phase 1a, a build with the `commit` cargo feature (off by default) has:
+A build with the `commit` cargo feature (off by default) has:
 
 - `GitConfig::with_commit_profile()`, which returns a `WritableGitConfig`.
-  `tool()` accepts either config. `git info` then reports the `commit`
-  profile and the `commit` feature.
-- `WritableGitConfig::with_rewrite_policy`, `with_hooks`, `with_identity` and
-  `without_verb`, and the types they take: `RewritePolicy` (default
-  `Unpublished`), `GitHooks` with `HookContext`, `HookOutput` and `HookError`,
-  and `Identity`. No verb reads them yet.
-- Scaffolding under `src/verbs/write/` that no verb calls: `WriteRepo`, the
-  write-containment walk (design section 6.1), and the check that refuses a
-  reflog message containing a line break.
-- Two tests for the read surface. The read verbs still leave the repository
-  byte-identical with `commit` compiled in and a `WritableGitConfig`
-  installed, and every refused write spelling does too.
+  `tool()` accepts either config. The write verbs exist only when `tool()` was
+  given a `WritableGitConfig`: a clone of `read_config()` lists the `commit`
+  profile but carries no write settings, and builds a tool with no write verbs.
+- Five write verbs, added to the verb set by `with_commit_profile()` and
+  removable one by one with `without_verb`: `add`, `rm`, `mv`,
+  `restore --staged` and `reset` with no revision (`Verb::WRITE`).
+  `GitConfig::read_only()` still publishes exactly `Verb::ALL`. Their text
+  surface is in `docs/git.md`, "`git add`, `rm`, `mv`, `restore --staged` and
+  `reset`".
+- Effect ids on the schema, for `plan`. Each write leaf declares what any of
+  its spellings can do, and the root lists the union:
 
-It does **not** have: any write verb. `git add`, `git commit` and the rest are
-still refused as read-only, with a `WritableGitConfig` as well, and
-`git info`'s `verbs` list is unchanged. Installing the profile today changes
-what `git info` reports and nothing else. Hooks and identity settings are
-stored and ignored. Write containment is a function with tests, not yet a
-guard on any write.
+  | Leaf | `operations` |
+  |---|---|
+  | `add`, `restore`, `reset` | `git.index` |
+  | `rm` | `git.index`, `fs.remove` |
+  | `mv` | `git.index`, `fs.rename` |
+
+  The read verbs declare none. The root of a read-only tool declares none.
+- `WritableGitConfig::with_rewrite_policy`, `with_hooks` and `with_identity`,
+  and the types they take (`RewritePolicy`, `GitHooks`, `Identity`). **No verb
+  reads them yet**; `commit` and the history rewrites are later phases.
+- The per-profile router text. A tool without write settings answers `git add`
+  with "this git is read-only". A tool with them never says that: for a git
+  command it has no verb for (`commit`, `switch`, `checkout`, `stash`) it names
+  the verbs it does have, and for a verb the embedder subtracted it says the
+  embedder turned it off.
+
+What the verbs do not do, stated plainly:
+
+- **No content conversion.** `add` stores the working-tree bytes as they are.
+  A path that real git would convert is refused, exit 4, naming why: any
+  `filter=` attribute (wherever the driver is defined), `working-tree-encoding`,
+  and, when the file has a `\r` or `$Id`, any `text`, `eol`, `crlf` or `ident`
+  attribute, `core.autocrlf` of `true` or `input`, or `core.eol`. A file with
+  none of those bytes is stored raw even under `* text=auto`, which is what git
+  stores for it. Attributes are read from `.gitattributes` files from the
+  working tree root down, and `info/attributes`, with a matcher in this crate;
+  a line it cannot match exactly and that names a conversion refuses. Tests
+  compare the staged blob id with `git hash-object` over a matrix of 36 cases.
+- **No hooks, no signing, no user-level configuration.** A hook git would run
+  for an index write is `post-index-change`; a repository with one (in
+  `hooks/`, or under a `core.hooksPath` inside the working tree) is refused,
+  as is a `core.hooksPath` that points outside it. `~/.gitconfig`,
+  `core.attributesFile` and `~/.config/git/attributes` are never read, and a
+  repository that sets `core.attributesFile` is refused by name.
+- **Repository states are refused, exit 4:** a merge, rebase, cherry-pick,
+  revert or bisect in progress; unmerged index entries; a split or sparse
+  index; `core.symlinks=false`, `core.ignorecase=true`,
+  `core.splitIndex=true`, `core.sparseCheckout=true`; SHA-256 repositories
+  (the read side's refusal); a bare repository (exit 1).
+- **No refresh.** The index is rewritten without the cache-tree, untracked
+  cache and fsmonitor extensions; git rebuilds them. Entries the verb did not
+  touch keep their stat.
+
+Write safety, in the order it applies:
+
+1. Refusals first. A verb decides everything it will refuse from a read-only
+   snapshot of the index and the working tree, before it creates a file. A
+   refusal leaves `.git` byte-identical, directory mtimes included
+   (`tests/write_fingerprint.rs`).
+2. Then `index.lock` is created exclusively, the index is read again under it,
+   and the plan is rebuilt if the bytes changed. A lock that already exists is
+   never removed: exit 4, naming it.
+3. Blobs are written as loose objects and fsynced, with their directories,
+   before the index is renamed into place, so the index never names an object a
+   crash could lose.
+4. Every path written or removed passes the containment walk (design 6.1) from
+   the root of the store it lands in. A symbolic link anywhere on the path, or
+   a hard-linked file that would be written in place, refuses. `rm` and `mv`
+   walk both working-tree paths. The threat is a hostile repository at rest,
+   not a process racing the walk; `openat2(RESOLVE_BENEATH)` would close that
+   (kaish #276).
+5. The index is written with git's racy-entry rule applied to every entry (see
+   `docs/issues.md`, "write: racy smudge").
 
 The `commit` feature adds no dependency: `cargo tree -i gix-command`,
 `gix-filter` and `gix-transport` stay empty with it on, and CI asserts that.
