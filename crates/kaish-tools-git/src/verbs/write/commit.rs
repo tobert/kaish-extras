@@ -28,7 +28,7 @@ use kaish_tool_api::GlobalFlags;
 
 use crate::config::{Identity, RewritePolicy};
 use crate::error::GitError;
-use crate::hooks::{GitHooks, HookContext, RefUpdate, RewrittenCommit};
+use crate::hooks::{GitHooks, HookContext, RewrittenCommit};
 use crate::verbs::write::add::{self, AddOptions, Plan, Tracked};
 use crate::verbs::write::attributes::AttributeReader;
 use crate::verbs::write::head;
@@ -568,7 +568,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
         HeadTarget::Branch(full) => full.clone(),
         HeadTarget::Detached => "HEAD".to_string(),
     };
-    let ref_tx: Tx = vec![RefUpdate::new(hookrun::oid_or_null(old), commit_id.to_string(), ref_name)];
+    let ref_tx = Tx::via_head(hookrun::oid_or_null(old), commit_id.to_string(), ref_name);
     if let Some(h) = env.hooks.as_ref() {
         // The commit object is written; a refusal here leaves it unreachable.
         hookrun::prepared(h.as_ref(), &ctx, MoveKind::COMMIT, cmd, std::slice::from_ref(&ref_tx), &mut err)

@@ -590,15 +590,18 @@ nothing counts as published. Cost, trust and the other limits are
   `Err` aborts, exit 1), `commit_msg` may rewrite the message (git cleans it
   again afterward), and `post_commit` runs after the ref moved, its failures
   reported on stderr and not fatal. Every verb that writes a ref calls
-  `reference_transaction` with `RefTransactionState::Prepared` and the
-  `<old> <new> <ref>` lines git would pass its hook, before it writes
-  anything; `Err` there refuses the command (exit 1) and leaves `.git` as it
-  was, apart from objects already written (a commit's, an annotated tag's), and
-  the refusal says which. It then sends `Committed` as each transaction is
-  written, or `Aborted` for each that was not (a refusal, or a write that
-  failed after `Prepared`). `reset` makes two transactions (`ORIG_HEAD`, then
-  the branch), `switch -c` and `checkout -b` two (the branch, then `HEAD`), and
-  the rest one; every `Prepared` is sent before the first write. `switch -c`
+  `reference_transaction` with `RefTransactionState::Preparing` and then
+  `Prepared`, with the `<old> <new> <ref>` lines git would pass its hook,
+  before it writes anything; `Err` at either refuses the command (exit 1) and
+  leaves `.git` as it was, apart from objects already written (a commit's, an
+  annotated tag's), and the refusal says which. It then sends `Committed` as
+  each transaction is written, or `Aborted` for each that was not (a refusal, or
+  a write that failed after `Prepared`). These are the four states git runs
+  the hook in, so a provider can forward to the repository's script for each.
+  `reset` makes two transactions (`ORIG_HEAD`, then the branch), `switch -c`
+  and `checkout -b` two (the branch, then `HEAD`), and the rest one; every
+  `Preparing` and `Prepared` is sent before the first write, which is not git's
+  order (docs/issues.md W21 lists both, per verb). `switch -c`
   and `checkout -b` then call `post_checkout`, and `commit --amend` calls
   `post_rewrite` with `amend` after `post_commit`. The provider is told
   `no_verify` and decides what it means. `HookContext::tree` is `None` for

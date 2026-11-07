@@ -110,8 +110,10 @@ fn unborn(dir: &Path) {
 struct Rec {
     calls: Mutex<Vec<String>>,
     trees: Mutex<Vec<Option<String>>>,
-    /// Refuse `prepared` for a transaction that names this ref.
+    /// Refuse a transaction that names this ref, at `veto_state`.
     veto_ref: Option<&'static str>,
+    /// The state to refuse at; `Prepared` when `None`.
+    veto_state: Option<RefTransactionState>,
     /// Return `Err` at this state, for every transaction.
     err_at: Option<RefTransactionState>,
     /// Does `pre_commit`, `commit_msg` and `post_commit` belong in this test?
@@ -165,9 +167,11 @@ impl GitHooks for Rec {
             if let Some(f) = &self.on_prepared {
                 f();
             }
-            if self.veto_ref.is_some_and(|r| updates.iter().any(|u| u.name == r)) {
-                return Err(HookError::new("reference-transaction", "no ref moves today"));
-            }
+        }
+        if state == self.veto_state.unwrap_or(RefTransactionState::Prepared)
+            && self.veto_ref.is_some_and(|r| updates.iter().any(|u| u.name == r))
+        {
+            return Err(HookError::new("reference-transaction", "no ref moves today"));
         }
         if self.err_at == Some(state) {
             return Err(HookError::new("reference-transaction", "the provider broke"));
@@ -231,7 +235,7 @@ impl Pair {
         script(
             "reference-transaction",
             &format!(
-                "case \"$1\" in prepared|committed|aborted) ;; *) cat >/dev/null; exit 0;; esac\n\
+                "case \"$1\" in preparing|prepared|committed|aborted) ;; *) cat >/dev/null; exit 0;; esac\n\
                  lines=$(grep -v ' AUTO_MERGE$' | tr '\\n' '|')\n\
                  [ -n \"$lines\" ] && echo \"rt $1 ${{lines%|}}\" >> '{log_s}'\n\
                  exit 0"
@@ -337,6 +341,7 @@ async fn the_calls_come_in_this_order() {
         [
             "pre-commit".to_string(),
             "commit-msg".to_string(),
+            format!("rt preparing {before} {after} HEAD"),
             format!("rt prepared {before} {after} refs/heads/main"),
             format!("rt committed {before} {after} refs/heads/main"),
             "post-commit".to_string(),
@@ -357,6 +362,7 @@ async fn the_calls_come_in_this_order() {
         [
             "pre-commit".to_string(),
             "commit-msg".to_string(),
+            format!("rt preparing {before} {after} HEAD"),
             format!("rt prepared {before} {after} refs/heads/main"),
             format!("rt committed {before} {after} refs/heads/main"),
             "post-commit".to_string(),
@@ -373,6 +379,8 @@ async fn the_calls_come_in_this_order() {
     assert_eq!(
         rec.calls(),
         [
+            format!("rt preparing {zero} {before} ORIG_HEAD"),
+            format!("rt preparing {before} {parent} HEAD"),
             format!("rt prepared {zero} {before} ORIG_HEAD"),
             format!("rt prepared {before} {parent} refs/heads/main"),
             format!("rt committed {zero} {before} ORIG_HEAD"),
@@ -385,8 +393,10 @@ async fn the_calls_come_in_this_order() {
     let rec = Arc::new(Rec::default());
     assert_eq!(p.run(&rec, &["reset"]).await.code, 0);
     let calls = rec.calls();
-    assert_eq!(calls[0], format!("rt prepared {before} {parent} ORIG_HEAD"), "{calls:?}");
-    assert_eq!(calls[1], format!("rt prepared {parent} {parent} refs/heads/main"), "{calls:?}");
+    assert_eq!(calls[0], format!("rt preparing {before} {parent} ORIG_HEAD"), "{calls:?}");
+    assert_eq!(calls[1], format!("rt preparing {parent} {parent} HEAD"), "{calls:?}");
+    assert_eq!(calls[2], format!("rt prepared {before} {parent} ORIG_HEAD"), "{calls:?}");
+    assert_eq!(calls[3], format!("rt prepared {parent} {parent} refs/heads/main"), "{calls:?}");
 
     // branch and tag: one transaction each, from the null oid.
     for (argv, name) in [(vec!["branch", "x"], "refs/heads/x"), (vec!["tag", "x"], "refs/tags/x"), (vec!["tag", "-a", "x", "-m", "m"], "refs/tags/x")] {
@@ -396,7 +406,11 @@ async fn the_calls_come_in_this_order() {
         let new = git_raw(&p.ours, &["rev-parse", name]).1.trim().to_string();
         assert_eq!(
             rec.calls(),
-            [format!("rt prepared {zero} {new} {name}"), format!("rt committed {zero} {new} {name}")],
+            [
+                format!("rt preparing {zero} {new} {name}"),
+                format!("rt prepared {zero} {new} {name}"),
+                format!("rt committed {zero} {new} {name}"),
+            ],
             "{argv:?}"
         );
     }
@@ -410,6 +424,8 @@ async fn the_calls_come_in_this_order() {
         assert_eq!(
             rec.calls(),
             [
+                format!("rt preparing {zero} {tip} refs/heads/x"),
+                format!("rt preparing {zero} ref:refs/heads/x HEAD"),
                 format!("rt prepared {zero} {tip} refs/heads/x"),
                 format!("rt prepared {zero} ref:refs/heads/x HEAD"),
                 format!("rt committed {zero} {tip} refs/heads/x"),
@@ -426,7 +442,11 @@ async fn the_calls_come_in_this_order() {
     assert_eq!(p.run(&rec, &["switch", "-c", "x"]).await.code, 0);
     assert_eq!(
         rec.calls(),
-        [format!("rt prepared {zero} ref:refs/heads/x HEAD"), format!("rt committed {zero} ref:refs/heads/x HEAD")]
+        [
+            format!("rt preparing {zero} ref:refs/heads/x HEAD"),
+            format!("rt prepared {zero} ref:refs/heads/x HEAD"),
+            format!("rt committed {zero} ref:refs/heads/x HEAD"),
+        ]
     );
 }
 
@@ -446,13 +466,13 @@ async fn a_hook_file_does_not_run_and_does_not_refuse_when_a_provider_is_install
         let r = p.run(&rec, &argv).await;
         assert_eq!(r.code, 0, "{argv:?}: {}", r.err);
         assert!(!s.exists(), "{argv:?}: this crate spawned a hook");
-        assert!(rec.calls().iter().any(|c| c.starts_with("rt prepared")), "{argv:?}: the provider heard nothing");
+        assert!(rec.calls().iter().any(|c| c.starts_with("rt preparing")), "{argv:?}: the provider heard nothing");
     }
 }
 
-/// Each case is refused at `prepared`: exit 1, nothing written but objects.
+/// Each case is refused at `preparing` and at `prepared`: exit 1, nothing written but objects.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_veto_at_prepared_leaves_git_untouched_and_says_what_was_written() {
+async fn a_veto_at_preparing_or_prepared_leaves_git_untouched_and_says_what_was_written() {
     let cases: &[VetoCase] = &[
         ("branch", base, &["branch", "x"], "refs/heads/x", false),
         ("tag", base, &["tag", "x"], "refs/tags/x", false),
@@ -471,10 +491,16 @@ async fn a_veto_at_prepared_leaves_git_untouched_and_says_what_was_written() {
         ("reset", staged, &["reset", "HEAD~1"], "refs/heads/main", false),
         ("plain reset, ORIG_HEAD", staged, &["reset"], "ORIG_HEAD", false),
     ];
-    for (label, setup, argv, veto, objects) in cases {
+    for (state, (label, setup, argv, veto, objects)) in [RefTransactionState::Preparing, RefTransactionState::Prepared]
+        .into_iter()
+        .flat_map(|st| cases.iter().map(move |c| (st, c)))
+    {
+        let label = &format!("{label} at {}", state.as_str());
+        // Git names a branch move `HEAD` while it is preparing.
+        let veto = if state == RefTransactionState::Preparing && *veto == "refs/heads/main" { "HEAD" } else { *veto };
         let p = Pair::new(setup);
         let before = support::Fingerprint::take(&p.git_dir());
-        let rec = Arc::new(Rec { veto_ref: Some(veto), commit_hooks: argv[0] == "commit", ..Rec::default() });
+        let rec = Arc::new(Rec { veto_ref: Some(veto), veto_state: Some(state), commit_hooks: argv[0] == "commit", ..Rec::default() });
         let r = p.run(&rec, argv).await;
         assert_eq!(r.code, 1, "[{label}] {}", r.err);
         assert!(r.err.contains("reference-transaction hook refused the"), "[{label}] {}", r.err);
@@ -492,34 +518,51 @@ async fn a_veto_at_prepared_leaves_git_untouched_and_says_what_was_written() {
         let calls = rec.calls();
         assert!(!calls.iter().any(|c| c.starts_with("rt committed")), "[{label}] {calls:?}");
         assert!(!calls.iter().any(|c| c.starts_with("post-")), "[{label}] {calls:?}");
+        let started = calls.iter().filter(|c| c.starts_with("rt preparing")).count();
         let prepared = calls.iter().filter(|c| c.starts_with("rt prepared")).count();
         let aborted = calls.iter().filter(|c| c.starts_with("rt aborted")).count();
-        assert!(prepared >= 1 && aborted >= 1 && aborted <= prepared, "[{label}] {calls:?}");
-        // Git agrees that a veto at prepared stops the command with exit 128.
+        assert!(started >= 1 && aborted >= 1 && aborted <= started, "[{label}] {calls:?}");
+        if state == RefTransactionState::Preparing {
+            assert_eq!(prepared, 0, "[{label}] a veto at preparing stops before prepared: {calls:?}");
+        }
+        // Git agrees that a veto at this state stops the command with exit 128.
         let twin_veto = p.fx.path("twin-veto");
         let path = p.twin.join(".git/hooks/reference-transaction");
-        std::fs::write(&path, format!("#!/bin/sh\n[ \"$1\" = prepared ] && {{ touch '{}'; exit 1; }}\nexit 0\n", twin_veto.display())).expect("hook");
+        std::fs::write(&path, format!("#!/bin/sh\n[ \"$1\" = {} ] && {{ touch '{}'; exit 1; }}\nexit 0\n", state.as_str(), twin_veto.display())).expect("hook");
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         let (code, _, _) = git_raw(&p.twin, argv);
-        assert!(twin_veto.exists(), "[{label}] git never reached prepared");
+        assert!(twin_veto.exists(), "[{label}] git never reached the vetoed state");
         assert!(code != 0, "[{label}] git ran the command despite the veto");
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_veto_of_the_second_transaction_aborts_the_first_one_too() {
+    // At prepared: both transactions were preparing and prepared.
     let p = Pair::new(&staged);
     let rec = Arc::new(Rec { veto_ref: Some("refs/heads/main"), ..Rec::default() });
     let r = p.run(&rec, &["reset", "--soft", "HEAD~1"]).await;
     assert_eq!(r.code, 1, "{}", r.err);
     let calls = rec.calls();
-    assert_eq!(calls.len(), 4, "{calls:?}");
-    assert!(calls[0].starts_with("rt prepared") && calls[0].ends_with("ORIG_HEAD"), "{calls:?}");
-    assert!(calls[1].starts_with("rt prepared") && calls[1].ends_with("refs/heads/main"), "{calls:?}");
-    assert!(calls[2].starts_with("rt aborted") && calls[2].ends_with("ORIG_HEAD"), "{calls:?}");
-    assert!(calls[3].starts_with("rt aborted") && calls[3].ends_with("refs/heads/main"), "{calls:?}");
+    let kinds: Vec<String> = calls.iter().map(|c| c.split(' ').take(2).collect::<Vec<_>>().join(" ")).collect();
+    assert_eq!(
+        kinds,
+        ["rt preparing", "rt preparing", "rt prepared", "rt prepared", "rt aborted", "rt aborted"],
+        "{calls:?}"
+    );
+    assert!(calls[4].ends_with("ORIG_HEAD") && calls[5].ends_with("refs/heads/main"), "{calls:?}");
     assert!(!p.git_dir().join("ORIG_HEAD").exists(), "ORIG_HEAD was written before the veto");
+
+    // At preparing: the second is refused before either is prepared.
+    let p = Pair::new(&staged);
+    let rec = Arc::new(Rec { veto_ref: Some("HEAD"), veto_state: Some(RefTransactionState::Preparing), ..Rec::default() });
+    let r = p.run(&rec, &["reset", "--soft", "HEAD~1"]).await;
+    assert_eq!(r.code, 1, "{}", r.err);
+    let calls = rec.calls();
+    let kinds: Vec<String> = calls.iter().map(|c| c.split(' ').take(2).collect::<Vec<_>>().join(" ")).collect();
+    assert_eq!(kinds, ["rt preparing", "rt preparing", "rt aborted", "rt aborted"], "{calls:?}");
+    assert!(!p.git_dir().join("ORIG_HEAD").exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -545,8 +588,9 @@ async fn an_error_at_committed_or_aborted_is_shown_and_changes_nothing() {
     let r = p.run(&rec, &["branch", "y"]).await;
     assert_eq!(r.code, 4, "{}", r.err);
     let calls = rec.calls();
-    assert_eq!(calls.len(), 2, "{calls:?}");
-    assert!(calls[0].starts_with("rt prepared") && calls[1].starts_with("rt aborted"), "{calls:?}");
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert!(calls[0].starts_with("rt preparing") && calls[1].starts_with("rt prepared"), "{calls:?}");
+    assert!(calls[2].starts_with("rt aborted"), "{calls:?}");
     assert!(!p.git_dir().join("refs/heads/y").exists());
 }
 

@@ -26,7 +26,6 @@ use clap::Parser;
 use kaish_tool_api::GlobalFlags;
 
 use crate::error::GitError;
-use crate::hooks::RefUpdate;
 use crate::verbs::write::hookrun::{self, Tx};
 use crate::verbs::write::branch::{
     blocked_refusal, exists_refusal, scan_ref_hooks, tracking_implied, tracking_refusal, unborn_refusal, RefsEnv,
@@ -287,9 +286,9 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &SwitchCreate) -> Resul
     // whose old value is the null oid and whose new value names the branch.
     let mut txs: Vec<Tx> = Vec::new();
     if let Some(oid) = head_oid {
-        txs.push(vec![RefUpdate::new(hookrun::null(), oid.to_string(), full.clone())]);
+        txs.push(Tx::new(hookrun::null(), oid.to_string(), full.clone()));
     }
-    txs.push(vec![RefUpdate::new(hookrun::null(), format!("ref:{full}"), "HEAD")]);
+    txs.push(Tx::new(hookrun::null(), format!("ref:{full}"), "HEAD"));
     let ctx = scan.context(repo);
     if let Some(h) = env.hooks.as_ref() {
         hookrun::prepared(h.as_ref(), &ctx, kind, cmd, &txs, &mut err)?;

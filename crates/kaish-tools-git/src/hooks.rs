@@ -91,33 +91,41 @@ impl HookError {
 
 /// Where a ref transaction is, as git's `reference-transaction` hook is told.
 ///
-/// Git also runs the hook in a `preparing` state, before any ref is locked.
-/// That state is not sent here: [`RefTransactionState::Prepared`] is the
-/// point where a provider refuses.
+/// Git runs the hook in these four states, in this order, for each
+/// transaction. A provider that forwards to the repository's hook script can
+/// run it for every one of them. `Preparing` and `Prepared` are the two where
+/// `Err` refuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RefTransactionState {
-    /// Every check has passed and nothing is written yet. This is the only
-    /// state where `Err` refuses: the command stops, leaves `.git` as it was
-    /// (apart from objects already written, such as a commit's) and says so.
+    /// The transaction is about to start and no ref is locked. A move of the
+    /// current branch is named `HEAD` here, as git names it (`Prepared` and
+    /// later name the branch). `Err` refuses the command exactly as at
+    /// `Prepared`: it stops, leaves `.git` as it was (apart from objects
+    /// already written) and says so. [`Aborted`](Self::Aborted) follows.
+    Preparing,
+    /// Every check has passed and nothing is written yet. `Err` refuses the
+    /// command as at `Preparing`.
     Prepared,
     /// The refs in the transaction were written. `Err` here is shown on
     /// stderr and changes nothing, as git ignores the hook's exit status.
     Committed,
-    /// A transaction that was sent as [`Prepared`](Self::Prepared) did not
+    /// A transaction that was sent as [`Preparing`](Self::Preparing) did not
     /// happen: a provider refused it (this one, or the call for a sibling
     /// transaction of the same command), or the write failed afterward, for
     /// example on a lock another process took. None of its refs were
-    /// written. It is never sent for a command refused before `Prepared`.
+    /// written. Its updates are those of the last state sent for the
+    /// transaction. It is never sent for a command refused before `Preparing`.
     /// `Err` here is shown on stderr and changes nothing.
     Aborted,
 }
 
 impl RefTransactionState {
-    /// The word git passes as the hook's argument: `prepared`, `committed`
-    /// or `aborted`.
+    /// The word git passes as the hook's argument: `preparing`, `prepared`,
+    /// `committed` or `aborted`.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Preparing => "preparing",
             Self::Prepared => "prepared",
             Self::Committed => "committed",
             Self::Aborted => "aborted",
@@ -198,22 +206,25 @@ pub trait GitHooks: Send + Sync {
 
     /// Git's `reference-transaction` hook, once per state of each ref
     /// transaction a verb makes. `updates` are the lines of the hook's
-    /// standard input for that transaction.
+    /// standard input for that transaction in that state.
     ///
     /// A command that makes more than one transaction sends
-    /// [`RefTransactionState::Prepared`] for every one of them, in git's
-    /// order, before it writes anything, and then sends `Committed` for each
-    /// as it is written. `reset` makes two when HEAD has a commit: `ORIG_HEAD`,
-    /// then the branch (or `HEAD` when detached). `switch -c` and `checkout -b` make two when HEAD
+    /// [`RefTransactionState::Preparing`] for every one of them, in git's
+    /// order, then `Prepared` for every one, all before it writes anything,
+    /// and then sends `Committed` for each as it is written. Git instead
+    /// runs all states of the first transaction before it starts the second;
+    /// see docs/issues.md W21 for the order per verb. `reset` makes two
+    /// transactions when HEAD has a commit: `ORIG_HEAD`, then the branch (or
+    /// `HEAD` when detached). `switch -c` and `checkout -b` make two when HEAD
     /// has a commit: the new branch, then `HEAD`. `commit`, `commit --amend`,
-    /// `branch` and `tag` make one. Git's transaction on the `AUTO_MERGE` ref,
-    /// which changes nothing, is not sent.
+    /// `branch` and `tag` make one. Git's transaction on the `AUTO_MERGE`
+    /// ref, which changes nothing, is not sent.
     ///
-    /// `Err` at `Prepared` refuses the command: the provider is then sent
-    /// `Aborted` for that transaction and for the earlier ones, and the
-    /// command leaves `.git` as it was apart from objects already written.
-    /// At `Committed` and `Aborted`, `Err` is shown on stderr and changes
-    /// nothing.
+    /// `Err` at `Preparing` or `Prepared` refuses the command: the provider is
+    /// then sent `Aborted` for every transaction it was sent `Preparing` for,
+    /// and the command leaves `.git` as it was apart from objects already
+    /// written. At `Committed` and `Aborted`, `Err` is shown on stderr and
+    /// changes nothing.
     fn reference_transaction(
         &self,
         ctx: &HookContext<'_>,

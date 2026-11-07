@@ -261,8 +261,8 @@ pub trait GitHooks: Send + Sync {
     /// After the ref moved. Errors are reported, not fatal (git's rule).
     fn post_commit(&self, ctx: &HookContext<'_>, commit: &str) -> HookOutput;
     /// Git's reference-transaction hook, per state of each ref transaction.
-    /// `Err` at `Prepared` refuses the command; at `Committed` and `Aborted`
-    /// it is reported.
+    /// `Err` at `Preparing` or `Prepared` refuses the command; at `Committed`
+    /// and `Aborted` it is reported.
     fn reference_transaction(&self, ctx: &HookContext<'_>, state: RefTransactionState, updates: &[RefUpdate]) -> Result<HookOutput, HookError>;
     /// After `switch -c` / `checkout -b`, with git's three arguments.
     fn post_checkout(&self, ctx: &HookContext<'_>, previous: &str, new: &str, branch_checkout: bool) -> HookOutput;
@@ -280,11 +280,9 @@ plain `reset` (`ORIG_HEAD`, then the branch), `branch`, `tag`, `tag -a`,
 `switch -c` and `checkout -b` (the branch, then `HEAD` as `<null> ref:<branch>
 HEAD`), and for none of `reset -- <path>`; it runs `post-checkout <old> <new>
 1` for the two switches (not on an unborn HEAD), and `post-rewrite amend` after
-`post-commit` for an amend only. Git also runs the hook in a `preparing` state
-before any lock, and a non-zero exit there refuses too; `GitHooks` sends
-`Prepared` as the one refusing state. Git's housekeeping transaction on
+`post-commit` for an amend only. Git also runs the hook in a `preparing` state before any lock, and a non-zero exit there refuses too (git then runs `aborted`); `GitHooks` sends all four states, and `Err` at `Preparing` or `Prepared` refuses (2026-11-07: the first draft took `prepared` for git's only veto point, and the measurement said otherwise). Git's housekeeping transaction on
 `AUTO_MERGE` (null to null) is not sent. `aborted` is sent for every
-transaction that was sent as `prepared` and did not complete, as git does after
+transaction that was sent as `preparing` and did not complete, as git does after
 a veto.
 
 `HookContext` carries the repository's real paths (worktree, git dir), the

@@ -23,7 +23,6 @@ use crate::verbs::branch::BranchArgs;
 use crate::verbs::write::hookrun::{self, Scan, Tx};
 use crate::verbs::write::ident::{self, KernelVars};
 use crate::verbs::write::refmove::{self, MoveKind};
-use crate::hooks::RefUpdate;
 use crate::verbs::write::refname::{self, RefKind};
 use crate::verbs::write::refusal::{refuse, Override};
 use crate::verbs::write::repo::WriteRepo;
@@ -270,7 +269,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &BranchCreate) -> Resul
     let committer = ident::resolve_committer(cmd, env.identity.as_ref(), &opts.vars, ident::now())?;
     let message = format!("branch: Created from {shown}");
     let mut err = String::new();
-    let tx: Tx = vec![RefUpdate::new(hookrun::null(), start_oid.to_string(), full.clone())];
+    let tx = Tx::new(hookrun::null(), start_oid.to_string(), full.clone());
     let ctx = scan.context(repo);
     if let Some(h) = env.hooks.as_ref() {
         hookrun::prepared(h.as_ref(), &ctx, MoveKind::BRANCH, cmd, std::slice::from_ref(&tx), &mut err)?;

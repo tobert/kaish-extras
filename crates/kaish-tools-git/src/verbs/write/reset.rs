@@ -28,7 +28,7 @@ use gix_ref::Target;
 
 use crate::config::{Identity, RewritePolicy};
 use crate::error::GitError;
-use crate::hooks::{GitHooks, RefUpdate};
+use crate::hooks::GitHooks;
 use crate::verbs::write::containment::Leaf;
 use crate::verbs::write::head;
 use crate::verbs::write::hookrun::{self, Tx};
@@ -125,13 +125,13 @@ pub(crate) fn run(repo: &WriteRepo, env: &ResetEnv, opts: &ResetOptions) -> Resu
     let mut txs: Vec<Tx> = Vec::new();
     if let (Some(old), Some(_)) = (old, env.hooks.as_ref()) {
         let before = orig_head_value(repo)?;
-        txs.push(vec![RefUpdate::new(hookrun::oid_or_null(before), old.to_string(), "ORIG_HEAD")]);
+        txs.push(Tx::new(hookrun::oid_or_null(before), old.to_string(), "ORIG_HEAD"));
     }
     let moved_ref = match &target {
         refmove::HeadTarget::Branch(full) => full.clone(),
         refmove::HeadTarget::Detached => "HEAD".to_string(),
     };
-    txs.push(vec![RefUpdate::new(hookrun::oid_or_null(old), new.to_string(), moved_ref)]);
+    txs.push(Tx::via_head(hookrun::oid_or_null(old), new.to_string(), moved_ref));
     let hooks = env.hooks.as_deref();
     if let Some(h) = hooks {
         hookrun::prepared(h, &ctx, MoveKind::RESET, cmd, &txs, &mut err)?;

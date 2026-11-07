@@ -1724,18 +1724,40 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   `HookContext::hooks_present` and the provider decides. `commit -a` and
   `--only` scan `post-index-change` (refused without a provider); git (2.56,
   measured) also runs it for a plain `commit` that rewrites the index and for
-  `reset`, which this build neither scans nor calls. The `reference-transaction`
-  hook has a `preparing` state before any lock, where git also refuses a
-  transaction; `GitHooks` sends `prepared`, `committed` and `aborted` only, and
-  a provider that forwards to a script never runs it for `preparing`. Git's
-  transaction on `AUTO_MERGE` (null to null, after `commit` and `reset`) is not
-  sent, and the deletion of `ORIG_HEAD` by `reset <rev>` from a branch with no
-  commit calls no hook, as in git. `reset` sends `prepared` for `ORIG_HEAD` and
-  for the branch before it writes either (git finishes the first transaction
-  before it starts the second), so a veto of the second leaves `ORIG_HEAD`
-  unwritten; `switch -c` does the same for its two. `pre_commit`,
-  `commit_msg` and, for `reset --mixed`, `reference_transaction` run
-  while `index.lock` is held (for `commit`, with `-a` and `--only`), so a
+  `reset`, which this build neither scans nor calls.
+
+  `reference_transaction` is sent in all four states git runs the hook in
+  (`preparing`, `prepared`, `committed`, `aborted`); `Err` at `preparing` or
+  `prepared` refuses. At `preparing` git names a move of the current branch
+  `HEAD` (commit, amend, and the branch move of `reset`), and so does
+  `GitHooks`; every other line is the same in all states. After a veto,
+  `aborted` carries the lines of the last state sent for that transaction, as
+  git's does. Git's transaction on `AUTO_MERGE` (null to null, after `commit`
+  and `reset`) is not sent, and the deletion of `ORIG_HEAD` by `reset <rev>`
+  from a branch with no commit calls no hook, as in git.
+
+  The order differs from git's for the verbs that make two transactions. S, P
+  and C are `preparing`, `prepared` and `committed`:
+
+  | Verb | `GitHooks` sends | Git runs |
+  |---|---|---|
+  | `commit`, `commit --amend` | S P C, then `post_commit`, then `post_rewrite` for an amend | the same |
+  | `branch`, `tag` | S P C | the same |
+  | `switch -c`, `checkout -b` on an unborn HEAD | S P C for `HEAD` | the same |
+  | `switch -c`, `checkout -b` | S(branch) S(HEAD) P(branch) P(HEAD) C(branch) C(HEAD), then `post_checkout` | S P C (branch), S P C (HEAD), then `post-checkout` |
+  | `reset`, plain `reset` | S(ORIG_HEAD) S(branch) P(ORIG_HEAD) P(branch) C(ORIG_HEAD) C(branch) | S P C (ORIG_HEAD), S P C (branch) |
+  | `reset -- <path>`, plain `reset` on an unborn branch | none | none |
+
+  Sending every `preparing` and `prepared` before the first write lets a veto
+  of the second transaction leave `.git` as it was; git would already have
+  written the first. A veto of any transaction sends `aborted` for every
+  transaction that was sent `preparing`. A provider that forwards to the
+  repository's scripts sees the same state order per transaction, with the
+  second transaction's `preparing` and `prepared` before the first's
+  `committed`.
+
+  `pre_commit`, `commit_msg` and, for `reset --mixed`, `reference_transaction`
+  run while `index.lock` is held (for `commit`, with `-a` and `--only`), so a
   provider that runs a real hook script which itself writes the index will find
   it locked. `--no-verify` is passed to the provider and the provider decides.
   Text a provider returns from a `committed` or `aborted` call is dropped when

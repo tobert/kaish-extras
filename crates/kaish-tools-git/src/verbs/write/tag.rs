@@ -27,7 +27,6 @@ use crate::error::GitError;
 use crate::verbs::tag::TagArgs;
 use crate::verbs::write::branch::{blocked_refusal, scan_ref_hooks, RefsEnv};
 use crate::verbs::write::hookrun::{self, Tx};
-use crate::hooks::RefUpdate;
 use crate::verbs::write::ident::{self, KernelVars};
 use crate::verbs::write::objects::BlobWriter;
 use crate::verbs::write::refmove::{self, MoveKind};
@@ -245,7 +244,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &TagCreate) -> Result<O
     // object was written first, so a refusal or failure names it.
     let create = |oid: ObjectId, objects: bool, err: &mut String| -> Result<(), GitError> {
         let after = |e: GitError| if objects { e.after_objects() } else { e };
-        let tx: Tx = vec![RefUpdate::new(hookrun::null(), oid.to_string(), full.clone())];
+        let tx = Tx::new(hookrun::null(), oid.to_string(), full.clone());
         if let Some(h) = env.hooks.as_ref() {
             hookrun::prepared(h.as_ref(), &ctx, MoveKind::TAG, cmd, std::slice::from_ref(&tx), err).map_err(after)?;
         }
