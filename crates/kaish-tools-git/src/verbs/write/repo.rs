@@ -180,7 +180,7 @@ impl WriteRepo {
         let is_dir = self
             .read
             .work_dir()
-            .map(|w| crate::worktree::join_repo_relative(w, &rel.to_string_lossy()))
+            .map(|w| w.join(rel))
             .is_some_and(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()));
         self.check_worktree(rel, if is_dir { Leaf::Dir } else { Leaf::Entry })
     }

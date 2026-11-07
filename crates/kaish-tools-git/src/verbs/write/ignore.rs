@@ -51,7 +51,7 @@ impl Ignore {
         op: &'static str,
         repo: &ReadRepo,
         work_dir: &Path,
-        rel: &str,
+        rel: &[u8],
         is_dir: bool,
     ) -> Result<bool, GitError> {
         let mode = is_dir.then_some(gix_index::entry::Mode::DIR);
@@ -70,16 +70,16 @@ impl Ignore {
         op: &'static str,
         repo: &ReadRepo,
         work_dir: &Path,
-        rel: &str,
+        rel: &[u8],
         is_dir: bool,
     ) -> Result<bool, GitError> {
-        let mut acc = String::new();
-        let parts: Vec<&str> = rel.split('/').collect();
+        let mut acc: Vec<u8> = Vec::new();
+        let parts: Vec<&[u8]> = rel.split(|b| *b == b'/').collect();
         for part in &parts[..parts.len() - 1] {
             if !acc.is_empty() {
-                acc.push('/');
+                acc.push(b'/');
             }
-            acc.push_str(part);
+            acc.extend_from_slice(part);
             if self.matches(op, repo, work_dir, &acc, true)? {
                 return Ok(true);
             }

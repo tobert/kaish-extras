@@ -1622,8 +1622,9 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   `git status`.
 - **W5 — hooks.** Only `post-index-change` is checked for index writes. The
   other hooks belong to `commit` (phase 2) and the `GitHooks` boundary.
-- **W6 — large files and non-UTF-8 names.** `add` reads a file whole (128 MiB
-  cap) and refuses a non-UTF-8 name.
+- **W6 — large files.** `add` reads a file whole (128 MiB cap). A non-UTF-8
+  name is kept as bytes by every verb (see `relpath.rs`); a message shows
+  it C-quoted, and a command-line path must be UTF-8.
 - **W7 — gitlinks.** An existing gitlink is updated to the nested repository's
   HEAD when it is a repository of its own; a nested repository not tracked as a
   submodule refuses where git warns and adds an embedded repository.
@@ -1647,3 +1648,32 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   so `pins_match_the_manifest` does not count it as linked. Phase 2's ref
   transactions link it for real: promote it to a pinned, `commit`-gated
   dependency with a `GIX_PINS` row then.
+- **W24 — an index in version 4 is rewritten as version 2.** `gix-index` reads
+  version 4 (path-prefix compression, which `feature.manyFiles` and
+  `index.version=4` turn on) and writes version 2 or 3. Every entry, mode and id
+  survives and git reads the result; the file gets larger, and a repository that
+  asked for version 4 loses it until real git runs `git update-index
+  --index-version 4`. `tests/write_index.rs`
+  (`a_version_4_index_is_read_and_rewritten_as_version_2`) pins it.
+- **W25 — a pathspec glob without a `/` matches the basename.** The shared
+  `PathFilter` matches `*.rs` at any depth, as the read verbs want, and
+  `caf*` against `d/caf.txt`. Git's pathspec has no such rule: `caf*` matches a
+  path that starts with `caf`, and `*` crosses `/`. So `git add 'ca*'` here
+  stages `d/caf.txt` and git's does not. Found by the T5 tests; they use a glob
+  (`*af?.txt`) on which both agree.
+- **W26 — `rm` stops at the first deletion failure.** Git continues past it and
+  warns; this shell stops, stages the deletions that happened and names the
+  rest, so the next command is exact. See W8 for the earlier shape.
+- **W27 — `add -A -u` runs here; git refuses it.** Git exits 128 with
+  "options '-u/--update' and '-A/--all' cannot be used together" and changes
+  nothing. `AddArgs` accepts both, and `-u` wins. Found by the pin test
+  `add_with_both_all_and_update_is_refused_as_git_refuses_it`, which is
+  `#[ignore]`d until the verb refuses the pair.
+- **W28 — `mv` into `.git` refuses here; git moves the file.** `git mv a.txt
+  .git/x` prints "invalid path '.git/x'" and still renames the file into `.git`
+  and stages the deletion of `a.txt` (measured on git 2.56.0). This shell
+  refuses with exit 4 and changes nothing. The refusal is deliberate, and the
+  difference is why
+  `mv_into_the_git_directory_changes_nothing_and_its_negative_controls_move`
+  does not compare the result with a twin.
+

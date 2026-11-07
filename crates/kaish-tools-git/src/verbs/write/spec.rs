@@ -54,11 +54,11 @@ impl SpecSet {
     }
 
     /// The specs `path` matches, without recording a match.
-    pub(crate) fn hits(&self, path: &str) -> Vec<usize> {
+    pub(crate) fn hits(&self, path: &[u8]) -> Vec<usize> {
         self.items
             .iter()
             .enumerate()
-            .filter(|(_, i)| i.filter.matches(path))
+            .filter(|(_, i)| i.filter.matches_bytes(path))
             .map(|(n, _)| n)
             .collect()
     }
@@ -70,7 +70,7 @@ impl SpecSet {
     }
 
     /// Whether `path` is wanted; records the match.
-    pub(crate) fn matches(&mut self, path: &str) -> bool {
+    pub(crate) fn matches(&mut self, path: &[u8]) -> bool {
         if self.items.is_empty() {
             return true;
         }
@@ -80,21 +80,18 @@ impl SpecSet {
     }
 
     /// Whether a spec names `path` exactly (not a glob, not a parent).
-    pub(crate) fn names_exactly(&self, path: &str) -> bool {
-        self.items.iter().any(|i| !i.glob && i.text == path)
+    pub(crate) fn names_exactly(&self, path: &[u8]) -> bool {
+        self.items.iter().any(|i| !i.glob && i.text.as_bytes() == path)
     }
 
     /// Whether a directory could hold a match: a spec is the directory, above
     /// it, or below it, or any spec is a glob.
-    pub(crate) fn relevant_dir(&self, dir: &str) -> bool {
+    pub(crate) fn relevant_dir(&self, dir: &[u8]) -> bool {
+        let below = |outer: &[u8], inner: &[u8]| inner.len() > outer.len() && inner.starts_with(outer) && inner[outer.len()] == b'/';
         self.items.is_empty()
             || self.items.iter().any(|i| {
-                i.glob
-                    || i.text.is_empty()
-                    || i.text == dir
-                    || dir.is_empty()
-                    || i.text.starts_with(&format!("{dir}/"))
-                    || dir.starts_with(&format!("{}/", i.text))
+                let text = i.text.as_bytes();
+                i.glob || text.is_empty() || text == dir || dir.is_empty() || below(dir, text) || below(text, dir)
             })
     }
 
@@ -102,9 +99,9 @@ impl SpecSet {
         self.items.iter().filter(|i| !i.glob && !i.text.is_empty()).map(|i| i.text.clone()).collect()
     }
 
-    pub(crate) fn mark_literal(&mut self, path: &str) {
+    pub(crate) fn mark_literal(&mut self, path: &[u8]) {
         for i in &mut self.items {
-            if !i.glob && i.text == path {
+            if !i.glob && i.text.as_bytes() == path {
                 i.matched = true;
             }
         }

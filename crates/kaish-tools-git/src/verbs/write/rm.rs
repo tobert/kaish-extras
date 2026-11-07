@@ -6,7 +6,6 @@
 //! and the refusal names `--cached` and `-f`.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use clap::Parser;
 use gix_index::entry::Mode;
@@ -18,6 +17,7 @@ use crate::verbs::write::add::Tracked;
 use crate::verbs::write::head;
 use crate::verbs::write::indexfile::{self, IndexTx, Snapshot};
 use crate::verbs::write::refusal::{refuse, Override};
+use crate::verbs::write::relpath::{os, show, show_all, RelPath};
 use crate::verbs::write::repo::WriteRepo;
 use crate::verbs::write::spec::{is_glob, Outcome, SpecSet};
 use crate::verbs::write::state::{ensure_writable, StagePolicy};
@@ -67,7 +67,7 @@ pub(crate) struct RmOptions {
 }
 
 struct Plan {
-    paths: Vec<String>,
+    paths: Vec<RelPath>,
 }
 
 pub(crate) fn run(repo: &WriteRepo, opts: &RmOptions) -> Result<Outcome, GitError> {
@@ -88,38 +88,75 @@ pub(crate) fn run(repo: &WriteRepo, opts: &RmOptions) -> Result<Outcome, GitErro
         plan = build(repo, tx.state(), tx.snap.mtime, &policy, opts)?;
     }
 
+    // Delete in index order and stop at the first failure. The paths already
+    // deleted are staged as deleted; the failed path and the rest are left as
+    // they were, and the error says which, so a rerun has an exact list.
+    let mut failed: Option<(usize, GitError)> = None;
     if !opts.cached {
-        for path in &plan.paths {
-            let abs = repo.check_worktree_any(Path::new(path))?;
-            match std::fs::symlink_metadata(&abs) {
-                Ok(m) if m.is_dir() => continue,
-                Ok(_) => {
-                    std::fs::remove_file(&abs)
-                        .map_err(|e| GitError::repository(OP, "removing a working-tree file", &abs, e))?;
-                    remove_empty_parents(repo, path);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(GitError::repository(OP, "reading a working-tree path", &abs, e)),
+        for (n, path) in plan.paths.iter().enumerate() {
+            if let Err(e) = delete_one(repo, path) {
+                failed = Some((n, e));
+                break;
             }
         }
     }
-    for path in &plan.paths {
-        indexfile::remove(tx.state_mut(), path);
+    let done = failed.as_ref().map_or(plan.paths.len(), |(n, _)| *n);
+    if done > 0 || failed.is_none() {
+        for path in &plan.paths[..done] {
+            indexfile::remove(tx.state_mut(), path);
+        }
+        tx.commit(repo)?;
     }
-    tx.commit(repo)?;
+    if let Some((n, e)) = failed {
+        return Err(partial_failure(e, &plan.paths, n));
+    }
 
-    let text: String = plan.paths.iter().map(|p| format!("rm '{p}'\n")).collect();
-    Ok(Outcome { text, json: serde_json::json!({ "removed": plan.paths, "cached": opts.cached }) })
+    let text: String = plan.paths.iter().map(|p| format!("rm '{}'\n", show(p))).collect();
+    let removed: Vec<String> = plan.paths.iter().map(|p| show(p)).collect();
+    Ok(Outcome { text, json: serde_json::json!({ "removed": removed, "cached": opts.cached }) })
+}
+
+/// Delete one tracked path's working-tree file.
+fn delete_one(repo: &WriteRepo, path: &[u8]) -> Result<(), GitError> {
+    let abs = repo.check_worktree_any(os(path))?;
+    match std::fs::symlink_metadata(&abs) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => {
+            std::fs::remove_file(&abs).map_err(|e| GitError::repository(OP, "removing a working-tree file", &abs, e))?;
+            remove_empty_parents(repo, path);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(GitError::repository(OP, "reading a working-tree path", &abs, e)),
+    }
+    Ok(())
+}
+
+/// Say what the failed deletion at `paths[n]` left behind, and the command
+/// that finishes the job.
+fn partial_failure(e: GitError, paths: &[RelPath], n: usize) -> GitError {
+    let GitError::Repository { operation, what, path, source } = e else { return e };
+    let rest = show_all(&paths[n..], " ");
+    let state = if n == 0 {
+        "Nothing was removed.".to_string()
+    } else {
+        format!("{n} of {} paths were removed and are staged as deleted; the rest are untouched.", paths.len())
+    };
+    GitError::Repository {
+        operation,
+        what: format!("{what} ({state} After fixing the cause, run: git rm {rest})"),
+        path,
+        source,
+    }
 }
 
 /// Git removes the directories a removal leaves empty, up to the root.
-fn remove_empty_parents(repo: &WriteRepo, path: &str) {
+fn remove_empty_parents(repo: &WriteRepo, path: &[u8]) {
     let Some(work) = repo.read().work_dir() else { return };
     let mut cur = path;
-    while let Some(i) = cur.rfind('/') {
+    while let Some(i) = cur.iter().rposition(|b| *b == b'/') {
         cur = &cur[..i];
         // Fails, and stops, at the first directory that still has content.
-        if std::fs::remove_dir(crate::worktree::join_repo_relative(work, cur)).is_err() {
+        if std::fs::remove_dir(crate::worktree::join_repo_relative_bytes(work, cur)).is_err() {
             break;
         }
     }
@@ -144,7 +181,7 @@ fn build(
         // Matched only as the inside of a directory spec: needs -r.
         if !opts.recursive {
             for s in &opts.specs {
-                if !is_glob(s) && !s.is_empty() && *s != t.path && t.path.starts_with(&format!("{s}/")) {
+                if !is_glob(s) && !s.is_empty() && s.as_bytes() != t.path.as_slice() && is_below(&t.path, s.as_bytes()) {
                     return refuse(
                         1,
                         &opts.command,
@@ -159,7 +196,7 @@ fn build(
             return refuse(
                 4,
                 &opts.command,
-                format!("'{}' is a submodule, and removing one means editing .gitmodules and its repository.", t.path),
+                format!("'{}' is a submodule, and removing one means editing .gitmodules and its repository.", show(&t.path)),
                 "Remove it with real git, outside this shell: git rm <path>.",
                 Override::Repository,
             );
@@ -177,7 +214,7 @@ fn build(
     }
 
     if !opts.force {
-        let head_map: BTreeMap<String, (ObjectId, Mode)> = head::flatten(repo, OP)?;
+        let head_map: BTreeMap<RelPath, (ObjectId, Mode)> = head::flatten(repo, OP)?;
         let mut staged = Vec::new();
         let mut cached = Vec::new();
         let mut local = Vec::new();
@@ -186,7 +223,7 @@ fn build(
                 Some((id, mode)) => *id != t.id || *mode != t.mode,
                 None => true,
             };
-            let abs = repo.check_worktree_any(Path::new(&t.path))?;
+            let abs = repo.check_worktree_any(os(&t.path))?;
             let local_changes = match std::fs::symlink_metadata(&abs) {
                 // Already gone, or a directory where the file was: nothing to lose.
                 Err(_) => false,
@@ -206,8 +243,8 @@ fn build(
                 }
             }
         }
-        let list = |v: &[String]| v.join(", ");
-        let all = |v: &[String]| v.join(" ");
+        let list = |v: &[RelPath]| show_all(v, ", ");
+        let all = |v: &[RelPath]| show_all(v, " ");
         if !staged.is_empty() {
             return refuse(
                 1,
@@ -240,8 +277,13 @@ fn build(
     // Containment for every deletion, before the first one.
     if !opts.cached {
         for t in &matched {
-            repo.check_worktree_any(Path::new(&t.path))?;
+            repo.check_worktree_any(os(&t.path))?;
         }
     }
     Ok(Plan { paths: matched.iter().map(|t| t.path.clone()).collect() })
+}
+
+/// Whether `path` is inside the directory `dir`.
+fn is_below(path: &[u8], dir: &[u8]) -> bool {
+    path.len() > dir.len() && path.starts_with(dir) && path[dir.len()] == b'/'
 }

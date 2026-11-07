@@ -1,9 +1,11 @@
 //! `git add` (git-write-profile.md §4, §5.3, §6).
 //!
 //! Accepts `<paths>`, `.`, `-A`/`--all`, `-u`/`--update` and `-f`/`--force`.
-//! Refuses `-p` and `-i` (no terminal), a plain `add` of an ignored path
-//! (with git's hint naming `-f`), a nested repository that is not already a
-//! gitlink, and any file real git would store differently from its bytes.
+//! Refuses `-p` and `-i` (no terminal), a plain `add` of an ignored file or
+//! directory named exactly (with git's hint naming `-f`), a nested repository
+//! that is not already a gitlink, and a file real git may store differently
+//! from its bytes. The last check errs toward refusing: it also refuses a file
+//! git would have stored as it is (docs/issues.md W9).
 //!
 //! Where it differs from git, on purpose: git adds the files that are not
 //! ignored and exits 1 for the ignored ones; this refuses the whole command so
@@ -15,7 +17,6 @@ use std::path::Path;
 use clap::Parser;
 use gix_index::entry::{Flags, Mode, Stat};
 use gix_index::hash::ObjectId;
-use gix_object::bstr::ByteSlice;
 use kaish_tool_api::GlobalFlags;
 
 use crate::error::GitError;
@@ -25,6 +26,7 @@ use crate::verbs::write::ignore::Ignore;
 use crate::verbs::write::indexfile::{self, IndexTx, Snapshot, Upsert};
 use crate::verbs::write::objects::BlobWriter;
 use crate::verbs::write::refusal::{refuse, Override};
+use crate::verbs::write::relpath::{os, show, show_all, RelPath};
 use crate::verbs::write::repo::WriteRepo;
 use crate::verbs::write::spec::{Outcome, SpecSet};
 use crate::verbs::write::stage::{self, Staged};
@@ -91,10 +93,10 @@ pub(crate) struct AddOptions {
 #[derive(Default)]
 struct Plan {
     files: Vec<Staged>,
-    removals: Vec<String>,
-    gitlinks: Vec<(String, ObjectId, Stat)>,
-    added: Vec<String>,
-    modified: Vec<String>,
+    removals: Vec<RelPath>,
+    gitlinks: Vec<(RelPath, ObjectId, Stat)>,
+    added: Vec<RelPath>,
+    modified: Vec<RelPath>,
     refreshed: usize,
 }
 
@@ -123,6 +125,10 @@ pub(crate) fn run(repo: &WriteRepo, opts: &AddOptions) -> Result<Outcome, GitErr
     }
 
     let mut writer = BlobWriter::new(repo, OP);
+    // Every blob's object path passes containment before the first is written.
+    for staged in &plan.files {
+        writer.vet(&staged.id)?;
+    }
     let mut upserts = Vec::new();
     for staged in &plan.files {
         let bytes = stage::reread(repo, staged)?;
@@ -146,9 +152,9 @@ fn report(plan: &Plan) -> Outcome {
     Outcome {
         text: String::new(),
         json: serde_json::json!({
-            "added": plan.added,
-            "modified": plan.modified,
-            "removed": plan.removals,
+            "added": plan.added.iter().map(|p| show(p)).collect::<Vec<_>>(),
+            "modified": plan.modified.iter().map(|p| show(p)).collect::<Vec<_>>(),
+            "removed": plan.removals.iter().map(|p| show(p)).collect::<Vec<_>>(),
             "refreshed": plan.refreshed,
         }),
     }
@@ -157,7 +163,7 @@ fn report(plan: &Plan) -> Outcome {
 /// One stage-0 index entry, copied out so the state can be edited while it
 /// is read.
 pub(crate) struct Tracked {
-    pub(crate) path: String,
+    pub(crate) path: RelPath,
     pub(crate) mode: Mode,
     pub(crate) id: ObjectId,
     pub(crate) stat: Stat,
@@ -171,7 +177,7 @@ impl Tracked {
             .iter()
             .filter(|e| e.stage() == gix_index::entry::Stage::Unconflicted)
             .map(|e| Tracked {
-                path: e.path(state).to_str_lossy().into_owned(),
+                path: e.path(state).to_owned(),
                 mode: e.mode,
                 id: e.id,
                 stat: e.stat,
@@ -196,7 +202,7 @@ impl Tracked {
         if stage::mode_of(meta, Some(self.mode), policy) != self.mode {
             return true;
         }
-        match crate::worktree::read_worktree_blob(OP, &self.path, abs, meta, stage::MAX_STAGE_BYTES) {
+        match crate::worktree::read_worktree_blob(OP, &show(&self.path), abs, meta, stage::MAX_STAGE_BYTES) {
             Ok(bytes) => crate::verbs::write::objects::blob_id(OP, &bytes).map_or(true, |id| id != self.id),
             Err(_) => true,
         }
@@ -215,11 +221,11 @@ fn build(
     let mut specs = SpecSet::new(OP, &opts.specs)?;
     let mut attrs = AttributeReader::new(repo, &opts.command);
     let mut plan = Plan::default();
-    let mut to_stage: BTreeMap<String, Option<Mode>> = BTreeMap::new();
+    let mut to_stage: BTreeMap<RelPath, Option<Mode>> = BTreeMap::new();
 
     let tracked = Tracked::all(state);
-    let tracked_paths: BTreeSet<&str> = tracked.iter().map(|t| t.path.as_str()).collect();
-    let gitlinks: BTreeSet<&str> = tracked.iter().filter(|t| t.mode == Mode::COMMIT).map(|t| t.path.as_str()).collect();
+    let tracked_paths: BTreeSet<&[u8]> = tracked.iter().map(|t| t.path.as_slice()).collect();
+    let gitlinks: BTreeSet<&[u8]> = tracked.iter().filter(|t| t.mode == Mode::COMMIT).map(|t| t.path.as_slice()).collect();
 
     // Phase 1: tracked paths, changed or gone.
     for t in &tracked {
@@ -231,7 +237,7 @@ fn build(
                 return refuse(
                     1,
                     &opts.command,
-                    format!("'{}' is outside the sparse-checkout definition, so its working-tree file is not the one the index tracks.", t.path),
+                    format!("'{}' is outside the sparse-checkout definition, so its working-tree file is not the one the index tracks.", show(&t.path)),
                     "Leave it out of the command.",
                     Override::Repository,
                 );
@@ -241,7 +247,7 @@ fn build(
         if t.flags.contains(Flags::ASSUME_VALID) {
             continue;
         }
-        let abs = match repo.check_worktree_any(Path::new(&t.path)) {
+        let abs = match repo.check_worktree_any(os(&t.path)) {
             Ok(p) => p,
             // A parent directory was replaced by a file: this path is gone.
             Err(GitError::WriteThroughLink { found: "not a directory", .. }) => {
@@ -258,7 +264,9 @@ fn build(
             }
             Err(e) => return Err(GitError::repository(OP, "reading a working-tree path", &abs, e)),
         };
-        if t.mode == Mode::COMMIT {
+        // A gitlink whose path is now a file or a link is a new file, staged
+        // below; only a directory is a nested repository to compare.
+        if t.mode == Mode::COMMIT && meta.is_dir() {
             if let Some(id) = gitlink_head(repo, &abs)? {
                 if id != t.id {
                     let stat = gix_index::fs::Metadata::from_path_no_follow(&abs)
@@ -283,7 +291,7 @@ fn build(
             return refuse(
                 4,
                 &opts.command,
-                format!("'{}' is neither a regular file, a symbolic link nor a git directory, and git stores nothing else.", t.path),
+                format!("'{}' is neither a regular file, a symbolic link nor a git directory, and git stores nothing else.", show(&t.path)),
                 "Leave it out of the command, or remove it from the working tree.",
                 Override::Repository,
             );
@@ -295,8 +303,8 @@ fn build(
     }
 
     // Phase 2: untracked paths.
-    let mut ignored_hits: Vec<String> = Vec::new();
-    let mut embedded: Vec<String> = Vec::new();
+    let mut ignored_hits: Vec<RelPath> = Vec::new();
+    let mut embedded: Vec<RelPath> = Vec::new();
     if !opts.update {
         let mut ignore = if opts.force { None } else { Some(Ignore::new(OP, rd, &work, state)?) };
         let mut walker = Walker {
@@ -310,7 +318,7 @@ fn build(
             ignored_hits: &mut ignored_hits,
             embedded: &mut embedded,
         };
-        walker.dir("")?;
+        walker.dir(b"")?;
         let found = walker.found;
         for rel in found {
             to_stage.entry(rel).or_insert(None);
@@ -324,18 +332,18 @@ fn build(
             }
             let abs = repo.check_worktree_any(Path::new(&lit))?;
             let Ok(meta) = std::fs::symlink_metadata(&abs) else { continue };
-            specs.mark_literal(&lit);
-            if meta.is_dir() || tracked_paths.contains(lit.as_str()) {
+            specs.mark_literal(lit.as_bytes());
+            if meta.is_dir() || tracked_paths.contains(lit.as_bytes()) {
                 continue;
             }
             let ign = match ignore.as_mut() {
-                Some(i) => i.ignored_with_parents(OP, rd, &work, &lit, false)?,
+                Some(i) => i.ignored_with_parents(OP, rd, &work, lit.as_bytes(), false)?,
                 None => false,
             };
             if ign {
-                ignored_hits.push(lit);
+                ignored_hits.push(lit.into());
             } else {
-                to_stage.entry(lit).or_insert(None);
+                to_stage.entry(lit.into()).or_insert(None);
             }
         }
     }
@@ -345,8 +353,8 @@ fn build(
         return refuse(
             4,
             &opts.command,
-            format!("'{}' is a git repository of its own that the index does not track as a submodule. Real git would add it as an embedded repository, which almost never is what was meant.", embedded[0]),
-            format!("Leave it out of the command, for example: git add <other-path>. To track it as a submodule, use real git outside this shell: git submodule add <url> {}.", embedded[0]),
+            format!("'{}' is a git repository of its own that the index does not track as a submodule. Real git would add it as an embedded repository, which almost never is what was meant.", show(&embedded[0])),
+            format!("Leave it out of the command, for example: git add <other-path>. To track it as a submodule, use real git outside this shell: git submodule add <url> {}.", show(&embedded[0])),
             Override::Repository,
         );
     }
@@ -356,8 +364,8 @@ fn build(
         return refuse(
             1,
             &opts.command,
-            format!("The following paths are ignored by one of your .gitignore files: {}.", ignored_hits.join(", ")),
-            format!("To stage them anyway, run: git add -f {}.", ignored_hits.join(" ")),
+            format!("The following paths are ignored by one of your .gitignore files: {}.", show_all(&ignored_hits, ", ")),
+            format!("To stage them anyway, run: git add -f {}.", show_all(&ignored_hits, " ")),
             Override::Flag("-f"),
         );
     }
@@ -412,7 +420,7 @@ fn unchanged(
     if !racy {
         return true;
     }
-    match crate::worktree::read_worktree_blob(OP, &t.path, abs, meta, stage::MAX_STAGE_BYTES) {
+    match crate::worktree::read_worktree_blob(OP, &show(&t.path), abs, meta, stage::MAX_STAGE_BYTES) {
         Ok(bytes) => crate::verbs::write::objects::blob_id(OP, &bytes).is_ok_and(|id| id == t.id),
         Err(_) => false,
     }
@@ -443,15 +451,15 @@ struct Walker<'a> {
     work: &'a Path,
     specs: &'a mut SpecSet,
     ignore: Option<&'a mut Ignore>,
-    tracked: &'a BTreeSet<&'a str>,
-    gitlinks: &'a BTreeSet<&'a str>,
-    found: Vec<String>,
-    ignored_hits: &'a mut Vec<String>,
-    embedded: &'a mut Vec<String>,
+    tracked: &'a BTreeSet<&'a [u8]>,
+    gitlinks: &'a BTreeSet<&'a [u8]>,
+    found: Vec<RelPath>,
+    ignored_hits: &'a mut Vec<RelPath>,
+    embedded: &'a mut Vec<RelPath>,
 }
 
 impl Walker<'_> {
-    fn is_ignored(&mut self, rel: &str, is_dir: bool) -> Result<bool, GitError> {
+    fn is_ignored(&mut self, rel: &[u8], is_dir: bool) -> Result<bool, GitError> {
         let rd = self.repo.read();
         match self.ignore.as_deref_mut() {
             Some(i) => i.matches(OP, rd, self.work, rel, is_dir),
@@ -459,31 +467,25 @@ impl Walker<'_> {
         }
     }
 
-    fn dir(&mut self, rel_dir: &str) -> Result<(), GitError> {
-        let abs = if rel_dir.is_empty() { self.work.to_path_buf() } else { crate::worktree::join_repo_relative(self.work, rel_dir) };
-        let mut names = Vec::new();
+    fn dir(&mut self, rel_dir: &[u8]) -> Result<(), GitError> {
+        use std::os::unix::ffi::OsStrExt as _;
+        let abs = if rel_dir.is_empty() { self.work.to_path_buf() } else { crate::worktree::join_repo_relative_bytes(self.work, rel_dir) };
+        let mut names: Vec<Vec<u8>> = Vec::new();
         for entry in std::fs::read_dir(&abs).map_err(|e| GitError::repository(OP, "listing a working-tree directory", &abs, e))? {
             let entry = entry.map_err(|e| GitError::repository(OP, "listing a working-tree directory", &abs, e))?;
-            match entry.file_name().into_string() {
-                Ok(n) => names.push(n),
-                Err(_) => {
-                    return refuse(
-                        4,
-                        format!("git {OP}"),
-                        format!("The directory '{rel_dir}' holds a file whose name is not valid UTF-8, which this shell cannot name or stage."),
-                        "Rename it, then run the command again.",
-                        Override::Repository,
-                    )
-                }
-            }
+            names.push(entry.file_name().as_bytes().to_vec());
         }
         names.sort();
         for name in names {
-            if name.eq_ignore_ascii_case(".git") {
+            if name.eq_ignore_ascii_case(b".git") {
                 continue;
             }
-            let rel = if rel_dir.is_empty() { name } else { format!("{rel_dir}/{name}") };
-            let full = crate::worktree::join_repo_relative(self.work, &rel);
+            let mut rel: RelPath = rel_dir.into();
+            if !rel_dir.is_empty() {
+                rel.push(b'/');
+            }
+            rel.extend_from_slice(&name);
+            let full = crate::worktree::join_repo_relative_bytes(self.work, &rel);
             let meta = match std::fs::symlink_metadata(&full) {
                 Ok(m) => m,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -491,14 +493,17 @@ impl Walker<'_> {
             };
             if meta.is_dir() {
                 self.visit_dir(&rel, &full)?;
-            } else if !self.tracked.contains(rel.as_str()) {
+            } else if !self.tracked.contains(rel.as_slice()) {
                 let hits = self.specs.hits(&rel);
                 if hits.is_empty() && !self.specs.is_empty() {
                     continue;
                 }
                 if self.is_ignored(&rel, false)? {
+                    // Only a spec that names the file exactly counts it as
+                    // matched. Git says a glob that matches nothing else
+                    // "did not match any files" and stages nothing.
                     if self.specs.names_exactly(&rel) {
-                        self.specs.mark(&hits);
+                        self.specs.mark_literal(&rel);
                         self.ignored_hits.push(rel);
                     }
                     continue;
@@ -510,7 +515,7 @@ impl Walker<'_> {
         Ok(())
     }
 
-    fn visit_dir(&mut self, rel: &str, full: &Path) -> Result<(), GitError> {
+    fn visit_dir(&mut self, rel: &[u8], full: &Path) -> Result<(), GitError> {
         if self.gitlinks.contains(rel) {
             return Ok(());
         }
@@ -520,11 +525,14 @@ impl Walker<'_> {
         if self.is_ignored(rel, true)? {
             if self.specs.names_exactly(rel) {
                 self.specs.mark_literal(rel);
+                // Naming an ignored directory is naming ignored paths, even
+                // when it is empty or the index tracks everything in it.
+                self.ignored_hits.push(rel.into());
             }
             return Ok(());
         }
         if std::fs::symlink_metadata(full.join(".git")).is_ok() {
-            self.embedded.push(rel.to_string());
+            self.embedded.push(rel.into());
             return Ok(());
         }
         // A literal directory spec that exists is a match even if it holds

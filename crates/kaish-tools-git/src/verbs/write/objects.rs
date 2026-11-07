@@ -34,6 +34,19 @@ impl<'a> BlobWriter<'a> {
         Self { repo, operation, files: Vec::new(), dirs: BTreeSet::new() }
     }
 
+    /// Walk the containment check for the loose object `id` would be written
+    /// to, writing nothing. A verb calls this for every planned blob before it
+    /// writes the first, so a planted link at a later blob's fan-out directory
+    /// refuses the command while no blob is on disk.
+    pub(crate) fn vet(&self, id: &ObjectId) -> Result<(), GitError> {
+        if self.repo.objects().exists(id) {
+            return Ok(());
+        }
+        let hex = id.to_string();
+        self.repo.check(Path::new(&format!("objects/{}/{}", &hex[..2], &hex[2..])), Leaf::Replaced)?;
+        Ok(())
+    }
+
     /// Write `bytes` as a blob unless the database already holds it.
     pub(crate) fn write(&mut self, bytes: &[u8]) -> Result<ObjectId, GitError> {
         let id = blob_id(self.operation, bytes)?;

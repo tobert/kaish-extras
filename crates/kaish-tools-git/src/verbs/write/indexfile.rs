@@ -22,11 +22,12 @@ use std::path::{Path, PathBuf};
 use gix_index::entry::{Flags, Mode, Stat};
 use gix_index::hash::ObjectId;
 use gix_index::State;
-use gix_object::bstr::{BStr, ByteSlice};
+use gix_object::bstr::BStr;
 
 use crate::error::GitError;
 use crate::verbs::write::containment::Leaf;
 use crate::verbs::write::refusal::{refuse, Override};
+use crate::verbs::write::relpath::{os, show, RelPath};
 use crate::verbs::write::repo::WriteRepo;
 
 /// The index as it was on disk, and what it decoded to.
@@ -51,8 +52,20 @@ impl Snapshot {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), None),
             Err(e) => return Err(GitError::repository(op, "reading the index", &path, e)),
         };
-        let state = if bytes.is_empty() {
+        let state = if mtime.is_none() {
+            // No index file: a repository that has staged nothing yet.
             State::new(gix_index::hash::Kind::Sha1)
+        } else if bytes.is_empty() {
+            // A file of zero bytes is not an empty index. Git refuses it
+            // ("index file smaller than expected", exit 128); reading it as
+            // empty would let `commit -a` commit a tree with every tracked
+            // file deleted.
+            return Err(GitError::repository(
+                op,
+                "decoding the index",
+                &path,
+                std::io::Error::other("index file smaller than expected"),
+            ));
         } else {
             crate::index_depth_guard::refuse_if_cache_tree_too_deep(op, &bytes)?;
             State::from_bytes(
@@ -98,7 +111,7 @@ fn vet(state: &State, command: &str) -> Result<(), GitError> {
         return refuse(
             4,
             command,
-            format!("'{path}' has unresolved merge conflict entries in the index."),
+            format!("'{}' has unresolved merge conflict entries in the index.", show(path)),
             "Resolve it with real git, outside this shell: git add <path> after fixing the file, or git rm <path>.",
             Override::Repository,
         );
@@ -202,10 +215,16 @@ impl Drop for IndexTx {
 /// repository) means nothing was ever recorded, and nothing is smudged.
 ///
 /// Git compares seconds only unless built with `USE_NSEC`, and so does this.
-/// The stat match is looser than git's (mtime second and size, not ctime or
-/// inode), so this smudges a superset; a spurious smudge costs one content
-/// compare, a missed one hides an edit. A file that cannot be read or
-/// verified is smudged. A file that is gone is not: nothing can match it.
+/// An entry is smudged when its mtime second is not older than the old index
+/// file's, the file's mtime second and size equal the entry's, and the file's
+/// content does not hash to the entry's id (or cannot be read). An entry whose
+/// content is unchanged keeps its size, as in git
+/// (`a_racy_entry_with_unchanged_content_is_smudged_exactly_when_git_smudges_it`).
+/// The stat comparison is narrower than git's `ce_match_stat_basic`, which also
+/// compares ctime, inode, uid, gid and device; so an entry whose file differs
+/// from the entry in one of those, and in content, can be smudged here where
+/// git leaves it alone. Git's next `status` rehashes that entry either way.
+/// A file that is gone is not smudged: nothing can match it.
 fn smudge_racy(repo: &WriteRepo, state: &mut State, old_mtime: Option<filetime::FileTime>) {
     let Some(old) = old_mtime else { return };
     if repo.read().work_dir().is_none() {
@@ -220,12 +239,12 @@ fn smudge_racy(repo: &WriteRepo, state: &mut State, old_mtime: Option<filetime::
         if threshold > e.stat.mtime.secs {
             continue;
         }
-        let rel = e.path_in(paths).to_str_lossy().into_owned();
-        if !crate::worktree::is_repo_relative(&rel) {
+        let rel: &[u8] = e.path_in(paths);
+        if !crate::worktree::is_repo_relative_bytes(rel) {
             e.stat.size = 0;
             continue;
         }
-        let Ok(abs) = repo.check_worktree(Path::new(&rel), Leaf::Entry) else {
+        let Ok(abs) = repo.check_worktree(os(rel), Leaf::Entry) else {
             e.stat.size = 0;
             continue;
         };
@@ -238,7 +257,7 @@ fn smudge_racy(repo: &WriteRepo, state: &mut State, old_mtime: Option<filetime::
             continue;
         }
         let Ok(std_meta) = std::fs::symlink_metadata(&abs) else { continue };
-        match crate::worktree::read_worktree_blob("add", &rel, &abs, &std_meta, crate::verbs::write::stage::MAX_STAGE_BYTES) {
+        match crate::worktree::read_worktree_blob("add", &show(rel), &abs, &std_meta, crate::verbs::write::stage::MAX_STAGE_BYTES) {
             Ok(bytes) => match crate::verbs::write::objects::blob_id("add", &bytes) {
                 Ok(id) if id == e.id => {}
                 _ => e.stat.size = 0,
@@ -255,7 +274,7 @@ pub(crate) fn find(state: &State, path: &BStr) -> Option<usize> {
 
 /// One entry to put in the index.
 pub(crate) struct Upsert {
-    pub(crate) path: String,
+    pub(crate) path: RelPath,
     pub(crate) stat: Stat,
     pub(crate) id: ObjectId,
     pub(crate) mode: Mode,
@@ -272,11 +291,11 @@ pub(crate) fn upsert_all(state: &mut State, items: Vec<Upsert>) {
     if items.is_empty() {
         return;
     }
-    let new_paths: std::collections::HashSet<&str> = items.iter().map(|u| u.path.as_str()).collect();
-    let mut parents: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let new_paths: std::collections::HashSet<&[u8]> = items.iter().map(|u| u.path.as_slice()).collect();
+    let mut parents: std::collections::HashSet<&[u8]> = std::collections::HashSet::new();
     for u in &items {
-        let mut cur = u.path.as_str();
-        while let Some(i) = cur.rfind('/') {
+        let mut cur: &[u8] = u.path.as_slice();
+        while let Some(i) = cur.iter().rposition(|b| *b == b'/') {
             cur = &cur[..i];
             if !parents.insert(cur) {
                 break;
@@ -286,11 +305,11 @@ pub(crate) fn upsert_all(state: &mut State, items: Vec<Upsert>) {
     {
         let (entries, paths) = state.entries_mut_and_pathbacking();
         for e in entries.iter_mut() {
-            let p = e.path_in(paths).to_str_lossy();
-            let mut collides = parents.contains(&*p);
-            let mut cur: &str = &p;
+            let p: &[u8] = e.path_in(paths);
+            let mut collides = parents.contains(p);
+            let mut cur: &[u8] = p;
             while !collides {
-                let Some(i) = cur.rfind('/') else { break };
+                let Some(i) = cur.iter().rposition(|b| *b == b'/') else { break };
                 cur = &cur[..i];
                 collides = new_paths.contains(cur);
             }
@@ -301,7 +320,7 @@ pub(crate) fn upsert_all(state: &mut State, items: Vec<Upsert>) {
     }
     let mut pending = Vec::new();
     for u in items {
-        match find(state, u.path.as_str().into()) {
+        match find(state, u.path.as_slice().into()) {
             Some(i) => {
                 let e = &mut state.entries_mut()[i];
                 e.stat = u.stat;
@@ -313,12 +332,12 @@ pub(crate) fn upsert_all(state: &mut State, items: Vec<Upsert>) {
         }
     }
     for u in pending {
-        state.dangerously_push_entry(u.stat, u.id, Flags::empty(), u.mode, u.path.as_str().into());
+        state.dangerously_push_entry(u.stat, u.id, Flags::empty(), u.mode, u.path.as_slice().into());
     }
 }
 
 /// Mark the stage-0 entry for `path` for removal.
-pub(crate) fn remove(state: &mut State, path: &str) {
+pub(crate) fn remove(state: &mut State, path: &[u8]) {
     if let Some(i) = find(state, path.into()) {
         state.entries_mut()[i].flags.insert(Flags::REMOVE);
     }

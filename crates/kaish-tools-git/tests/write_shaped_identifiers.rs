@@ -860,3 +860,78 @@ fn the_write_allowlist_is_exactly_verbs_write() {
          design decision, not a test fixup"
     );
 }
+
+// ── a path must not go through a lossy conversion (review T5) ──────────────
+//
+// Git paths are bytes. A `to_str_lossy` on an index or tree path renames a
+// non-UTF-8 file to U+FFFD on the way to the tree, and the fix is a type
+// (`RelPath`, bytes) rather than a rule. This scan is the rule that keeps it:
+// no lossy conversion anywhere in `src/verbs/write/` unless the line, or the
+// line above it, carries the marker `display-only`, which says the text goes
+// to a person and never back to a path.
+
+const LOSSY: &[&str] = &["to_str_lossy", "to_string_lossy", "from_utf8_lossy"];
+const DISPLAY_MARKER: &str = "display-only";
+
+/// The 1-based lines of `source` that hold a lossy conversion with no marker
+/// on the same line or the line above. A line that is only a comment is not
+/// code and is skipped.
+fn unmarked_lossy_lines(source: &str) -> Vec<usize> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim_start().starts_with("//") || !LOSSY.iter().any(|t| line.contains(t)) {
+            continue;
+        }
+        let above = i.checked_sub(1).map(|j| lines[j]).unwrap_or("");
+        if !line.contains(DISPLAY_MARKER) && !above.contains(DISPLAY_MARKER) {
+            out.push(i + 1);
+        }
+    }
+    out
+}
+
+#[test]
+fn no_write_path_goes_through_a_lossy_conversion() {
+    let src = crate_src();
+    let mut files = Vec::new();
+    rust_sources(&src, &mut files);
+    let write: Vec<&PathBuf> = files.iter().filter(|f| is_write_territory(f.strip_prefix(&src).expect("under src"))).collect();
+    // The scan must be looking at the write module: it has the path types.
+    assert!(
+        write.iter().any(|f| f.ends_with("relpath.rs")),
+        "the scan did not see src/verbs/write/relpath.rs; it is not walking the write module"
+    );
+    let mut violations = Vec::new();
+    for file in write {
+        let source = std::fs::read_to_string(file).unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
+        for line in unmarked_lossy_lines(&source) {
+            violations.push(format!("{}:{line}", file.strip_prefix(&src).expect("under src").display()));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "a lossy conversion in the write module, which turns a path that is not UTF-8 into a different path. \
+         Keep the bytes (RelPath), or mark a conversion that only builds text for a person with a \
+         `display-only` comment on the line or the line above:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// Negative controls: the scan fails on a planted lossy conversion, and the
+/// marker is honored only where it is meant.
+#[test]
+fn the_lossy_scan_finds_a_planted_conversion_and_honors_only_a_nearby_marker() {
+    for token in LOSSY {
+        let planted = format!("fn f(p: &BStr) -> String {{\n    p.{token}().into_owned()\n}}\n");
+        assert_eq!(unmarked_lossy_lines(&planted), [2], "{token} was not detected");
+    }
+    let same_line = "let s = p.to_str_lossy(); // display-only\n";
+    assert!(unmarked_lossy_lines(same_line).is_empty());
+    let line_above = "// display-only: the text of an error\nlet s = p.to_str_lossy();\n";
+    assert!(unmarked_lossy_lines(line_above).is_empty());
+    let two_above = "// display-only\n\nlet s = p.to_str_lossy();\n";
+    assert_eq!(unmarked_lossy_lines(two_above), [3], "a marker two lines up must not count");
+    let in_comment = "// the old code called to_str_lossy here\n";
+    assert!(unmarked_lossy_lines(in_comment).is_empty());
+}

@@ -614,10 +614,11 @@ What refuses, with the exit code:
 | Spelling | Exit | Why |
 |---|---|---|
 | `add -p`, `add -i`, `restore -p`, `reset -p` | 2 | no terminal |
-| `add <ignored path>` | 1 | git's hint: `git add -f <path>` |
+| `add <ignored file or directory>`, named exactly | 1 | git's hint: `git add -f <path>` |
 | `add` of a nested repository the index does not track | 4 | names it |
 | `add <file real git would convert>` | 4 | names the attribute or setting |
-| any pathspec that matches nothing | 1 | |
+| any pathspec that matches nothing, a glob that matches only ignored files included | 1 | |
+| `index` file of zero bytes | 1 | git refuses it too ("index file smaller than expected") |
 | `rm` of a path with staged or local changes | 1 | `--cached` or `-f` |
 | `rm <dir>` without `-r` | 1 | |
 | `mv` untracked or missing source, existing destination without `-f`, a directory into itself, a missing destination parent | 1 | |
@@ -640,7 +641,15 @@ form and refuses.
 - `restore --staged` and `reset` give a restored entry an all-zero stat, as git
   does; an entry that already matches HEAD is left alone.
 - `add` reads whole files: a file over 128 MiB refuses (git streams).
-- `add` names a non-UTF-8 file name in a refusal and does not stage it.
+- A path that is not UTF-8 is kept as the bytes it is, in the index, in a tree
+  and on disk, by every verb here. A message that names such a path shows git's
+  C-quoted form (`"caf\351.txt"`), which is not the path itself; a path on the
+  command line must be UTF-8, so a glob such as `*af?.txt` is how to name one.
+- A partial `rm` failure (a file that cannot be deleted) stops at the first
+  failure, stages the deletions that happened, and says which paths are left
+  and the command to run. Git continues past the failure and warns.
+- An index in version 4 is read and written back as version 2
+  (docs/issues.md W24).
 - `rm` and `mv` do not support `-n`, `-q`, `-v` or `-k`.
 
 ## Non-goals

@@ -9,7 +9,6 @@
 //! changed in between fails the second pass before the index is touched.
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
 
 use gix_index::entry::{Mode, Stat};
 use gix_index::hash::ObjectId;
@@ -19,6 +18,7 @@ use crate::verbs::write::attributes::{conversion_reason, AttributeReader};
 use crate::verbs::write::containment::Leaf;
 use crate::verbs::write::objects::blob_id;
 use crate::verbs::write::refusal::{refuse, Override};
+use crate::verbs::write::relpath::{os, show, RelPath};
 use crate::verbs::write::repo::WriteRepo;
 use crate::verbs::write::state::StagePolicy;
 
@@ -28,7 +28,7 @@ pub(crate) const MAX_STAGE_BYTES: u64 = 128 * 1024 * 1024;
 /// A path that passed inspection.
 #[derive(Debug, Clone)]
 pub(crate) struct Staged {
-    pub(crate) rel: String,
+    pub(crate) rel: RelPath,
     pub(crate) mode: Mode,
     pub(crate) stat: Stat,
     pub(crate) id: ObjectId,
@@ -60,11 +60,12 @@ pub(crate) fn inspect(
     attrs: &mut AttributeReader<'_>,
     policy: &StagePolicy,
     command: &str,
-    rel: &str,
+    rel: &[u8],
     existing: Option<Mode>,
 ) -> Result<Staged, GitError> {
     let op = repo.read().operation();
-    let abs = repo.check_worktree(Path::new(rel), Leaf::Entry)?;
+    let shown = show(rel);
+    let abs = repo.check_worktree(os(rel), Leaf::Entry)?;
     let meta = std::fs::symlink_metadata(&abs)
         .map_err(|e| GitError::repository(op, "reading a working-tree path", &abs, e))?;
     let ft = meta.file_type();
@@ -72,7 +73,7 @@ pub(crate) fn inspect(
         return refuse(
             4,
             command,
-            format!("'{rel}' is neither a regular file, a symbolic link nor a git directory, and git stores nothing else."),
+            format!("'{shown}' is neither a regular file, a symbolic link nor a git directory, and git stores nothing else."),
             "Leave it out of the command, or remove it from the working tree.",
             Override::Repository,
         );
@@ -83,13 +84,13 @@ pub(crate) fn inspect(
         .map_err(|e| GitError::repository(op, "reading a working-tree path", &abs, e))?;
     let stat = Stat::from_fs(&gmeta)
         .map_err(|e| GitError::repository(op, "reading a working-tree path", &abs, e))?;
-    let bytes = match crate::worktree::read_worktree_blob(op, rel, &abs, &meta, MAX_STAGE_BYTES) {
+    let bytes = match crate::worktree::read_worktree_blob(op, &shown, &abs, &meta, MAX_STAGE_BYTES) {
         Ok(b) => b,
         Err(GitError::BlobTooLarge { size, .. }) => {
             return refuse(
                 1,
                 command,
-                format!("'{rel}' is {size} bytes, over the {MAX_STAGE_BYTES}-byte limit this shell reads to stage a file."),
+                format!("'{shown}' is {size} bytes, over the {MAX_STAGE_BYTES}-byte limit this shell reads to stage a file."),
                 "Stage it with real git, outside this shell: git add <path>.",
                 Override::Repository,
             )
@@ -102,14 +103,14 @@ pub(crate) fn inspect(
             return refuse(
                 4,
                 command,
-                format!("'{rel}' would be stored differently by real git: {why}. This shell stores the file's bytes as they are."),
+                format!("'{shown}' would be stored differently by real git: {why}. This shell stores the file's bytes as they are."),
                 "Stage it with real git, outside this shell: git add <path>.",
                 Override::Repository,
             );
         }
     }
     Ok(Staged {
-        rel: rel.to_string(),
+        rel: rel.into(),
         mode: mode_of(&meta, existing, policy),
         stat,
         id: blob_id(op, &bytes)?,
@@ -120,14 +121,14 @@ pub(crate) fn inspect(
 /// inspection computed.
 pub(crate) fn reread(repo: &WriteRepo, staged: &Staged) -> Result<Vec<u8>, GitError> {
     let op = repo.read().operation();
-    let abs = repo.check_worktree(Path::new(&staged.rel), Leaf::Entry)?;
+    let abs = repo.check_worktree(os(&staged.rel), Leaf::Entry)?;
     let meta = std::fs::symlink_metadata(&abs)
         .map_err(|e| GitError::repository(op, "reading a working-tree path", &abs, e))?;
-    let bytes = crate::worktree::read_worktree_blob(op, &staged.rel, &abs, &meta, MAX_STAGE_BYTES)?;
+    let bytes = crate::worktree::read_worktree_blob(op, &show(&staged.rel), &abs, &meta, MAX_STAGE_BYTES)?;
     if blob_id(op, &bytes)? != staged.id {
         return Err(GitError::repository(
             op,
-            format!("staging '{}'", staged.rel),
+            format!("staging '{}'", show(&staged.rel)),
             &abs,
             std::io::Error::other("the file changed while it was being staged; run the command again"),
         ));
