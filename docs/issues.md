@@ -1744,9 +1744,6 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   asked for version 4 loses it until real git runs `git update-index
   --index-version 4`. `tests/write_index.rs`
   (`a_version_4_index_is_read_and_rewritten_as_version_2`) pins it.
-- **W26 — `rm` stops at the first deletion failure.** Git continues past it and
-  warns; this shell stops, stages the deletions that happened and names the
-  rest, so the next command is exact. See W8 for the earlier shape.
 - **W28 — `mv` into `.git` refuses here; git moves the file.** `git mv a.txt
   .git/x` prints "invalid path '.git/x'" and still renames the file into `.git`
   and stages the deletion of `a.txt` (measured on git 2.56.0). This shell
@@ -1811,8 +1808,8 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   several published commits names one of them (the highest in generation
   order with a graph, the lowest oid without) and the first remote-tracking ref
   in name order that reaches it. `reset <rev>` accepts the read side's
-  revision grammar: `HEAD~N`, `^`, branches, tags, oids; `@{...}`, `^{tree}`
-  and `A..B` are refused by the revision parser.
+  revision grammar: `HEAD~N`, `^`, `^{type}`, `@{-N}`, branches, tags, oids;
+  `A..B` is refused by the revision parser.
 - **W34 — the hook provider is not called for `branch`, `tag`, `switch -c`,
   `checkout -b` or `reset`.** `GitHooks` has `pre_commit`, `commit_msg` and
   `post_commit` and nothing for a ref update. Without a provider these verbs
@@ -1886,13 +1883,6 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   (exit 4) any start under `refs/remotes/` unless `--no-track` is given (see
   W38). Failing case: `auto_setup_merge_simple_writes_no_tracking_when_the_names_differ`,
   ignored.
-- **W42 — `@{-1}` is not a start point.** Git expands it to the previous
-  branch; the revision parser has no `@{...}` form and exits 2. Failing case:
-  `at_minus_one_is_a_start_point_as_in_git`, ignored.
-- **W43 — a tag target of `HEAD^{tree}` or `HEAD:<path>` exits 2.** Git tags
-  the tree or the blob. The same object given by its id works (pinned in
-  `a_tag_of_a_tree_or_a_blob_is_made_as_git_makes_it`). Failing case:
-  `a_tag_target_may_be_a_tree_or_blob_spelling`, ignored.
 - **W44 — an existing log file for a new tag.** Git appends the tag's line to a
   file that already exists at `logs/refs/tags/<name>` (checked: a stale file
   gains `tag: tagging ...`); this shell writes no tag log. Failing case:
@@ -1914,3 +1904,20 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   `git config --type=bool`). A key with no `=` is told from `key =` by
   `ReadRepo::config_entries`; the older `config_values` paired a bare key with
   the value of the next key and no longer does.
+- **W48 — `log <tree>` exits 1 here and 0 in git.** `git log HEAD^{tree}` and
+  `git log HEAD:a.txt` print nothing and exit 0; this shell refuses them as
+  "names a tree, not a commit" (exit 1), as it refuses a tree id. Pinned by
+  `a_tree_where_a_commit_is_wanted_is_refused_by_type` in `tests/log.rs`.
+- **W49 — `HEAD:./path` is refused.** Git reads a path that starts with `./` or
+  `../` from the current directory (`git tag t HEAD:./a.txt` works). The
+  revision parser refuses both with exit 2 and asks for the path from the
+  repository root. `:N:path` takes stages 0 to 3 from the index, and an
+  unmerged entry at stage 0 is reported as no such revision, where git says
+  the entry is "in the index, but not at stage 0".
+- **W50 — `show :<path>` and `show :<N>:<path>` are refused.** `tag` takes an
+  index path as a target; `show` and `ls` split `<rev>:<path>` themselves and
+  read an empty revision as a usage error (exit 2). Git shows the staged blob.
+- **W51 — `reset -- <pathspec>` refuses when the pathspec matches nothing.**
+  `git reset -- nomatch` exits 0 and changes nothing; this shell exits 1 with
+  "did not match any file known to git". Failing case:
+  `reset_with_an_unmatched_pathspec_is_not_an_error_in_git`, ignored.

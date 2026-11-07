@@ -545,7 +545,7 @@ async fn rm_of_an_untracked_path_is_a_pathspec_error() {
 }
 
 /// `git reset -- <pathspec>` exits 0 and changes nothing when the pathspec
-/// matches no entry; this shell refuses (exit 1). Found while measuring W33.
+/// matches no entry; this shell refuses (exit 1). docs/issues.md W51.
 #[ignore = "BUG: reset -- <unmatched pathspec> refuses here; git exits 0 and unstages nothing"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reset_with_an_unmatched_pathspec_is_not_an_error_in_git() {
@@ -555,7 +555,17 @@ async fn reset_with_an_unmatched_pathspec_is_not_an_error_in_git() {
     p.assert_same("reset -- nomatch");
 }
 
-/// W33: a trailing `/` in a pathspec names a directory only. `a.txt/` is
+/// `rm d/` needs `-r` as `rm d` does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rm_of_a_directory_spelled_with_a_slash_needs_dash_r() {
+    let (r, t, p) = both(&base, &["rm", "d/"], "rm d/").await;
+    assert_ne!(t.0, 0, "git: {}", t.2);
+    assert_eq!(r.code, 1, "{}", r.err);
+    assert!(r.err.contains("git rm -r d/"), "{}", r.err);
+    p.assert_same("rm d/");
+}
+
+/// A trailing `/` in a pathspec names a directory only. `a.txt/` is
 /// refused where `a.txt` is a file; `d/` and `d//` reach into the directory.
 /// The row for a file spelled with a slash is held to git's exit status
 /// (nonzero) and an unchanged index; the directory rows to git's result.
@@ -1436,32 +1446,77 @@ async fn a_glob_that_matches_only_ignored_files_matched_nothing() {
 
 // ── a partial `rm` failure says what is left and what to run (review T14) ───
 
+/// Make `d` unwritable in both repositories, so no file in it can be
+/// unlinked. Returns false (and restores) where the user ignores directory
+/// permissions and the failure cannot be produced.
+#[cfg(unix)]
+fn lock_d(p: &Pair) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    for dir in [&p.ours, &p.twin] {
+        std::fs::set_permissions(dir.join("d"), std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    }
+    if std::fs::File::create(p.ours.join("d/probe")).is_ok() {
+        std::fs::remove_file(p.ours.join("d/probe")).expect("probe");
+        unlock_d(p);
+        return false;
+    }
+    true
+}
+
+#[cfg(unix)]
+fn unlock_d(p: &Pair) {
+    use std::os::unix::fs::PermissionsExt;
+    for dir in [&p.ours, &p.twin] {
+        std::fs::set_permissions(dir.join("d"), std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+}
+
+/// Measured on git 2.56: `git rm` removes in index order. A deletion that
+/// fails before any has succeeded dies (128) with nothing removed and nothing
+/// staged. A deletion that fails after one has succeeded is passed over: git
+/// prints nothing, stages every path as deleted, exits 0 and leaves the file,
+/// which then shows as untracked. This shell matches the state and the exit
+/// code, and adds a warning on stderr that names the paths left on disk.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_failed_deletion_names_what_was_removed_and_the_command_to_finish() {
-    use std::os::unix::fs::PermissionsExt;
-    let p = Pair::new(&base);
-    // `d/c.txt` cannot be unlinked from a directory without write permission.
-    let locked = p.ours.join("d");
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).expect("chmod");
-    if std::fs::File::create(locked.join("probe")).is_ok() {
-        // Running as a user that ignores directory permissions: the failure
-        // cannot be produced here.
-        std::fs::remove_file(locked.join("probe")).expect("probe");
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        return;
+async fn a_failed_deletion_stops_or_is_passed_over_as_git_does() {
+    // (arguments, git dies on the first deletion)
+    for (args, dies) in [
+        (vec!["rm", "d/c.txt"], true),
+        (vec!["rm", "d/c.txt", "d/e/f.txt"], true),
+        (vec!["rm", "a.txt", "d/c.txt"], false),
+        (vec!["rm", "a.txt", "d/c.txt", "b.txt"], false),
+        (vec!["rm", "-r", "a.txt", "d"], false),
+        (vec!["rm", "-f", "a.txt", "d/c.txt"], false),
+    ] {
+        let p = Pair::new(&base);
+        if !lock_d(&p) {
+            return;
+        }
+        let r = p.ours("", &args).await;
+        let t = p.twin(&args);
+        unlock_d(&p);
+        let label = args.join(" ");
+        if dies {
+            assert_eq!(t.0, 128, "[{label}] git dies: {}", t.2);
+            assert_eq!(r.code, 1, "[{label}] {}", r.err);
+            assert!(r.err.contains("Nothing was removed or staged"), "[{label}] {}", r.err);
+            assert!(r.err.contains("git rm d/c.txt"), "[{label}] {}", r.err);
+            assert_eq!(support::git(&p.ours, &["status", "--porcelain"]), "", "[{label}] nothing may be staged");
+        } else {
+            assert_eq!(t.0, 0, "[{label}] git goes on: {}", t.2);
+            assert_eq!(r.code, 0, "[{label}] {}", r.err);
+            assert_eq!(t.2, "", "[{label}] git says nothing");
+            assert!(r.err.contains("warning: could not delete d/c.txt"), "[{label}] {}", r.err);
+            assert!(r.err.contains("still on disk"), "[{label}] {}", r.err);
+            assert_eq!(r.text_out(), t.1, "[{label}] git prints rm '<path>' for every path");
+            // The failed file is staged as deleted and left on disk: untracked.
+            let status = support::git(&p.ours, &["status", "--porcelain"]);
+            assert!(status.contains("D  d/c.txt"), "[{label}] {status}");
+            assert!(p.ours.join("d/c.txt").exists(), "[{label}] the file is still on disk");
+        }
+        p.assert_same(&label);
     }
-    let r = p.ours("", &["rm", "a.txt", "b.txt", "d/c.txt"]).await;
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    assert_ne!(r.code, 0);
-    assert!(r.err.contains("removing a working-tree file"), "{}", r.err);
-    assert!(r.err.contains("2 of 3 paths were removed and are staged as deleted"), "{}", r.err);
-    assert!(r.err.contains("git rm d/c.txt"), "{}", r.err);
-    // The state matches the words: the first two are gone and staged (index
-    // order), the third is untouched.
-    let status = support::git(&p.ours, &["status", "--porcelain"]);
-    assert_eq!(status, "D  a.txt\nD  b.txt", "{status}");
-    assert!(p.ours.join("d/c.txt").exists());
 }
 
 // ── a zero-length index is corrupt, not empty (review T7) ──────────────────

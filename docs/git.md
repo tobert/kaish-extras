@@ -630,6 +630,7 @@ What refuses, with the exit code:
 | `add` of a nested repository the index does not track | 4 | names it |
 | `add <file real git would convert>` | 4 | names the attribute or setting |
 | any pathspec that matches nothing, a glob that matches only ignored files included | 1 | |
+| a pathspec that ends in `/` where the path is a file | 1 | `d/` names a directory only, as in git; the same holds for `status`, `log` and `diff` (they show nothing for it) |
 | `index` file of zero bytes | 1 | git refuses it too ("index file smaller than expected") |
 | `rm` of a path with staged or local changes | 1 | `--cached` or `-f` |
 | `rm <dir>` without `-r` | 1 | |
@@ -659,9 +660,12 @@ copies those index entries from that revision and moves nothing.
   and on disk, by every verb here. A message that names such a path shows git's
   C-quoted form (`"caf\351.txt"`), which is not the path itself; a path on the
   command line must be UTF-8, so a glob such as `*af?.txt` is how to name one.
-- A partial `rm` failure (a file that cannot be deleted) stops at the first
-  failure, stages the deletions that happened, and says which paths are left
-  and the command to run. Git continues past the failure and warns.
+- `rm` deletes in index order and passes over a file it cannot delete once an
+  earlier deletion has succeeded, as git does (checked on git 2.56): every
+  path is staged as deleted, the command exits 0, and the file stays on disk
+  as an untracked file. Git says nothing; this shell prints a warning that
+  names the paths. When the first deletion fails, `rm` stops with nothing
+  removed and nothing staged (exit 1; git exits 128).
 - An index in version 4 is read and written back as version 2
   (docs/issues.md W24).
 - `rm` and `mv` do not support `-n`, `-q`, `-v` or `-k`.
@@ -813,7 +817,7 @@ hook provider (exit 4), before anything is written. The output is git's, with
 to `<rev>`'s tree. The working tree is never written. Both write `ORIG_HEAD`
 (the old tip) and the reflog line `reset: moving to <rev as typed>` in the
 branch's log and `logs/HEAD`, as git does, and need an identity for the line.
-`<rev>` is what `git log` accepts: `HEAD~N`, `^`, a branch, a tag, an oid.
+`<rev>` is what `git log` accepts: `HEAD~N`, `^`, `@{-N}`, a branch, a tag, an oid.
 `--json` returns `head`, `previous`, `mode`, `branch` and `unstaged`.
 
 **The policy.** `Refuse` forbids a move that drops commits; `Unpublished`, the
@@ -867,7 +871,8 @@ kaish> git checkout -b feature-x             # the same
 refuse, exit 2). A branch or tag that exists refuses (exit 1) with the name,
 and so does a name that would sit inside another (`a` beside `a/b`).
 
-**A branch** is made at HEAD or at `<start>`, a revision `git log` accepts. The
+**A branch** is made at HEAD or at `<start>`, a revision `git log` accepts
+(`@{-1}` is the branch HEAD was on before the last checkout). The
 reflog line is `branch: Created from <start as typed>`; with no start it names
 the current branch, or `HEAD` when detached, as git does. A branch needs an
 identity for that line (the variables or the pinned one). An unborn HEAD has
@@ -876,8 +881,9 @@ git write tracking configuration, which this shell never does: it refuses
 (exit 4) unless `--no-track` is given.
 
 **A tag** at `<rev>` (HEAD by default) can name a commit, a tag, a tree or a
-blob, given as a branch, a tag, a ref, an object id or a `~N`/`^` suffix on one
-of those. `HEAD^{tree}` and `HEAD:<path>` are not parsed (exit 2, W43). `-a` makes an
+blob, given as a branch, a tag, a ref, an object id, `@{-N}`, a `~N`/`^`/`^{type}`
+suffix on one of those (`HEAD^{tree}`, `v1^{}`), `<rev>:<path>` (`HEAD:a.txt`) or
+`:<path>` and `:<N>:<path>` from the index. `-a` makes an
 annotated tag, and so do `-m` and `-F`; there is no editor, so `-a` alone
 refuses. The tag object is git's, byte for byte: `object`, `type`, `tag`,
 `tagger` (the committer identity, with its date), a blank line and the

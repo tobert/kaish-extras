@@ -510,7 +510,7 @@ async fn only_commits_the_named_paths_and_leaves_other_staged_changes_like_git()
     }
 }
 
-/// W33: `a/` names a directory, so `commit a/` is refused where `a` is a file
+/// `a/` names a directory, so `commit a/` is refused where `a` is a file
 /// (git: "did not match any file(s) known to git"), and `d/` commits the
 /// directory like `d`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

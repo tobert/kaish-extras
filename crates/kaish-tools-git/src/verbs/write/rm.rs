@@ -88,32 +88,41 @@ pub(crate) fn run(repo: &WriteRepo, opts: &RmOptions) -> Result<Outcome, GitErro
         plan = build(repo, tx.state(), tx.snap.mtime, &policy, opts)?;
     }
 
-    // Delete in index order and stop at the first failure. The paths already
-    // deleted are staged as deleted; the failed path and the rest are left as
-    // they were, and the error says which, so a rerun has an exact list.
-    let mut failed: Option<(usize, GitError)> = None;
+    // Delete in index order, as git does (builtin/rm.c). A failure before any
+    // deletion has succeeded stops the command with nothing removed and
+    // nothing staged. A failure after one is passed over: git stages every
+    // path as deleted and exits 0, leaving the file on disk, where it shows
+    // as untracked. Git says nothing about it; this shell says which paths.
+    let mut left: Vec<&RelPath> = Vec::new();
     if !opts.cached {
-        for (n, path) in plan.paths.iter().enumerate() {
-            if let Err(e) = delete_one(repo, path) {
-                failed = Some((n, e));
-                break;
+        let mut removed_any = false;
+        for path in &plan.paths {
+            match delete_one(repo, path) {
+                Ok(()) => removed_any = true,
+                Err(e) if !removed_any => return Err(first_failure(e, &plan.paths)),
+                Err(_) => left.push(path),
             }
         }
     }
-    let done = failed.as_ref().map_or(plan.paths.len(), |(n, _)| *n);
-    if done > 0 || failed.is_none() {
-        for path in &plan.paths[..done] {
-            indexfile::remove(tx.state_mut(), path);
-        }
-        tx.commit(repo)?;
+    for path in &plan.paths {
+        indexfile::remove(tx.state_mut(), path);
     }
-    if let Some((n, e)) = failed {
-        return Err(partial_failure(e, &plan.paths, n));
-    }
+    tx.commit(repo)?;
 
     let text: String = plan.paths.iter().map(|p| format!("rm '{}'\n", show(p))).collect();
     let removed: Vec<String> = plan.paths.iter().map(|p| show(p)).collect();
-    Ok(Outcome { text, err: String::new(), json: serde_json::json!({ "removed": removed, "cached": opts.cached }) })
+    let err = if left.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "warning: could not delete {} from the working tree. {} staged as deleted and still on disk, so git status lists {} as untracked. Delete {} by hand after fixing the cause (for example, the directory permissions).\n",
+            show_all(left.iter().copied(), ", "),
+            if left.len() == 1 { "It is" } else { "They are" },
+            if left.len() == 1 { "it" } else { "them" },
+            if left.len() == 1 { "it" } else { "them" },
+        )
+    };
+    Ok(Outcome { text, err, json: serde_json::json!({ "removed": removed, "cached": opts.cached }) })
 }
 
 /// Delete one tracked path's working-tree file.
@@ -131,19 +140,13 @@ fn delete_one(repo: &WriteRepo, path: &[u8]) -> Result<(), GitError> {
     Ok(())
 }
 
-/// Say what the failed deletion at `paths[n]` left behind, and the command
-/// that finishes the job.
-fn partial_failure(e: GitError, paths: &[RelPath], n: usize) -> GitError {
+/// The first deletion failed, so nothing was removed and nothing is staged
+/// (git dies here too). Say so, and the command to run once the cause is fixed.
+fn first_failure(e: GitError, paths: &[RelPath]) -> GitError {
     let GitError::Repository { operation, what, path, source, wrote } = e else { return e };
-    let rest = show_all(&paths[n..], " ");
-    let state = if n == 0 {
-        "Nothing was removed.".to_string()
-    } else {
-        format!("{n} of {} paths were removed and are staged as deleted; the rest are untouched.", paths.len())
-    };
     GitError::Repository {
         operation,
-        what: format!("{what} ({state} After fixing the cause, run: git rm {rest})"),
+        what: format!("{what} (Nothing was removed or staged. After fixing the cause, run: git rm {})", show_all(paths, " ")),
         path,
         source,
         wrote,
@@ -182,7 +185,8 @@ fn build(
         // Matched only as the inside of a directory spec: needs -r.
         if !opts.recursive {
             for s in &opts.specs {
-                if !is_glob(s) && !s.is_empty() && s.as_bytes() != t.path.as_slice() && is_below(&t.path, s.as_bytes()) {
+                let dir = s.trim_end_matches('/');
+                if !is_glob(s) && !dir.is_empty() && dir.as_bytes() != t.path.as_slice() && is_below(&t.path, dir.as_bytes()) {
                     return refuse(
                         1,
                         &opts.command,
