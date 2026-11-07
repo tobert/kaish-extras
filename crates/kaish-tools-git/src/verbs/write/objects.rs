@@ -49,7 +49,15 @@ impl<'a> BlobWriter<'a> {
 
     /// Write `bytes` as a blob unless the database already holds it.
     pub(crate) fn write(&mut self, bytes: &[u8]) -> Result<ObjectId, GitError> {
-        let id = blob_id(self.operation, bytes)?;
+        self.write_object(Kind::Blob, bytes)
+    }
+
+    /// Write `bytes` as an object of `kind` unless the database already holds
+    /// it. The commit verb writes its trees and the commit through here, so
+    /// one [`BlobWriter::sync`] covers everything the ref will name.
+    pub(crate) fn write_object(&mut self, kind: Kind, bytes: &[u8]) -> Result<ObjectId, GitError> {
+        let id = gix_object::compute_hash(gix_index::hash::Kind::Sha1, kind, bytes)
+            .map_err(|e| GitError::repository(self.operation, "hashing an object", Path::new("."), e))?;
         if self.repo.objects().exists(&id) {
             return Ok(id);
         }
@@ -59,12 +67,12 @@ impl<'a> BlobWriter<'a> {
         let written = self
             .repo
             .objects()
-            .write_buf(Kind::Blob, bytes)
-            .map_err(|e| GitError::repository(self.operation, "writing a blob", self.repo.common_dir(), std::io::Error::other(e.to_string())))?;
+            .write_buf(kind, bytes)
+            .map_err(|e| GitError::repository(self.operation, "writing an object", self.repo.common_dir(), std::io::Error::other(e.to_string())))?;
         if written != id {
             return Err(GitError::repository(
                 self.operation,
-                "writing a blob",
+                "writing an object",
                 self.repo.common_dir(),
                 std::io::Error::other("the object database stored a different id from the one computed"),
             ));

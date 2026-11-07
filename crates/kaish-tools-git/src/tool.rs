@@ -1302,6 +1302,9 @@ fn operations_of(verb: &str) -> &'static [&'static str] {
         // `rm` deletes the working-tree file unless --cached.
         "rm" => &["git.index", "fs.remove"],
         "mv" => &["git.index", "fs.rename"],
+        // `--amend` is refused today; the id is declared anyway because the
+        // schema is reflected before argv is known (git-write-profile.md §2).
+        "commit" => &["git.index", "git.commit", "git.ref", "git.rewrite"],
         _ => &[],
     }
 }
@@ -1363,6 +1366,9 @@ impl GitTool {
                 let mut result =
                     ExecResult::with_output(OutputData::text(o.text).with_rich_json(o.json));
                 result.baggage.insert("git.repo".to_string(), root);
+                if !o.err.is_empty() {
+                    result.err = o.err;
+                }
                 result
             }
             Err(e) => failure(e),
@@ -1578,6 +1584,172 @@ impl GitTool {
     }
 }
 
+#[cfg(feature = "commit")]
+impl GitTool {
+    async fn run_commit(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
+        const OP: &str = "commit";
+        if let Err(e) = verb_enabled(&self.config, Verb::Commit, OP) {
+            return failure(e);
+        }
+        let parsed = match parse_leaf::<verbs::write::commit::CommitArgs>(argv, OP, &self.config) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+        let command = command_text(OP, argv);
+        if let Err(e) = parsed.refuse_flags(&command) {
+            return failure(e);
+        }
+        let ops = operands(&parsed.operands, argv).all();
+        let usage = |reason: &str, next: &str| {
+            failure(
+                verbs::write::refusal::Refusal::new(2, &command, reason, next, verbs::write::refusal::Override::Never)
+                    .into_error(),
+            )
+        };
+        if parsed.all && !ops.is_empty() {
+            return usage(
+                "-a commits every tracked change, and paths name some of them.",
+                "Use one: git commit -am '<message>', or git commit <path> -m '<message>'.",
+            );
+        }
+        if parsed.only && ops.is_empty() {
+            return usage("--only needs the paths to commit.", "Name them: git commit --only <path> -m '<message>'.");
+        }
+
+        let raw_message = match &parsed.file {
+            Some(file) => match read_message_file(ctx, file).await {
+                Ok(text) => text,
+                Err(e) => return failure(e),
+            },
+            None => verbs::write::message::join_paragraphs(&parsed.message),
+        };
+        let author = match parsed
+            .author
+            .as_deref()
+            .map(|a| verbs::write::ident::parse_author_flag(&command, a))
+            .transpose()
+        {
+            Ok(a) => a,
+            Err(e) => return failure(e),
+        };
+        let trailers: Result<Vec<_>, _> = parsed
+            .trailer
+            .iter()
+            .map(|t| verbs::write::message::Trailer::parse(&command, t))
+            .collect();
+        let trailers = match trailers {
+            Ok(t) => t,
+            Err(e) => return failure(e),
+        };
+        let vars = match verbs::write::ident::KernelVars::read(&command, ctx) {
+            Ok(v) => v,
+            Err(e) => return failure(e),
+        };
+        let Some(settings) = self.write_settings() else {
+            return failure(GitError::VerbNotEnabled { operation: OP });
+        };
+        let env = verbs::write::commit::CommitEnv {
+            hooks: settings.hooks.clone(),
+            identity: settings.identity.clone(),
+        };
+        self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, base| {
+            let specs = base.repo_paths(OP, &ops)?;
+            verbs::write::commit::run(
+                repo,
+                &env,
+                &verbs::write::commit::CommitOptions {
+                    raw_message,
+                    trailers,
+                    all: parsed.all,
+                    specs,
+                    allow_empty: parsed.allow_empty,
+                    author,
+                    no_verify: parsed.no_verify,
+                    quiet: parsed.quiet,
+                    vars,
+                    command,
+                },
+            )
+        })
+    }
+
+    async fn run_var(&self, argv: &[String], ctx: &mut dyn ToolCtx) -> ExecResult {
+        const OP: &str = "var";
+        if let Err(e) = verb_enabled(&self.config, Verb::Var, OP) {
+            return failure(e);
+        }
+        let parsed = match parse_leaf::<verbs::write::var::VarArgs>(argv, OP, &self.config) {
+            Ok(p) => p,
+            Err(result) => return *result,
+        };
+        parsed.global.apply(ctx);
+        let command = command_text(OP, argv);
+        let Some(settings) = self.write_settings() else {
+            return failure(GitError::VerbNotEnabled { operation: OP });
+        };
+        let vars = match verbs::write::ident::KernelVars::read(&command, ctx) {
+            Ok(v) => v,
+            Err(e) => return failure(e),
+        };
+        match verbs::write::var::run(&command, parsed.name.as_deref(), settings.identity.as_ref(), &vars) {
+            Ok(o) => ExecResult::with_output(OutputData::text(o.text).with_rich_json(o.json)),
+            Err(e) => failure(e),
+        }
+    }
+}
+
+/// Read `-F <file>` through the kernel's filesystem, as curl reads `-d @file`.
+#[cfg(feature = "commit")]
+async fn read_message_file(ctx: &dyn ToolCtx, file: &str) -> Result<String, GitError> {
+    const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+    let refused = |reason: String| {
+        verbs::write::refusal::refuse::<String>(
+            2,
+            format!("git commit -F {file}"),
+            reason,
+            "Pass the message with -m instead, or name a readable file: git commit -F <file>.",
+            verbs::write::refusal::Override::Never,
+        )
+    };
+    if file == "-" {
+        return refused("Reading the message from standard input is not supported.".to_string());
+    }
+    let vfs = ctx.resolve_path(file);
+    let bytes = match ctx.backend().read(&vfs, None).await {
+        Ok(b) => b,
+        Err(e) => return refused(format!("The file '{}' could not be read: {e}.", vfs.display())),
+    };
+    if bytes.len() > MAX_MESSAGE_BYTES {
+        return refused(format!("The file '{}' is over {MAX_MESSAGE_BYTES} bytes, too large for a commit message.", vfs.display()));
+    }
+    match String::from_utf8(bytes) {
+        Ok(t) => Ok(t),
+        Err(_) => refused(format!("The file '{}' is not valid UTF-8.", vfs.display())),
+    }
+}
+
+/// `git config user.name` and `user.email`: this shell never reads them.
+#[cfg(feature = "commit")]
+fn config_identity_refusal(argv: &[String]) -> Option<GitError> {
+    if argv.first().map(String::as_str) != Some("config") {
+        return None;
+    }
+    let key = argv[1..].iter().find(|w| {
+        let w = w.to_ascii_lowercase();
+        w == "user.name" || w == "user.email"
+    })?;
+    let command = format!("git config {key}");
+    verbs::write::refusal::refuse::<()>(
+        2,
+        command,
+        "This shell neither reads nor writes user.name or user.email: a commit takes its identity from the pinned identity or from the variables GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL.",
+        "See the identity the next commit will use: git var GIT_AUTHOR_IDENT. To change it, set GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL.",
+        verbs::write::refusal::Override::Variables,
+    )
+    .err()
+}
+
 /// The command as the caller typed it, bounded so a refusal stays readable.
 #[cfg(feature = "commit")]
 fn command_text(op: &str, argv: &[String]) -> String {
@@ -1752,6 +1924,12 @@ impl Tool for GitTool {
             if self.config.has(Verb::Reset) {
                 cmd = cmd.subcommand(verbs::write::unstage::ResetArgs::command().name("reset"));
             }
+            if self.config.has(Verb::Commit) {
+                cmd = cmd.subcommand(verbs::write::commit::CommitArgs::command().name("commit"));
+            }
+            if self.config.has(Verb::Var) {
+                cmd = cmd.subcommand(verbs::write::var::VarArgs::command().name("var"));
+            }
         }
         let schema = schema_tree_from_clap(
             &cmd,
@@ -1851,6 +2029,12 @@ impl Tool for GitTool {
                     .and_then(|word| {
                         crate::spelling::unsupported_verb(&schema.name, word, &self.config, self.is_writable())
                     });
+                #[cfg(feature = "commit")]
+                if self.is_writable() {
+                    if let Some(refusal) = config_identity_refusal(&argv) {
+                        return failure(refusal);
+                    }
+                }
                 return failure(known.unwrap_or(e));
             }
         };
@@ -1887,6 +2071,10 @@ impl Tool for GitTool {
             "restore" => self.run_restore(leaf, ctx).await,
             #[cfg(feature = "commit")]
             "reset" => self.run_reset(leaf, ctx).await,
+            #[cfg(feature = "commit")]
+            "commit" => self.run_commit(leaf, ctx).await,
+            #[cfg(feature = "commit")]
+            "var" => self.run_var(leaf, ctx).await,
             // A node with no subcommand word after it. Routing stops at the
             // node, which is correct — the caller named a group, not a verb —
             // and the answer names what the group holds rather than guessing
@@ -2000,9 +2188,13 @@ const DESCRIPTION: &str =
 
 /// The description of a tool built with the commit profile.
 #[cfg(feature = "commit")]
-const COMMIT_DESCRIPTION: &str = "Read a git repository, and change its index — shallow, safety-first. \
-Reads change nothing. The write verbs are add, rm, mv, restore --staged and reset (no revision): \
-they write the index, and rm and mv also delete or rename the working-tree files they name. \
+const COMMIT_DESCRIPTION: &str = "Read a git repository, change its index, and commit — shallow, safety-first. \
+Reads change nothing. The write verbs are add, rm, mv, restore --staged, reset (no revision) and commit: \
+they write the index, and rm and mv also delete or rename the working-tree files they name; commit \
+writes a commit and moves the current branch. It never opens an editor (give the message with -m or -F), \
+never rewrites a commit, and takes the author and committer from the pinned identity or from \
+GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, GIT_COMMITTER_NAME, GIT_COMMITTER_EMAIL and the *_DATE variables; \
+git var GIT_AUTHOR_IDENT shows which. \
 This git never runs hooks, filters or signing, and never reads user-level git configuration, \
 whatever the host's git is set up to do; a path that real git would convert (filters, line endings, $Id) is refused, not staged";
 
@@ -2021,7 +2213,7 @@ const WORKTREE_DESCRIPTION: &str = "Work with the repository's working trees";
 /// (`kaish-help`'s `tool_help`) shows only params and examples, never a bare
 /// subcommand list, so a verb with no example here would never be named in
 /// `help git` at all, enabled or not.
-const EXAMPLES: [(&str, &str); 27] = [
+const EXAMPLES: [(&str, &str); 33] = [
     ("What repository is this", "git info"),
     ("Inspect a specific repository", "git info --repo /mnt/repos/kaish"),
     ("Structured, for a script", "git info --json"),
@@ -2049,6 +2241,12 @@ const EXAMPLES: [(&str, &str); 27] = [
     ("Rename a tracked file", "git mv old.txt new.txt"),
     ("Unstage one file", "git restore --staged src/main.rs"),
     ("Unstage everything", "git reset"),
+    ("Commit what is staged", "git commit -m 'Fix the parser'"),
+    ("Commit with a subject and a body", "git commit -m 'Fix the parser' -m 'The tokenizer dropped a closing quote.'"),
+    ("Stage tracked changes and commit", "git commit -am 'Update the docs'"),
+    ("Commit one file and leave the rest staged", "git commit --only src/main.rs -m 'Fix main'"),
+    ("Credit a co-author", "git commit -m 'Fix the parser' --trailer 'Co-authored-by: Ada <ada@example.com>'"),
+    ("Show who the next commit is by", "git var GIT_AUTHOR_IDENT"),
 ];
 
 /// [`EXAMPLES`], narrowed to the ones whose verb this config still enables.

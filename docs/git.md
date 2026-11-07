@@ -593,7 +593,8 @@ These exist only in a tool built with the `commit` feature and given a
 the index, and `rm` and `mv` also delete or rename the working-tree files they
 name. Nothing here writes file content into the working tree. Every refusal has
 five parts: the command, the reason, one exact next command, whether an
-override exists and who grants it, and "Nothing was changed."
+override exists and who grants it, and what was written: "Nothing was changed."
+(`.git` is byte-identical) for a refusal that comes before any write.
 
 ```sh
 kaish> git add src/main.rs
@@ -657,6 +658,116 @@ form and refuses.
 - An index in version 4 is read and written back as version 2
   (docs/issues.md W24).
 - `rm` and `mv` do not support `-n`, `-q`, `-v` or `-k`.
+
+## `git commit` and `git var` — what the built verbs do
+
+These exist only in a tool built with the `commit` feature and given a
+`WritableGitConfig`. `commit` writes a commit from the index and moves the
+current branch; `var` prints the identity the next commit will use. Every
+refusal has five parts: the command, the reason, one exact next command,
+whether an override exists and who grants it, and what was written. A refusal
+that comes before any write says "Nothing was changed." A refusal that comes
+after the commit's objects were written (a hook provider that rejects the
+tree, or a branch that moved before the ref update) says that no ref or index
+changed, that the objects remain, and that `git gc` prunes them.
+
+```sh
+kaish> git commit -m 'Fix the parser'
+kaish> git commit -m 'Fix the parser' -m 'The tokenizer dropped a closing quote.'
+kaish> git commit -am 'Update the docs'            # tracked changes, then commit
+kaish> git commit --only src/main.rs -m 'Fix main'  # also: git commit src/main.rs -m ...
+kaish> git commit -F msg.txt                         # a path in the kernel's filesystem
+kaish> git commit -m 'Fix it' --trailer 'Fixes: 12' --trailer 'Co-authored-by: Ada <ada@example.com>'
+kaish> git commit --allow-empty -m 'Mark the release'
+kaish> git commit -m 'Fix it' --author 'Ada <ada@example.com>'
+kaish> git var GIT_AUTHOR_IDENT                     # also GIT_COMMITTER_IDENT
+```
+
+The first line is git's: `[main abc1234] subject`, `[main (root-commit) abc1234] subject`
+for the first commit, `[detached HEAD abc1234] subject` on a detached HEAD. An
+` Author: Name <email>` line follows when the author differs from the
+committer, then ` N files changed, X insertions(+), Y deletions(-)` and one
+`create mode`, `delete mode` or `mode change` line per file. `-q` prints
+nothing. `--json` returns `commit`, `tree`, `parent`, `branch`, `root`,
+`files_changed`, `insertions`, `deletions`, `author` and `committer`.
+
+**Message.** Each `-m` is a paragraph. The message is cleaned in git's
+`whitespace` mode, which is what `git commit -m` and `-F` use when no editor
+opens: trailing whitespace comes off every line, runs of blank lines collapse
+to one, leading and trailing blank lines go, the text ends with one `\n`, and
+lines that start with `#` stay. An empty message exits 1 ("Aborting commit due
+to an empty commit message."). With neither `-m` nor `-F`: exit 2, "There is no
+editor in this shell; pass -m '<message>'." A trailer is placed as
+`git interpret-trailers` places it, in the last paragraph when that paragraph
+is a trailer block (so `Co-authored-by` given as the last `-m` is extended, not
+repeated), and in a new paragraph otherwise; a trailer equal to the one before
+it is skipped. The reflog line is `commit: <first line>`, or
+`commit (initial): <first line>` on an unborn branch, in both the branch's log
+and `logs/HEAD`.
+
+**`-a` and `--only`.** `-a` stages tracked modifications and deletions under
+the same `index.lock` the commit holds, as `git add -u` would. `--only <paths>`,
+`<paths>` and `-- <paths>` mean git's `--only`: the commit is HEAD's tree with
+the named paths' working-tree content (a deleted file is removed), the other
+staged changes are left staged, and the real index ends up holding the
+working-tree content of exactly those paths. A path must be known to the index
+or to HEAD, else exit 1. Tests compare the commit oid and the resulting index
+with git's, with other staged changes, a staged-only path and a staged
+deletion in play.
+
+**Identity.** When the embedder pinned an identity, that is the author and the
+committer, and no variable is read (`--author` still sets the author). Otherwise
+`GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL` must be set in the shell; the committer
+is `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL`, falling back to the author's
+variables field by field. `user.name` and `user.email` in a config file are
+never read, and `git config user.name` or `user.email` is refused with exit 2
+naming `git var GIT_AUTHOR_IDENT`. With nothing to use, `commit` and `var` exit
+2 naming both variables and saying the embedder can pin an identity. Dates:
+`GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` read ISO 8601 / RFC 3339
+(`2026-08-01T10:00:00+02:00`, `2026-08-01 10:00:00 +0200`, `...Z`, fractional
+seconds) and git's internal form (`1785578400 +0200`, `@1785578400`). Unset, a
+date is the clock. A date with no offset, and the clock, are UTC (`+0000`): this
+crate reads no zone database, where git uses the local zone. The committer date
+does not borrow the author's.
+
+**What refuses.**
+
+| Spelling | Exit | Why |
+|---|---|---|
+| `--amend`, `--amend --no-edit` | 2 | not available yet; the next command is a new commit |
+| `--fixup`, `--squash` | 2 | no autosquash |
+| `-S`, `--gpg-sign` | 2 | this shell never signs |
+| `commit.gpgSign` or `tag.gpgSign` true in the repository's config | 4 | same |
+| `-p`, `--interactive` | 2 | no terminal |
+| `-e`, `-v`, no `-m` and no `-F` | 2 | no editor |
+| `-i`, `-m` with `-F`, `-F -`, `-a` with paths, `--only` with no paths | 2 | usage |
+| a `--trailer` with no key, separator or value; an `--author` that is not `Name <email>` | 2 | usage |
+| an empty message | 1 | as git |
+| nothing to commit (the tree equals the parent's) without `--allow-empty` | 1 | as git |
+| a named path git does not know | 1 | as git |
+| the branch moved while the commit was made | 1 | names the ref and both oids |
+| a hook present and no hook provider; `--no-verify` with a hook present and no provider | 4 | names the hook |
+| `i18n.commitEncoding`, `commit.cleanup` other than `default`/`whitespace`, `core.logAllRefUpdates=false` | 4 | the commit would differ from git's |
+| a merge, rebase, ... in progress; a split or sparse index; the other states the index verbs refuse | 4 | design section 4 |
+| a symbolic link or hard link in the ref's write set (ref, `.lock`, reflog, `logs/HEAD`, `packed-refs`) | 4 | design section 6.1 |
+| `index.lock` or `<ref>.lock` already present | 4 | not removed |
+
+### Where it differs from git, on purpose
+
+- The summary shows a rename as one delete and one create; git's summary
+  detects renames. The commit object is not affected.
+- Line counts in the summary come from `gix-imara-diff`'s Myers, and a side
+  over 16 MiB is left out of them with a note on stderr.
+- A bare `--trailer 'Key'`, or one with no value, is refused; git writes `Key:`.
+- Dates with no offset and the clock are UTC; git's are local.
+- `commit.template`, `prepare-commit-msg` content, `trailer.*` configuration
+  and `commit.status` are not applied: there is no editor and no `git
+  interpret-trailers` configuration here.
+- `git commit` writes no `ORIG_HEAD`, runs no `gc --auto`, and does not
+  refresh the index's stat information or write its cache-tree extension (git
+  rebuilds it); `-a` and `--only` rewrite the index without it.
+- A pre-commit hook rejection after `-a` or `--only` leaves unreachable
+  objects behind; the index and the branch do not change.
 
 ## Non-goals
 

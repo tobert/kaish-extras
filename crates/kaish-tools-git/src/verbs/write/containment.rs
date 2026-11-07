@@ -503,8 +503,8 @@ mod tests {
                 .transaction()
                 .prepare(
                     [edit],
-                    lock::acquire::Fail::Immediately,
-                    lock::acquire::Fail::Immediately,
+                    gix_lock::acquire::Fail::Immediately,
+                    gix_lock::acquire::Fail::Immediately,
                 )
                 .expect("prepare")
                 .commit(Some(gix_actor::SignatureRef {

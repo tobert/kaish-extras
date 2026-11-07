@@ -1,26 +1,33 @@
-//! Reflog message validation (git-write-profile.md §6; feasibility
-//! surprise 2).
+//! Reflog messages (git-write-profile.md §6; feasibility surprise 2).
 //!
 //! `gix-ref 0.66` declares `Error::MessageWithNewlines` and never raises it:
 //! the reflog writer does `writeln!(file, "\t{message}")` with the message
 //! as given, so a `\n` in it forges a second reflog line. Every reflog
-//! message passes through here before the ref transaction that would write it.
+//! message passes through [`copy_message`] before the ref transaction that
+//! would write it.
+//!
+//! [`copy_message`] is git's `copy_reflog_msg` (refs.c): it skips leading
+//! whitespace, turns each run of whitespace into one space, and drops
+//! trailing whitespace. Whitespace is git's own `isspace` (git-compat-util.h):
+//! space, tab, newline and carriage return; a vertical tab or form feed is not
+//! whitespace there and stays. So a commit subject with a
+//! carriage return or a tab commits, and the reflog holds the same bytes git
+//! would write.
 
-use crate::error::GitError;
-
-/// Refuse a reflog message that contains `\n` or `\r`.
-///
-/// Returns the message unchanged when it is acceptable. Nothing is stripped:
-/// writing a different message from the one the caller built would be a
-/// silent change.
-pub(crate) fn validate_message<'a>(
-    operation: &'static str,
-    message: &'a str,
-) -> Result<&'a str, GitError> {
-    if message.contains(['\n', '\r']) {
-        return Err(GitError::ReflogMessageLineBreak { operation });
+/// The message as git writes it into a reflog line.
+pub(crate) fn copy_message(message: &str) -> String {
+    let is_space = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r');
+    let mut out = String::with_capacity(message.len());
+    let mut was_space = true;
+    for c in message.chars() {
+        if was_space && is_space(c) {
+            continue;
+        }
+        was_space = is_space(c);
+        out.push(if was_space { ' ' } else { c });
     }
-    Ok(message)
+    out.truncate(out.trim_end_matches(' ').len());
+    out
 }
 
 #[cfg(test)]
@@ -37,28 +44,32 @@ mod tests {
             "checkout: moving from main to topic",
             "",
         ] {
-            assert_eq!(validate_message("commit", m).expect("accepted"), m);
+            assert_eq!(copy_message(m), m);
         }
     }
 
     #[test]
-    fn a_line_break_is_refused_wherever_it_sits() {
-        for m in [
-            "commit: a\nb",
-            "commit: a\r\nb",
-            "commit: a\rb",
-            "\ncommit: a",
-            "commit: a\n",
-            // The forged-line shape: a second reflog entry smuggled in.
-            "commit: a\n0000000000000000000000000000000000000000 \
-             1111111111111111111111111111111111111111 Mallory <m@x> 0 +0000\tcommit: forged",
+    fn whitespace_collapses_as_git_collapses_it() {
+        for (given, want) in [
+            ("commit: a\nb", "commit: a b"),
+            ("commit: a\r\nb", "commit: a b"),
+            ("commit: a\rb", "commit: a b"),
+            ("\ncommit: a", "commit: a"),
+            ("commit: a\n", "commit: a"),
+            ("commit: a \t  b", "commit: a b"),
+            ("   ", ""),
         ] {
-            let err = validate_message("commit", m).expect_err("must refuse");
-            assert_eq!(err.exit_code(), 2, "{m:?}");
-            let text = err.to_string();
-            assert!(text.starts_with("git commit:"), "{text}");
-            assert!(text.contains("nothing was written"), "{text}");
-            assert!(!text.contains("forged"), "must not echo the message: {text}");
+            assert_eq!(copy_message(given), want, "{given:?}");
         }
+    }
+
+    /// The forged-line shape from the feasibility study: the result holds no
+    /// line break, so it cannot start a second reflog entry.
+    #[test]
+    fn a_forged_second_line_stays_on_one_line() {
+        let forged = "commit: a\n0000000000000000000000000000000000000000 \
+                      1111111111111111111111111111111111111111 Mallory <m@x> 0 +0000\tcommit: forged";
+        let out = copy_message(forged);
+        assert!(!out.contains(['\n', '\r', '\t']), "{out:?}");
     }
 }

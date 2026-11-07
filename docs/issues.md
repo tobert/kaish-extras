@@ -1632,8 +1632,9 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
 - **W9 — attribute matcher.** `[attr]` macros are expanded to depth 5; a
   quoted pattern, or a pattern with a backslash, is treated as "may match" and
   refuses when its line names a conversion. `core.attributesFile` refuses.
-- **W10 — `core.hooksPath` inside the tree** is resolved for the
-  `post-index-change` check only.
+- **W10 — `core.hooksPath` inside the tree** is resolved through the
+  containment walk, for the `post-index-change` check and for `commit`'s hook
+  scan. A link on the way refuses, naming the setting.
 - **W11 — residuals of the phase 1a containment review.** The source scan
   (`tests/write_shaped_identifiers.rs`) does not match a turbofish call
   (`.transaction::<T>(`). The `.git` component guard does not cover
@@ -1646,6 +1647,93 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   so `pins_match_the_manifest` does not count it as linked. Phase 2's ref
   transactions link it for real: promote it to a pinned, `commit`-gated
   dependency with a `GIX_PINS` row then.
+
+## git write — phase 2 (commit), what is left
+
+- **W13 — gix-ref 0.66.0 hangs on a branch lock under a symbolic HEAD
+  (closed; the upstream defect remains).**
+  `Transaction::prepare_inner` (`store/file/transaction/prepare.rs:401`,
+  `while let Some(parent_idx) = cursor`) never advances `cursor` when the
+  lock for the *child* of a split `HEAD` edit cannot be taken, and spins at
+  100% CPU. Found by `a_stale_ref_lock_fails_the_commit_and_is_left_alone`.
+  `refmove::move_head` no longer hands gix-ref a `deref: true` edit: for a
+  branch the one edit names the branch (`deref: false`), which has no parent
+  and never enters that loop. HEAD is taken as git takes it: `HEAD.lock` is
+  acquired with fail-immediately, HEAD is re-read and must still name the
+  branch (else exit 1), the branch moves, the same line is appended to
+  `logs/HEAD`, and the lock is released with HEAD unchanged. A lock that
+  exists when the move starts, whether it appeared before or after
+  `refmove::precheck`, is an exit 4 refusal. `precheck` stays as the early
+  check that refuses before any object is written. Tests:
+  `refmove::tests::a_branch_lock_taken_after_the_precheck_...` and
+  `..._head_lock_...` run the move with a 10 second deadline. The gix-ref
+  defect itself is untouched: any other caller that gives it a symbolic
+  edit would hit it. Reflogs match git's line for line
+  (`an_unborn_branch_gets_the_initial_reflog_...`). Remaining gap: a crash
+  between the branch move and the `logs/HEAD` append leaves the branch
+  moved with no `logs/HEAD` line.
+- **W14 — the summary shows a rename as a delete and a create.** Git's commit
+  summary runs rename detection (`rename a => b (100%)`, and inexact
+  renames); here the shortstat counts two files and prints a `delete mode`
+  and a `create mode` line. The commit object is unaffected. Line counts are
+  `gix-imara-diff` Myers (the L-series imprecision on log `--stat` applies),
+  and a side over 16 MiB is left out of them with a note on stderr.
+- **W15 — a leftover loose object after a hook rejection.** `commit -a` and
+  `--only` write their blobs, and every commit writes its trees, before
+  `pre_commit` runs (the hook is given the tree oid). A rejection or a lost
+  compare-and-swap leaves those objects unreachable; the index and branch are
+  untouched. The refusal says so (`Wrote::UnreachableObjects`) and is tested
+  against the bytes; `git gc` prunes the objects. Every check that can run
+  before the first object is written does (message, identity, tree validity,
+  containment of every blob's path, hook presence).
+- **W16 — `--trailer` is stricter than git.** A trailer with no `:`/`=`, no
+  value, or a key outside letters, digits and `-` is refused (git writes
+  `Key:`). `trailer.*` configuration (`trailer.<token>.key`, `.command`,
+  `.ifexists`) is not read; a repository that configures it gets git's
+  defaults here, which differ from its own git. Trailer-block detection is
+  the subject-paragraph rule, the all-trailers rule and the `Signed-off-by` /
+  `(cherry picked from commit` 25% rule; the `git-generated` and comment
+  rules of `interpret-trailers` are not implemented.
+- **W17 — identity details.** A date with no offset, and the clock, are UTC
+  (`+0000`); git uses the local zone. The committer date is the clock unless
+  `GIT_COMMITTER_DATE` is set: it does not default to the author's date as
+  the architecture.md E.6 table says, because git does not either, and the
+  oracle test compares with git. RFC 2822 dates, `YYYY-MM-DD` alone and
+  relative dates ("2 weeks ago") are refused. Git strips "crud" characters
+  from the ends of a name and an email; this trims whitespace only and
+  refuses `<`, `>` and line breaks (`Identity::new`), for `--author` on a
+  pinned identity too. Git removes them instead: `--author $'A\nB <a@b.c>'`
+  commits as author `AB`.
+- **W18 — path validation is ours.** The tree writer refuses an index path
+  whose component is empty, `.`, `..` or `.git` in any case. It does not use
+  `gix-validate`'s fuller rule (NTFS and HFS spellings of `.git`, trailing
+  dots and spaces). A hostile index naming `.git ` can be committed; real
+  git's `verify_path` would refuse it.
+- **W19 — commit settings checked, not all of git's.** Refused: `commit.gpgSign`,
+  `tag.gpgSign`, `i18n.commitEncoding`, `commit.cleanup` other than
+  `default`/`whitespace`, `core.logAllRefUpdates=false`. Ignored without
+  saying so: `commit.template` (no editor), `commit.status`, `commit.verbose`,
+  `core.commentChar`, `user.useConfigOnly`, `trailer.*`. User-level
+  configuration is never read, as everywhere.
+- **W20 — a plain `commit` does not rewrite the index.** Git writes the
+  index after a commit (new cache-tree, refreshed stat). A plain commit here
+  leaves the file untouched; `-a` and `--only` rewrite it without the
+  cache-tree extension, as the index verbs do.
+- **W21 — hook accounting.** `prepare-commit-msg` and `reference-transaction`
+  have no `GitHooks` method: with a provider they appear in
+  `HookContext::hooks_present` and the provider decides. `post-rewrite` and
+  `post-checkout` belong to later verbs. `pre_commit` and `commit_msg` run
+  while `index.lock` is held for `-a` and `--only`, so a provider that runs a
+  real hook script which itself writes the index will find it locked.
+  `--no-verify` is passed to the provider and the provider decides.
+- **W22 — `-F -` and a non-UTF-8 message.** The message file is read through
+  the kernel's filesystem, capped at 1 MiB, and must be UTF-8. Standard input
+  is not read. Git accepts any bytes.
+- **W23 — `commit --only` and special entries.** SKIP_WORKTREE and
+  ASSUME_VALID entries named by `--only` keep the index's value silently
+  (add's rule for a spec that matches many); a nested repository that is
+  already a gitlink is updated to its HEAD. Intent-to-add entries are left
+  out of the tree and stay in the index, as git does.
 - **W24 — an index in version 4 is rewritten as version 2.** `gix-index` reads
   version 4 (path-prefix compression, which `feature.manyFiles` and
   `index.version=4` turn on) and writes version 2 or 3. Every entry, mode and id

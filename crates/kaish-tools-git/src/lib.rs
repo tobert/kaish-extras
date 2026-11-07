@@ -179,6 +179,9 @@ const GIX_PINS: &[(&str, &str)] = &[
     ("gix-ignore", "0.22.0"),
     ("gix-imara-diff", "0.2.4"),
     ("gix-index", "0.54.0"),
+    // Linked only with the `commit` feature (it is an optional dependency), so
+    // `gix_pins()` leaves the row out of a build without it.
+    ("gix-lock", "24.0.0"),
     ("gix-object", "0.63.0"),
     ("gix-odb", "0.83.0"),
     ("gix-pack", "0.73.0"),
@@ -194,6 +197,7 @@ const GIX_PINS: &[(&str, &str)] = &[
 pub fn gix_pins() -> std::collections::BTreeMap<String, String> {
     GIX_PINS
         .iter()
+        .filter(|(name, _)| cfg!(feature = "commit") || *name != "gix-lock")
         .map(|(name, version)| (name.to_string(), version.to_string()))
         .collect()
 }
@@ -277,7 +281,10 @@ mod tests {
     fn gix_pins_are_reported_as_a_map() {
         let pins = gix_pins();
         assert_eq!(pins.get("gix-object").map(String::as_str), Some("0.63.0"));
-        assert_eq!(pins.len(), GIX_PINS.len());
+        // `gix-lock` is in the table always and reported only when linked.
+        let linked = GIX_PINS.len() - usize::from(!cfg!(feature = "commit"));
+        assert_eq!(pins.len(), linked);
+        assert_eq!(pins.contains_key("gix-lock"), cfg!(feature = "commit"));
     }
 }
 

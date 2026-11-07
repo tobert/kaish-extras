@@ -113,7 +113,7 @@ pub(crate) fn run(repo: &WriteRepo, opts: &RmOptions) -> Result<Outcome, GitErro
 
     let text: String = plan.paths.iter().map(|p| format!("rm '{}'\n", show(p))).collect();
     let removed: Vec<String> = plan.paths.iter().map(|p| show(p)).collect();
-    Ok(Outcome { text, json: serde_json::json!({ "removed": removed, "cached": opts.cached }) })
+    Ok(Outcome { text, err: String::new(), json: serde_json::json!({ "removed": removed, "cached": opts.cached }) })
 }
 
 /// Delete one tracked path's working-tree file.
