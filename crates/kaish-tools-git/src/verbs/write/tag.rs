@@ -143,8 +143,7 @@ pub(crate) struct TagCreate {
 ///
 /// Whitespace is git's own `isspace`: space, tab, newline and carriage
 /// return. A form feed or a vertical tab stays (checked against git 2.56;
-/// `commit`'s cleanup treats them as whitespace, which differs: docs/issues.md
-/// W35).
+/// `commit`'s cleanup agrees).
 pub(crate) fn cleanup(raw: &str) -> String {
     let mut out = String::new();
     let mut pending_blank = false;
