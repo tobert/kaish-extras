@@ -320,6 +320,27 @@ async fn messages_are_assembled_and_cleaned_as_git_does() {
     }
 }
 
+/// Found while building `tag` (phase 4): git's whitespace is space, tab,
+/// newline and carriage return, so a trailing form feed or vertical tab stays
+/// in the message. `message::cleanup` strips both. docs/issues.md W35.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "W35: message::cleanup strips a trailing form feed and vertical tab, which git keeps"]
+async fn a_trailing_form_feed_or_vertical_tab_stays_in_the_message_as_in_git() {
+    for (label, msg) in [("form feed", "subject\u{c}"), ("vertical tab", "subject\u{b}")] {
+        let setup = |dir: &Path| {
+            base(dir);
+            support::write_file(dir, "a.txt", "changed\n");
+            support::git(dir, &["add", "a.txt"]);
+        };
+        let p = Pair::new(&setup);
+        let r = p.ours("", &["commit", "-m", msg]).await;
+        assert_eq!(r.code, 0, "[{label}] {}", r.err);
+        let (code, _, err) = p.twin(&["commit", "-q", "-m", msg]);
+        assert_eq!(code, 0, "[{label}] {err}");
+        p.assert_same(label);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_empty_message_aborts_as_git_does() {
     let setup = |dir: &Path| {
