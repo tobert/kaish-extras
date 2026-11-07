@@ -133,7 +133,20 @@ fn apply_move(
         .commit(Some(sig))
         .map_err(|e| GitError::repository(OP, format!("moving '{refname}'"), repo.common_dir(), e))?;
     if head_lock.is_some() {
-        append_head_reflog(repo, old, new, &sig, message)?;
+        // The branch has already moved. The error must say so, or an agent
+        // reads a failure and makes the same commit a second time.
+        append_head_reflog(repo, old, new, &sig, message).map_err(|e| match e {
+            GitError::Repository { operation, what, path, source } => GitError::Repository {
+                operation,
+                what: format!(
+                    "the commit was made and '{refname}' now points at {new}, so do not run the command again; \
+                     only {what} failed (logs/HEAD lacks this entry)"
+                ),
+                path,
+                source,
+            },
+            other => other,
+        })?;
     }
     drop(head_lock);
     Ok(())
@@ -390,6 +403,29 @@ mod tests {
         assert!(log.lines().last().expect("line").ends_with("\tcommit: t"), "{log}");
         let blog = std::fs::read_to_string(fx.common().join("logs/refs/heads/main")).expect("log");
         assert!(blog.lines().last().expect("line").ends_with("\tcommit: t"), "{blog}");
+    }
+
+    #[test]
+    fn a_failed_head_reflog_append_says_the_commit_was_made() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = Fixture::new();
+        let log = fx.common().join("logs/HEAD");
+        let before = std::fs::read(&log).expect("log");
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o444)).expect("chmod");
+        if std::fs::OpenOptions::new().append(true).open(&log).is_ok() {
+            // Running as root: permissions do not stop the append.
+            return;
+        }
+        let err = move_main_with_deadline(&fx).expect_err("logs/HEAD is read-only");
+        let text = err.to_string();
+        assert!(text.contains("the commit was made"), "{text}");
+        assert!(text.contains("do not run the command again"), "{text}");
+        assert!(!text.to_lowercase().contains("nothing was"), "the branch moved: {text}");
+        // The branch did move, and the lock is released.
+        let main = std::fs::read_to_string(fx.common().join("refs/heads/main")).expect("main");
+        assert!(text.contains(main.trim()), "names the new oid: {text}");
+        assert!(!fx.common().join("HEAD.lock").exists());
+        assert_eq!(std::fs::read(&log).expect("log"), before);
     }
 
     #[test]
