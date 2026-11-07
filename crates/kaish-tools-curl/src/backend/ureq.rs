@@ -127,6 +127,16 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
         // The whole-request deadline is always set, clamped to the embedder's
         // ceiling above. An omitted `--max-time` must not mean "wait forever".
         .timeout_global(Some(Duration::from_secs_f64(max_time)));
+    // `-H 'Accept:'` and `-H 'User-Agent:'` remove what the client adds on its
+    // own, which ureq does unless told not to.
+    for name in &req.suppressed {
+        builder_cfg = match name.as_str() {
+            "accept" => builder_cfg.accept(ureq::config::AutoHeaderValue::None),
+            "user-agent" => builder_cfg.user_agent(ureq::config::AutoHeaderValue::None),
+            "accept-encoding" => builder_cfg.accept_encoding(ureq::config::AutoHeaderValue::None),
+            _ => builder_cfg,
+        };
+    }
     if req.insecure {
         // The parser only sets this when the embedder permitted it.
         builder_cfg = builder_cfg.tls_config(
@@ -173,16 +183,21 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
     // the string ureq resolves — no parser sitting between the two.
     strip_userinfo(&mut current);
 
-    let body_bytes: Vec<u8> = if req.bodies.is_empty() {
-        Vec::new()
-    } else {
-        req.bodies.join("&").into_bytes()
-    };
+    let body_bytes: &[u8] = &req.body;
 
     let started = std::time::Instant::now();
     let start_host = current.host_str().map(str::to_string);
     let mut same_host_as_start = true;
     let mut hops: u32 = 0;
+    // What the next request is, which a redirect can change: curl turns a
+    // POST into a GET across 301/302 and any non-HEAD request into a GET
+    // across 303, dropping the body (and the form type this build added for
+    // it). 307 and 308 keep both. Replaying a body to wherever a `Location`
+    // points is how a payload meant for one host reaches another.
+    let mut method = req.method.clone();
+    let mut body_active = req.sends_body();
+    let mut body_dropped = false;
+    let mut history: Vec<crate::model::Hop> = Vec::new();
     loop {
         if config.permit_egress(current.as_str()) != EgressResult::Allowed {
             return Err(CurlError::CouldNotConnect {
@@ -196,7 +211,7 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
         }
 
         let mut builder = ureq::http::Request::builder()
-            .method(req.method.as_str())
+            .method(method.as_str())
             .uri(current.as_str());
 
         // The embedder's headers, applied to every request the agent cannot
@@ -216,6 +231,12 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
         // the far end would choose — which is not a choice to hand over when
         // one of the two is the embedder's credential.
         for (name, value) in &req.headers {
+            if body_dropped
+                && !req.caller_content_type
+                && name.eq_ignore_ascii_case("content-type")
+            {
+                continue;
+            }
             if injected_here.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)) {
                 continue;
             }
@@ -232,21 +253,33 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
         for (name, value) in injected_here {
             builder = builder.header(name, value);
         }
-        if let Some((user, pass)) = &credentials {
+        // One `Authorization` goes out. Precedence: the embedder's header,
+        // then the caller's `-H Authorization:` (curl lets `-H` override
+        // `-u`), then `-u` or the URL's userinfo. `Builder::header` appends, so
+        // sending two would leave the far end to choose between a credential
+        // the embedder injected and one the agent typed.
+        let authorization_set = injected_here.iter().any(|(n, _)| n.eq_ignore_ascii_case("authorization"))
+            || req.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("authorization"));
+        if let (Some((user, pass)), false) = (&credentials, authorization_set) {
             let encoded = STANDARD.encode(format!("{user}:{pass}"));
             builder = builder.header("Authorization", format!("Basic {encoded}"));
         }
 
-        let http_req = builder
-            .body(body_bytes.clone())
-            .map_err(|e| CurlError::MalformedUrl {
-                url: current.to_string(),
-                reason: format!("could not build request: {e}"),
-            })?;
-
-        let mut resp = agent
-            .run(http_req)
-            .map_err(|e| map_ureq_into_curl(e, &current, started.elapsed(), max_redirs))?;
+        // A request with no data flag carries no body and no Content-Length,
+        // as in curl; `-d ''` and an empty `-T` file still send
+        // `Content-Length: 0`.
+        let outcome = if body_active {
+            builder
+                .body(body_bytes.to_vec())
+                .map_err(|e| build_error(&current, &e))
+                .and_then(|r| run_once(&agent, r, &current, started.elapsed(), max_redirs))
+        } else {
+            builder
+                .body(())
+                .map_err(|e| build_error(&current, &e))
+                .and_then(|r| run_once(&agent, r, &current, started.elapsed(), max_redirs))
+        };
+        let mut resp = outcome?;
         let status = resp.status().as_u16();
 
         if let Some(location) = redirect_target(status, resp.headers()).filter(|_| following) {
@@ -259,6 +292,19 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
                     url: location.clone(),
                     reason: format!("redirect target is not a usable URL: {e}"),
                 })?;
+            let post_becomes_get = matches!(status, 301 | 302) && body_active && req.upload_file.is_none();
+            if (status == 303 && !req.head_only) || post_becomes_get {
+                body_dropped |= body_active;
+                body_active = false;
+                if !req.method_explicit {
+                    method = "GET".to_string();
+                }
+            }
+            history.push(crate::model::Hop {
+                status,
+                reason: resp.status().canonical_reason().unwrap_or_default().to_string(),
+                headers: resp_headers(resp.headers()),
+            });
             // Credentials do not cross a host boundary. docs/curl.md and CU10
             // both promised this; nothing implemented it, so `-u` plus a
             // redirect was an exfiltration path.
@@ -274,21 +320,56 @@ pub fn fetch(req: &Request, config: &CurlConfig) -> Result<CurlResponse, CurlErr
             continue;
         }
 
-        if req.fail_on_error && status >= 400 {
-            return Err(CurlError::HttpFailure { status });
-        }
-
-        let body = read_body_within(&mut resp, limits.max_response_bytes, &current)?;
+        // `-f` is decided at the headers, as in curl: an error body that is
+        // about to be thrown away is not read, so a huge or slow 404 is still
+        // exit 22 (not the size cap's exit 1 or a timeout's 28), and
+        // `%{size_download}` is 0. A 416 on a resumed download is the one
+        // status `-f` lets through (tool.rs reads it as "already complete").
+        let discard_body = req.fail_on_error
+            && !req.fail_with_body
+            && status >= 400
+            && !(req.resume_from.is_some() && status == 416);
+        let body = if discard_body {
+            Vec::new()
+        } else {
+            read_body_within(&mut resp, limits.max_response_bytes, &current)?
+        };
         return Ok(CurlResponse {
             // The URL the response actually came from, after any hops — which
             // is what `model.rs` documents and what the caller needs to
             // resolve anything relative in the body.
             url: current.to_string(),
             status,
+            reason: resp
+                .status()
+                .canonical_reason()
+                .unwrap_or_default()
+                .to_string(),
             headers: resp_headers(resp.headers()),
+            redirects: hops,
+            history,
             body,
         });
     }
+}
+
+fn build_error(url: &Url, e: &ureq::http::Error) -> CurlError {
+    CurlError::MalformedUrl {
+        url: url.to_string(),
+        reason: format!("could not build request: {e}"),
+    }
+}
+
+fn run_once<B: ureq::AsSendBody>(
+    agent: &ureq::Agent,
+    request: ureq::http::Request<B>,
+    url: &Url,
+    elapsed: std::time::Duration,
+    max_redirs: u32,
+) -> Result<ureq::http::Response<ureq::Body>, CurlError> {
+    agent
+        .run(request)
+        .map_err(|e| map_ureq_into_curl(e, url, elapsed, max_redirs))
 }
 
 /// The `Location` of a redirect this build follows, if this is one.

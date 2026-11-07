@@ -141,13 +141,19 @@ whose structured value IS the answer (`fromjson`, `jq`, `keys`). Both crates
 are the other kind: `git` and `curl` name real programs, and an agent that
 wants the model asks with `--json`.
 
-`.data` is set in places, and that does not change the binding: curl sets it
-on every response, and git sets it when a `PatchRenderer` returns data.
-`tests/patch_renderer.rs` proves both halves for git through a real kernel
-(`.data` set, `$(…)` still text), and git's `tests/kaish_behavior_canary.rs`
-pins the observable half. **curl has no such test**: adding
-`with_typed_substitution()` to its schema would flip `$(curl …)` to the JSON
-value with the curl suite green (docs/issues.md, X6).
+`.data` is set in places, and that does not change the binding for `$(…)`:
+git sets it when a `PatchRenderer` returns data. `tests/patch_renderer.rs`
+proves that half for git through a real kernel (`.data` set, `$(…)` still
+text), and git's `tests/kaish_behavior_canary.rs` pins the observable half.
+
+curl is stricter than git: it sets `.data` only under `--json`, where the
+output IS the response envelope. It used to set it on every response, and a
+**pipe** (unlike `$(…)`) hands the next tool `.data` in place of the text, so
+`curl -s URL | jq -r .name` printed `null` with exit 0 (survey SW-1).
+`tests/compat.rs` pins `| jq` reading the body, `$(curl …)` binding text, and
+`.data` being unset without `--json`, all through a real kernel; a fourth
+case pins `$(curl --json …)` binding the printed text, which is what
+`with_typed_substitution()` on curl's schema would flip.
 
 ## Cross-model review with kaibo
 

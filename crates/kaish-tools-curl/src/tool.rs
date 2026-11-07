@@ -45,52 +45,103 @@ impl CurlTool {
 
             /// Request body. Repeatable; parts join with '&'. Implies POST and
             /// Content-Type: application/x-www-form-urlencoded unless -H sets one.
+            /// '@path' reads the file, removing every CR and LF byte; '@-'
+            /// (stdin) exits 2.
             #[arg(short = 'd', long, action = clap::ArgAction::Append)]
             data: Vec<String>,
 
-            /// Like --data, and sends no Content-Type of its own.
+            /// Like --data, and '@path' keeps every byte of the file.
             #[arg(long, action = clap::ArgAction::Append)]
             data_binary: Vec<String>,
 
-            /// Like --data, with '@' literal rather than a file read, and no
-            /// Content-Type of its own.
+            /// Like --data, with '@' literal rather than a file read.
             #[arg(long, action = clap::ArgAction::Append)]
             data_raw: Vec<String>,
 
-            /// Send 'name=value' as a body part, percent-encoding only the value.
-            /// Repeatable.
+            /// Send a body part percent-encoded (space as '+'). Forms: 'content',
+            /// '=content', 'name=content' (only the content is encoded), '@path'
+            /// and 'name@path' (encode the file's bytes). Repeatable.
             #[arg(long, action = clap::ArgAction::Append)]
             data_urlencode: Vec<String>,
 
-            /// Send a request header, 'Name: value'. Repeatable.
+            /// Send a multipart/form-data part. Repeatable; implies POST. Forms:
+            /// 'name=text', 'name=@file' (sent as a file: filename and a
+            /// Content-Type guessed from its extension), 'name=<file' (the
+            /// file's bytes as the value). Add ';type=MIME' or ';filename=NAME'.
+            /// A value in double quotes may hold a ';'. One file per part; cannot
+            /// be combined with -d, -G or -I.
+            #[arg(short = 'F', long, action = clap::ArgAction::Append)]
+            form: Vec<String>,
+
+            /// Send this file's bytes as the body, with PUT unless -X says
+            /// otherwise. A URL ending in '/' gains the file's name. One file
+            /// per invocation; cannot be combined with -d, -F, -G or -I. '-T -'
+            /// (stdin) exits 2.
+            #[arg(short = 'T', long)]
+            upload_file: Option<String>,
+
+            /// Send a request header, 'Name: value'. Repeatable. 'Name:' removes a
+            /// header the client adds itself (Accept, User-Agent); 'Name;' sends
+            /// it with no value.
             #[arg(short = 'H', long, action = clap::ArgAction::Append)]
             header: Vec<String>,
 
-            /// Print the response headers above the body; with -o they go into
-            /// the file instead.
+            /// Send the -d, --data-binary, --data-raw and --data-urlencode data
+            /// on the URL's query string instead of in a body. The method stays
+            /// GET (or -X, or HEAD under -I). Data a URL cannot carry, such as
+            /// a space, exits 2: use --data-urlencode.
+            #[arg(short = 'G', long)]
+            get: bool,
+
+            /// Print the response headers above the body; with -L, every redirect's
+            /// headers print first. With -o they go into the file instead.
             #[arg(short = 'i', long)]
             include: bool,
 
-            /// Send HEAD and print the response headers only. Cannot be combined
-            /// with a request body.
+            /// Send HEAD and print the response headers only; with -o the file
+            /// holds them. Cannot be combined with a request body.
             #[arg(short = 'I', long)]
             head: bool,
 
             /// Write the body to this path in the shell's filesystem instead of
             /// stdout. Required for a binary response, which stdout cannot carry.
+            /// '-' means stdout. An unwritable path exits 23.
             #[arg(short = 'o', long)]
             output: Option<String>,
 
+            /// Resume the -o or -O file: send 'Range: bytes=<size>-' and append the
+            /// 206 body. Only the value '-' (the file's size) is accepted. A
+            /// missing or empty file downloads from the start. A 416 exits 0
+            /// with the file as it was; a 200 or any other status exits 33 and
+            /// leaves the file alone. Needs -o or -O; exits 2 with -i, -I or
+            /// -H Range.
+            #[arg(short = 'C', long)]
+            continue_at: Option<String>,
+
+            /// Write the body to a file named after the last segment of the URL
+            /// path, in the current directory, replacing any file of that name.
+            /// The name is not percent-decoded. A URL with no segment, or
+            /// together with -o, exits 2. -J is refused.
+            #[arg(short = 'O', long)]
+            remote_name: bool,
+
+            /// Put the -o or -O file in this directory, which must exist (exit
+            /// 23 when it does not). Exits 2 without -o or -O.
+            #[arg(long)]
+            output_dir: Option<String>,
+
             /// Follow redirects; off by default. Every hop is checked against
             /// the embedder's egress policy, and user/password are dropped when
-            /// the host changes.
+            /// the host changes. A 301/302/303 turns a POST into a GET and drops
+            /// the body; 307/308 keep both.
             #[arg(short = 'L', long)]
             location: bool,
 
             /// Stop after this many redirects. Default 50, and the embedder's
-            /// own ceiling still applies. Exceeding it exits 47.
+            /// own ceiling still applies. -1 sets no cap of your own. Exceeding
+            /// the cap exits 47.
             #[arg(long)]
-            max_redirs: Option<u32>,
+            max_redirs: Option<i64>,
 
             /// Basic auth, 'user' or 'user:password'. Dropped on a redirect to a
             /// different host.
@@ -101,18 +152,45 @@ impl CurlTool {
             #[arg(short = 'A', long)]
             user_agent: Option<String>,
 
+            /// Do not print a progress meter. This build has none, so it changes
+            /// nothing; errors still print.
+            #[arg(short = 's', long)]
+            silent: bool,
+
+            /// Print errors even under -s. This build always does.
+            #[arg(short = 'S', long)]
+            show_error: bool,
+
             /// Set the Referer header.
             #[arg(short = 'e', long)]
             referer: Option<String>,
 
             /// Exit 22 on an HTTP status of 400 or more instead of printing the
-            /// body. Without it, any status is exit 0 and the body prints.
+            /// body, which is not read. Without it, any status is exit 0 and the
+            /// body prints.
             #[arg(short = 'f', long)]
             fail: bool,
 
-            /// Give up after this many seconds. Default 30; may lower the
-            /// embedder's ceiling, never raise it. Exceeding it exits 28.
+            /// Like --fail, but print the response body too (to stdout, or to
+            /// the --output file) before exiting 22.
             #[arg(long)]
+            fail_with_body: bool,
+
+            /// After the body, print this text on stdout. Variables:
+            /// %{http_code}, %{response_code}, %{time_total} (seconds, six
+            /// decimals), %{size_download}, %{url_effective}, %{content_type},
+            /// %{redirect_url}, %{num_redirects}. Escapes: \n \r \t and
+            /// %% for a percent sign; any other backslash and the character
+            /// after it print as typed. Also printed when the request fails,
+            /// with 000 for the code. Any other variable exits 2. Cannot be combined
+            /// with --json.
+            #[arg(short = 'w', long)]
+            write_out: Option<String>,
+
+            /// Give up after this many seconds. Default 30; may lower the
+            /// embedder's ceiling, never raise it. 0 sets no limit of your own.
+            /// Exceeding it exits 28.
+            #[arg(short = 'm', long)]
             max_time: Option<f64>,
 
             /// Connect to this filesystem socket instead of the URL's host,
@@ -127,8 +205,8 @@ impl CurlTool {
             insecure: bool,
 
             /// Give up on connecting after this many seconds. No connect-phase
-            /// limit of its own by default; --max-time still bounds the whole
-            /// request. Exceeding it exits 28.
+            /// limit of its own by default, and 0 keeps it that way; --max-time
+            /// still bounds the whole request. Exceeding it exits 28.
             #[arg(long)]
             connect_timeout: Option<f64>,
         }
@@ -190,20 +268,52 @@ impl Tool for CurlTool {
             Err(err) => return failure(err),
         };
 
-        let output_file = req.output_file.clone();
-        let include_headers = req.include_headers;
-        let head_only = req.head_only;
+        // Read the files the command line names (`-d @file`, ...) through the
+        // VFS, inside the byte budget, before any request is made.
+        let mut req = req;
+        if let Err(err) =
+            crate::input::prepare(&mut req, &*ctx, self.config.limits().max_response_bytes).await
+        {
+            return failure(err);
+        }
 
+        let output_file = req.output_file.clone();
+        let output_dir = req.output_dir.clone();
+        let resume_from = req.resume_from;
+        let render = Render {
+            include_headers: req.include_headers,
+            head_only: req.head_only,
+            json_output: req.json_output,
+            fail_on_error: req.fail_on_error,
+            fail_with_body: req.fail_with_body,
+            write_out: req.write_out.clone(),
+        };
+
+        // `-w` still prints when no response came, with `000` for the code, as
+        // in curl; a script that branches on `%{http_code}` needs the
+        // answer on the failure path most of all.
+        let unanswered = req.write_out.clone().map(|w| (w, req.url.clone()));
+
+        let started = std::time::Instant::now();
         let result = crate::util::block_in_place_compat(move || {
             crate::backend::fetch(&req, &self.config)
         });
+        let elapsed = started.elapsed();
 
         match result {
-            Ok(response) => {
-                handle_success(output_file.as_deref(), response, include_headers, head_only, ctx)
-                    .await
+            Ok(response) => handle_success(output_file.as_deref(), output_dir.as_deref(), resume_from, response, render, elapsed, ctx).await,
+            Err(err) => {
+                let mut r = error_result(err);
+                if let Some((w, url)) = unanswered {
+                    let text = w.render(&crate::model::Response::unanswered(url), elapsed);
+                    let err_text = std::mem::take(&mut r.err);
+                    let code = r.code;
+                    r = ExecResult::with_output(OutputData::text(text));
+                    r.code = code;
+                    r.err = err_text;
+                }
+                r
             }
-            Err(err) => error_result(err),
         }
     }
 }
@@ -219,7 +329,7 @@ Reaches only hosts the embedder permits; flags this build cannot honor are refus
 ///
 /// Chosen for the shapes an agent actually types, not for flag coverage: read
 /// an API, post JSON, authenticate, save a file, branch on the result.
-const EXAMPLES: [(&str, &str); 6] = [
+const EXAMPLES: [(&str, &str); 7] = [
     ("Fetch a URL", "curl https://api.example.com/status"),
     (
         "Post JSON and read the reply",
@@ -228,6 +338,7 @@ const EXAMPLES: [(&str, &str); 6] = [
     ("Authenticate", "curl -u alice:secret https://api.example.com/private"),
     ("See the response headers too", "curl -i https://api.example.com/status"),
     ("Save the body to a file", "curl -o /tmp/page.html https://example.com/"),
+    ("Save under the name in the URL", "curl -O https://example.com/files/report.pdf"),
     (
         "Branch on the response without re-parsing text",
         "curl --json https://api.example.com/status | jq -r .status",
@@ -317,7 +428,19 @@ fn failure(err: CurlError) -> ExecResult {
     r
 }
 
-/// Render the response to stdout, or write it to a VFS path for `-o`.
+/// How to present one response: the flags that shape stdout, the file, and
+/// the exit code.
+struct Render {
+    include_headers: bool,
+    head_only: bool,
+    json_output: bool,
+    fail_on_error: bool,
+    fail_with_body: bool,
+    write_out: Option<crate::write_out::WriteOut>,
+}
+
+/// Render the response to stdout, or write it to a VFS path for `-o`, then
+/// apply `-f` / `--fail-with-body` and `-w`.
 ///
 /// `-o` goes through `ToolCtx::resolve_path` + `backend().write()`, never
 /// `std::fs`. Writing to the host filesystem would let `curl -o /etc/passwd`
@@ -325,11 +448,130 @@ fn failure(err: CurlError) -> ExecResult {
 /// paths, applied to the one flag that produces a path.
 async fn handle_success(
     output_file: Option<&str>,
+    output_dir: Option<&str>,
+    resume_from: Option<u64>,
     response: crate::model::Response,
-    include_headers: bool,
-    head_only: bool,
+    render: Render,
+    elapsed: std::time::Duration,
     ctx: &mut dyn ToolCtx,
 ) -> ExecResult {
+    let status = response.status;
+    let failed = status >= 400 && (render.fail_on_error || render.fail_with_body);
+    let write_out_text = render
+        .write_out
+        .as_ref()
+        .map(|w| w.render(&response, elapsed))
+        .unwrap_or_default();
+    let failure = || CurlError::HttpFailure { status };
+
+    // `-C -` and a 416: the server has no bytes past the end of the file,
+    // which curl takes to mean the file is whole. Nothing is written, and the
+    // exit is 0 even under `-f`.
+    if resume_from.is_some() && status == 416 {
+        return ExecResult::success(write_out_text);
+    }
+
+    // `-f`: the body is dropped, the exit is 22, and `-w` still prints, as
+    // in curl. Nothing is written to the `-o` file.
+    if failed && !render.fail_with_body {
+        let mut r = ExecResult::success(write_out_text);
+        r.code = failure().exit_code();
+        r.err = failure().to_string();
+        return r;
+    }
+
+    let mut result = match (resume_from, output_file) {
+        (Some(from), Some(path)) => resume_append(path, from, response, ctx).await,
+        _ => deliver(output_file, output_dir, response, &render, ctx).await,
+    };
+    if result.code != 0 {
+        return result;
+    }
+    if !write_out_text.is_empty() {
+        let body = result.text_out().into_owned();
+        // Replace the output rather than append to it, so the result keeps one
+        // text channel. `--json` is refused with `-w`, so `.data` is unset.
+        let mut with_w = ExecResult::with_output(OutputData::text(format!("{body}{write_out_text}")));
+        with_w.baggage = std::mem::take(&mut result.baggage);
+        result = with_w;
+    }
+    if failed {
+        // `--fail-with-body`: the body is out; the exit still says it failed.
+        result.code = failure().exit_code();
+        result.err = failure().to_string();
+    }
+    result
+}
+
+/// `-C -`: append the body to the file, if and only if the server answered
+/// with exactly the bytes that follow it. Anything else leaves the file as it
+/// was, because appending a whole body or an error page to a partial file
+/// corrupts it.
+async fn resume_append(
+    path: &str,
+    from: u64,
+    response: crate::model::Response,
+    ctx: &mut dyn ToolCtx,
+) -> ExecResult {
+    let status = response.status;
+    let unchanged = |why: String| {
+        error_result(CurlError::Range(format!(
+            "{why}. '{path}' was left unchanged. Re-run without '-C -' to download it again."
+        )))
+    };
+    if status == 200 {
+        return unchanged(
+            "the server ignored the Range request (it answered 200, not 206) and does not seem to support byte ranges, so the download cannot resume".to_string(),
+        );
+    }
+    if status != 206 {
+        return unchanged(format!(
+            "the request for bytes {from}- was answered {status}, not 206"
+        ));
+    }
+    let starts_at = response
+        .headers
+        .get("content-range")
+        .and_then(|v| v.first())
+        .and_then(|v| v.strip_prefix("bytes "))
+        .and_then(|v| v.split_once('-'))
+        .and_then(|(start, _)| start.trim().parse::<u64>().ok());
+    if starts_at != Some(from) {
+        return unchanged(format!(
+            "the server's Content-Range ({}) does not start at byte {from}",
+            response
+                .headers
+                .get("content-range")
+                .and_then(|v| v.first())
+                .map_or("missing", String::as_str)
+        ));
+    }
+    let vfs_path = ctx.resolve_path(path);
+    if let Err(err) = ctx.backend().append(&vfs_path, &response.body).await {
+        return error_result(CurlError::WriteFailed {
+            path: vfs_path.display().to_string(),
+            reason: err.to_string(),
+        });
+    }
+    let mut result = ExecResult::success("");
+    result.baggage.insert("curl.bytes".to_string(), response.body.len().to_string());
+    result.baggage.insert("curl.file".to_string(), vfs_path.display().to_string());
+    result.baggage.insert("curl.url".to_string(), response.url);
+    result.baggage.insert("curl.status".to_string(), status.to_string());
+    result
+}
+
+/// Put the body where the caller asked: stdout, or a VFS path for `-o`.
+async fn deliver(
+    output_file: Option<&str>,
+    output_dir: Option<&str>,
+    response: crate::model::Response,
+    render: &Render,
+    ctx: &mut dyn ToolCtx,
+) -> ExecResult {
+    let include_headers = render.include_headers;
+    let head_only = render.head_only;
+    let json_output = render.json_output;
     let status = response.status;
     let url = response.url.clone();
 
@@ -339,7 +581,7 @@ async fn handle_success(
         // response. Say what it is and where it can go intact instead
         // (CU41) — `-o` writes the bytes through the VFS unchanged, and
         // `--json` base64s them.
-        if !head_only && std::str::from_utf8(&response.body).is_err() {
+        if !head_only && !json_output && std::str::from_utf8(&response.body).is_err() {
             return error_result(CurlError::Transport(format!(
                 "the response from {url} is {} bytes of binary, which cannot be printed. \
                  Save it with '-o <path>', or use '--json' to receive it base64-encoded.",
@@ -348,37 +590,65 @@ async fn handle_success(
         }
         // curl prints headers for `-I` whether or not `-i` was given.
         let text = crate::render::render_text(&response, include_headers || head_only, head_only);
-        let json_obj = crate::render::render_json(&response);
 
         let mut result = ExecResult::with_output(OutputData::text(text));
-        result.data = Some(Value::Json(json_obj));
+        // The structured value goes on the result only under `--json`, where
+        // the output is that envelope. A pipe hands the next tool `.data` in
+        // place of the text, so setting it on a plain response made
+        // `curl URL | jq .name` read the envelope and print `null` (survey
+        // SW-1). `$(curl ...)` binds text either way (X6).
+        if json_output {
+            result.data = Some(Value::Json(crate::render::render_json(&response)));
+        }
         result.baggage.insert("curl.url".to_string(), url);
         result.baggage.insert("curl.status".to_string(), status.to_string());
         return result;
     };
 
-    // With `-i`, headers go into the file alongside the body — curl's
-    // behavior, and what docs/curl.md's `-o` row promises.
-    let payload = if include_headers {
-        crate::render::render_text(&response, true, head_only).into_bytes()
-    } else {
-        response.body
-    };
+    // `-i` puts the headers in the file ahead of the body, and `-I` puts in
+    // the headers alone — curl's behavior, and what docs/curl.md's `-o` row
+    // promises.
+    let payload = crate::render::render_bytes(&response, include_headers || head_only, head_only);
     let written = payload.len();
 
     let vfs_path = ctx.resolve_path(path);
+    // `--output-dir` must name a directory that exists; the backend would
+    // otherwise create it on write, which is not what curl does.
+    if let Some(dir) = output_dir {
+        let dir_vfs = ctx.resolve_path(dir);
+        match ctx.backend().stat(&dir_vfs).await {
+            Ok(entry) if entry.kind == kaish_types::DirEntryKind::Directory => {}
+            Ok(_) => {
+                return error_result(CurlError::WriteFailed {
+                    path: vfs_path.display().to_string(),
+                    reason: format!("'{dir}' is not a directory"),
+                })
+            }
+            Err(err) => {
+                return error_result(CurlError::WriteFailed {
+                    path: vfs_path.display().to_string(),
+                    reason: format!("the directory '{dir}' is not usable: {err}"),
+                })
+            }
+        }
+    }
     if let Err(err) = ctx
         .backend()
         .write(&vfs_path, &payload, WriteMode::Overwrite)
         .await
     {
-        return error_result(CurlError::Transport(format!(
-            "could not write '{}': {err}",
-            vfs_path.display()
-        )));
+        return error_result(CurlError::WriteFailed {
+            path: vfs_path.display().to_string(),
+            reason: err.to_string(),
+        });
     }
 
-    let mut result = ExecResult::success(format!("Wrote {written} bytes to '{}'", vfs_path.display()));
+    // curl prints nothing on stdout with `-o`; its progress meter goes to
+    // stderr. This build has no meter, so there is nothing to say, and a
+    // confirmation on stdout ran into whatever printed next (survey SW-3).
+    // The size and path stay in the baggage (`curl.bytes`, `curl.file`).
+    let mut result = ExecResult::success("");
+    result.baggage.insert("curl.bytes".to_string(), written.to_string());
     result.baggage.insert("curl.file".to_string(), vfs_path.display().to_string());
     result.baggage.insert("curl.url".to_string(), url);
     result.baggage.insert("curl.status".to_string(), status.to_string());
@@ -469,6 +739,47 @@ mod tests {
                 described.iter().any(|d| d == flag),
                 "the parser honors {flag} and the schema never mentions it — \
                  an agent reading `help curl` would never know to type it"
+            );
+        }
+    }
+
+    /// `HONORED_FLAGS` is a hand-kept mirror, and `-s`/`-S` were accepted by
+    /// the parser for months while absent from both it and the schema. This
+    /// reads the parser's own match arms, so a flag added there without a
+    /// schema entry (or a refusal) fails here, whether or not anyone
+    /// remembered the mirror.
+    #[test]
+    fn every_long_flag_the_parser_matches_is_in_the_schema() {
+        let src = include_str!("args.rs");
+        let start = src.find("pub fn parse_args").expect("parse_args exists");
+        let end = src[start..].find("\nfn resolve_output").expect("resolve_output follows") + start;
+        let mut found: Vec<&str> = Vec::new();
+        let mut rest = &src[start..end];
+        while let Some(at) = rest.find("\"--") {
+            let after = &rest[at + 1..];
+            let Some(close) = after.find('"') else { break };
+            let token = &after[..close];
+            if token.len() > 2 && token.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+                found.push(token);
+            }
+            rest = &after[close + 1..];
+        }
+        // Negative control: the scan really sees flags, including the two
+        // that were missing.
+        assert!(found.len() > 25, "the scan found only {found:?}");
+        for must in ["--silent", "--show-error", "--header"] {
+            assert!(found.contains(&must), "the scan missed {must}: {found:?}");
+        }
+        let schema = tool(CurlConfig::default().with_insecure_permitted(true)).schema();
+        let described: Vec<String> = schema.params.iter().map(|p| format!("--{}", p.name)).collect();
+        for flag in found {
+            // `--json` is kaish's own output flag, handled by the kernel.
+            if flag == "--json" || described.iter().any(|d| d == flag) {
+                continue;
+            }
+            assert!(
+                REFUSED_FLAGS.iter().any(|(f, _)| *f == flag) || flag == "--url",
+                "the parser matches {flag} and `help curl` never mentions it"
             );
         }
     }

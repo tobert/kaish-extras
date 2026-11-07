@@ -46,40 +46,44 @@ pub(crate) const HONORED_FLAGS: &[&str] = &[
     "--data-binary",
     "--data-raw",
     "--data-urlencode",
+    "--form",
+    "--get",
     "--header",
     "--include",
     "--head",
     "--output",
+    "--output-dir",
+    "--remote-name",
     "--location",
     "--max-redirs",
+    "--upload-file",
     "--user",
     "--user-agent",
     "--referer",
     "--fail",
+    "--fail-with-body",
+    "--write-out",
     "--max-time",
     "--connect-timeout",
+    "--continue-at",
     "--unix-socket",
+    "--silent",
+    "--show-error",
 ];
 
-/// Flags refused at parse time, each with the message an agent reads.
-///
-/// Two kinds live here: out of the 80/20 cut (`-O`, `--form`, …), and not
-/// implemented by the backend (`-k`, `--unix-socket`). Both refuse, because
-/// the alternative is a flag that quietly does nothing.
+/// Flags refused at parse time, each with the message an agent reads. They are
+/// out of this build's scope, and a flag that quietly does nothing is worse
+/// than a refusal. (`-k` and `--unix-socket` are not here: they are
+/// implemented, `-k` only where the embedder permits it.)
 pub(crate) const REFUSED_FLAGS: &[(&str, &str)] = &[
-    ("-O", "'-O' is not supported. Use '-o <file>' for an explicit output path."),
+    ("-J", "'-J' is not supported, and no request was sent. A server-chosen filename from Content-Disposition is not trusted. '-O' names the file after the last segment of the URL path, or choose the name with '-o <file>'."),
+    ("--remote-header-name", "'--remote-header-name' is not supported, and no request was sent. A server-chosen filename from Content-Disposition is not trusted. '-O' names the file after the last segment of the URL path, or choose the name with '-o <file>'."),
     ("--compressed", "'--compressed' is not supported. Responses are decompressed already — drop the flag."),
-    ("--form", "'--form' (multipart) is not supported. Use '--data' for application/x-www-form-urlencoded."),
-    ("-F", "'-F' (multipart) is not supported. Use '--data' for application/x-www-form-urlencoded."),
     ("--cookie", "'--cookie' is not supported. Send cookies with '-H Cookie:<value>'."),
     ("-b", "'-b' is not supported. Send cookies with '-H Cookie:<value>'."),
-    ("--verbose", "'--verbose' is not supported. Use '-i' to see response headers; request tracing is not available in this build."),
-    ("-v", "'-v' is not supported. Use '-i' to see response headers; request tracing is not available in this build."),
-    ("--write-out", "'--write-out' is not supported. Use kaish '--json' for a structured response object."),
-    ("-w", "'-w' is not supported. Use kaish '--json' for a structured response object."),
+    ("--verbose", "'--verbose' is not supported, and no request was sent. This build prints no request or connection trace. Use 'curl -i <url>' to print the response headers above the body. The request headers are the ones you set with '-H' plus 'User-Agent: kaish-curl'."),
+    ("-v", "'-v' is not supported, and no request was sent. This build prints no request or connection trace. Use 'curl -i <url>' to print the response headers above the body. The request headers are the ones you set with '-H' plus 'User-Agent: kaish-curl'."),
     ("--retry", "'--retry' is not supported. Retry from the shell: 'for i in 1 2 3; do curl ... && break; done'."),
-    ("--get", "'--get' is not supported. Put the query string in the URL."),
-    ("-G", "'-G' is not supported. Put the query string in the URL."),
     ("--cert", "'--cert' is not supported. Client certificates are not available."),
     ("--key", "'--key' is not supported. Client key files are not available."),
     ("--proxy", "'--proxy' is not supported. Direct connections only."),
@@ -87,6 +91,9 @@ pub(crate) const REFUSED_FLAGS: &[(&str, &str)] = &[
     ("--config", "'--config' is not supported. Pass flags on the command line."),
     ("-K", "'-K' is not supported. Pass flags on the command line."),
     ("--netrc", "'--netrc' is not supported. Use '--user <user[:pass]>' for credentials."),
+    ("--parallel", "'--parallel' is not supported, and no request was sent. This build makes one request per invocation. Run curl once per URL."),
+    ("-Z", "'-Z' (--parallel) is not supported, and no request was sent. This build makes one request per invocation. Run curl once per URL."),
+    ("--next", "'--next' is not supported, and no request was sent. This build makes one request per invocation. Run curl once per URL."),
     ("--resolve", "'--resolve' is not supported. To reach a specific address with a different Host, request the IP and set the header: curl -H 'Host: example.com' http://<ip>/."),
 ];
 
@@ -101,8 +108,34 @@ const DEFAULT_USER_AGENT: &str = "kaish-curl";
 pub struct Request {
     pub url: String,
     pub method: String,
-    /// Body parts, joined with `&` by the backend.
-    pub bodies: Vec<String>,
+    /// `-X` named the method. curl keeps an explicit method across a
+    /// redirect, and derives it again from the request kind when none was
+    /// named.
+    pub method_explicit: bool,
+    /// Lower-cased names of headers the caller removed with `-H 'Name:'`. The
+    /// backend stops adding `Accept` and `User-Agent` for these; the body's
+    /// `Content-Type` was already left out.
+    pub suppressed: Vec<String>,
+    /// The caller set a `Content-Type` with `-H`. One this build added for a
+    /// body goes with the body when a redirect drops it; the caller's stays.
+    pub caller_content_type: bool,
+    /// Body parts, joined with `&`. Files in them are read by `input::prepare`
+    /// (the parser has no filesystem), which fills [`Request::body`].
+    pub bodies: Vec<BodyPart>,
+    /// The request body as it goes on the wire. Empty until `input::prepare`
+    /// has resolved `bodies`; the backend sends this and nothing else.
+    pub body: Vec<u8>,
+    /// `-G`: `bodies` go on the query string instead of in a body.
+    pub get: bool,
+    /// `-F` parts, in order. Files in them are read by `input::prepare`.
+    pub forms: Vec<crate::form::FormPart>,
+    /// `-T`: the file whose bytes are the body, as typed.
+    pub upload_file: Option<String>,
+    /// `-C -`: resume the `-o` / `-O` file from its current size.
+    pub resume: bool,
+    /// The size the file had when `input::prepare` added `Range: bytes=N-`;
+    /// `None` when no Range was sent (no file yet, or an empty one).
+    pub resume_from: Option<u64>,
     /// Header name/value pairs, including the `User-Agent` (the caller's or
     /// [`DEFAULT_USER_AGENT`]) and any `Referer` from `-e`.
     pub headers: Vec<(String, String)>,
@@ -112,6 +145,8 @@ pub struct Request {
     pub head_only: bool,
     /// Write the body to this VFS path instead of stdout (`-o`).
     pub output_file: Option<String>,
+    /// `--output-dir`, as typed. It must exist: the file is written under it.
+    pub output_dir: Option<String>,
     /// Basic auth user; `password` is `None` when the caller gave no `:pass`.
     pub user: Option<String>,
     pub password: Option<String>,
@@ -124,7 +159,12 @@ pub struct Request {
     /// applies regardless.
     pub max_redirects: Option<u32>,
     /// `-f`: fail with exit 22 on status >= 400 instead of printing the body.
+    /// Applied by the tool after the fetch, so `-w` can still print.
     pub fail_on_error: bool,
+    /// `--fail-with-body`: exit 22 on status >= 400, and print the body.
+    pub fail_with_body: bool,
+    /// `-w`: text printed on stdout after the body.
+    pub write_out: Option<crate::write_out::WriteOut>,
     /// Whole-request deadline in seconds. Always set — the `CurlConfig`
     /// default applies when the caller omits `--max-time`, so an agent cannot
     /// hang the embedder by leaving it off. The backend clamps it to the
@@ -139,36 +179,88 @@ pub struct Request {
     /// `-k`: skip TLS certificate verification. Only reachable when the
     /// embedder set `CurlConfig::with_insecure_permitted`; refused otherwise.
     pub insecure: bool,
+    /// kaish's `--json`: the output is the response envelope, so the result
+    /// carries it as structured data. Without it the output is the body text
+    /// and carries no structured data, because a pipe hands the next tool
+    /// that data in place of the text (survey SW-1).
+    pub json_output: bool,
+}
+
+impl Request {
+    /// Whether the request carries a body (and so a `Content-Length`).
+    /// curl sends neither when no data flag was given, and an empty body
+    /// still counts when a flag asked for one (`-d ''`).
+    pub fn sends_body(&self) -> bool {
+        self.upload_file.is_some() || !(self.body.is_empty() && (self.bodies.is_empty() || self.get))
+    }
+}
+
+/// One `-d`-family body part, before any file is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyPart {
+    /// Text to send as it stands (already percent-encoded for
+    /// `--data-urlencode`).
+    Literal(String),
+    /// `-d @path` or `--data-binary @path`.
+    File {
+        /// The path as typed, resolved against the shell's cwd.
+        path: String,
+        /// `-d` removes every CR and LF byte; `--data-binary` keeps them.
+        strip_line_breaks: bool,
+    },
+    /// `--data-urlencode @path` or `name@path`: the file's bytes,
+    /// percent-encoded.
+    EncodedFile {
+        /// Sent before the `=` when given.
+        name: Option<String>,
+        /// The path as typed.
+        path: String,
+    },
 }
 
 /// Short flags that carry no value, and can therefore be written together.
 ///
 /// Refused shorts are here too, so `-kL` refuses `-k` rather than reporting
 /// the whole cluster as unknown.
-const BOOLEAN_SHORTS: &[char] = &['i', 'I', 'f', 'L', 's', 'S', 'k', 'O', 'v', 'G'];
+const BOOLEAN_SHORTS: &[char] = &['i', 'I', 'f', 'L', 's', 'S', 'k', 'O', 'v', 'G', 'J', 'Z'];
 
 /// Short flags that take a value, and so cannot appear inside a cluster.
-const VALUE_SHORTS: &[char] = &['X', 'd', 'H', 'o', 'u', 'A', 'e', 'w', 'b', 'x', 'K', 'F'];
+const VALUE_SHORTS: &[char] = &['X', 'd', 'H', 'o', 'u', 'A', 'e', 'w', 'b', 'x', 'K', 'F', 'm', 'T', 'C'];
 
-/// Expand `-sSL` into `-s -S -L`.
+/// Expand a run of short flags into one token per flag: `-sSL` into
+/// `-s -S -L`, and a value-taking flag's attached value into its own token,
+/// as curl reads it: `-dfoo` into `-d foo`, `-m5` into `-m 5`, `-d=a=1` into
+/// `-d =a=1`, `-sXPUT` into `-s -X PUT`. A value-taking flag at the end of a
+/// run takes the next word, as `-so out.txt` does.
 ///
 /// Agents type `curl -sSL <url>` from muscle memory — it is one of the most
-/// common shapes in the training corpus — and it used to be refused whole as
-/// an unknown flag. Only called at flag position, never on a value: `-d -iL`
-/// is a body, and a preprocessing pass over all of argv could not tell the
-/// difference.
+/// common shapes in the training corpus. Only called at flag position, never
+/// on a value: `-d -iL` is a body, and a preprocessing pass over all of argv
+/// could not tell the difference.
 ///
-/// `None` means this is not a cluster of value-free shorts, and the caller
-/// reports it rather than guessing.
-fn expand_short_cluster(token: &str) -> Option<Vec<String>> {
+/// `None` means a letter in the run is not a short flag this build knows, and
+/// the caller reports it rather than guessing.
+fn expand_short_run(token: &str) -> Option<Vec<String>> {
     let body = token.strip_prefix('-')?;
     if body.starts_with('-') || body.chars().count() < 2 {
         return None;
     }
-    if !body.chars().all(|c| BOOLEAN_SHORTS.contains(&c)) {
-        return None;
+    let mut out = Vec::new();
+    for (at, c) in body.char_indices() {
+        if BOOLEAN_SHORTS.contains(&c) {
+            out.push(format!("-{c}"));
+        } else if VALUE_SHORTS.contains(&c) {
+            out.push(format!("-{c}"));
+            let attached = &body[at + c.len_utf8()..];
+            if !attached.is_empty() {
+                out.push(attached.to_string());
+            }
+            return Some(out);
+        } else {
+            return None;
+        }
     }
-    Some(body.chars().map(|c| format!("-{c}")).collect())
+    Some(out)
 }
 
 /// Split a `--flag=value` token, which is the one composed shape the kaish
@@ -187,8 +279,10 @@ fn split_inline_value(token: &str) -> (&str, Option<&str>) {
 pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlError> {
     let mut argv = trim_argv(args)?;
 
-    let mut bodies: Vec<String> = Vec::new();
+    let mut bodies: Vec<BodyPart> = Vec::new();
     let mut headers: Vec<(String, String)> = Vec::new();
+    // Lower-cased names of headers `-H 'Name:'` removed.
+    let mut suppressed: Vec<String> = Vec::new();
     let mut output_file: Option<String> = None;
     let mut user: Option<String> = None;
     let mut password: Option<String> = None;
@@ -202,14 +296,20 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     let mut include_headers = false;
     let mut head_only = false;
     let mut fail_on_error = false;
+    let mut fail_with_body = false;
+    let mut write_out: Option<crate::write_out::WriteOut> = None;
     let mut follow_redirects = false;
     let mut insecure = false;
     let mut unix_socket: Option<String> = None;
+    let mut json_output = false;
+    let mut get = false;
+    let mut resume = false;
+    let mut upload_file: Option<String> = None;
+    let mut remote_name = false;
+    let mut output_dir: Option<String> = None;
+    let mut forms: Vec<crate::form::FormPart> = Vec::new();
 
-    // Only `-d`/`--data`/`--data-urlencode` imply a form Content-Type; real
-    // curl sends none for `--data-binary`/`--data-raw`, so declaring
-    // `--data-binary '{"a":1}'` as form-urlencoded was a lie about the bytes
-    // on the wire (CU40).
+    // Every `-d`-family flag implies the form Content-Type, as in curl.
     let mut body_implies_form = false;
 
     let mut i = 0;
@@ -220,7 +320,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         let inline = inline.map(str::to_string);
 
         if let Some((_, message)) = REFUSED_FLAGS.iter().find(|(f, _)| *f == flag) {
-            return Err(CurlError::Transport((*message).to_string()));
+            return Err(CurlError::Usage((*message).to_string()));
         }
 
         // Consume this flag's value: the inline half of `--flag=value`, or the
@@ -233,50 +333,60 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             }
             *i += 1;
             argv.get(*i).cloned().ok_or_else(|| {
-                CurlError::Transport(format!("'{flag}' requires a value, and none followed it."))
+                CurlError::Usage(format!("'{flag}' requires a value, and none followed it."))
             })
         };
 
-        match argv[i].as_str().split('=').next().unwrap_or(&argv[i]) {
+        // `--flag=value` names its flag before the `=`; a short flag's
+        // attached value (`-d=a=1`) is part of the token, and is split off by
+        // `expand_short_run` below.
+        let key = if argv[i].starts_with("--") {
+            argv[i].split('=').next().unwrap_or(&argv[i])
+        } else {
+            argv[i].as_str()
+        };
+        match key {
             "-d" | "--data" | "--data-binary" | "--data-raw" => {
-                let raw = argv_flag == "--data-raw";
                 let val = value(&mut i)?;
-                // `--data-raw` takes `@` literally; the others would read a
-                // file, which is deferred (CU5).
-                if !raw && val.starts_with('@') {
-                    return Err(CurlError::Transport(
-                        "'@path' body syntax is not supported. Read a file with 'cat <path>' and pipe it into curl --data-binary -."
-                            .into(),
-                    ));
-                }
-                if matches!(argv_flag.as_str(), "-d" | "--data") {
-                    body_implies_form = true;
-                }
-                bodies.push(val);
+                // curl sends the form Content-Type for every one of these, the
+                // `--data-binary` and `--data-raw` spellings included (checked
+                // against curl 8.23 on a loopback server; CU40 had assumed it
+                // did not).
+                body_implies_form = true;
+                bodies.push(data_part(&argv_flag, val)?);
             }
             "--data-urlencode" => {
                 let val = value(&mut i)?;
-                if val.starts_with('@') || (val.contains('@') && !val.contains('=')) {
-                    return Err(CurlError::Transport(
-                        "'--data-urlencode' file forms ('@file', 'name@file') are not supported. Pass 'name=value' instead."
-                            .into(),
-                    ));
-                }
                 body_implies_form = true;
-                bodies.push(urlencode_pair(&val));
+                bodies.push(urlencode_part(&val)?);
             }
             "-H" | "--header" => {
                 let hv = value(&mut i)?;
-                let Some((name, v)) = hv.split_once(':') else {
-                    return Err(CurlError::Transport(format!(
-                        "'-H {hv}' is not a header. Headers are 'Name: value'."
-                    )));
-                };
-                let name = name.trim();
-                if name.eq_ignore_ascii_case("user-agent") {
-                    user_agent = Some(v.trim().to_string());
+                // `Name: value` sets a header; `Name:` removes one the client
+                // would add itself (`Accept`, `User-Agent`, a body's
+                // `Content-Type`); `Name;` sends `Name` with no value. A bare
+                // `Name` is curl's silent no-op, which this build refuses.
+                if let Some((name, v)) = hv.split_once(':') {
+                    let (name, v) = (name.trim(), v.trim());
+                    if name.eq_ignore_ascii_case("host") && v.is_empty() {
+                        return Err(CurlError::Usage(
+                            "'-H Host:' cannot remove the Host header (exit 2), and no request was sent. HTTP/1.1 requires one. Set another with '-H \"Host: name\"'."
+                                .into(),
+                        ));
+                    }
+                    if v.is_empty() {
+                        suppressed.push(name.to_ascii_lowercase());
+                    } else if name.eq_ignore_ascii_case("user-agent") {
+                        user_agent = Some(v.to_string());
+                    } else {
+                        headers.push((name.to_string(), v.to_string()));
+                    }
+                } else if let Some(name) = hv.strip_suffix(';').map(str::trim).filter(|n| !n.is_empty()) {
+                    headers.push((name.to_string(), String::new()));
                 } else {
-                    headers.push((name.to_string(), v.trim().to_string()));
+                    return Err(CurlError::Usage(format!(
+                        "'-H {hv}' is not a header (exit 2), and no request was sent. Write 'Name: value', 'Name:' to remove a default header, or 'Name;' to send it empty."
+                    )));
                 }
             }
             "-o" | "--output" => output_file = Some(value(&mut i)?),
@@ -294,6 +404,28 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             }
             "-A" | "--user-agent" => user_agent = Some(value(&mut i)?),
             "-e" | "--referer" => referer = Some(value(&mut i)?),
+            "-F" | "--form" => forms.push(crate::form::parse(&value(&mut i)?)?),
+            "-T" | "--upload-file" => {
+                let path = value(&mut i)?;
+                crate::args::refuse_stdin(&path, "-T")?;
+                if let Some(first) = upload_file.replace(path.clone()) {
+                    return Err(CurlError::Usage(format!(
+                        "only one '-T' file per invocation is supported (exit 2), and both '{first}' and '{path}' were given. No request was sent. Run curl once per file."
+                    )));
+                }
+            }
+            "-C" | "--continue-at" => {
+                let offset = value(&mut i)?;
+                if offset != "-" {
+                    return Err(CurlError::Usage(format!(
+                        "'{argv_flag} {offset}' takes only '-' (exit 2), and no request was sent. '-C -' resumes from the size of the '-o' / '-O' file."
+                    )));
+                }
+                resume = true;
+            }
+            "-G" | "--get" => get = true,
+            "-O" | "--remote-name" => remote_name = true,
+            "--output-dir" => output_dir = Some(value(&mut i)?),
             "-i" | "--include" => include_headers = true,
             // curl's `-s` also silences *error* messages; this build always
             // reports errors, because an agent that cannot see a failure
@@ -302,10 +434,12 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             "-s" | "--silent" | "-S" | "--show-error" => {}
             "-I" | "--head" => head_only = true,
             "-f" | "--fail" => fail_on_error = true,
+            "--fail-with-body" => fail_with_body = true,
+            "-w" | "--write-out" => write_out = Some(crate::write_out::parse(&value(&mut i)?)?),
             "-L" | "--location" => follow_redirects = true,
             "--unix-socket" => {
                 if cfg!(not(unix)) {
-                    return Err(CurlError::Transport(
+                    return Err(CurlError::Usage(
                         "'--unix-socket' needs a unix-family target, and this build is not one. Reach the service over http:// instead."
                             .into(),
                     ));
@@ -314,7 +448,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             }
             "-k" | "--insecure" => {
                 if !config.insecure_permitted() {
-                    return Err(CurlError::Transport(format!(
+                    return Err(CurlError::Usage(format!(
                         "'{argv_flag}' is not permitted here. This embedder requires TLS certificates to verify; reach the service over http:// instead, or ask the embedder to allow it."
                     )));
                 }
@@ -322,15 +456,21 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             }
             "--max-redirs" => {
                 let raw = value(&mut i)?;
-                max_redirects = Some(raw.parse::<u32>().map_err(|_| {
-                    CurlError::Transport(format!(
-                        "'--max-redirs' wants a whole number of redirects, got '{raw}'."
-                    ))
-                })?);
+                // `-1` is curl's "unlimited": no cap of the caller's own, so
+                // the embedder's ceiling is the only one.
+                max_redirects = match raw.parse::<i64>() {
+                    Ok(-1) => None,
+                    Ok(n) if n >= 0 => Some(u32::try_from(n).unwrap_or(u32::MAX)),
+                    _ => {
+                        return Err(CurlError::Usage(format!(
+                            "'--max-redirs' wants a whole number of redirects, or -1 for no cap of your own (exit 2), got '{raw}'."
+                        )))
+                    }
+                };
             }
-            "--max-time" => max_time = Some(seconds(&value(&mut i)?, "--max-time")?),
+            "-m" | "--max-time" => max_time = seconds(&value(&mut i)?, &argv_flag)?,
             "--connect-timeout" => {
-                connect_timeout = Some(seconds(&value(&mut i)?, "--connect-timeout")?)
+                connect_timeout = seconds(&value(&mut i)?, "--connect-timeout")?
             }
             // kaish's global output flag, not curl's request-body `--json`
             // (CU16). The kernel has already applied it via
@@ -338,7 +478,7 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
             // raw-argv case — it reaches us only because a raw_argv binder
             // lifts nothing out of source order. Consume and move on;
             // refusing it as unknown would break `curl --json <url> | jq`.
-            "--json" => {}
+            "--json" => json_output = true,
             // End of options: everything after is an operand.
             "--" => {
                 for token in &argv[i + 1..] {
@@ -347,25 +487,16 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
                 break;
             }
             other if other.starts_with('-') && other.len() > 1 => {
-                if let Some(expanded) = expand_short_cluster(other) {
-                    // Splice the cluster in where it stood, so each flag is
+                if let Some(expanded) = expand_short_run(other) {
+                    // Splice the run in where it stood, so each flag is
                     // read in the position it was written.
                     argv.splice(i..=i, expanded);
                     continue;
                 }
-                if let Some(bad) = other
-                    .strip_prefix('-')
-                    .filter(|b| !b.starts_with('-'))
-                    .and_then(|b| b.chars().find(|c| VALUE_SHORTS.contains(c)))
-                {
-                    return Err(CurlError::Transport(format!(
-                        "'{other}' cannot be written as one word, because '-{bad}' takes a value. Write the flags separately, as in '-s -{bad} <value>'."
-                    )));
-                }
                 // Silently ignoring an unknown flag is the failure mode this
                 // whole surface exists to avoid: the agent believes it asked
                 // for something.
-                return Err(CurlError::Transport(format!(
+                return Err(CurlError::Usage(format!(
                     "'{other}' is not a flag curl accepts here; see `help curl` for the ones it does."
                 )));
             }
@@ -374,9 +505,8 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         i += 1;
     }
 
-    let url = url.ok_or_else(|| CurlError::MalformedUrl {
-        url: "<missing>".into(),
-        reason: "URL is required — one positional argument or --url must specify the target".into(),
+    let url = url.ok_or_else(|| {
+        CurlError::Usage("no URL was given (exit 2), and no request was sent. Pass one as the last argument or with '--url <url>'.".into())
     })?;
 
     if !url.starts_with("http://") && !url.starts_with("https://") {
@@ -386,11 +516,90 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
         });
     }
 
-    if head_only && !bodies.is_empty() {
-        return Err(CurlError::MalformedUrl {
-            url: url.clone(),
-            reason: "--head discards the response body; providing --data is meaningless".into(),
-        });
+    if write_out.is_some() && json_output {
+        return Err(CurlError::Usage(
+            "'-w' cannot be combined with '--json' (exit 2), because '--json' prints the response object and '-w' text would be lost. Read the fields with jq instead: curl --json <url> | jq -r .status"
+                .into(),
+        ));
+    }
+
+    // `-o -` is stdout, as in curl (with `--output-dir` too), not a file
+    // named `-`.
+    if output_file.as_deref() == Some("-") && !remote_name {
+        output_file = None;
+        output_dir = None;
+    } else {
+        output_file = resolve_output(output_file, remote_name, output_dir.clone(), &url)?;
+    }
+
+    if json_output && output_file.is_some() {
+        return Err(CurlError::Usage(
+            "'--json' cannot be combined with '-o' or '-O' (exit 2), and no request was sent, because '--json' prints the response object on stdout and a file would hold something else. Save the body with '-o <file>' alone, or print the object with '--json' alone and read it with jq: curl --json <url> | jq -r .body"
+                .into(),
+        ));
+    }
+
+    if resume {
+        let problem = if output_file.is_none() {
+            Some("needs '-o <file>' or '-O', because it resumes that file (curl would silently start over)")
+        } else if include_headers || head_only {
+            Some("cannot be combined with '-i' or '-I', because headers would be written into the middle of the file")
+        } else if headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("range")) {
+            Some("sets the Range header itself, so '-H Range: ...' cannot be combined with it")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            return Err(CurlError::Usage(format!(
+                "'-C -' {problem} (exit 2), and no request was sent."
+            )));
+        }
+    }
+
+    if upload_file.is_some() {
+        // curl refuses -d, -F and -I with -T too (exit 2); it accepts -G and
+        // ignores it, which would be a quiet difference here.
+        let with = if !bodies.is_empty() {
+            Some("a data flag ('-d', '--data-binary', '--data-raw', '--data-urlencode')")
+        } else if !forms.is_empty() {
+            Some("'-F'")
+        } else if get {
+            Some("'-G'")
+        } else if head_only {
+            Some("'-I'")
+        } else {
+            None
+        };
+        if let Some(with) = with {
+            return Err(CurlError::Usage(format!(
+                "'-T' cannot be combined with {with} (exit 2), and no request was sent. A request has one body."
+            )));
+        }
+    }
+
+    if !forms.is_empty() {
+        // curl refuses these mixes too (exit 2).
+        let with = if !bodies.is_empty() {
+            Some("a data flag ('-d', '--data-binary', '--data-raw', '--data-urlencode')")
+        } else if get {
+            Some("'-G'")
+        } else if head_only {
+            Some("'-I'")
+        } else {
+            None
+        };
+        if let Some(with) = with {
+            return Err(CurlError::Usage(format!(
+                "'-F' cannot be combined with {with} (exit 2), and no request was sent. A request has one body: multipart from '-F', or the data flags."
+            )));
+        }
+    }
+
+    if head_only && !get && !bodies.is_empty() {
+        return Err(CurlError::Usage(
+            "'-I' (--head) cannot be combined with a data flag (exit 2), and no request was sent, because '-I' discards the response body and a HEAD carries no request body. Drop '-I', or add '-G' to send the data on the query string."
+                .into(),
+        ));
     }
 
     if let Some(r) = referer {
@@ -398,87 +607,219 @@ pub fn parse_args(args: &ToolArgs, config: &CurlConfig) -> Result<Request, CurlE
     }
     // docs/curl.md's `-d` row: a body implies form encoding unless the caller
     // named a Content-Type themselves.
-    if body_implies_form
-        && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-    {
+    let caller_content_type = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+    if body_implies_form && !get && !caller_content_type && !suppressed.iter().any(|n| n == "content-type") {
         headers.push((
             "Content-Type".to_string(),
             "application/x-www-form-urlencoded".to_string(),
         ));
     }
-    headers.push((
-        "User-Agent".to_string(),
-        user_agent.unwrap_or_else(|| DEFAULT_USER_AGENT.to_string()),
-    ));
+    if !suppressed.iter().any(|n| n == "user-agent") || user_agent.is_some() {
+        headers.push((
+            "User-Agent".to_string(),
+            user_agent.unwrap_or_else(|| DEFAULT_USER_AGENT.to_string()),
+        ));
+    }
 
+    let method_explicit = method_override.is_some();
     let method = match method_override {
         Some(m) => m,
         None if head_only => "HEAD".to_string(),
-        None if !bodies.is_empty() => "POST".to_string(),
+        None if (!bodies.is_empty() && !get) || !forms.is_empty() => "POST".to_string(),
+        None if upload_file.is_some() => "PUT".to_string(),
         None => "GET".to_string(),
     };
 
     Ok(Request {
         url,
         method,
+        method_explicit,
+        caller_content_type,
+        suppressed,
         bodies,
+        body: Vec::new(),
+        get,
+        forms,
+        upload_file,
+        resume,
+        resume_from: None,
         headers,
         include_headers,
         head_only,
         output_file,
+        output_dir,
         user,
         password,
         follow_redirects,
         max_redirects,
         fail_on_error,
+        fail_with_body,
+        write_out,
         max_time: max_time.unwrap_or_else(|| config.limits().max_time),
         connect_timeout,
         insecure,
         unix_socket,
+        json_output,
     })
+}
+
+/// Decide where the body goes: `-o`, or `-O`'s name from the URL, under
+/// `--output-dir` when given. The name is one segment of the URL path, so it
+/// cannot name a directory above the output directory.
+fn resolve_output(
+    output: Option<String>,
+    remote_name: bool,
+    dir: Option<String>,
+    url: &str,
+) -> Result<Option<String>, CurlError> {
+    let name = match (output, remote_name) {
+        (Some(_), true) => {
+            return Err(CurlError::Usage(
+                "'-O' and '-o' both name the output file (exit 2), and no request was sent. Use one: '-O' for the last segment of the URL path, or '-o <file>'.".into(),
+            ))
+        }
+        (Some(file), false) => file,
+        (None, true) => remote_file_name(url)?,
+        (None, false) => {
+            if dir.is_some() {
+                return Err(CurlError::Usage(
+                    "'--output-dir' has no effect without '-o' or '-O' (exit 2), and no request was sent. Add '-O', or '-o <file>'.".into(),
+                ));
+            }
+            return Ok(None);
+        }
+    };
+    Ok(Some(match dir {
+        Some(d) => format!("{}/{name}", d.trim_end_matches('/')),
+        None => name,
+    }))
+}
+
+/// `-O`'s file name: the last non-empty segment of the URL path, query and
+/// fragment excluded, and not percent-decoded (curl 8.23 does not decode it
+/// either). curl falls back to `curl_response` when there is none; this build
+/// refuses, because a name nobody chose is a name nobody will find.
+fn remote_file_name(url: &str) -> Result<String, CurlError> {
+    let parsed = url::Url::parse(url).map_err(|e| CurlError::MalformedUrl {
+        url: url.to_string(),
+        reason: e.to_string(),
+    })?;
+    let name = parsed
+        .path_segments()
+        .and_then(|mut segments| segments.rfind(|s| !s.is_empty()))
+        .unwrap_or_default();
+    if name.is_empty() || name == "." || name == ".." || name.contains('\\') {
+        return Err(CurlError::Usage(format!(
+            "'-O' found no file name in '{url}' (exit 2), and no request was sent. The name is the last segment of the URL path. Choose one with '-o <file>'."
+        )));
+    }
+    Ok(name.to_string())
 }
 
 /// One URL per invocation, and say so rather than fetching the first and
 /// ignoring the rest.
+///
+/// A word that opens with `{` or `[` is almost always a JSON body typed for
+/// curl's own `--json <data>`, which kaish's global `--json` took the place
+/// of; saying so is more use than "only one URL".
 fn set_once(existing: Option<String>, candidate: String) -> Result<String, CurlError> {
+    if looks_like_json_body(&candidate) {
+        return Err(CurlError::Usage(format!(
+            "'{candidate}' is not a valid http or https URL; it looks like a request body (exit 2), and no request was sent. \
+             '--json' here is kaish's output flag, not curl's request-body shorthand. Put the body in '--data <body>' and the URL last, or send JSON with \
+             '-H Content-Type:application/json --data <body>'."
+        )));
+    }
     match existing {
-        Some(first) => Err(CurlError::Transport(format!(
+        Some(first) => Err(CurlError::Usage(format!(
             "only one URL per invocation is supported, and both '{first}' and '{candidate}' were given. Run curl once per URL."
         ))),
         None => Ok(candidate),
     }
 }
 
-/// Parse a seconds value, naming the flag when it isn't a number.
-fn seconds(raw: &str, flag: &str) -> Result<f64, CurlError> {
-    raw.parse::<f64>()
+fn looks_like_json_body(word: &str) -> bool {
+    let w = word.trim_start();
+    w.starts_with('{') || w.starts_with('[')
+}
+
+/// Parse a seconds value, naming the flag when it isn't a number. `0` is
+/// curl's "no timeout": `None`, meaning no limit of the caller's own, so the
+/// embedder's ceiling still applies.
+fn seconds(raw: &str, flag: &str) -> Result<Option<f64>, CurlError> {
+    let n = raw
+        .parse::<f64>()
         .ok()
-        .filter(|s| *s > 0.0 && s.is_finite())
+        .filter(|s| *s >= 0.0 && s.is_finite())
         .ok_or_else(|| {
-            CurlError::Transport(format!(
-                "'{flag}' wants a positive number of seconds, got '{raw}'."
+            CurlError::Usage(format!(
+                "'{flag}' wants a number of seconds, 0 or more (exit 2), got '{raw}'. 0 means no limit of your own; the embedder's ceiling still applies."
             ))
-        })
+        })?;
+    Ok((n > 0.0).then_some(n))
 }
 
-/// Percent-encode the value half of a `name=value` pair, leaving the name and
-/// the `=` alone (docs/curl.md's `--data-urlencode` row). A bare value with no
-/// `=` is encoded whole, as curl does.
-fn urlencode_pair(raw: &str) -> String {
-    match raw.split_once('=') {
-        Some((name, value)) => format!("{name}={}", percent_encode(value)),
-        None => percent_encode(raw),
+/// What `-d`, `--data`, `--data-binary` and `--data-raw` take as a value.
+///
+/// A leading `@` names a file, except under `--data-raw`. `-d` strips every CR
+/// and LF from the file; `--data-binary` keeps the bytes. A bare `-` is the
+/// one-character body `-` in curl, so it is one here.
+fn data_part(flag: &str, val: String) -> Result<BodyPart, CurlError> {
+    let Some(path) = val.strip_prefix('@').filter(|_| flag != "--data-raw") else {
+        return Ok(BodyPart::Literal(val));
+    };
+    refuse_stdin(path, flag)?;
+    Ok(BodyPart::File {
+        path: path.to_string(),
+        strip_line_breaks: flag != "--data-binary",
+    })
+}
+
+/// `--data-urlencode`, in curl's grammar: `content`, `=content`,
+/// `name=content`, `@file`, `name@file`. The first `=` or `@` decides which.
+/// The name is sent as typed, so it has to be encoded already.
+fn urlencode_part(raw: &str) -> Result<BodyPart, CurlError> {
+    let Some(at) = raw.find(['=', '@']) else {
+        return Ok(BodyPart::Literal(percent_encode(raw)));
+    };
+    let (name, rest) = (&raw[..at], &raw[at + 1..]);
+    let name = (!name.is_empty()).then(|| name.to_string());
+    if raw.as_bytes()[at] == b'@' {
+        refuse_stdin(rest, "--data-urlencode")?;
+        return Ok(BodyPart::EncodedFile { name, path: rest.to_string() });
     }
+    let encoded = percent_encode(rest);
+    Ok(BodyPart::Literal(match name {
+        Some(n) => format!("{n}={encoded}"),
+        None => encoded,
+    }))
 }
 
-/// Percent-encode everything outside RFC 3986's unreserved set.
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
+/// A file operand of `-`, as in `-d @-`, means stdin in curl. A tool cannot
+/// read its stdin through `ToolCtx` (kaish-tool-api 0.18), so refuse it
+/// rather than read nothing and send an empty body.
+pub(crate) fn refuse_stdin(path: &str, flag: &str) -> Result<(), CurlError> {
+    if path == "-" {
+        return Err(CurlError::Usage(format!(
+            "'{flag} @-' (a request body from stdin) is not supported, and no request was sent. \
+             Write the input to a file first and name it: curl {flag} @<path> <url>"
+        )));
+    }
+    Ok(())
+}
+
+/// Percent-encode everything outside RFC 3986's unreserved set, with a space
+/// as `+`. That is curl's `--data-urlencode` form (checked against curl 8.23),
+/// and the one a form-urlencoded body expects.
+pub(crate) fn percent_encode(s: impl AsRef<[u8]>) -> String {
+    let bytes = s.as_ref();
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(b as char)
             }
+            b' ' => out.push('+'),
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -502,7 +843,7 @@ fn trim_argv(args: &ToolArgs) -> Result<Vec<String>, CurlError> {
             Value::Bool(b) => Ok(b.to_string()),
             // A structured or binary value has no argv spelling. Refusing
             // beats picking one and pretending the caller meant it.
-            other => Err(CurlError::Transport(format!(
+            other => Err(CurlError::Usage(format!(
                 "an argument of this kind cannot be part of a command line: {other:?}. Pass a string."
             ))),
         })
@@ -596,7 +937,7 @@ mod tests {
     #[test]
     fn data_urlencode_encodes_only_the_value() {
         let req = parse(&["--data-urlencode", "q=a b&c", "http://x.com"]);
-        assert_eq!(req.bodies, vec!["q=a%20b%26c".to_string()]);
+        assert_eq!(req.bodies, vec![BodyPart::Literal("q=a+b%26c".to_string())]);
         assert_eq!(req.method, "POST");
     }
 
@@ -611,10 +952,16 @@ mod tests {
     }
 
     #[test]
-    fn at_file_body_is_refused_not_silently_dropped() {
-        let err = parse_args(&argv(&["-d", "@/etc/passwd", "http://x.com"]), &CurlConfig::default())
-            .expect_err("@file bodies are deferred and must refuse");
-        assert!(format!("{err}").contains("@path"), "message should name the syntax: {err}");
+    fn at_file_body_is_a_file_part_not_text() {
+        let req = parse(&["-d", "@/work/p", "--data-binary", "@q", "--data-raw", "@r", "http://x.com"]);
+        assert_eq!(
+            req.bodies,
+            vec![
+                BodyPart::File { path: "/work/p".into(), strip_line_breaks: true },
+                BodyPart::File { path: "q".into(), strip_line_breaks: false },
+                BodyPart::Literal("@r".into()),
+            ]
+        );
     }
 
     #[test]
@@ -672,11 +1019,11 @@ mod tests {
         // The old pre-scan swept all of argv for booleans, so `-d "-i"` set
         // --include and `-d "-O"` refused a flag nobody typed.
         let req = parse(&["-d", "-i", "http://x.com"]);
-        assert_eq!(req.bodies, vec!["-i".to_string()]);
+        assert_eq!(req.bodies, vec![BodyPart::Literal("-i".to_string())]);
         assert!(!req.include_headers, "a body must not set a flag");
 
         let req = parse(&["-d", "-O", "http://x.com"]);
-        assert_eq!(req.bodies, vec!["-O".to_string()]);
+        assert_eq!(req.bodies, vec![BodyPart::Literal("-O".to_string())]);
 
         // and a value beginning with `-` no longer desyncs the URL search
         let req = parse(&["-d", "-5", "http://x.com"]);
@@ -694,20 +1041,15 @@ mod tests {
     }
 
     #[test]
-    fn only_the_form_body_flags_imply_a_form_content_type() {
-        // Real curl sends no Content-Type for --data-binary/--data-raw.
-        assert_eq!(
-            header(&parse(&["--data-binary", "{\"a\":1}", "http://x.com"]), "content-type"),
-            None
-        );
-        assert_eq!(
-            header(&parse(&["--data-raw", "x", "http://x.com"]), "content-type"),
-            None
-        );
-        assert_eq!(
-            header(&parse(&["-d", "a=1", "http://x.com"]), "content-type"),
-            Some("application/x-www-form-urlencoded")
-        );
+    fn every_data_flag_implies_the_form_content_type_like_curl() {
+        // Checked against curl 8.23: --data-binary and --data-raw send it too.
+        for flag in ["-d", "--data", "--data-binary", "--data-raw", "--data-urlencode"] {
+            assert_eq!(
+                header(&parse(&[flag, "a=1", "http://x.com"]), "content-type"),
+                Some("application/x-www-form-urlencoded"),
+                "{flag}"
+            );
+        }
     }
 
     #[test]
@@ -729,12 +1071,19 @@ mod tests {
     }
 
     #[test]
-    fn a_cluster_containing_a_value_flag_says_so() {
-        let err = parse_args(&argv(&["-so", "/tmp/out", "http://x.com"]), &CurlConfig::default())
-            .expect_err("-o takes a value and cannot be clustered");
-        let msg = format!("{err}");
-        assert!(msg.contains("-o"), "name the flag that broke it: {msg}");
-        assert!(msg.contains("separately"), "say what to do instead: {msg}");
+    fn a_value_flag_ends_a_run_and_takes_the_rest_or_the_next_word() {
+        let req = parse(&["-so", "/tmp/out", "http://x.com"]);
+        assert_eq!(req.output_file.as_deref(), Some("/tmp/out"));
+        let req = parse(&["-so/tmp/out", "http://x.com"]);
+        assert_eq!(req.output_file.as_deref(), Some("/tmp/out"));
+        let req = parse(&["-m5", "-XPUT", "-uu:p", "http://x.com"]);
+        assert_eq!((req.method.as_str(), req.user.as_deref(), req.password.as_deref()), ("PUT", Some("u"), Some("p")));
+        assert_eq!(req.max_time, 5.0);
+        let req = parse(&["-d=a=1", "http://x.com"]);
+        assert_eq!(req.bodies, vec![BodyPart::Literal("=a=1".to_string())]);
+        // A letter this build does not know still refuses the word.
+        let err = parse_args(&argv(&["-sQ", "http://x.com"]), &CurlConfig::default()).unwrap_err();
+        assert!(format!("{err}").contains("-sQ"), "{err}");
     }
 
     #[test]
@@ -742,7 +1091,7 @@ mod tests {
         // `-iL` here is a body. Expanding argv up front could not tell the
         // difference; expanding at flag position can.
         let req = parse(&["-d", "-iL", "http://x.com"]);
-        assert_eq!(req.bodies, vec!["-iL".to_string()]);
+        assert_eq!(req.bodies, vec![BodyPart::Literal("-iL".to_string())]);
         assert!(!req.include_headers);
         assert!(!req.follow_redirects);
     }
@@ -758,11 +1107,11 @@ mod tests {
 
     #[test]
     fn a_refusal_names_the_tool_exactly_once() {
-        // `CurlError::Transport`'s Display already prefixes "curl: ", and
+        // `CurlError::Usage`'s Display already prefixes "curl: ", and
         // every message here used to carry its own — so every refusal an
         // agent read began "curl: curl:".
         for (flag, message) in REFUSED_FLAGS {
-            let rendered = CurlError::Transport((*message).to_string()).to_string();
+            let rendered = CurlError::Usage((*message).to_string()).to_string();
             assert!(rendered.starts_with("curl: "), "{flag}: {rendered}");
             assert!(!rendered.contains("curl: curl:"), "{flag}: {rendered}");
             assert!(
@@ -775,7 +1124,7 @@ mod tests {
     #[test]
     fn a_refused_flag_names_itself_and_the_way_forward() {
         // Both kinds of refusal: out of the 80/20 cut, and gated by config.
-        for flag in ["-O", "--form", "--proxy"] {
+        for flag in ["--cert", "--retry", "--proxy"] {
             let err = parse_args(&argv(&[flag, "http://x.com"]), &CurlConfig::default())
                 .expect_err("must refuse a flag outside the cut");
             assert!(format!("{err}").contains(flag), "message should name {flag}: {err}");

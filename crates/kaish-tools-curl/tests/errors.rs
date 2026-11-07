@@ -17,10 +17,10 @@ use support::{argv, curl, loopback_config, Response, Server, TcpGuard};
 use kaish_tools_curl::{AllowByList, CurlConfig, Limits};
 
 #[tokio::test]
-async fn missing_url_fails_with_exit_7() {
+async fn missing_url_fails_with_exit_2_like_curl() {
     let result = curl(loopback_config(), argv(&[])).await;
-    assert_eq!(result.code, 7, "{}", result.err);
-    assert!(result.err.contains("URL is required"), "{}", result.err);
+    assert_eq!(result.code, 2, "{}", result.err);
+    assert!(result.err.contains("no URL was given"), "{}", result.err);
 }
 
 #[tokio::test]
@@ -134,24 +134,13 @@ async fn dash_k_is_refused_until_the_embedder_permits_it() {
 }
 
 #[tokio::test]
-async fn at_file_body_syntax_is_refused_and_names_at_path() {
-    let result = curl(
-        loopback_config(),
-        argv(&["-d", "@/etc/passwd", "http://127.0.0.1:1/"]),
-    )
-    .await;
-    assert_ne!(result.code, 0);
-    assert!(result.err.contains("@path"), "{}", result.err);
-}
-
-#[tokio::test]
 async fn head_with_data_is_refused() {
     let result = curl(
         loopback_config(),
         argv(&["-I", "-d", "x=1", "http://127.0.0.1:1/"]),
     )
     .await;
-    assert_ne!(result.code, 0);
+    assert_eq!(result.code, 2, "{}", result.err);
     assert!(result.err.contains("--head"), "{}", result.err);
 }
 
