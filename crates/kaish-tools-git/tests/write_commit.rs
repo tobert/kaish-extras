@@ -1039,3 +1039,76 @@ async fn through_a_real_kernel_f_reads_the_message_from_the_vfs_and_variables_co
     assert_eq!(missing.code, 2, "{}", missing.err);
     assert!(missing.err.contains("could not be read"), "{}", missing.err);
 }
+
+// ── non-UTF-8 paths survive every commit spelling (review T5) ──────────────
+
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+
+fn tree_z(repo: &Path) -> Vec<u8> {
+    let out = Command::new("git")
+        .args(["ls-tree", "-r", "-z", "HEAD"])
+        .current_dir(repo)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("run git");
+    assert!(out.status.success());
+    out.stdout
+}
+
+fn write_bytes_path(root: &Path, rel: &[u8], contents: &str) {
+    let path = root.join(OsStr::from_bytes(rel));
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(path, contents).expect("write");
+}
+
+const LATIN1: &[u8] = b"caf\xe9.txt";
+const LATIN1_IN_D: &[u8] = b"d/caf\xe9.txt";
+
+fn base_with_latin1(dir: &Path) {
+    base(dir);
+    write_bytes_path(dir, LATIN1, "latin one\n");
+    write_bytes_path(dir, LATIN1_IN_D, "latin two\n");
+    support::git(dir, &["add", "-A"]);
+    support::git(dir, &["commit", "-qm", "latin1"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_commit_keeps_a_non_utf8_entry_byte_for_byte() {
+    type Setup = fn(&Path);
+    let cases: Vec<(&str, Setup, Vec<&str>)> = vec![
+        ("plain", |d| {
+            base_with_latin1(d);
+            support::write_file(d, "a.txt", "alpha two\n");
+            support::git(d, &["add", "a.txt"]);
+        }, vec!["-m", "x"]),
+        ("-a edits", |d| {
+            base_with_latin1(d);
+            write_bytes_path(d, LATIN1, "latin edited\n");
+            write_bytes_path(d, LATIN1_IN_D, "latin two edited\n");
+        }, vec!["-a", "-m", "x"]),
+        ("-a deletion", |d| {
+            base_with_latin1(d);
+            std::fs::remove_file(d.join(OsStr::from_bytes(LATIN1_IN_D))).expect("rm");
+        }, vec!["-a", "-m", "x"]),
+        ("--only glob", |d| {
+            base_with_latin1(d);
+            write_bytes_path(d, LATIN1, "latin edited\n");
+            write_bytes_path(d, LATIN1_IN_D, "latin two edited\n");
+            support::write_file(d, "a.txt", "alpha two\n");
+        }, vec!["-m", "x", "*af?.txt"]),
+    ];
+    for (label, setup, args) in cases {
+        let p = Pair::new(&setup);
+        let mut ours = vec!["commit"];
+        ours.extend(&args);
+        let r = p.ours("", &ours).await;
+        assert_eq!(r.code, 0, "[{label}] {}", r.err);
+        let (code, _, err) = p.twin(&ours);
+        assert_eq!(code, 0, "[{label}] git: {err}");
+        let (a, b) = (tree_z(&p.ours), tree_z(&p.twin));
+        assert!(a == b, "[{label}] ls-tree -r -z HEAD differs\nours: {:?}\ntwin: {:?}", String::from_utf8_lossy(&a), String::from_utf8_lossy(&b));
+        p.assert_same(label);
+    }
+}

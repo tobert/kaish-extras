@@ -22,7 +22,6 @@ use std::sync::Arc;
 use clap::Parser;
 use gix_index::entry::{Flags, Mode};
 use gix_index::hash::ObjectId;
-use gix_object::bstr::ByteSlice as _;
 use kaish_tool_api::GlobalFlags;
 
 use crate::config::Identity;
@@ -37,6 +36,7 @@ use crate::verbs::write::message::{self, Trailer};
 use crate::verbs::write::objects::BlobWriter;
 use crate::verbs::write::refmove::{self, HeadTarget};
 use crate::verbs::write::refusal::{refuse, Override};
+use crate::verbs::write::relpath::{os, show, RelPath};
 use crate::verbs::write::repo::WriteRepo;
 use crate::verbs::write::spec::{Outcome, SpecSet};
 use crate::verbs::write::stage;
@@ -269,7 +269,7 @@ pub(crate) struct CommitEnv {
     pub(crate) identity: Option<(Identity, Identity)>,
 }
 
-type Map = BTreeMap<String, (ObjectId, Mode)>;
+type Map = BTreeMap<RelPath, (ObjectId, Mode)>;
 
 /// The index change a commit makes, and the tree it commits.
 struct Prepared {
@@ -599,7 +599,7 @@ fn prepare(
         .filter(|e| e.stage() == gix_index::entry::Stage::Unconflicted)
         // Intent-to-add entries are not committed: git's write-tree skips them.
         .filter(|e| !e.flags.contains(Flags::INTENT_TO_ADD))
-        .map(|e| (e.path(state).to_str_lossy().into_owned(), (e.id, e.mode)))
+        .map(|e| (e.path(state).to_owned(), (e.id, e.mode)))
         .collect();
     let plan = if opts.all {
         add::build(
@@ -629,12 +629,12 @@ fn build_only(
     let tracked = Tracked::all(state);
     // Known paths: the index's and HEAD's, as git's `list_paths` overlays
     // HEAD's tree on the index to match against.
-    let mut known: BTreeMap<&str, Option<Mode>> = BTreeMap::new();
+    let mut known: BTreeMap<&[u8], Option<Mode>> = BTreeMap::new();
     for (p, (_, m)) in head_map {
-        known.insert(p.as_str(), Some(*m));
+        known.insert(p.as_slice(), Some(*m));
     }
     for t in &tracked {
-        known.insert(t.path.as_str(), Some(t.mode));
+        known.insert(t.path.as_slice(), Some(t.mode));
     }
     let mut plan = Plan::default();
     let mut attrs = AttributeReader::new(repo, cmd);
@@ -642,14 +642,14 @@ fn build_only(
         if !specs.matches(path) {
             continue;
         }
-        let tr = tracked.iter().find(|t| t.path == *path);
+        let tr = tracked.iter().find(|t| t.path.as_slice() == *path);
         if tr.is_some_and(|t| t.flags.contains(Flags::SKIP_WORKTREE) || t.flags.contains(Flags::ASSUME_VALID)) {
             continue;
         }
-        let abs = match repo.check_worktree_any(Path::new(path)) {
+        let abs = match repo.check_worktree_any(os(path)) {
             Ok(p) => p,
             Err(GitError::WriteThroughLink { found: "not a directory", .. }) => {
-                plan.removals.push((*path).to_string());
+                plan.removals.push((*path).into());
                 continue;
             }
             Err(e) => return Err(e),
@@ -657,7 +657,7 @@ fn build_only(
         let meta = match std::fs::symlink_metadata(&abs) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                plan.removals.push((*path).to_string());
+                plan.removals.push((*path).into());
                 continue;
             }
             Err(e) => return Err(GitError::repository(OP, "reading a working-tree path", &abs, e)),
@@ -668,12 +668,12 @@ fn build_only(
                     .ok()
                     .and_then(|m| gix_index::entry::Stat::from_fs(&m).ok())
                     .unwrap_or_default();
-                plan.gitlinks.push(((*path).to_string(), id, stat));
+                plan.gitlinks.push(((*path).into(), id, stat));
             }
             continue;
         }
         if meta.is_dir() {
-            plan.removals.push((*path).to_string());
+            plan.removals.push((*path).into());
             continue;
         }
         plan.files.push(stage::inspect(repo, &mut attrs, policy, cmd, path, *mode)?);
@@ -700,20 +700,21 @@ fn overlay(map: &mut Map, plan: &Plan) {
     let adds = plan
         .files
         .iter()
-        .map(|s| (s.rel.as_str(), s.id, s.mode))
-        .chain(plan.gitlinks.iter().map(|(p, id, _)| (p.as_str(), *id, Mode::COMMIT)));
+        .map(|s| (s.rel.as_slice(), s.id, s.mode))
+        .chain(plan.gitlinks.iter().map(|(p, id, _)| (p.as_slice(), *id, Mode::COMMIT)));
     for (path, id, mode) in adds {
         let mut cur = path;
-        while let Some(i) = cur.rfind('/') {
+        while let Some(i) = cur.iter().rposition(|b| *b == b'/') {
             cur = &cur[..i];
             map.remove(cur);
         }
-        let below = format!("{path}/");
-        let doomed: Vec<String> = map.range(below.clone()..).take_while(|(k, _)| k.starts_with(&below)).map(|(k, _)| k.clone()).collect();
+        let mut below: RelPath = path.into();
+        below.push(b'/');
+        let doomed: Vec<RelPath> = map.range(below.clone()..).take_while(|(k, _)| k.starts_with(&below)).map(|(k, _)| k.clone()).collect();
         for k in doomed {
             map.remove(&k);
         }
-        map.insert(path.to_string(), (id, mode));
+        map.insert(path.into(), (id, mode));
     }
 }
 
@@ -746,14 +747,15 @@ struct Summary {
 /// lines. A rename shows as a delete and a create.
 fn summarize(repo: &WriteRepo, before: &Map, after: &Map, err: &mut String) -> Result<Summary, GitError> {
     use crate::diffcore::{line_delta, LineDelta, Side};
-    let mut paths: Vec<&String> = before.keys().chain(after.keys()).collect();
+    let mut paths: Vec<&RelPath> = before.keys().chain(after.keys()).collect();
     paths.sort();
     paths.dedup();
     let (mut files, mut ins, mut del) = (0usize, 0u64, 0u64);
     let mut modes = String::new();
-    let mut over: Vec<&str> = Vec::new();
+    let mut over: Vec<String> = Vec::new();
     for path in paths {
         let (old, new) = (before.get(path), after.get(path));
+        let shown = show(path);
         if old == new {
             continue;
         }
@@ -764,10 +766,10 @@ fn summarize(repo: &WriteRepo, before: &Map, after: &Map, err: &mut String) -> R
             Some((id, _)) => Side::Object(*id),
         };
         match (old, new) {
-            (None, Some((_, m))) => modes.push_str(&format!(" create mode {:06o} {path}\n", m.bits())),
-            (Some((_, m)), None) => modes.push_str(&format!(" delete mode {:06o} {path}\n", m.bits())),
+            (None, Some((_, m))) => modes.push_str(&format!(" create mode {:06o} {shown}\n", m.bits())),
+            (Some((_, m)), None) => modes.push_str(&format!(" delete mode {:06o} {shown}\n", m.bits())),
             (Some((_, a)), Some((_, b))) if a != b => {
-                modes.push_str(&format!(" mode change {:06o} => {:06o} {path}\n", a.bits(), b.bits()));
+                modes.push_str(&format!(" mode change {:06o} => {:06o} {shown}\n", a.bits(), b.bits()));
             }
             _ => {}
         }
@@ -790,7 +792,7 @@ fn summarize(repo: &WriteRepo, before: &Map, after: &Map, err: &mut String) -> R
                 ins += added;
                 del += deleted;
             }
-            LineDelta::OverCap => over.push(path.as_str()),
+            LineDelta::OverCap => over.push(shown),
             LineDelta::Binary | LineDelta::Gitlink => {}
         }
     }
@@ -836,7 +838,7 @@ mod tests {
             ..Plan::default()
         };
         overlay(&mut map, &plan);
-        let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+        let keys: Vec<String> = map.keys().map(|k| show(k)).collect();
         assert_eq!(keys, ["a/inner", "d"]);
     }
 }

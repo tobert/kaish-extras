@@ -26,7 +26,7 @@ pub(crate) struct PathFilter {
 #[derive(Debug)]
 enum Spec {
     /// A literal path: matches itself and anything under it.
-    Literal(String),
+    Literal(Vec<u8>),
     /// A glob, matched against the whole repo-relative path.
     Glob(gix_glob::Pattern),
 }
@@ -60,7 +60,7 @@ impl PathFilter {
                     }
                 }
             } else {
-                specs.push(Spec::Literal(normalized.to_string()));
+                specs.push(Spec::Literal(normalized.as_bytes().to_vec()));
             }
         }
         Ok(PathFilter { specs })
@@ -68,14 +68,22 @@ impl PathFilter {
 
     /// Whether a repo-relative path passes the filter.
     pub(crate) fn matches(&self, path: &str) -> bool {
+        self.matches_bytes(path.as_bytes())
+    }
+
+    /// [`matches`](Self::matches) for a path that is bytes: an index or tree
+    /// path need not be UTF-8, and must match a glob such as `*` all the same.
+    pub(crate) fn matches_bytes(&self, path: &[u8]) -> bool {
         if self.specs.is_empty() {
             return true;
         }
         self.specs.iter().any(|spec| match spec {
-            Spec::Literal(lit) => path == lit || path.starts_with(&format!("{lit}/")),
+            Spec::Literal(lit) => {
+                path == lit.as_slice() || (path.len() > lit.len() && path.starts_with(lit) && path[lit.len()] == b'/')
+            }
             Spec::Glob(pattern) => {
                 let bstr: &BStr = path.into();
-                let basename = path.rfind('/').map(|p| p + 1);
+                let basename = path.iter().rposition(|b| *b == b'/').map(|p| p + 1);
                 pattern.matches_repo_relative_path(
                     bstr,
                     basename,

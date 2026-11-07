@@ -9,14 +9,14 @@
 //! <scratch>/<SENTINEL>/        the directory every planted link points at
 //! ```
 //!
-//! # The table phase 1b points at real verbs
+//! # What the table covers
 //!
-//! [`CASES`] is a table of (plant, target) pairs. In 1a the target is checked
-//! by calling the containment function. Phase 1b adds, per case, the verb
-//! spelling that would write to that target (for example `branch sub/x` for
-//! `refs/heads/sub/x`), runs it through a kernel, and asserts the same
-//! things: exit 4, the planted component named relative to its root, no host
-//! path in the text, the outside directory unchanged.
+//! [`CASES`] is a table of (plant, target) pairs, and the target is checked by
+//! calling the containment function. It has no verb field, and no case runs a
+//! verb. The verb spellings that write to a planted target run through a
+//! kernel in `tests/write_index.rs` (`hostile()`, `hostile_run()`), on fixtures
+//! of their own, and assert exit 4, the planted component named relative to
+//! its root, no host path in the text, and the outside directory unchanged.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -49,7 +49,7 @@ fn git(cwd: &Path, args: &[&str]) {
     assert!(
         out.status.success(),
         "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&out.stderr) // display-only
     );
 }
 
@@ -62,7 +62,7 @@ pub(crate) fn git_stdout(cwd: &Path, args: &[&str]) -> String {
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .output()
         .expect("git must be on PATH: the oracle is real git");
-    assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr)); // display-only
     String::from_utf8(out.stdout).expect("utf-8").trim_end().to_string()
 }
 

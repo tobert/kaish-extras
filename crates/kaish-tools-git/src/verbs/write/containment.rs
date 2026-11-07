@@ -94,18 +94,20 @@ pub(crate) enum Leaf {
 /// `.lock`, or beneath the base; `refs/worktreex` is not `refs/worktree`.
 /// For a plain repository both roots are the same directory.
 pub(crate) fn root_for(rel: &Path) -> Root {
+    use std::os::unix::ffi::OsStrExt as _;
     let joined = rel
         .components()
         .filter_map(|c| match c {
-            Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+            Component::Normal(n) => Some(n.as_bytes().to_vec()),
             _ => None,
         })
         .collect::<Vec<_>>()
-        .join("/");
+        .join(&b'/');
     let at = |base: &str| {
+        let base = base.as_bytes();
         joined == base
-            || joined.strip_suffix(".lock") == Some(base)
-            || joined.strip_prefix(base).is_some_and(|rest| rest.starts_with('/'))
+            || joined.strip_suffix(b".lock".as_slice()) == Some(base)
+            || joined.strip_prefix(base).is_some_and(|rest| rest.starts_with(b"/"))
     };
     const PER_WORKTREE_INSIDE_COMMON: &[&str] = &[
         "info/sparse-checkout",
@@ -299,7 +301,7 @@ fn has_other_hard_links(_meta: &std::fs::Metadata) -> bool {
 /// A relative path as a refusal shows it: `/`-separated, lossy.
 fn shown(path: &Path) -> String {
     path.components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .map(|c| c.as_os_str().to_string_lossy().into_owned()) // display-only
         .collect::<Vec<_>>()
         .join("/")
 }

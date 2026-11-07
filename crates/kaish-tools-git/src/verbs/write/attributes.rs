@@ -13,11 +13,12 @@
 //! first is refused by name in `state::ensure_writable`.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use gix_object::bstr::ByteSlice as _;
 
 use crate::error::GitError;
 use crate::verbs::write::containment::Leaf;
 use crate::verbs::write::refusal::{refuse, Override};
+use crate::verbs::write::relpath::{os, show};
 use crate::verbs::write::repo::WriteRepo;
 use crate::verbs::write::state::{Autocrlf, StagePolicy};
 
@@ -53,12 +54,15 @@ struct Line {
     pattern: Option<gix_glob::Pattern>,
     /// `true` when the pattern text could not be parsed exactly.
     unreadable: bool,
+    /// The line is not UTF-8, so neither its pattern nor its attributes were
+    /// read. It may set any conversion.
+    undecodable: bool,
     attrs: Vec<(String, AttrState)>,
 }
 
 struct AttrFile {
     /// The directory the file's patterns are relative to, `""` for the root.
-    dir: String,
+    dir: Vec<u8>,
     /// Where it was read, for refusals.
     label: String,
     lines: Vec<Line>,
@@ -82,7 +86,7 @@ impl Conversions {
 pub(crate) struct AttributeReader<'a> {
     repo: &'a WriteRepo,
     /// `.gitattributes` per directory, `None` when the directory has none.
-    cache: BTreeMap<String, Option<AttrFile>>,
+    cache: BTreeMap<Vec<u8>, Option<AttrFile>>,
     info: Option<Option<AttrFile>>,
     command: String,
 }
@@ -102,11 +106,23 @@ impl<'a> AttributeReader<'a> {
         )
     }
 
-    fn load(&self, dir: &str) -> Result<Option<AttrFile>, GitError> {
-        let rel = if dir.is_empty() { ".gitattributes".to_string() } else { format!("{dir}/.gitattributes") };
-        let abs = match self.repo.check_worktree(Path::new(&rel), Leaf::Entry) {
+    fn load(&self, dir: &[u8]) -> Result<Option<AttrFile>, GitError> {
+        let mut rel_bytes = dir.to_vec();
+        if !dir.is_empty() {
+            rel_bytes.push(b'/');
+        }
+        rel_bytes.extend_from_slice(b".gitattributes");
+        let rel = show(&rel_bytes);
+        let abs = match self.repo.check_worktree(os(&rel_bytes), Leaf::Entry) {
             Ok(p) => p,
-            Err(_) => return self.unreadable(&rel, "is behind a symbolic link"),
+            // Say what the walk found: a link, a directory, or a link above it.
+            Err(GitError::WriteThroughLink { found, path, .. }) if path == rel => {
+                return self.unreadable(&rel, &format!("cannot be read: the walk found {found} there"))
+            }
+            Err(GitError::WriteThroughLink { found, path, .. }) => {
+                return self.unreadable(&rel, &format!("cannot be read: '{path}' above it is {found}"))
+            }
+            Err(e) => return Err(e),
         };
         let meta = match std::fs::symlink_metadata(&abs) {
             Ok(m) => m,
@@ -143,20 +159,20 @@ impl<'a> AttributeReader<'a> {
         let Ok(bytes) = std::fs::read(&path) else {
             return self.unreadable("info/attributes", "cannot be read");
         };
-        Ok(Some(parse_file("", "info/attributes".to_string(), &bytes)))
+        Ok(Some(parse_file(b"", "info/attributes".to_string(), &bytes)))
     }
 
     /// The conversion attributes of the file at repo-relative `rel`.
-    pub(crate) fn conversions(&mut self, rel: &str) -> Result<Conversions, GitError> {
+    pub(crate) fn conversions(&mut self, rel: &[u8]) -> Result<Conversions, GitError> {
         // Root first, then each directory down to the file's own.
-        let mut dirs = vec![String::new()];
-        let mut acc = String::new();
-        let parts: Vec<&str> = rel.split('/').collect();
+        let mut dirs: Vec<Vec<u8>> = vec![Vec::new()];
+        let mut acc: Vec<u8> = Vec::new();
+        let parts: Vec<&[u8]> = rel.split(|b| *b == b'/').collect();
         for part in &parts[..parts.len().saturating_sub(1)] {
             if !acc.is_empty() {
-                acc.push('/');
+                acc.push(b'/');
             }
-            acc.push_str(part);
+            acc.extend_from_slice(part);
             dirs.push(acc.clone());
         }
         for d in &dirs {
@@ -187,9 +203,9 @@ impl<'a> AttributeReader<'a> {
         let mut out = Conversions::default();
         let mut resolved: BTreeMap<String, AttrState> = BTreeMap::new();
         for f in &files {
-            let local = match rel.strip_prefix(&f.dir) {
+            let local: &[u8] = match rel.strip_prefix(f.dir.as_slice()) {
                 Some(r) if f.dir.is_empty() => r,
-                Some(r) => r.trim_start_matches('/'),
+                Some(r) => r.strip_prefix(b"/").unwrap_or(r),
                 None => continue,
             };
             for line in &f.lines {
@@ -199,7 +215,7 @@ impl<'a> AttributeReader<'a> {
                 match line_matches(line, local) {
                     Matched::No => {}
                     Matched::Maybe => {
-                        if line.attrs.iter().any(|(n, _)| RELEVANT.contains(&n.as_str()) || macros.contains_key(n.as_str()) || n == "binary") {
+                        if line.undecodable || line.attrs.iter().any(|(n, _)| RELEVANT.contains(&n.as_str()) || macros.contains_key(n.as_str()) || n == "binary") {
                             out.unsure.get_or_insert_with(|| f.label.clone());
                         }
                     }
@@ -256,10 +272,13 @@ fn parse_attr_token(tok: &str) -> (String, AttrState) {
     }
 }
 
-fn parse_file(dir: &str, label: String, bytes: &[u8]) -> AttrFile {
-    let text = String::from_utf8_lossy(bytes);
+fn parse_file(dir: &[u8], label: String, bytes: &[u8]) -> AttrFile {
     let mut lines = Vec::new();
-    for raw in text.lines() {
+    for raw_bytes in bytes.lines() {
+        let Ok(raw) = std::str::from_utf8(raw_bytes) else {
+            lines.push(Line { pattern: None, unreadable: true, undecodable: true, attrs: Vec::new() });
+            continue;
+        };
         let l = raw.trim_start_matches([' ', '\t']);
         if l.is_empty() || l.starts_with('#') {
             continue;
@@ -269,7 +288,7 @@ fn parse_file(dir: &str, label: String, bytes: &[u8]) -> AttrFile {
             let Some(name) = toks.next() else { continue };
             let mut attrs = vec![(format!("[attr]{name}"), AttrState::Set)];
             attrs.extend(toks.map(parse_attr_token));
-            lines.push(Line { pattern: None, unreadable: false, attrs });
+            lines.push(Line { pattern: None, unreadable: false, undecodable: false, attrs });
             continue;
         }
         let (pat, rest, quoted) = if let Some(after) = l.strip_prefix('"') {
@@ -295,17 +314,17 @@ fn parse_file(dir: &str, label: String, bytes: &[u8]) -> AttrFile {
         if negative {
             continue;
         }
-        lines.push(Line { unreadable: parsed.is_none(), pattern: parsed, attrs });
+        lines.push(Line { unreadable: parsed.is_none(), undecodable: false, pattern: parsed, attrs });
     }
-    AttrFile { dir: dir.to_string(), label, lines }
+    AttrFile { dir: dir.to_vec(), label, lines }
 }
 
-fn line_matches(line: &Line, local: &str) -> Matched {
+fn line_matches(line: &Line, local: &[u8]) -> Matched {
     if line.unreadable {
         return Matched::Maybe;
     }
     let Some(p) = &line.pattern else { return Matched::Maybe };
-    let basename = local.rfind('/').map(|i| i + 1);
+    let basename = local.iter().rposition(|b| *b == b'/').map(|i| i + 1);
     if p.matches_repo_relative_path(
         local.into(),
         basename,

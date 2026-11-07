@@ -35,7 +35,13 @@ pub(crate) const ESCAPING_INDEX_ENTRY: &str = "working tree path (an index entry
 /// is also what keeps unix honest in the other direction: there the same name
 /// is one ordinary file, and refusing it would be a lie about a legal path.
 pub(crate) fn is_repo_relative(rel: &str) -> bool {
-    !rel.is_empty() && rel.split('/').all(is_ordinary_component)
+    is_repo_relative_bytes(rel.as_bytes())
+}
+
+/// [`is_repo_relative`] for a path that is bytes, as every git path is: the
+/// write verbs carry index and tree paths that need not be UTF-8.
+pub(crate) fn is_repo_relative_bytes(rel: &[u8]) -> bool {
+    !rel.is_empty() && rel.split(|b| *b == b'/').all(is_ordinary_component)
 }
 
 /// Whether one `/`-separated segment is an ordinary name we will join.
@@ -50,11 +56,11 @@ pub(crate) fn is_repo_relative(rel: &str) -> bool {
 /// A NUL byte is refused here rather than left to fail somewhere below. It
 /// cannot occur in a path git wrote, every syscall wrapper would reject it
 /// anyway, and a barrier that holds by coincidence is not one.
-fn is_ordinary_component(segment: &str) -> bool {
-    if segment.is_empty() || segment == "." || segment == ".." || segment.contains('\0') {
+fn is_ordinary_component(segment: &[u8]) -> bool {
+    if segment.is_empty() || segment == b"." || segment == b".." || segment.contains(&0) {
         return false;
     }
-    let mut components = Path::new(segment).components();
+    let mut components = bytes_path(segment).components();
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
@@ -219,11 +225,30 @@ impl<'a> WorktreePaths<'a> {
 
 /// Join a slash-separated repo-relative path onto a real base directory.
 pub(crate) fn join_repo_relative(base: &Path, rel: &str) -> std::path::PathBuf {
+    join_repo_relative_bytes(base, rel.as_bytes())
+}
+
+/// [`join_repo_relative`] for a path that is bytes.
+pub(crate) fn join_repo_relative_bytes(base: &Path, rel: &[u8]) -> std::path::PathBuf {
     let mut out = base.to_path_buf();
-    for component in rel.split('/') {
-        out.push(component);
+    for component in rel.split(|b| *b == b'/') {
+        out.push(bytes_path(component));
     }
     out
+}
+
+/// The host path for bytes git stored: the same bytes on unix.
+#[cfg(unix)]
+pub(crate) fn bytes_path(bytes: &[u8]) -> &Path {
+    use std::os::unix::ffi::OsStrExt;
+    Path::new(std::ffi::OsStr::from_bytes(bytes))
+}
+
+/// Off unix there is no byte-exact host path; a name that is not UTF-8 cannot
+/// be named, and is replaced by an empty path that no lookup will find.
+#[cfg(not(unix))]
+pub(crate) fn bytes_path(bytes: &[u8]) -> &Path {
+    Path::new(std::str::from_utf8(bytes).unwrap_or(""))
 }
 
 /// Read a worktree path's git blob content: the file's bytes, or a symlink's
