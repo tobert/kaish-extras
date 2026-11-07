@@ -20,14 +20,15 @@ use crate::config::Identity;
 use crate::error::GitError;
 use crate::hooks::GitHooks;
 use crate::verbs::branch::BranchArgs;
-use crate::verbs::write::commit::hook_present;
+use crate::verbs::write::hookrun::{self, Scan, Tx};
 use crate::verbs::write::ident::{self, KernelVars};
 use crate::verbs::write::refmove::{self, MoveKind};
+use crate::hooks::RefUpdate;
 use crate::verbs::write::refname::{self, RefKind};
 use crate::verbs::write::refusal::{refuse, Override};
 use crate::verbs::write::repo::WriteRepo;
 use crate::verbs::write::spec::Outcome;
-use crate::verbs::write::state::{config_last, ensure_reflog_on, hooks_dir};
+use crate::verbs::write::state::{config_last, ensure_reflog_on};
 
 const OP: &str = "branch";
 
@@ -146,16 +147,13 @@ pub(crate) struct BranchCreate {
     pub(crate) command: String,
 }
 
-/// Refuse when the repository has a hook git would run for this write and no
-/// provider is installed. `names` are the hook files, `what` completes "Use
-/// real git for this ...".
-pub(crate) fn refuse_hooks(repo: &WriteRepo, env: &RefsEnv, command: &str, names: &[&str], what: &str) -> Result<(), GitError> {
-    if env.hooks.is_some() {
-        return Ok(());
-    }
-    let dir = hooks_dir(repo, command)?;
-    for name in names {
-        if hook_present(&dir, name) {
+/// Read which of the hooks `names` the repository has. Without a provider, a
+/// hook file git would run for this write refuses it: `what` completes "Use
+/// real git for this ...". With one, the provider is called and decides.
+pub(crate) fn scan_ref_hooks(repo: &WriteRepo, provider: bool, command: &str, names: &[&str], what: &str) -> Result<Scan, GitError> {
+    let scan = Scan::read(repo, command, names)?;
+    if !provider {
+        if let Some(name) = scan.present.first() {
             return refuse(
                 4,
                 command,
@@ -165,7 +163,7 @@ pub(crate) fn refuse_hooks(repo: &WriteRepo, env: &RefsEnv, command: &str, names
             );
         }
     }
-    Ok(())
+    Ok(scan)
 }
 
 /// Whether git would write tracking configuration for a branch started at
@@ -239,7 +237,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &BranchCreate) -> Resul
     let cmd = opts.command.as_str();
     let full = refname::full_name(RefKind::Branch, cmd, &opts.name)?;
     ensure_reflog_on(repo, cmd)?;
-    refuse_hooks(repo, env, cmd, &["reference-transaction"], "branch")?;
+    let scan = scan_ref_hooks(repo, env.hooks.is_some(), cmd, &["reference-transaction"], "branch")?;
 
     let head = repo.read().head()?;
     let head_oid = head
@@ -271,10 +269,24 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &BranchCreate) -> Resul
     }
     let committer = ident::resolve_committer(cmd, env.identity.as_ref(), &opts.vars, ident::now())?;
     let message = format!("branch: Created from {shown}");
-    refmove::create_ref(repo, MoveKind::BRANCH, cmd, &full, start_oid, Some((&message, &committer)))?;
+    let mut err = String::new();
+    let tx: Tx = vec![RefUpdate::new(hookrun::null(), start_oid.to_string(), full.clone())];
+    let ctx = scan.context(repo);
+    if let Some(h) = env.hooks.as_ref() {
+        hookrun::prepared(h.as_ref(), &ctx, MoveKind::BRANCH, cmd, std::slice::from_ref(&tx), &mut err)?;
+    }
+    if let Err(e) = refmove::create_ref(repo, MoveKind::BRANCH, cmd, &full, start_oid, Some((&message, &committer))) {
+        if let Some(h) = env.hooks.as_ref() {
+            hookrun::aborted(h.as_ref(), &ctx, &tx, &mut err);
+        }
+        return Err(e);
+    }
+    if let Some(h) = env.hooks.as_ref() {
+        hookrun::committed(h.as_ref(), &ctx, &tx, &mut err);
+    }
     Ok(Outcome {
         text: String::new(),
-        err: String::new(),
+        err,
         json: serde_json::json!({ "branch": opts.name, "ref": full, "commit": start_oid.to_string(), "start": shown }),
     })
 }

@@ -1719,16 +1719,27 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   index after a commit (new cache-tree, refreshed stat). A plain commit here
   leaves the file untouched; `-a` and `--only` rewrite it without the
   cache-tree extension, as the index verbs do.
-- **W21 — hook accounting.** `prepare-commit-msg` and `reference-transaction`
+- **W21 — hook accounting.** `prepare-commit-msg` and `post-index-change`
   have no `GitHooks` method: with a provider they appear in
-  `HookContext::hooks_present` and the provider decides. `post-rewrite`
-  (an amend) is the same: scanned, refused without a provider, listed with
-  one, and never called with the old and new oids git feeds it. `reset`
-  scans `reference-transaction` only. `post-checkout` belongs to a later verb.
-  `pre_commit` and `commit_msg` run
-  while `index.lock` is held for `-a` and `--only`, so a provider that runs a
-  real hook script which itself writes the index will find it locked.
-  `--no-verify` is passed to the provider and the provider decides.
+  `HookContext::hooks_present` and the provider decides. `commit -a` and
+  `--only` scan `post-index-change` (refused without a provider); git (2.56,
+  measured) also runs it for a plain `commit` that rewrites the index and for
+  `reset`, which this build neither scans nor calls. The `reference-transaction`
+  hook has a `preparing` state before any lock, where git also refuses a
+  transaction; `GitHooks` sends `prepared`, `committed` and `aborted` only, and
+  a provider that forwards to a script never runs it for `preparing`. Git's
+  transaction on `AUTO_MERGE` (null to null, after `commit` and `reset`) is not
+  sent, and the deletion of `ORIG_HEAD` by `reset <rev>` from a branch with no
+  commit calls no hook, as in git. `reset` sends `prepared` for `ORIG_HEAD` and
+  for the branch before it writes either (git finishes the first transaction
+  before it starts the second), so a veto of the second leaves `ORIG_HEAD`
+  unwritten; `switch -c` does the same for its two. `pre_commit`,
+  `commit_msg` and, for `reset --mixed`, `reference_transaction` run
+  while `index.lock` is held (for `commit`, with `-a` and `--only`), so a
+  provider that runs a real hook script which itself writes the index will find
+  it locked. `--no-verify` is passed to the provider and the provider decides.
+  Text a provider returns from a `committed` or `aborted` call is dropped when
+  the command then fails: only the failure shows.
 - **W22 — `-F -` and a non-UTF-8 message.** The message file is read through
   the kernel's filesystem, capped at 1 MiB, and must be UTF-8. Standard input
   is not read. Git accepts any bytes.
@@ -1787,18 +1798,21 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   since looks unpublished. Under `Unpublished`, a shallow repository refuses
   (exit 4) even when no remote ref exists, and with no remote-tracking refs at
   all a non-shallow repository allows every rewrite.
-- **W30 — `reset` and `ORIG_HEAD`.** `reset --soft|--mixed <rev>`, with or
-  without `--soft` and a revision other than `HEAD`, writes `ORIG_HEAD` (the
-  old tip) and `reset: moving to <rev as typed>` in the branch's log and
-  `logs/HEAD`, as git does, including when the tip does not change. The
-  no-revision forms (`reset`, `reset HEAD`, `reset --mixed`, `reset -- <path>`)
-  write neither; git writes both for the first three (checked: git 2.56 writes
-  `ORIG_HEAD` and a `reset: moving to HEAD` line for `git reset HEAD`). Git
-  deletes `ORIG_HEAD` when a reset starts from an unborn branch; this does not.
-  A reset needs a committer identity (the variables or the pinned one) for
-  the reflog line, where git falls back to its own identity detection. `reset
-  --mixed` prints no "Unstaged changes after reset" (W4). `reset <rev> --
-  <path>` is supported and moves nothing.
+- **W30 — what `reset` still differs on.** Checked on git 2.56: `reset @`
+  logs `reset: moving to HEAD`, where this shell logs the word as typed
+  (`moving to @`; `reset_at_sign_logs_head_as_git_does` is ignored until it
+  changes). `reset HEAD` on a branch with no commit exits 128 in git
+  (`ambiguous argument 'HEAD'`) and succeeds here
+  (`reset_head_on_an_unborn_branch_fails_as_git_does`, ignored); `reset --soft`
+  with no revision on such a branch exits 0 in git and exits 1 here with a
+  gix-ref message (`reset_soft_with_no_revision_on_an_unborn_branch_succeeds_as_git_does`,
+  ignored). A reset that git would log needs a committer identity (the
+  variables or the pinned one) and refuses before writing without one, where
+  git falls back to its own identity detection. `reset --mixed` prints no
+  "Unstaged changes after reset" (W4). `reset <rev> -- <path>` is supported and
+  moves nothing. The index file after a reset holds the same entries as git's
+  but not the same bytes: git adds a cache-tree extension and the stat data
+  belongs to each checkout's files.
 - **W31 — what `--amend` cannot carry over.** A commit with an `encoding`
   header, or a message that is not UTF-8, refuses the amend (exit 4). Other
   extra headers are copied; `gpgsig` and `gpgsig-sha256` are dropped, as git
@@ -1820,16 +1834,6 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   nothing and `git ls-files -- d` prints `d`. It affects every verb that takes
   a pathspec, and it predates the commit profile. The fix is to keep the
   trailing `/` in the spec and match directories only.
-- **W34 — the hook provider is not called for `branch`, `tag`, `switch -c`,
-  `checkout -b` or `reset`.** `GitHooks` has `pre_commit`, `commit_msg` and
-  `post_commit` and nothing for a ref update. Without a provider these verbs
-  refuse when the repository has a `reference-transaction` hook (and
-  `post-checkout`, for the two switches). With a provider installed they
-  proceed, the hook file does not run, and the provider hears nothing
-  (`tests/write_refs.rs`, `with_a_provider_the_ref_writes_proceed_and_the_provider_is_not_called`).
-  An embedder that installs a provider to run `pre-commit` therefore loses the
-  `reference-transaction` check for these verbs. The fix is a `GitHooks`
-  method for a ref update, called with the ref, old and new value.
 - **W35 — `commit` keeps no trailing form feed or vertical tab, and git
   does.** `message::cleanup` strips `\x0c` and `\x0b` from the end of a line;
   git's `isspace` is space, tab, newline and carriage return, so git keeps them

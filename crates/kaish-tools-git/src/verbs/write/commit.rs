@@ -28,15 +28,16 @@ use kaish_tool_api::GlobalFlags;
 
 use crate::config::{Identity, RewritePolicy};
 use crate::error::GitError;
-use crate::hooks::{GitHooks, HookContext};
+use crate::hooks::{GitHooks, HookContext, RefUpdate, RewrittenCommit};
 use crate::verbs::write::add::{self, AddOptions, Plan, Tracked};
 use crate::verbs::write::attributes::AttributeReader;
 use crate::verbs::write::head;
+use crate::verbs::write::hookrun::{self, note, Tx};
 use crate::verbs::write::ident::{self, KernelVars};
 use crate::verbs::write::indexfile::{self, IndexTx, Snapshot, Upsert};
 use crate::verbs::write::message::{self, Trailer};
 use crate::verbs::write::objects::BlobWriter;
-use crate::verbs::write::refmove::{self, HeadTarget};
+use crate::verbs::write::refmove::{self, HeadTarget, MoveKind};
 use crate::verbs::write::rewrite::{self, MoveCheck, Mover, NewTip};
 use crate::verbs::write::refusal::{refuse, Override};
 use crate::verbs::write::relpath::{os, show, RelPath};
@@ -497,7 +498,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
         worktree: work,
         git_dir: repo.git_dir(),
         hooks_dir: &hooks_dir,
-        tree: &tree_hex,
+        tree: Some(&tree_hex),
         hooks_present: &present,
         no_verify: opts.no_verify,
     };
@@ -562,7 +563,26 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
         "commit"
     };
     let reflog = format!("{kind}: {}", message::subject(&message));
-    refmove::move_head(repo, cmd, &target, old, commit_id, &reflog, &idents.committer).map_err(GitError::after_objects)?;
+    // The ref's name as git's hook sees it: the branch, or HEAD when detached.
+    let ref_name = match &target {
+        HeadTarget::Branch(full) => full.clone(),
+        HeadTarget::Detached => "HEAD".to_string(),
+    };
+    let ref_tx: Tx = vec![RefUpdate::new(hookrun::oid_or_null(old), commit_id.to_string(), ref_name)];
+    if let Some(h) = env.hooks.as_ref() {
+        // The commit object is written; a refusal here leaves it unreachable.
+        hookrun::prepared(h.as_ref(), &ctx, MoveKind::COMMIT, cmd, std::slice::from_ref(&ref_tx), &mut err)
+            .map_err(GitError::after_objects)?;
+    }
+    if let Err(e) = refmove::move_head(repo, cmd, &target, old, commit_id, &reflog, &idents.committer) {
+        if let Some(h) = env.hooks.as_ref() {
+            hookrun::aborted(h.as_ref(), &ctx, &ref_tx, &mut err);
+        }
+        return Err(e.after_objects());
+    }
+    if let Some(h) = env.hooks.as_ref() {
+        hookrun::committed(h.as_ref(), &ctx, &ref_tx, &mut err);
+    }
 
     if let Some(tx) = tx {
         // The ref has moved; the index follows, as in git. A failure here
@@ -572,6 +592,10 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
     if let Some(h) = env.hooks.as_ref() {
         let out = h.post_commit(&ctx, &commit_id.to_string());
         note(&mut err, &out.message);
+        if let Some(prev) = amended.as_ref().and(old) {
+            let out = h.post_rewrite(&ctx, "amend", &[RewrittenCommit::new(prev.to_string(), commit_id.to_string())]);
+            note(&mut err, &out.message);
+        }
     }
 
     let detached = matches!(target, HeadTarget::Detached);
@@ -639,16 +663,6 @@ fn validate_tree(repo: &WriteRepo, cmd: &str, prepared: &Prepared) -> Result<(),
         vet.vet(&staged.id)?;
     }
     Ok(())
-}
-
-fn note(err: &mut String, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    err.push_str(text);
-    if !text.ends_with('\n') {
-        err.push('\n');
-    }
 }
 
 fn hook_refusal<T>(command: &str, hook: &str, why: &str) -> Result<T, GitError> {

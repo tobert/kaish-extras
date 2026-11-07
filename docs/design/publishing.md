@@ -7,10 +7,18 @@ stays available later if a concrete reason appears; it is not a prerequisite
 for shipping the rewrite.
 
 One consequence to carry: `kaish-tools-git` no longer inherits
-`workspace.package.version`. It carries `version = "0.9.0"` in its own
+`workspace.package.version`. It carries `version = "0.10.0"` in its own
 `Cargo.toml` while `kaish-web` and `kaish-tools-curl` stay on the workspace
 `0.1.0`. The publish itself is still [H](architecture.md#h-phasing) PR 9,
 gated on the read profile being complete.
+
+**Update 2026-11-07: the first publish is `0.10.0`, not `0.9.0`.** `0.9.0` was
+the development version and was never published. `GitHooks` gained required
+methods for ref updates, which breaks every implementer, and pre-1.0 a
+minor carries a breaking change, so the crate moved to `0.10.0`. The reasoning
+below is unchanged: `^0.8` resolves to neither, and the timeline stays
+monotonic. Each later breaking change takes the next minor, and there is no
+`CHANGELOG`; the commit that breaks the interface states it.
 
 The options and their consequences are laid out below.
 

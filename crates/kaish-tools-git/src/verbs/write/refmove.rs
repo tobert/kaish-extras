@@ -49,6 +49,8 @@ pub(crate) struct MoveKind {
     pub(crate) again: &'static str,
     /// Says the move happened, for a failure after the branch moved.
     pub(crate) done: &'static str,
+    /// The command as a noun, for "the hook refused the ...".
+    pub(crate) noun: &'static str,
 }
 
 impl MoveKind {
@@ -57,30 +59,35 @@ impl MoveKind {
         during: "this commit was being made",
         again: "make the commit again",
         done: "the commit was made",
+        noun: "commit",
     };
     pub(crate) const RESET: MoveKind = MoveKind {
         op: "reset",
         during: "this reset was running",
         again: "run the reset again",
         done: "the reset was made",
+        noun: "reset",
     };
     pub(crate) const BRANCH: MoveKind = MoveKind {
         op: "branch",
         during: "this branch was being created",
         again: "create the branch again",
         done: "the branch was created",
+        noun: "branch",
     };
     pub(crate) const TAG: MoveKind = MoveKind {
         op: "tag",
         during: "this tag was being created",
         again: "create the tag again",
         done: "the tag was created",
+        noun: "tag",
     };
     pub(crate) const SWITCH: MoveKind = MoveKind {
         op: "switch",
         during: "this switch was running",
         again: "run the switch again",
         done: "the branch was created",
+        noun: "switch",
     };
 }
 
@@ -307,6 +314,9 @@ pub(crate) struct HeadSwitch<'a> {
     /// The branch's reflog line, and the committer, when the branch is made.
     /// An unborn HEAD makes no branch: HEAD just names the new one.
     pub(crate) create: Option<(&'a str, &'a Signature)>,
+    /// Set to true once the branch exists, so a caller that failed later can
+    /// tell the branch transaction from the HEAD one.
+    pub(crate) created: Option<&'a std::cell::Cell<bool>>,
 }
 
 /// Create the branch (unless HEAD is unborn) and point HEAD at it, holding
@@ -343,6 +353,9 @@ pub(crate) fn switch_head(repo: &WriteRepo, s: &HeadSwitch<'_>) -> Result<(), Gi
     }
     if let (Some(oid), Some((message, committer))) = (s.head_oid, s.create) {
         create_ref(repo, kind, s.command, s.full, oid, Some((message, committer)))?;
+        if let Some(flag) = s.created {
+            flag.set(true);
+        }
     }
     let created = s.create.is_some();
     let after_branch = |what: String, source: std::io::Error| -> GitError {
@@ -745,6 +758,7 @@ mod tests {
                 head_oid: Some(oid),
                 full,
                 create: Some(("branch: Created from HEAD", &committer())),
+                created: None,
             },
         )
     }

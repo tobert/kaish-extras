@@ -20,12 +20,16 @@
 //! An unborn HEAD has no commit to branch from. Git then only points `HEAD`
 //! at the new name and writes no reflog; this does the same.
 
+use std::cell::Cell;
+
 use clap::Parser;
 use kaish_tool_api::GlobalFlags;
 
 use crate::error::GitError;
+use crate::hooks::RefUpdate;
+use crate::verbs::write::hookrun::{self, Tx};
 use crate::verbs::write::branch::{
-    blocked_refusal, exists_refusal, refuse_hooks, tracking_implied, tracking_refusal, unborn_refusal, RefsEnv,
+    blocked_refusal, exists_refusal, scan_ref_hooks, tracking_implied, tracking_refusal, unborn_refusal, RefsEnv,
 };
 use crate::verbs::write::ident::{self, KernelVars};
 use crate::verbs::write::refmove::{self, HeadSwitch, MoveKind};
@@ -233,7 +237,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &SwitchCreate) -> Resul
     let full = refname::full_name(RefKind::Branch, cmd, &opts.name)?;
     ensure_idle(repo, cmd, "switch branches")?;
     ensure_reflog_on(repo, cmd)?;
-    refuse_hooks(repo, env, cmd, &["reference-transaction", "post-checkout"], "switch")?;
+    let scan = scan_ref_hooks(repo, env.hooks.is_some(), cmd, &["reference-transaction", "post-checkout"], "switch")?;
 
     let head = repo.read().head()?;
     let head_oid = head
@@ -278,7 +282,20 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &SwitchCreate) -> Resul
         None => None,
     };
     let message = format!("branch: Created from {shown}");
-    refmove::switch_head(
+    let mut err = String::new();
+    // Git's transactions: the new branch (when HEAD has a commit), then HEAD,
+    // whose old value is the null oid and whose new value names the branch.
+    let mut txs: Vec<Tx> = Vec::new();
+    if let Some(oid) = head_oid {
+        txs.push(vec![RefUpdate::new(hookrun::null(), oid.to_string(), full.clone())]);
+    }
+    txs.push(vec![RefUpdate::new(hookrun::null(), format!("ref:{full}"), "HEAD")]);
+    let ctx = scan.context(repo);
+    if let Some(h) = env.hooks.as_ref() {
+        hookrun::prepared(h.as_ref(), &ctx, kind, cmd, &txs, &mut err)?;
+    }
+    let created = Cell::new(false);
+    let switched = refmove::switch_head(
         repo,
         &HeadSwitch {
             kind,
@@ -287,9 +304,30 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &SwitchCreate) -> Resul
             head_oid,
             full: &full,
             create: committer.as_ref().map(|c| (message.as_str(), c)),
+            created: Some(&created),
         },
-    )?;
-    let err = if opts.quiet { String::new() } else { format!("Switched to a new branch '{}'\n", opts.name) };
+    );
+    if let Some(h) = env.hooks.as_ref() {
+        let h = h.as_ref();
+        match &switched {
+            Ok(()) => txs.iter().for_each(|tx| hookrun::committed(h, &ctx, tx, &mut err)),
+            Err(_) => {
+                // The branch transaction is first, and it was written when
+                // the branch exists; the HEAD one never was.
+                let (done, rest) = if created.get() { txs.split_at(1) } else { txs.split_at(0) };
+                done.iter().for_each(|tx| hookrun::committed(h, &ctx, tx, &mut err));
+                rest.iter().for_each(|tx| hookrun::aborted(h, &ctx, tx, &mut err));
+            }
+        }
+    }
+    switched?;
+    if let (Some(h), Some(oid)) = (env.hooks.as_ref(), head_oid) {
+        let out = h.post_checkout(&ctx, &oid.to_string(), &oid.to_string(), true);
+        hookrun::note(&mut err, &out.message);
+    }
+    if !opts.quiet {
+        err.insert_str(0, &format!("Switched to a new branch '{}'\n", opts.name));
+    }
     Ok(Outcome {
         text: String::new(),
         err,

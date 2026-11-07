@@ -165,6 +165,11 @@ fn lockfiles(git_dir: &Path) -> Vec<String> {
 pub async fn run_tool(root: &Path, cwd: &str, argv: &[&str]) -> kaish_types::ExecResult {
     let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), root));
     let mut ctx = TestCtx::new(backend, cwd);
+    // A plain `reset` writes ORIG_HEAD and a reflog line, so it needs a
+    // committer (W30). The other verbs here ignore it.
+    for (k, v) in [("GIT_COMMITTER_NAME", "Fixture Committer"), ("GIT_COMMITTER_EMAIL", "committer@example.invalid")] {
+        kaish_tool_api::ToolCtx::set_var(&mut ctx, k, kaish_types::Value::String(v.to_string()));
+    }
     let git = kaish_tools_git::tool(GitConfig::read_only().with_commit_profile()).expect("config builds");
     let (verb, rest) = argv.split_first().expect("a verb");
     git.execute(support::verb_words(verb, rest), &mut ctx).await

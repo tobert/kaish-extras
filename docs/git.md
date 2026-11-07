@@ -613,7 +613,12 @@ kaish> git reset HEAD~1 -- notes.txt # that index entry from another revision; n
 ```
 
 `reset --soft <rev>` and `reset --mixed <rev>` (also `reset <rev>`) move the
-branch and are described under "Rewriting history" below.
+branch and are described under "Rewriting history" below. A plain `reset`
+(also `reset HEAD` and `reset --mixed`, with no path) is a `--mixed` reset to
+`HEAD`: it writes `ORIG_HEAD` and the reflog line `reset: moving to HEAD`, as
+git does, so it needs a committer identity and exits 2 without one. On a branch
+with no commit it only empties the index, as git does, and needs no identity.
+`reset -- <path>` and `reset HEAD -- <path>` write neither.
 
 Each returns its summary in `--json` (`added`, `modified`, `removed`,
 `refreshed`; `removed`, `cached`; `moved`; `unstaged`). The text surface is
@@ -649,9 +654,7 @@ copies those index entries from that revision and moves nothing.
 - `add` refuses the whole command when a named path is ignored; git stages the
   other paths and exits 1.
 - `reset` and `restore --staged` do not print "Unstaged changes after reset"
-  and do not refresh the stat of entries they restore. `reset`, `reset HEAD`
-  and `reset -- <path>` write no `ORIG_HEAD` or reflog line; git writes both
-  for the first two, even though HEAD does not move (`docs/issues.md` W30).
+  and do not refresh the stat of entries they restore.
 - `restore --staged` and `reset` give a restored entry an all-zero stat, as git
   does; an entry that already matches HEAD is left alone.
 - `add` reads whole files: a file over 128 MiB refuses (git streams).
@@ -838,8 +841,8 @@ the policy is unless it is `Allow`.
 
 ### Where it differs from git, on purpose
 
-- `reset` with no revision or `HEAD` writes no `ORIG_HEAD` and no reflog line;
-  with a revision it writes both. Git writes both always.
+- A `reset` from a branch with no commit to a revision deletes a stale
+  `ORIG_HEAD`, as git does.
 - No "Unstaged changes after reset" list; entries a `--mixed` reset restores
   get an all-zero stat.
 - Amend refuses a commit with an `encoding` header or a non-UTF-8 message.
@@ -900,7 +903,7 @@ With no start point, an unborn HEAD changes only `HEAD`. `--json` returns `branc
 and `tag -a` without a message; `switch <branch>`, `checkout <branch>` and
 `checkout <path>` (they write files); `switch -C`, `checkout -B`, `--detach`,
 `--orphan`, `-f` and `-m` on either. The differences from git, and the cost of
-the name check, are `docs/issues.md` W34-W47.
+the name check, are `docs/issues.md` W35-W47.
 
 ## Non-goals
 

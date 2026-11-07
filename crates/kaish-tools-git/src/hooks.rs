@@ -8,11 +8,17 @@
 //! scripts, run its own checks, or decline.
 //!
 //! `commit` calls them, in git's order: `pre_commit` once the tree is written
-//! and before the commit object is, `commit_msg` on the message, `post_commit`
-//! after the branch moved. `prepare-commit-msg`, `reference-transaction` and
-//! `post-index-change` have no method: when a repository has one, its name is
-//! in [`HookContext::hooks_present`] and the provider decides what to do about
-//! it (docs/issues.md, W21).
+//! and before the commit object is, `commit_msg` on the message, then
+//! `reference_transaction` around the branch move, `post_commit` after it, and
+//! for `--amend` `post_rewrite`. `branch`, `tag`, `reset`, `switch -c` and
+//! `checkout -b` call `reference_transaction` around each ref they write;
+//! the two switches then call `post_checkout`.
+//!
+//! Every method is required. A provider that has nothing to do for a hook
+//! says so by returning `Ok`, and no default does that on its behalf.
+//! `prepare-commit-msg` and `post-index-change` have no method: when a
+//! repository has one, its name is in [`HookContext::hooks_present`] and the
+//! provider decides what to do about it (docs/issues.md, W21).
 
 use std::path::Path;
 
@@ -31,10 +37,12 @@ pub struct HookContext<'a> {
     /// The directory hooks were resolved from: `core.hooksPath` when the
     /// repository sets it, else `<common dir>/hooks`.
     pub hooks_dir: &'a Path,
-    /// The tree the commit will have, as 40 lowercase hex digits. A string,
-    /// like every oid in this crate's public types, so an embedder needs no
-    /// gix crate to read it.
-    pub tree: &'a str,
+    /// The tree the commit will have, as 40 lowercase hex digits, for a verb
+    /// that makes a commit (`commit`, `commit --amend`). `None` for `reset`,
+    /// `branch`, `tag`, `switch -c` and `checkout -b`, which make none. A
+    /// string, like every oid in this crate's public types, so an embedder
+    /// needs no gix crate to read it.
+    pub tree: Option<&'a str>,
     /// The names of the hook files present that git would run for this
     /// write, for example `pre-commit`. Never a `*.sample` file.
     pub hooks_present: &'a [String],
@@ -81,7 +89,98 @@ impl HookError {
     }
 }
 
-/// An embedder's implementation of git's commit hooks.
+/// Where a ref transaction is, as git's `reference-transaction` hook is told.
+///
+/// Git also runs the hook in a `preparing` state, before any ref is locked.
+/// That state is not sent here: [`RefTransactionState::Prepared`] is the
+/// point where a provider refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RefTransactionState {
+    /// Every check has passed and nothing is written yet. This is the only
+    /// state where `Err` refuses: the command stops, leaves `.git` as it was
+    /// (apart from objects already written, such as a commit's) and says so.
+    Prepared,
+    /// The refs in the transaction were written. `Err` here is shown on
+    /// stderr and changes nothing, as git ignores the hook's exit status.
+    Committed,
+    /// A transaction that was sent as [`Prepared`](Self::Prepared) did not
+    /// happen: a provider refused it (this one, or the call for a sibling
+    /// transaction of the same command), or the write failed afterward, for
+    /// example on a lock another process took. None of its refs were
+    /// written. It is never sent for a command refused before `Prepared`.
+    /// `Err` here is shown on stderr and changes nothing.
+    Aborted,
+}
+
+impl RefTransactionState {
+    /// The word git passes as the hook's argument: `prepared`, `committed`
+    /// or `aborted`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::Committed => "committed",
+            Self::Aborted => "aborted",
+        }
+    }
+}
+
+/// One ref in a transaction, in the form of a line on the hook's standard
+/// input: `<old> <new> <ref>`.
+///
+/// `old` and `new` are 40 hex digits, with 40 zeros for a ref that does not
+/// exist yet. `new` is `ref:<full name>` for a `HEAD` that is made to name a
+/// branch, as git writes it. `name` is a full ref name (`refs/heads/main`), or
+/// `HEAD` for a detached HEAD and for the move of HEAD itself. Built by this
+/// crate; an embedder reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RefUpdate {
+    /// The value before the update.
+    pub old: String,
+    /// The value after it.
+    pub new: String,
+    /// The ref.
+    pub name: String,
+}
+
+impl RefUpdate {
+    pub(crate) fn new(old: impl Into<String>, new: impl Into<String>, name: impl Into<String>) -> Self {
+        Self { old: old.into(), new: new.into(), name: name.into() }
+    }
+
+    /// The line as git feeds it to the hook, without the newline.
+    pub fn line(&self) -> String {
+        format!("{} {} {}", self.old, self.new, self.name)
+    }
+}
+
+/// A commit that a rewrite replaced: a line on `post-rewrite`'s standard
+/// input is `<old> <new>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RewrittenCommit {
+    /// The commit that was replaced, as 40 hex digits.
+    pub old: String,
+    /// The commit that replaced it, as 40 hex digits.
+    pub new: String,
+}
+
+impl RewrittenCommit {
+    pub(crate) fn new(old: impl Into<String>, new: impl Into<String>) -> Self {
+        Self { old: old.into(), new: new.into() }
+    }
+
+    /// The line as git feeds it to the hook, without the newline.
+    pub fn line(&self) -> String {
+        format!("{} {}", self.old, self.new)
+    }
+}
+
+/// An embedder's implementation of git's hooks.
+///
+/// Every method is required: a provider decides each one. The write verbs
+/// call them whether or not the repository has a hook file of that name.
 pub trait GitHooks: Send + Sync {
     /// Called before the commit object is written. `Err` aborts the commit
     /// and its text is the refusal.
@@ -96,4 +195,44 @@ pub trait GitHooks: Send + Sync {
 
     /// Called after the ref moved. Errors are reported, not fatal, as in git.
     fn post_commit(&self, ctx: &HookContext<'_>, commit: &str) -> HookOutput;
+
+    /// Git's `reference-transaction` hook, once per state of each ref
+    /// transaction a verb makes. `updates` are the lines of the hook's
+    /// standard input for that transaction.
+    ///
+    /// A command that makes more than one transaction sends
+    /// [`RefTransactionState::Prepared`] for every one of them, in git's
+    /// order, before it writes anything, and then sends `Committed` for each
+    /// as it is written. `reset` makes two when HEAD has a commit: `ORIG_HEAD`,
+    /// then the branch (or `HEAD` when detached). `switch -c` and `checkout -b` make two when HEAD
+    /// has a commit: the new branch, then `HEAD`. `commit`, `commit --amend`,
+    /// `branch` and `tag` make one. Git's transaction on the `AUTO_MERGE` ref,
+    /// which changes nothing, is not sent.
+    ///
+    /// `Err` at `Prepared` refuses the command: the provider is then sent
+    /// `Aborted` for that transaction and for the earlier ones, and the
+    /// command leaves `.git` as it was apart from objects already written.
+    /// At `Committed` and `Aborted`, `Err` is shown on stderr and changes
+    /// nothing.
+    fn reference_transaction(
+        &self,
+        ctx: &HookContext<'_>,
+        state: RefTransactionState,
+        updates: &[RefUpdate],
+    ) -> Result<HookOutput, HookError>;
+
+    /// Git's `post-checkout` hook, after `switch -c` or `checkout -b` moved
+    /// HEAD to a new branch. `previous` and `new` are the commit HEAD was on
+    /// and the commit it is on now (the same one, since these verbs write no
+    /// files), and `branch_checkout` is git's third argument: true for a
+    /// branch checkout. It is not called when HEAD has no commit yet. Errors
+    /// are reported, not fatal, as in git.
+    fn post_checkout(&self, ctx: &HookContext<'_>, previous: &str, new: &str, branch_checkout: bool) -> HookOutput;
+
+    /// Git's `post-rewrite` hook, after a command replaced commits.
+    /// `command` is git's argument (`amend` for `commit --amend`) and
+    /// `rewritten` the lines of its standard input. `commit --amend` is the
+    /// only verb here that calls it: `reset` does not. Called after
+    /// `post_commit`, as git does. Errors are reported, not fatal.
+    fn post_rewrite(&self, ctx: &HookContext<'_>, command: &str, rewritten: &[RewrittenCommit]) -> HookOutput;
 }
