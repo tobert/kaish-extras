@@ -118,8 +118,14 @@ struct Rec {
     err_at: Option<RefTransactionState>,
     /// Does `pre_commit`, `commit_msg` and `post_commit` belong in this test?
     commit_hooks: bool,
+    /// Every `Ok` carries a message naming the call, and `commit_msg` refuses
+    /// when `refuse_commit_msg` is set.
+    chatty: bool,
+    refuse_commit_msg: bool,
     /// Called inside `Prepared`, to act like another writer.
     on_prepared: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Called inside `Committed`, after the ref was written.
+    on_committed: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl Rec {
@@ -135,18 +141,27 @@ fn joined(updates: &[RefUpdate]) -> String {
     updates.iter().map(RefUpdate::line).collect::<Vec<_>>().join("|")
 }
 
+impl Rec {
+    fn said(&self, text: &str) -> HookOutput {
+        if self.chatty { HookOutput::with_message(text) } else { HookOutput::none() }
+    }
+}
+
 impl GitHooks for Rec {
     fn pre_commit(&self, ctx: &HookContext<'_>) -> Result<HookOutput, HookError> {
         assert!(self.commit_hooks, "pre_commit is not part of this test");
         self.trees.lock().expect("lock").push(ctx.tree.map(str::to_string));
         self.push("pre-commit".to_string());
-        Ok(HookOutput::none())
+        Ok(self.said("pre-commit said hello"))
     }
 
     fn commit_msg(&self, _: &HookContext<'_>, _: &mut String) -> Result<HookOutput, HookError> {
         assert!(self.commit_hooks, "commit_msg is not part of this test");
         self.push("commit-msg".to_string());
-        Ok(HookOutput::none())
+        if self.refuse_commit_msg {
+            return Err(HookError::new("the message is rude"));
+        }
+        Ok(self.said("commit-msg said hello"))
     }
 
     fn post_commit(&self, _: &HookContext<'_>, _: &str) -> HookOutput {
@@ -168,15 +183,20 @@ impl GitHooks for Rec {
                 f();
             }
         }
+        if state == RefTransactionState::Committed {
+            if let Some(f) = &self.on_committed {
+                f();
+            }
+        }
         if state == self.veto_state.unwrap_or(RefTransactionState::Prepared)
             && self.veto_ref.is_some_and(|r| updates.iter().any(|u| u.name == r))
         {
-            return Err(HookError::new("reference-transaction", "no ref moves today"));
+            return Err(HookError::new("no ref moves today"));
         }
         if self.err_at == Some(state) {
-            return Err(HookError::new("reference-transaction", "the provider broke"));
+            return Err(HookError::new("the provider broke"));
         }
-        Ok(HookOutput::none())
+        Ok(self.said(&format!("rt {} said hello", state.as_str())))
     }
 
     fn post_checkout(&self, _: &HookContext<'_>, previous: &str, new: &str, branch_checkout: bool) -> HookOutput {
@@ -627,5 +647,218 @@ async fn a_write_that_fails_after_prepared_is_aborted_for_each_verb() {
         // What the move left committed is not reported as aborted: the
         // branch, or ORIG_HEAD of a reset, was written before the lock stopped the rest.
         assert_eq!(n("rt committed") + n("rt aborted"), *prepared, "[{label}] every prepared transaction ends once: {calls:?}");
+    }
+}
+
+/// The ref moved and only `logs/HEAD` failed: the transaction happened, so the
+/// provider hears `committed` for it, never `aborted`. The command still fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_logs_head_failure_after_the_ref_moved_is_committed_not_aborted() {
+    use std::os::unix::fs::PermissionsExt;
+    // (label, setup, argv, transactions prepared)
+    let cases: &[(&str, Setup, &[&str], usize)] = &[
+        ("commit", staged, &["commit", "-m", "c"], 1),
+        ("reset --soft", staged, &["reset", "--soft", "HEAD~1"], 2),
+        ("switch -c", base, &["switch", "-c", "x"], 2),
+    ];
+    for (label, setup, argv, prepared) in cases {
+        let p = Pair::new(setup);
+        let log = p.git_dir().join("logs/HEAD");
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o444)).expect("chmod");
+        if std::fs::OpenOptions::new().append(true).open(&log).is_ok() {
+            return; // running as root: permissions do not stop the append
+        }
+        let rec = Arc::new(Rec { commit_hooks: argv[0] == "commit", ..Rec::default() });
+        let r = p.run(&rec, argv).await;
+        assert_ne!(r.code, 0, "[{label}] logs/HEAD was read-only, so the command fails: {}", r.err);
+        assert!(r.err.contains("do not run the command again"), "[{label}] {}", r.err);
+        let calls = rec.calls();
+        let n = |kind: &str| calls.iter().filter(|c| c.starts_with(kind)).count();
+        assert_eq!(n("rt prepared"), *prepared, "[{label}] {calls:?}");
+        assert_eq!(n("rt aborted"), 0, "[{label}] the ref moved, so nothing is aborted: {calls:?}");
+        assert_eq!(n("rt committed"), *prepared, "[{label}] {calls:?}");
+    }
+}
+
+/// Texts that name the verb the caller typed: `checkout -b` is not "switch".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkout_b_refusals_say_checkout_and_switch_c_says_switch() {
+    use std::os::unix::fs::PermissionsExt;
+    for (verb, argv) in [("checkout", ["checkout", "-b", "x"]), ("switch", ["switch", "-c", "x"])] {
+        let other = if verb == "checkout" { "switch" } else { "checkout" };
+        // A provider veto.
+        let p = Pair::new(&base);
+        let rec = Arc::new(Rec { veto_ref: Some("refs/heads/x"), ..Rec::default() });
+        let r = p.run(&rec, &argv).await;
+        assert_eq!(r.code, 1, "[{verb}] {}", r.err);
+        assert!(r.err.contains(&format!("hook refused the {verb}:")), "[{verb}] {}", r.err);
+        assert!(r.err.contains(&format!("run the {verb} again")), "[{verb}] {}", r.err);
+        assert!(!r.err.contains(other), "[{verb}] names the other verb: {}", r.err);
+
+        // HEAD moves between the read and the write.
+        let p = Pair::new(&base);
+        let head = p.git_dir().join("HEAD");
+        let rec = Arc::new(Rec {
+            on_prepared: Some(Box::new(move || std::fs::write(&head, "ref: refs/heads/elsewhere\n").expect("HEAD"))),
+            ..Rec::default()
+        });
+        let r = p.run(&rec, &argv).await;
+        assert_eq!(r.code, 1, "[{verb}] {}", r.err);
+        assert!(r.err.contains(&format!("HEAD moved while this {verb} was running")), "[{verb}] {}", r.err);
+        assert!(r.err.contains(&format!("run the {verb} again")), "[{verb}] {}", r.err);
+        assert!(!r.err.contains(other), "[{verb}] names the other verb: {}", r.err);
+
+        // A hook file and no provider.
+        let p = Pair::new(&base);
+        let path = p.ours.join(".git/hooks/post-checkout");
+        std::fs::write(&path, "#!/bin/sh\n").expect("hook");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let r = run_with(&p.fx.root(), "/mnt/ours", &argv, GitConfig::read_only().with_commit_profile()).await;
+        assert_eq!(r.code, 4, "[{verb}] {}", r.err);
+        assert!(r.err.contains(&format!("for this {verb},")), "[{verb}] {}", r.err);
+        // The hook is named post-checkout, so look for the phrase, not the word.
+        assert!(!r.err.contains(&format!("this {other}")), "[{verb}] names the other verb: {}", r.err);
+    }
+}
+
+/// `core.hooksPath` outside the tree: the refusal repeats the command that was
+/// refused, not a `git add` suggestion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hooks_path_refusal_names_the_command_that_was_refused() {
+    for argv in [vec!["branch", "x"], vec!["tag", "x"], vec!["switch", "-c", "x"], vec!["reset"], vec!["commit", "-m", "c"]] {
+        let p = Pair::new(&staged);
+        support::git(&p.ours, &["config", "core.hooksPath", "/elsewhere"]);
+        let rec = Arc::new(Rec { commit_hooks: argv[0] == "commit", ..Rec::default() });
+        let r = p.run(&rec, &argv).await;
+        assert_eq!(r.code, 4, "{argv:?}: {}", r.err);
+        assert!(r.err.contains("core.hooksPath points outside"), "{argv:?}: {}", r.err);
+        assert!(!r.err.contains("git add <path>"), "{argv:?} suggests git add: {}", r.err);
+        assert!(r.err.contains(&format!("real git, outside this shell: git {}", argv.join(" "))), "{argv:?}: {}", r.err);
+    }
+}
+
+/// A lock that stops a ref's creation says "creating", and one that stops a
+/// move says "moving".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lock_refusal_says_creating_for_a_new_ref_and_moving_for_a_move() {
+    let cases: &[(&str, Setup, &[&str], &str, &str)] = &[
+        ("branch", base, &["branch", "x"], "refs/heads/x.lock", "creating 'refs/heads/x'"),
+        ("tag", base, &["tag", "x"], "refs/tags/x.lock", "creating 'refs/tags/x'"),
+        ("reset", staged, &["reset", "--soft", "HEAD~1"], "refs/heads/main.lock", "moving 'refs/heads/main'"),
+        ("commit", staged, &["commit", "-m", "c"], "refs/heads/main.lock", "moving 'refs/heads/main'"),
+    ];
+    for (label, setup, argv, lock, phrase) in cases {
+        // Planted before the command: the early check.
+        let p = Pair::new(setup);
+        std::fs::write(p.git_dir().join(lock), "").expect("lock");
+        let rec = Arc::new(Rec { commit_hooks: argv[0] == "commit", ..Rec::default() });
+        let r = p.run(&rec, argv).await;
+        assert_eq!(r.code, 4, "[{label}] {}", r.err);
+        assert!(r.err.contains(phrase), "[{label}] early check: {}", r.err);
+
+        // Planted after `prepared`: the lock the write itself takes.
+        let p = Pair::new(setup);
+        let path = p.git_dir().join(lock);
+        let rec = Arc::new(Rec {
+            commit_hooks: argv[0] == "commit",
+            on_prepared: Some(Box::new(move || {
+                let _ = std::fs::write(&path, "");
+            })),
+            ..Rec::default()
+        });
+        let r = p.run(&rec, argv).await;
+        assert_eq!(r.code, 4, "[{label}] {}", r.err);
+        assert!(r.err.contains(phrase), "[{label}] at the write: {}", r.err);
+    }
+}
+
+/// What a hook said before a later call refused is not lost with the refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refusal_keeps_the_output_of_the_hooks_that_ran_before_it() {
+    // A veto at `prepared`: `preparing` (and, for reset, the first
+    // transaction's `prepared`) said something, and so do the aborted calls.
+    for (setup, argv, veto) in [
+        (base as Setup, vec!["branch", "x"], "refs/heads/x"),
+        (base, vec!["tag", "x"], "refs/tags/x"),
+        (base, vec!["switch", "-c", "x"], "refs/heads/x"),
+        (staged, vec!["reset", "--soft", "HEAD~1"], "refs/heads/main"),
+        (staged, vec!["commit", "-m", "c"], "refs/heads/main"),
+    ] {
+        let p = Pair::new(&setup);
+        let rec = Arc::new(Rec { veto_ref: Some(veto), chatty: true, commit_hooks: argv[0] == "commit", ..Rec::default() });
+        let r = p.run(&rec, &argv).await;
+        assert_eq!(r.code, 1, "{argv:?}: {}", r.err);
+        assert!(r.err.contains("no ref moves today"), "{argv:?}: {}", r.err);
+        assert!(r.err.contains("rt preparing said hello"), "{argv:?}: preparing's message was dropped: {}", r.err);
+        assert!(r.err.contains("rt aborted said hello"), "{argv:?}: the aborted call's message was dropped: {}", r.err);
+        if argv[0] == "commit" {
+            assert!(r.err.contains("pre-commit said hello") && r.err.contains("commit-msg said hello"), "{argv:?}: {}", r.err);
+        }
+    }
+
+    // `pre_commit` spoke, then `commit_msg` refused.
+    let p = Pair::new(&staged);
+    let rec = Arc::new(Rec { chatty: true, refuse_commit_msg: true, commit_hooks: true, ..Rec::default() });
+    let r = p.run(&rec, &["commit", "-m", "c"]).await;
+    assert_eq!(r.code, 1, "{}", r.err);
+    assert!(r.err.contains("the message is rude"), "{}", r.err);
+    assert!(r.err.contains("pre-commit said hello"), "pre_commit's message was dropped: {}", r.err);
+    assert!(!r.err.contains("commit-msg said hello"), "a refusing call has no message: {}", r.err);
+}
+
+/// The ref moved and the index write that follows failed: a repository failure
+/// (exit 1) whose text says the change was made, not a usage error (exit 2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_index_write_that_fails_after_the_ref_moved_exits_1_and_says_it_was_made() {
+    let cases: &[(&str, Setup, &[&str], &str)] = &[
+        ("commit -a", staged, &["commit", "-a", "-m", "c"], "the commit "),
+        ("reset", staged, &["reset", "HEAD~1"], "the branch now names "),
+    ];
+    for (label, setup, argv, said) in cases {
+        let p = Pair::new(setup);
+        let index = p.git_dir().join("index");
+        let rec = Arc::new(Rec {
+            commit_hooks: argv[0] == "commit",
+            // The new index is renamed over `.git/index`, which a directory refuses.
+            on_committed: Some(Box::new(move || {
+                // `reset` sends `Committed` twice; the second finds the directory.
+                if index.is_file() {
+                    std::fs::remove_file(&index).expect("rm index");
+                    std::fs::create_dir(&index).expect("index dir");
+                }
+            })),
+            ..Rec::default()
+        });
+        let r = p.run(&rec, argv).await;
+        assert_eq!(r.code, 1, "[{label}] {}", r.err);
+        assert!(r.err.contains(said) && r.err.contains("index could not be written afterward"), "[{label}] {}", r.err);
+        assert!(r.err.contains("run git status"), "[{label}] {}", r.err);
+        assert_eq!(git_raw(&p.ours, &["rev-parse", "--verify", "-q", "main"]).0, 0, "[{label}]");
+    }
+}
+
+/// `reset <rev>` from a branch with no commit, where `ORIG_HEAD` exists: git
+/// deletes it in a transaction its hook sees (docs/issues.md W57).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "docs/issues.md W57: git runs a reference-transaction for the ORIG_HEAD it deletes; this crate sends none"]
+async fn reset_to_a_revision_from_an_unborn_branch_tells_the_provider_what_git_tells_its_scripts() {
+    let setup = |d: &Path| {
+        base(d);
+        support::git(d, &["checkout", "-q", "--orphan", "fresh"]);
+        std::fs::write(d.join(".git/ORIG_HEAD"), "1111111111111111111111111111111111111111\n").expect("ORIG_HEAD");
+    };
+    for argv in [vec!["reset", "--soft", "main"], vec!["reset", "main"]] {
+        let p = Pair::new(&setup);
+        let log = p.log_twin_hooks();
+        let rec = Arc::new(Rec::default());
+        let r = p.run(&rec, &argv).await;
+        assert_eq!(r.code, 0, "{argv:?}: {}", r.err);
+        let (code, _, err) = git_raw(&p.twin, &argv);
+        assert_eq!(code, 0, "{argv:?}: {err}");
+        let git = by_kind(&twin_calls(&log));
+        assert_eq!(by_kind(&rec.calls()), git, "{argv:?}: the calls differ from what git's scripts saw");
+        // The negative control: git's scripts saw something to compare.
+        assert!(!git.is_empty(), "{argv:?}: {git:?}");
+        assert!(!p.ours.join(".git/ORIG_HEAD").exists() && !p.twin.join(".git/ORIG_HEAD").exists(), "{argv:?}");
     }
 }

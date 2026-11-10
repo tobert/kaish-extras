@@ -27,7 +27,7 @@ use gix_ref::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
 use gix_ref::Target;
 
 use crate::config::{Identity, RewritePolicy};
-use crate::error::GitError;
+use crate::error::{GitError, Wrote};
 use crate::hooks::GitHooks;
 use crate::verbs::write::containment::Leaf;
 use crate::verbs::write::head;
@@ -165,7 +165,11 @@ pub(crate) fn run(repo: &WriteRepo, env: &ResetEnv, opts: &ResetOptions) -> Resu
     // A refusal from here on (a lost compare-and-swap, a HEAD that moved)
     // comes after ORIG_HEAD was written, and says so.
     if let Err(e) = refmove::move_head_as(repo, MoveKind::RESET, cmd, &target, old, new, &message, &committer) {
-        abort_all(txs.len() - 1, &mut err);
+        match hooks {
+            // A branch that moved before the failure is committed, not aborted.
+            Some(h) if hookrun::ref_written(&e) => hookrun::committed(h, &ctx, &txs[txs.len() - 1], &mut err),
+            _ => abort_all(txs.len() - 1, &mut err),
+        }
         return Err(if wrote_orig_head { e.after_orig_head() } else { e });
     }
     if let Some(h) = hooks {
@@ -175,9 +179,13 @@ pub(crate) fn run(repo: &WriteRepo, env: &ResetEnv, opts: &ResetOptions) -> Resu
     let unstaged = prepared.as_ref().map(unstage::Prepared::paths).unwrap_or_default();
     if let Some(p) = prepared {
         // The branch has moved; a failure here leaves the index as it was.
-        p.finish(repo).map_err(|e| GitError::Usage {
+        // A repository failure (exit 1) whose text says the reset was made.
+        p.finish(repo).map_err(|e| GitError::Repository {
             operation: OP,
-            message: format!("the branch now names {new}, but the index could not be written afterward ({e}). Run git status; the index still holds the state from before the reset"),
+            what: format!("the branch now names {new}, but the index could not be written afterward (run git status: the index still holds the state from before the reset)"),
+            path: repo.git_dir().join("index"),
+            source: Box::new(std::io::Error::other(e.to_string())),
+            wrote: Wrote::Described,
         })?;
     }
     let detached = matches!(target, refmove::HeadTarget::Detached);
@@ -243,7 +251,7 @@ fn write_orig_head(repo: &WriteRepo, old: ObjectId, committer: &Signature) -> Re
     repo.check(std::path::Path::new("ORIG_HEAD"), Leaf::File)?;
     let edit = RefEdit {
         change: Change::Update {
-            log: LogChange { mode: RefLog::AndReference, force_create_reflog: false, message: "updating ORIG_HEAD".into() },
+            log: LogChange { mode: RefLog::AndReference, force_create_reflog: false, message: "reset: updating ORIG_HEAD".into() },
             expected: PreviousValue::Any,
             new: Target::Object(old),
         },

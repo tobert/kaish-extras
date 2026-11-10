@@ -21,7 +21,7 @@ before 0.14 (kaish `docs/EMBEDDING.md`, "Why this, and not a gate").
 | W4 | History rewrites follow `RewritePolicy::{Refuse, Unpublished, Allow}`; default `Unpublished` | §3 |
 | W5 | First cut: `add`, `rm`, `mv`, `restore --staged`, `reset` (no revision), `commit` (`-m`, `-F`, `-a`, `--only`/`-- <paths>`, `--trailer`, `--amend`), `branch <name>`, `tag <name>`, `switch -c`, `var GIT_AUTHOR_IDENT` | §4 |
 | W6 | Nothing writes file *content* into the working tree. `mv` renames; `switch <existing>` and `restore <file>` are refused in this cut | §4 |
-| W7 | Hooks: refuse when the repository has one, unless the embedder installs a `GitHooks` provider | §5 |
+| W7 | Hooks: refuse when the repository has one, unless the embedder installs a `GitHooks` provider. With one installed, `core.hooksPath` outside the tree and a `post-index-change` hook (index verbs, `reset` without `--soft`) still refuse (docs/issues.md W50, W51) | §5 |
 | W8 | Signing: refuse when `commit.gpgSign`/`tag.gpgSign` is true; no signer provider in this cut | §5 |
 | W9 | Content conversion: any `filter=` attribute refuses the path; `text`/`eol`/`ident`/`core.autocrlf` refuse only when the bytes could change | §5 |
 | W10 | Every ref move is compare-and-swap against the oid we read, and writes a reflog entry in git's format | §6 |

@@ -27,7 +27,7 @@ use gix_index::hash::ObjectId;
 use kaish_tool_api::GlobalFlags;
 
 use crate::config::{Identity, RewritePolicy};
-use crate::error::GitError;
+use crate::error::{GitError, Wrote};
 use crate::hooks::{GitHooks, HookContext, RewrittenCommit};
 use crate::verbs::write::add::{self, AddOptions, Plan, Tracked};
 use crate::verbs::write::attributes::AttributeReader;
@@ -507,12 +507,12 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
     if let Some(h) = env.hooks.as_ref() {
         match h.pre_commit(&ctx) {
             Ok(out) => note(&mut err, &out.message),
-            Err(e) => return hook_refusal(cmd, "pre-commit", &e.message).map_err(GitError::after_objects),
+            Err(e) => return hook_refusal(cmd, "pre-commit", &e.message, &err).map_err(GitError::after_objects),
         }
         let mut text = message.clone();
         match h.commit_msg(&ctx, &mut text) {
             Ok(out) => note(&mut err, &out.message),
-            Err(e) => return hook_refusal(cmd, "commit-msg", &e.message).map_err(GitError::after_objects),
+            Err(e) => return hook_refusal(cmd, "commit-msg", &e.message, &err).map_err(GitError::after_objects),
         }
         if text != message {
             // Git cleans the file again after the hook has been at it.
@@ -525,7 +525,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
                     "Run the commit again with a message: git commit -m '<message>'.",
                     Override::Never,
                 )
-                .map_err(GitError::after_objects);
+                .map_err(|e| e.with_hook_output(&err).after_objects());
             }
         }
     }
@@ -576,7 +576,12 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
     }
     if let Err(e) = refmove::move_head(repo, cmd, &target, old, commit_id, &reflog, &idents.committer) {
         if let Some(h) = env.hooks.as_ref() {
-            hookrun::aborted(h.as_ref(), &ctx, &ref_tx, &mut err);
+            // A ref that moved before the failure is committed, not aborted.
+            if hookrun::ref_written(&e) {
+                hookrun::committed(h.as_ref(), &ctx, &ref_tx, &mut err);
+            } else {
+                hookrun::aborted(h.as_ref(), &ctx, &ref_tx, &mut err);
+            }
         }
         return Err(e.after_objects());
     }
@@ -587,7 +592,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &CommitEnv, opts: &CommitOptions) -> Re
     if let Some(tx) = tx {
         // The ref has moved; the index follows, as in git. A failure here
         // leaves the commit made and the index as it was.
-        tx.commit(repo).map_err(|e| index_after_commit(&e, commit_id))?;
+        tx.commit(repo).map_err(|e| index_after_commit(repo, &e, commit_id))?;
     }
     if let Some(h) = env.hooks.as_ref() {
         let out = h.post_commit(&ctx, &commit_id.to_string());
@@ -665,7 +670,8 @@ fn validate_tree(repo: &WriteRepo, cmd: &str, prepared: &Prepared) -> Result<(),
     Ok(())
 }
 
-fn hook_refusal<T>(command: &str, hook: &str, why: &str) -> Result<T, GitError> {
+/// `said` is what the hooks before this one printed.
+fn hook_refusal<T>(command: &str, hook: &str, why: &str, said: &str) -> Result<T, GitError> {
     refuse(
         1,
         command,
@@ -673,12 +679,19 @@ fn hook_refusal<T>(command: &str, hook: &str, why: &str) -> Result<T, GitError> 
         "Fix what it names, then make the commit again.",
         Override::Embedder,
     )
+    .map_err(|e| e.with_hook_output(said))
 }
 
-fn index_after_commit(e: &GitError, commit: ObjectId) -> GitError {
-    GitError::Usage {
+/// The ref moved and the index write that follows failed. A repository
+/// failure (exit 1) whose text says the commit was made, so it is not made a
+/// second time.
+fn index_after_commit(repo: &WriteRepo, e: &GitError, commit: ObjectId) -> GitError {
+    GitError::Repository {
         operation: OP,
-        message: format!("the commit {commit} was made, and the branch now names it, but the index could not be written afterward ({e}). Run git status; the index still holds the state from before the commit"),
+        what: format!("the commit {commit} was made and the branch now names it, but the index could not be written afterward (run git status: the index still holds the state from before the commit)"),
+        path: repo.git_dir().join("index"),
+        source: Box::new(std::io::Error::other(e.to_string())),
+        wrote: Wrote::Described,
     }
 }
 

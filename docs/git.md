@@ -616,7 +616,7 @@ kaish> git reset HEAD~1 -- notes.txt # that index entry from another revision; n
 branch and are described under "Rewriting history" below. A plain `reset`
 (also `reset HEAD` and `reset --mixed`, with no path) is a `--mixed` reset to
 `HEAD`: it writes `ORIG_HEAD` and the reflog line `reset: moving to HEAD`, as
-git does, so it needs a committer identity and exits 2 without one. On a branch
+git does for these spellings (`reset @` differs: docs/issues.md W30), so it needs a committer identity and exits 2 without one. On a branch
 with no commit it only empties the index, as git does, and needs no identity.
 `reset -- <path>` and `reset HEAD -- <path>` write neither.
 
@@ -643,6 +643,7 @@ What refuses, with the exit code:
 | `reset --hard`, `--merge`, `--keep` | 2 | they write working-tree files; never |
 | `reset --soft` with a path; two of `--soft`, `--mixed`, `--hard`, `--merge`, `--keep` | 2 | usage |
 | any of them in a merge, rebase, ... or with a split index, ... | 4 | design section 4 |
+| `add`, `rm`, `mv`, `restore --staged` or `reset` without `--soft` in a repository with an executable `post-index-change` hook, with or without a hook provider | 4 | git runs the hook after it writes the index, and this shell cannot (W50) |
 
 `reset HEAD` and `reset HEAD -- <path>` are the unstage forms. Any other first
 word that names a revision, or contains `~`, `^`, `@` or `{`, is a revision:
@@ -815,7 +816,9 @@ hook provider (exit 4), before anything is written. The output is git's, with
 (or a detached HEAD) and nothing else. `--mixed` also puts the whole index back
 to `<rev>`'s tree. The working tree is never written. Both write `ORIG_HEAD`
 (the old tip) and the reflog line `reset: moving to <rev as typed>` in the
-branch's log and `logs/HEAD`, as git does, and need an identity for the line.
+branch's log and `logs/HEAD`, as git does for a revision that is not `@`
+(git logs `HEAD` for `@`, and this shell logs `@`; W30), and need an identity
+for the line.
 `<rev>` is what `git log` accepts: `HEAD~N`, `^`, a branch, a tag, an oid.
 `--json` returns `head`, `previous`, `mode`, `branch` and `unstaged`.
 

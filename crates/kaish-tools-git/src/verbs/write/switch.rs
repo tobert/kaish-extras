@@ -232,11 +232,11 @@ pub(crate) struct SwitchCreate {
 
 pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &SwitchCreate) -> Result<Outcome, GitError> {
     let cmd = opts.command.as_str();
-    let kind = MoveKind { op: opts.op, ..MoveKind::SWITCH };
+    let kind = if opts.op == "checkout" { MoveKind::CHECKOUT } else { MoveKind::SWITCH };
     let full = refname::full_name(RefKind::Branch, cmd, &opts.name)?;
     ensure_idle(repo, cmd, "switch branches")?;
     ensure_reflog_on(repo, cmd)?;
-    let scan = scan_ref_hooks(repo, env.hooks.is_some(), cmd, &["reference-transaction", "post-checkout"], "switch")?;
+    let scan = scan_ref_hooks(repo, env.hooks.is_some(), cmd, &["reference-transaction", "post-checkout"], opts.op)?;
 
     let head = repo.read().head()?;
     let head_oid = head
@@ -310,9 +310,11 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &SwitchCreate) -> Resul
         let h = h.as_ref();
         match &switched {
             Ok(()) => txs.iter().for_each(|tx| hookrun::committed(h, &ctx, tx, &mut err)),
+            // Only the `logs/HEAD` line failed: both transactions were written.
+            Err(e) if hookrun::ref_written(e) => txs.iter().for_each(|tx| hookrun::committed(h, &ctx, tx, &mut err)),
             Err(_) => {
                 // The branch transaction is first, and it was written when
-                // the branch exists; the HEAD one never was.
+                // the branch exists; the HEAD one was not.
                 let (done, rest) = if created.get() { txs.split_at(1) } else { txs.split_at(0) };
                 done.iter().for_each(|tx| hookrun::committed(h, &ctx, tx, &mut err));
                 rest.iter().for_each(|tx| hookrun::aborted(h, &ctx, tx, &mut err));

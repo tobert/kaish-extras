@@ -1001,3 +1001,24 @@ fn amend_and_reset_declare_the_rewrite_operation() {
         assert!(leaf.operations.iter().any(|o| o == "git.ref"), "{verb}: {:?}", leaf.operations);
     }
 }
+
+/// An `ORIG_HEAD` that has a reflog gets a line from a reset, as git writes it:
+/// the same bytes in `logs/ORIG_HEAD`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reset_appends_to_the_orig_head_reflog_as_git_does() {
+    let setup = |d: &Path| {
+        staged(d);
+        support::git(d, &["update-ref", "--create-reflog", "-m", "seed", "ORIG_HEAD", "HEAD~1"]);
+    };
+    for argv in [&["reset", "--soft", "HEAD~1"][..], &["reset", "HEAD~1"], &["reset"]] {
+        let p = Pair::new(&setup);
+        let seeded = read_log(&p.ours, "logs/ORIG_HEAD");
+        assert!(seeded.contains("\tseed"), "the control: the seed wrote a reflog line: {seeded}");
+        let r = p.ours(argv).await;
+        assert_eq!(r.code, 0, "{argv:?}: {}", r.err);
+        assert_eq!(p.twin(argv).0, 0, "{argv:?}");
+        let bytes = |d: &Path| std::fs::read(d.join(".git/logs/ORIG_HEAD")).expect("logs/ORIG_HEAD");
+        assert_eq!(bytes(&p.ours), bytes(&p.twin), "{argv:?}: logs/ORIG_HEAD differs");
+        assert!(bytes(&p.ours).len() > seeded.len(), "{argv:?}: git appended a line, so the comparison is not of an untouched file");
+    }
+}

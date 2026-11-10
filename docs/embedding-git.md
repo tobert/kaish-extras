@@ -529,7 +529,9 @@ A build with the `commit` cargo feature (off by default) has:
   verbs declare none. The root of a read-only tool declares none, and a
   read-only tool's `branch` and `tag` accept no creation flag.
 - `WritableGitConfig::with_hooks` and `with_identity`, and the types they take
-  (`GitHooks`, `Identity`), which `commit`, `reset` and `var` read.
+  (`GitHooks`, `Identity`). `with_hooks` is read by `commit`, `reset`, `branch`,
+  `tag`, `switch -c` and `checkout -b`; `with_identity` by those verbs when
+  they write a reflog line or a tag, and by `var`.
   `with_rewrite_policy` takes a `RewritePolicy`, described next.
 - The per-profile router text. A tool without write settings answers `git add`
   with "this git is read-only". A tool with them never says that: for a git
@@ -570,7 +572,9 @@ nothing counts as published. Cost, trust and the other limits are
   them from the process environment), `GIT_COMMITTER_NAME` and
   `GIT_COMMITTER_EMAIL` fall back to the author's field by field, and
   `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` are optional. With nothing to
-  use, `commit` and `var` exit 2 naming both variables and the pin. Repo-local
+  use, `commit`, `var`, `reset`, `branch`, `tag`, `switch -c` and `checkout -b`
+  exit 2 naming both variables and the pin (a reset or a branch needs a
+  committer only). Repo-local
   `user.name`/`user.email` are not read. A date with no offset and the clock
   are UTC.
 - *Hooks.* This crate spawns nothing. Without a provider, a hook git would run
@@ -584,7 +588,12 @@ nothing counts as published. Cost, trust and the other limits are
   `<common dir>/hooks` or the directory `core.hooksPath` names (any value
   counts; a path outside the working tree, or through a symbolic link, refuses
   by name). With a `GitHooks` provider the hook file is not run and does not
-  refuse: the provider is called whether or not the file exists, and decides.
+  refuse for `commit`, `reset --soft`, `branch`, `tag`, `switch -c` and
+  `checkout -b`: the provider is called whether or not the file exists, and
+  decides. Two refusals stay with a provider installed: a `core.hooksPath`
+  outside the working tree or through a link (W51), and a `post-index-change`
+  hook, which refuses `add`, `rm`, `mv`, `restore --staged` and `reset` without
+  `--soft` (W50). `post-index-change` and `prepare-commit-msg` have no method.
   Every method of `GitHooks` is required, so a provider decides each hook.
   `pre_commit` gets the tree oid before the commit object is written (its
   `Err` aborts, exit 1), `commit_msg` may rewrite the message (git cleans it
@@ -601,12 +610,16 @@ nothing counts as published. Cost, trust and the other limits are
   `reset` makes two transactions (`ORIG_HEAD`, then the branch), `switch -c`
   and `checkout -b` two (the branch, then `HEAD`), and the rest one; every
   `Preparing` and `Prepared` is sent before the first write, which is not git's
-  order (docs/issues.md W21 lists both, per verb). `switch -c`
-  and `checkout -b` then call `post_checkout`, and `commit --amend` calls
+  order (docs/issues.md W21 lists both, per verb). `Prepared` is also sent
+  before any ref lock is taken, where git's `prepared` follows the locks
+  (W48). `switch -c` and `checkout -b` then call `post_checkout` when HEAD has
+  a commit, and `commit --amend` calls
   `post_rewrite` with `amend` after `post_commit`. The provider is told
   `no_verify` and decides what it means. `HookContext::tree` is `None` for
-  the verbs that make no commit. The calls, in git's order, were measured
-  against git 2.56 (`tests/write_hooks.rs`).
+  the verbs that make no commit. The lines each state carries, and the state
+  order for each transaction, were compared with git 2.56's scripts in
+  `tests/write_hooks.rs`; the order across the two transactions of one command
+  differs from git's, as the table in W21 shows.
 - *Signing* is refused: `-S`, `tag -s` and `-u`, and `commit.gpgSign` or
   `tag.gpgSign` true in the repository's own config (`tag.forceSignAnnotated`
   refuses an annotated tag). Host `~/.gitconfig` is never read, so a host
@@ -691,9 +704,12 @@ Write safety, in the order it applies:
 
 1. Refusals first. A verb decides everything it will refuse from a read-only
    snapshot of the index and the working tree, before it creates a file. A
-   refusal that says "Nothing was changed." leaves `.git` byte-identical,
-   directory mtimes included (`tests/write_fingerprint.rs`, and the commit
-   refusals in `tests/write_commit.rs`). Every blob's object path passes
+   refusal that says "Nothing was changed." leaves the files in `.git`
+   byte-identical, and the mtimes of the directories inside it
+   (`tests/write_fingerprint.rs`, and the commit refusals in
+   `tests/write_commit.rs`). One refusal moves the mtime of `.git` itself: a
+   hook veto of `reset --mixed`, which takes and releases `index.lock` first
+   (W52). Every blob's object path passes
    containment before the first blob is written.
 2. Then `index.lock` is created exclusively, the index is read again under it,
    and the plan is rebuilt if the bytes changed. A lock that already exists is

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use gix_index::hash::ObjectId;
 
-use crate::error::GitError;
+use crate::error::{GitError, Wrote};
 use crate::hooks::{GitHooks, HookContext, RefTransactionState, RefUpdate};
 use crate::verbs::write::commit::hook_present;
 use crate::verbs::write::refmove::MoveKind;
@@ -93,7 +93,8 @@ pub(crate) fn oid_or_null(old: Option<ObjectId>) -> String {
 /// `Preparing` (with the lines of the last state each was sent), and return the
 /// refusal.
 ///
-/// The refusal carries no written-state: a caller that has written objects
+/// The refusal carries what the hooks said before it (`err`, which the caller
+/// may already hold text in), and no written-state: a caller that has written objects
 /// marks it with [`GitError::after_objects`].
 pub(crate) fn prepared(
     hooks: &dyn GitHooks,
@@ -117,9 +118,8 @@ pub(crate) fn prepared(
         }
     }
     let Some((at, state, why)) = refused else { return Ok(()) };
-    // A refusal has no stderr to add to; the aborted calls' text is dropped
-    // with it, and their `Err` can change nothing.
-    let mut dropped = String::new();
+    // A refusal has no stderr of its own: what the calls said before it, the
+    // aborted calls included, rides on the refusal. Their `Err` changes nothing.
     for (i, tx) in txs.iter().enumerate() {
         let was_prepared = state == RefTransactionState::Prepared && i <= at;
         let lines = if was_prepared { &tx.updates } else { &tx.preparing };
@@ -127,7 +127,7 @@ pub(crate) fn prepared(
         if state == RefTransactionState::Preparing && i > at {
             continue;
         }
-        send_lines(hooks, ctx, RefTransactionState::Aborted, lines, &mut dropped);
+        send_lines(hooks, ctx, RefTransactionState::Aborted, lines, err);
     }
     refuse(
         1,
@@ -136,11 +136,20 @@ pub(crate) fn prepared(
         format!("Fix what it names, then {}.", kind.again),
         Override::Embedder,
     )
+    .map_err(|e| e.with_hook_output(err))
 }
 
 /// Send `Committed` for `tx`. A failure is shown on stderr and is not fatal.
 pub(crate) fn committed(hooks: &dyn GitHooks, ctx: &HookContext<'_>, tx: &Tx, err: &mut String) {
     send(hooks, ctx, RefTransactionState::Committed, tx, err);
+}
+
+/// Whether a failed ref move had already written the ref. Only an error that
+/// says so ([`Wrote::Described`]: the ref moved and a later step, the
+/// `logs/HEAD` line, failed) does; any other failure left the ref as it was.
+/// The caller sends `Committed` for that transaction, never `Aborted`.
+pub(crate) fn ref_written(e: &GitError) -> bool {
+    matches!(e, GitError::Repository { wrote: Wrote::Described, .. })
 }
 
 /// Send `Aborted` for `tx`. A failure is shown on stderr and is not fatal.

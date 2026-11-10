@@ -85,6 +85,9 @@ pub struct Refusal {
     pub(crate) next: String,
     pub(crate) overridable: Override,
     pub(crate) wrote: Wrote,
+    /// What hooks that ran before the refusal said on stderr. Empty for a
+    /// refusal that no hook was involved in.
+    pub(crate) hook_output: String,
 }
 
 impl Refusal {
@@ -102,7 +105,14 @@ impl Refusal {
             next: next.into(),
             overridable,
             wrote: Wrote::Nothing,
+            hook_output: String::new(),
         }
+    }
+
+    /// The same refusal, carrying the output of hooks that ran before it.
+    pub(crate) fn with_hook_output(mut self, text: &str) -> Self {
+        self.hook_output = text.to_string();
+        self
     }
 
     /// The same refusal, raised after objects were written.
@@ -132,7 +142,11 @@ impl fmt::Display for Refusal {
             self.next,
             self.overridable.sentence(),
             self.wrote.sentence()
-        )
+        )?;
+        if !self.hook_output.trim().is_empty() {
+            write!(f, "\nOutput of the hooks that ran before this refusal:\n{}", self.hook_output.trim_end())?;
+        }
+        Ok(())
     }
 }
 

@@ -724,6 +724,9 @@ async fn writes_refuse_in_repository_states_they_must_not_run_in() {
             base(d);
             let h = d.join(".git/hooks/post-index-change");
             std::fs::write(&h, "#!/bin/sh\n").expect("hook");
+            // Git runs a hook that is an executable file, and no other.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&h, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }, "post-index-change hook"),
         ("hooksPath outside the tree", |d| { base(d); support::git(d, &["config", "core.hooksPath", "/elsewhere"]); }, "core.hooksPath points outside"),
     ];
@@ -738,6 +741,26 @@ async fn writes_refuse_in_repository_states_they_must_not_run_in() {
             assert!(support::Fingerprint::take(&p.ours).differences_from(&fp).is_empty(), "[{label}] {args:?} changed the repository");
         }
     }
+}
+
+/// Git runs `post-index-change` only when it is an executable file (or a link
+/// to one); a mode 0644 file is ignored with a hint and `git add` succeeds.
+/// This build refuses only what git would run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_post_index_change_file_git_would_not_run_does_not_refuse() {
+    use std::os::unix::fs::PermissionsExt;
+    let p = Pair::new(&|d| {
+        base(d);
+        let h = d.join(".git/hooks/post-index-change");
+        std::fs::write(&h, "#!/bin/sh\nexit 1\n").expect("hook");
+        std::fs::set_permissions(&h, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        support::write_file(d, "a.txt", "changed\n");
+    });
+    let (code, _, err) = p.twin(&["add", "a.txt"]);
+    assert_eq!(code, 0, "git ignores a hook that is not executable: {err}");
+    let r = p.ours("", &["add", "a.txt"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    p.assert_same("0644 post-index-change");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

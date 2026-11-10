@@ -16,9 +16,13 @@
 //!
 //! Every method is required. A provider that has nothing to do for a hook
 //! says so by returning `Ok`, and no default does that on its behalf.
-//! `prepare-commit-msg` and `post-index-change` have no method: when a
-//! repository has one, its name is in [`HookContext::hooks_present`] and the
-//! provider decides what to do about it (docs/issues.md, W21).
+//! `prepare-commit-msg` and `post-index-change` have no method. For `commit`,
+//! a repository that has one lists its name in [`HookContext::hooks_present`]
+//! and the provider decides what to do about it. The index verbs (`add`, `rm`,
+//! `mv`, `restore --staged` and `reset` without `--soft`) refuse a repository
+//! that has a `post-index-change` hook whether or not a provider is installed,
+//! and every verb refuses a `core.hooksPath` that points outside the working
+//! tree (docs/issues.md, W21, W50 and W51).
 
 use std::path::Path;
 
@@ -72,20 +76,20 @@ impl HookOutput {
 }
 
 /// A hook that refused the write. Its text is the refusal the caller sees.
+///
+/// The verb knows which hook it called, so the error carries no hook name.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("hook {hook} refused: {message}")]
+#[error("hook refused: {message}")]
 #[non_exhaustive]
 pub struct HookError {
-    /// The hook's name, for example `pre-commit`.
-    pub hook: String,
     /// Why it refused, in words a caller can act on.
     pub message: String,
 }
 
 impl HookError {
-    /// A refusal by `hook` with `message`.
-    pub fn new(hook: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { hook: hook.into(), message: message.into() }
+    /// A refusal with `message`.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self { message: message.into() }
     }
 }
 
@@ -104,8 +108,11 @@ pub enum RefTransactionState {
     /// `Prepared`: it stops, leaves `.git` as it was (apart from objects
     /// already written) and says so. [`Aborted`](Self::Aborted) follows.
     Preparing,
-    /// Every check has passed and nothing is written yet. `Err` refuses the
-    /// command as at `Preparing`.
+    /// Every check this crate makes has passed and nothing is written yet.
+    /// `Err` refuses the command as at `Preparing`. This is sent before any ref
+    /// lock is taken, where git sends `prepared` after it has locked the refs:
+    /// a lock that another process holds can still fail the write after this
+    /// state, and [`Aborted`](Self::Aborted) follows (docs/issues.md W48).
     Prepared,
     /// The refs in the transaction were written. `Err` here is shown on
     /// stderr and changes nothing, as git ignores the hook's exit status.
@@ -116,6 +123,10 @@ pub enum RefTransactionState {
     /// example on a lock another process took. None of its refs were
     /// written. Its updates are those of the last state sent for the
     /// transaction. It is never sent for a command refused before `Preparing`.
+    /// A transaction whose refs were written is sent
+    /// [`Committed`](Self::Committed) even when the command then fails, for
+    /// example when the `logs/HEAD` line cannot be appended after the branch
+    /// moved.
     /// `Err` here is shown on stderr and changes nothing.
     Aborted,
 }

@@ -872,7 +872,7 @@ impl GitHooks for Recorder {
             git_raw(repo, &["update-ref", "refs/heads/main", other.trim()]);
         }
         if self.reject_pre_commit {
-            return Err(HookError::new("pre-commit", "lint failed"));
+            return Err(HookError::new("lint failed"));
         }
         Ok(HookOutput::with_message("pre-commit ran"))
     }
