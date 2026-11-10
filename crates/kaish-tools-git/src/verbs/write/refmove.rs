@@ -28,6 +28,7 @@ use crate::verbs::write::ident::Signature;
 use crate::verbs::write::refusal::{refuse, Override};
 use crate::verbs::write::reflog::copy_message;
 use crate::verbs::write::repo::WriteRepo;
+use crate::verbs::write::state::reflog_turned_off;
 
 /// What HEAD names right now.
 pub(crate) enum HeadTarget {
@@ -262,13 +263,33 @@ fn hold_head(repo: &WriteRepo, kind: MoveKind, command: &str, full: &str) -> Res
     }
 }
 
+/// Whether the reflog of `full` is a file already. Git appends to one whatever
+/// `core.logAllRefUpdates` says, and creates one only for the refs that
+/// setting names. A directory there is not a log (git leaves it alone for a
+/// tag); a link or a file with other hard links refuses, as every write does.
+pub(crate) fn log_exists(repo: &WriteRepo, full: &str) -> Result<bool, GitError> {
+    use crate::verbs::write::containment::Leaf;
+    let rel = std::path::PathBuf::from(format!("logs/{full}"));
+    let parent = rel.parent().map(|p| repo.check(p, Leaf::Dir)).transpose()?;
+    let (Some(parent), Some(name)) = (parent, rel.file_name()) else { return Ok(false) };
+    match std::fs::symlink_metadata(parent.join(name)) {
+        Ok(m) if m.is_dir() => Ok(false),
+        Ok(_) => repo.check(&rel, Leaf::File).map(|_| true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(GitError::repository(repo.read().operation(), format!("looking at logs/{full}"), repo.common_dir(), e)),
+    }
+}
+
 /// Create the ref `full` at `new`, which must not exist (git-write-profile.md
 /// §6). The caller has already refused a name that exists, with git's wording;
 /// the compare-and-swap here closes the race after that look.
 ///
 /// `log` is the reflog line for the ref and the committer to write it as. A
 /// branch gets one (gix-ref's autocreate rule is git's: heads, remotes, notes
-/// and `HEAD`); a tag passes `None`, and gix-ref writes no log for it.
+/// and `HEAD`); a tag passes `None`, and gix-ref writes no log for it, unless
+/// the caller found a log file already there (see [`log_exists`]). With
+/// `core.logAllRefUpdates` off, git writes the line only to a log file that
+/// exists, so `log` is dropped when there is none.
 pub(crate) fn create_ref(
     repo: &WriteRepo,
     kind: MoveKind,
@@ -277,6 +298,7 @@ pub(crate) fn create_ref(
     new: ObjectId,
     log: Option<(&str, &Signature)>,
 ) -> Result<(), GitError> {
+    let log = if log.is_some() && reflog_turned_off(repo, command)? && !log_exists(repo, full)? { None } else { log };
     let checked = if log.is_some() { repo.check_ref_write(full, false)? } else { repo.check_ref_write_unlogged(full)? };
     refuse_if_ref_locked(repo, command, &checked, full)?;
     let message = log.map(|(m, _)| copy_message(m)).unwrap_or_default();
@@ -359,6 +381,9 @@ pub(crate) fn switch_head(repo: &WriteRepo, s: &HeadSwitch<'_>) -> Result<(), Gi
             Override::Never,
         );
     }
+    // With reflogs off, git appends to `logs/HEAD` only when it exists. Asked
+    // before the first write: a refusal here must leave the repository as it was.
+    let head_log = !reflog_turned_off(repo, s.command)? || log_exists(repo, "HEAD")?;
     if let (Some(oid), Some((message, committer))) = (s.head_oid, s.create) {
         create_ref(repo, kind, s.command, s.full, oid, Some((message, committer)))?;
         if let Some(flag) = s.created {
@@ -377,7 +402,7 @@ pub(crate) fn switch_head(repo: &WriteRepo, s: &HeadSwitch<'_>) -> Result<(), Gi
     lock.write_all(format!("ref: {}\n", s.full).as_bytes())
         .map_err(|e| after_branch("HEAD could not be written".to_string(), e))?;
     lock.commit().map_err(|e| after_branch("HEAD could not be replaced".to_string(), e.error))?;
-    if let (Some(oid), Some((_, committer))) = (s.head_oid, s.create) {
+    if let (true, Some(oid), Some((_, committer))) = (head_log, s.head_oid, s.create) {
         let from = match s.was {
             HeadTarget::Branch(b) => b.strip_prefix("refs/heads/").unwrap_or(b).to_string(),
             HeadTarget::Detached => oid.to_string(),

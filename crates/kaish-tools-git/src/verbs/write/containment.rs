@@ -69,6 +69,12 @@ pub(crate) enum Leaf {
     /// makes them on purpose. A link, a directory or anything not a regular
     /// file still refuses.
     Replaced,
+    /// A ref, or the reflog of one, that a write creates or appends to. As
+    /// [`Leaf::File`], and a tree of empty directories also passes: git
+    /// removes one in the way of a ref or a reflog and writes the file
+    /// (checked on git 2.56 for `branch` and `tag`). A directory that holds a
+    /// file or a link refuses, as git does.
+    Ref,
     /// A name the walk only reads, deletes or renames: a regular file or a
     /// symbolic link, never followed. The link count does not matter, because
     /// unlink and rename change the directory entry and not the inode.
@@ -239,15 +245,41 @@ pub(crate) fn check_beneath(
                 if ty.is_dir() {
                     return Err(refuse(&seen, "a directory", THEN_NOT_FILE));
                 }
+            } else if leaf == Leaf::Ref && ty.is_dir() {
+                if !only_empty_directories(&abs, EMPTY_TREE_DEPTH) {
+                    return Err(refuse(&seen, "a directory that holds files", THEN_NOT_FILE));
+                }
+                continue;
             } else if !ty.is_file() {
                 return Err(refuse(&seen, "not a regular file", THEN_NOT_FILE));
             }
-            if leaf == Leaf::File && has_other_hard_links(&meta) {
+            if matches!(leaf, Leaf::File | Leaf::Ref) && has_other_hard_links(&meta) {
                 return Err(refuse(&seen, "a file with other hard links", THEN_HARD_LINKED));
             }
         }
     }
     Ok(abs)
+}
+
+/// How deep [`only_empty_directories`] looks. A tree deeper than this is
+/// refused as if it held a file; git has no such bound, and no real
+/// repository leaves a tree this deep behind.
+const EMPTY_TREE_DEPTH: usize = 32;
+
+/// Whether `dir` holds nothing but directories, to `depth` levels, so git
+/// would remove it. A link, a file, anything unreadable, or a tree deeper
+/// than `depth` answers false.
+fn only_empty_directories(dir: &Path, depth: usize) -> bool {
+    let Some(depth) = depth.checked_sub(1) else { return false };
+    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    for entry in entries {
+        let Ok(entry) = entry else { return false };
+        // `DirEntry::file_type` does not follow a link.
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) || !only_empty_directories(&entry.path(), depth) {
+            return false;
+        }
+    }
+    true
 }
 
 const THEN_LEAVES: &str = "A write must stay beneath one directory of the repository, and this \
@@ -263,10 +295,10 @@ const THEN_LINK_NEEDS_DIR: &str = "Writing through it could change files outside
 const THEN_LINK_NEEDS_FILE: &str = "Writing through it could change a file outside the mount. Real git \
     follows such links; this shell does not. Replace it with a regular file \
     using tools outside this repository's control, or use a clean clone";
-const THEN_NOT_DIR: &str = "The write needs a directory there. Real git fails on this layout too. \
+const THEN_NOT_DIR: &str = "The write needs a directory there. \
     Remove or rename it using tools outside this repository's control, or use \
     a clean clone";
-const THEN_NOT_FILE: &str = "The write needs a regular file there. Real git fails on this layout too. \
+const THEN_NOT_FILE: &str = "The write needs a regular file there. \
     Remove or rename it using tools outside this repository's control, or use \
     a clean clone";
 const THEN_HARD_LINKED: &str = "Writing in place would also change every other name for it, and one of \

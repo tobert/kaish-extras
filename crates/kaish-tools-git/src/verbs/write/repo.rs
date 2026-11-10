@@ -180,7 +180,10 @@ impl WriteRepo {
         }
         rels.push("packed-refs".to_string());
         rels.push("packed-refs.lock".to_string());
-        let mut paths: Vec<PathBuf> = rels.iter().map(|rel| self.check(Path::new(rel), Leaf::File)).collect::<Result<_, _>>()?;
+        // The ref and its reflog may be an empty directory tree, which git
+        // removes; the lock and `packed-refs` are files only.
+        let leaf_of = |rel: &str| if rel == refname || rel.strip_prefix("logs/") == Some(refname) { Leaf::Ref } else { Leaf::File };
+        let mut paths: Vec<PathBuf> = rels.iter().map(|rel| self.check(Path::new(rel), leaf_of(rel))).collect::<Result<_, _>>()?;
         if !logged {
             if let Some(dir) = Path::new("logs").join(refname).parent() {
                 paths.push(self.check(dir, Leaf::Dir)?);

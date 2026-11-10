@@ -620,9 +620,9 @@ nothing counts as published. Cost, trust and the other limits are
   order for each transaction, were compared with git 2.56's scripts in
   `tests/write_hooks.rs`; the order across the two transactions of one command
   differs from git's, as the table in W21 shows.
-- *Signing* is refused: `-S`, `tag -s` and `-u`, and `commit.gpgSign` or
-  `tag.gpgSign` true in the repository's own config (`tag.forceSignAnnotated`
-  refuses an annotated tag). Host `~/.gitconfig` is never read, so a host
+- *Signing* is refused: `-S`, `tag -s` and `-u`, and `commit.gpgSign` true
+  (for `commit`) or `tag.gpgSign` true (for `tag`) in the repository's own
+  config (`tag.forceSignAnnotated` refuses an annotated tag). Host `~/.gitconfig` is never read, so a host
   that signs by default still gets an unsigned commit from this tool; the
   tool description says so.
 

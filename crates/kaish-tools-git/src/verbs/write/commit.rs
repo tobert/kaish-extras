@@ -739,16 +739,14 @@ fn check_not_empty(items: &Map, head_map: &Map, allow_empty: bool, command: &str
 
 /// Settings that would make this shell's commit differ from git's.
 fn ensure_commit_settings(repo: &WriteRepo, command: &str) -> Result<(), GitError> {
-    for (section, key, shown) in [("commit", "gpgsign", "commit.gpgSign"), ("tag", "gpgsign", "tag.gpgSign")] {
-        if config_bool(repo, command, section, key, shown)? == Some(true) {
-            return refuse(
-                4,
-                command,
-                format!("{shown} is true in this repository, and this shell never signs."),
-                format!("Commit with real git, outside this shell, or turn signing off for this repository: git config {shown} false."),
-                Override::Repository,
-            );
-        }
+    if config_bool(repo, command, "commit", "gpgsign", "commit.gpgSign")? == Some(true) {
+        return refuse(
+            4,
+            command,
+            "commit.gpgSign is true in this repository, and this shell never signs.",
+            "Commit with real git, outside this shell, or turn signing off for this repository: git config commit.gpgSign false.",
+            Override::Repository,
+        );
     }
     let bad = |what: String, fix: String| refuse::<()>(4, command, what, fix, Override::Repository);
     if config_last(repo, "i18n", "commitencoding")?.is_some() {

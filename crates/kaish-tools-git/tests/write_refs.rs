@@ -455,21 +455,51 @@ async fn a_linked_worktree_creates_in_the_common_dir_and_logs_head_in_its_own() 
     assert!(p.ours.join(".git/logs/refs/heads/n/m").is_file(), "branch logs live in the common dir");
 }
 
-/// Git removes an empty directory in the way of a ref and creates the ref.
-/// The containment walk refuses it (exit 4, nothing changed) because it wants a
-/// regular file or nothing at that path. Safe, and different: docs/issues.md W36.
+/// Git removes a tree of empty directories in the way of a ref or of its
+/// reflog and writes the file; a directory that holds a file stays an error
+/// (docs/issues.md W36, checked on git 2.56).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_empty_directory_where_a_branch_goes_is_refused_though_git_replaces_it() {
-    let p = Pair::new(&base);
-    for repo in [&p.ours, &p.twin] {
-        std::fs::create_dir_all(repo.join(".git/refs/heads/emptydir/sub")).expect("dir");
+async fn an_empty_directory_where_a_ref_or_its_log_goes_is_replaced_as_git_replaces_it() {
+    for (verb, dir) in [
+        ("branch", "refs/heads/emptydir/sub"),
+        ("branch", "logs/refs/heads/emptydir/sub"),
+        ("tag", "refs/tags/emptydir/sub"),
+    ] {
+        let p = Pair::new(&base);
+        for repo in [&p.ours, &p.twin] {
+            std::fs::create_dir_all(repo.join(".git").join(dir)).expect("dir");
+        }
+        assert_eq!(p.twin(&[verb, "emptydir"]).0, 0, "git replaces the empty directory at {dir}");
+        let r = p.ours("", &[verb, "emptydir"]).await;
+        assert_eq!(r.code, 0, "{verb} over {dir}: {}", r.err);
+        p.assert_same(dir);
     }
-    let before = support::Fingerprint::take(&p.git_dir(true));
-    let r = p.ours("", &["branch", "emptydir"]).await;
-    assert_eq!(r.code, 4, "{}", r.err);
-    assert!(r.err.contains("refs/heads/emptydir"), "{}", r.err);
-    assert_eq!(support::Fingerprint::take(&p.git_dir(true)).differences_from(&before), Vec::<String>::new());
-    assert_eq!(p.twin(&["branch", "emptydir"]).0, 0, "git replaces the empty directory");
+}
+
+/// The negative control for the test above: a directory that holds a file, or
+/// a link, is not removed by git and not by this shell, and nothing changes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_directory_holding_a_file_where_a_ref_or_its_log_goes_is_refused_as_git_refuses_it() {
+    for (dir, plant) in [
+        ("logs/refs/heads/full", "file"),
+        ("logs/refs/heads/full", "link"),
+        ("refs/heads/full/deeper", "link"),
+    ] {
+        let p = Pair::new(&base);
+        for repo in [&p.ours, &p.twin] {
+            let d = repo.join(".git").join(dir);
+            std::fs::create_dir_all(&d).expect("dir");
+            match plant {
+                "file" => std::fs::write(d.join("junk"), "x\n").expect("file"),
+                _ => std::os::unix::fs::symlink("/nonexistent", d.join("lnk")).expect("link"),
+            }
+        }
+        assert_ne!(p.twin(&["branch", "full"]).0, 0, "git refuses {dir} with a {plant}");
+        let before = support::Fingerprint::take(&p.git_dir(true));
+        let r = p.ours("", &["branch", "full"]).await;
+        assert_eq!(r.code, 4, "{dir} with a {plant}: {}", r.err);
+        assert_eq!(support::Fingerprint::take(&p.git_dir(true)).differences_from(&before), Vec::<String>::new());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1671,7 +1701,6 @@ async fn a_symlinked_head_refuses_switch_in_both_spellings_and_writes_nothing() 
 /// name's prefixes, and gix says that is not a valid ref name, so the verb
 /// fails (exit 1) instead of making the ref.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "BUG: a name with a directory part ending in a dot (a./b) fails in the prefix walk; git accepts it"]
 async fn a_name_with_a_directory_part_ending_in_a_dot_is_accepted_as_git_accepts_it() {
     for (verb, name) in [("branch", "a./b"), ("tag", "a./b"), ("branch", "dot./x.LOCK")] {
         let p = Pair::new(&base);
@@ -1683,10 +1712,9 @@ async fn a_name_with_a_directory_part_ending_in_a_dot_is_accepted_as_git_accepts
     }
 }
 
-// ── divergences filed in docs/issues.md (W40-W44), each ignored until fixed ──
+// ── reflog and tracking settings (docs/issues.md W40, W41, W44) ───────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "W40: core.logAllRefUpdates=false in a non-bare repository refuses; git makes the ref with no log"]
 async fn log_all_ref_updates_false_makes_the_branch_with_no_log_as_git_does() {
     let p = Pair::new(&|d| {
         base(d);
@@ -1699,7 +1727,6 @@ async fn log_all_ref_updates_false_makes_the_branch_with_no_log_as_git_does() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "W41: branch.autoSetupMerge=simple refuses a start under refs/remotes whose name differs; git writes no tracking"]
 async fn auto_setup_merge_simple_writes_no_tracking_when_the_names_differ() {
     let p = Pair::new(&|d| {
         base(d);
@@ -1933,7 +1960,6 @@ async fn a_tag_target_may_be_a_tree_or_blob_spelling() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "W44: a log file that exists for a new tag gets the tag's line in git; this writes none"]
 async fn an_existing_log_file_for_a_new_tag_is_appended_to_as_git_does() {
     let p = Pair::new(&base);
     for dir in [&p.ours, &p.twin] {
@@ -1943,4 +1969,126 @@ async fn an_existing_log_file_for_a_new_tag_is_appended_to_as_git_does() {
     assert_eq!(p.twin(&["tag", "x"]).0, 0);
     assert_eq!(p.ours("", &["tag", "x"]).await.code, 0);
     p.assert_same("stale tag log");
+}
+
+/// `core.logAllRefUpdates=false` still appends to a log file that exists, for
+/// a branch, for `logs/HEAD` and for a new tag, and `switch -c` skips a
+/// `logs/HEAD` that does not exist. Each case is compared with git's bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn log_all_ref_updates_false_appends_to_existing_logs_only_as_git_does() {
+    type Setup = fn(&Path);
+    let cases: Vec<(&str, Setup, Vec<&str>)> = vec![
+        ("existing branch log", |d| { std::fs::create_dir_all(d.join(".git/logs/refs/heads")).expect("dir"); std::fs::write(d.join(".git/logs/refs/heads/nb"), "stale\n").expect("log"); }, vec!["branch", "nb"]),
+        ("switch -c without a HEAD log", |d| { std::fs::remove_file(d.join(".git/logs/HEAD")).expect("rm"); }, vec!["switch", "-c", "nb"]),
+        ("switch -c with a HEAD log", |_| {}, vec!["switch", "-c", "nb"]),
+        ("checkout -b with a branch log", |d| { std::fs::create_dir_all(d.join(".git/logs/refs/heads")).expect("dir"); std::fs::write(d.join(".git/logs/refs/heads/nb"), "stale\n").expect("log"); }, vec!["checkout", "-b", "nb"]),
+    ];
+    for (label, extra, argv) in cases {
+        let p = Pair::new(&|d| {
+            base(d);
+            support::git(d, &["config", "core.logAllRefUpdates", "false"]);
+            extra(d);
+        });
+        let (code, _, gerr) = p.twin(&argv);
+        assert_eq!(code, 0, "[{label}] git: {gerr}");
+        let r = p.ours("", &argv).await;
+        assert_eq!(r.code, 0, "[{label}] {}", r.err);
+        p.assert_same(label);
+    }
+    // The negative control: the same switch with the setting on writes the HEAD log.
+    let p = Pair::new(&|d| {
+        base(d);
+        std::fs::remove_file(d.join(".git/logs/HEAD")).expect("rm");
+    });
+    assert_eq!(p.twin(&["switch", "-c", "nb"]).0, 0);
+    assert_eq!(p.ours("", &["switch", "-c", "nb"]).await.code, 0);
+    assert!(p.ours.join(".git/logs/HEAD").is_file(), "with the setting on, logs/HEAD is created");
+    p.assert_same("setting on");
+}
+
+/// `autoSetupMerge=simple` writes tracking when the new name is the name of
+/// the branch the remote-tracking ref follows, which a refspec decides: the
+/// source of `refs/heads/a:refs/remotes/origin/b` is `a`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_setup_merge_simple_follows_the_fetch_refspec_as_git_does() {
+    let globbed: &[(&str, &str, bool)] = &[("feat", "origin/feat", true), ("other", "origin/feat", false)];
+    let exact: &[(&str, &str, bool)] = &[("a", "origin/b", true), ("b", "origin/b", false)];
+    let nested: &[(&str, &str, bool)] = &[("feat", "o/x/feat", true), ("x/feat", "o/x/feat", false)];
+    type Runs<'a> = &'a [(&'a str, &'a str, bool)];
+    let cases: Vec<(&str, &str, &str, Runs)> = vec![
+        ("+refs/heads/*:refs/remotes/origin/*", "origin", "refs/remotes/origin/feat", globbed),
+        ("+refs/heads/a:refs/remotes/origin/b", "origin", "refs/remotes/origin/b", exact),
+        ("+refs/heads/*:refs/remotes/o/x/*", "o/x", "refs/remotes/o/x/feat", nested),
+    ];
+    for (refspec, remote, tracking, runs) in cases {
+        for (name, start, tracks) in runs {
+            let p = Pair::new(&|d| {
+                base(d);
+                let key = |k: &str| format!("remote.{remote}.{k}");
+                support::git(d, &["config", &key("url"), "/nowhere"]);
+                support::git(d, &["config", &key("fetch"), refspec]);
+                support::git(d, &["update-ref", tracking, "HEAD"]);
+                support::git(d, &["config", "branch.autoSetupMerge", "simple"]);
+            });
+            let (code, _, gerr) = p.twin(&["branch", name, start]);
+            assert_eq!(code, 0, "git {name} {start} ({refspec}): {gerr}");
+            let wrote = git_raw(&p.twin, &["config", "--get-regexp", "^branch\\.[^a]"]).0 == 0
+                || git_raw(&p.twin, &["config", "--get", &format!("branch.{name}.remote")]).0 == 0;
+            assert_eq!(wrote, *tracks, "premise: git tracking for {name} {start} under {refspec}");
+            let r = p.ours("", &["branch", name, start]).await;
+            if *tracks {
+                assert_eq!(r.code, 4, "{name} {start} ({refspec}): {}", r.err);
+            } else {
+                assert_eq!(r.code, 0, "{name} {start} ({refspec}): {}", r.err);
+                p.assert_same(&format!("{name} {start}"));
+            }
+        }
+    }
+}
+
+/// The line git writes to an existing tag log names the target by its type
+/// when it is no commit, and by subject and UTC date when it is one, and it
+/// is the same for an annotated tag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_existing_tag_log_gets_gits_line_for_each_kind_of_target() {
+    for (label, argv) in [
+        ("annotated", vec!["tag", "-a", "x", "-m", "m"]),
+        ("tree", vec!["tag", "x", "HEAD^{tree}"]),
+        ("blob", vec!["tag", "x", "HEAD:a.txt"]),
+        ("older commit", vec!["tag", "x", "HEAD~1"]),
+        ("tag of a tag", vec!["tag", "x", "first"]),
+    ] {
+        let p = Pair::new(&|d| {
+            base(d);
+            support::git(d, &["tag", "-a", "first", "-m", "f"]);
+            std::fs::create_dir_all(d.join(".git/logs/refs/tags")).expect("dir");
+            std::fs::write(d.join(".git/logs/refs/tags/x"), "stale\n").expect("log");
+        });
+        let (code, _, gerr) = p.twin(&argv);
+        assert_eq!(code, 0, "[{label}] git: {gerr}");
+        let r = p.ours("", &argv).await;
+        assert_eq!(r.code, 0, "[{label}] {}", r.err);
+        p.assert_same(label);
+    }
+}
+
+/// A negative refspec is one this shell does not interpret, so `simple` refuses
+/// a start under it even where git would write no tracking: the refusal is a
+/// divergence in the safe direction, and `--no-track` (or no negative refspec)
+/// makes the branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_setup_merge_simple_refuses_a_start_when_a_negative_refspec_is_configured() {
+    let p = Pair::new(&|d| {
+        base(d);
+        support::git(d, &["config", "remote.origin.url", "/nowhere"]);
+        support::git(d, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+        support::git(d, &["config", "--add", "remote.origin.fetch", "^refs/heads/zzz"]);
+        support::git(d, &["update-ref", "refs/remotes/origin/feat", "HEAD"]);
+        support::git(d, &["config", "branch.autoSetupMerge", "simple"]);
+    });
+    let before = support::Fingerprint::take(&p.git_dir(true));
+    let r = p.ours("", &["branch", "other", "origin/feat"]).await;
+    assert_eq!(r.code, 4, "{}", r.err);
+    assert_eq!(support::Fingerprint::take(&p.git_dir(true)).differences_from(&before), Vec::<String>::new());
+    assert_eq!(p.ours("", &["branch", "--no-track", "other", "origin/feat"]).await.code, 0);
 }

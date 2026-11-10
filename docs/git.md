@@ -759,7 +759,7 @@ does not borrow the author's.
 | `--no-edit` or `--reset-author` without `--amend`; `--reset-author` with `--author` | 2 | usage |
 | `--fixup`, `--squash` | 2 | no autosquash |
 | `-S`, `--gpg-sign` | 2 | this shell never signs |
-| `commit.gpgSign` or `tag.gpgSign` true in the repository's config | 4 | same |
+| `commit.gpgSign` true in the repository's config | 4 | same |
 | `-p`, `--interactive` | 2 | no terminal |
 | `-e`, `-v`, no `-m` and no `-F` | 2 | no editor |
 | `-i`, `-m` with `-F`, `-F -`, `-a` with paths, `--only` with no paths | 2 | usage |
