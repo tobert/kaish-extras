@@ -520,6 +520,26 @@ pub enum GitError {
         repo: PathBuf,
     },
 
+    /// A revision of the form `:<path>` or `:<N>:<path>` named a path the
+    /// index has no entry for. Exit 1, the same class as `NoSuchPath`.
+    #[error(
+        "git {operation}: '{spec}' names the path '{path}', which is not in the \
+         index of repository '{repo}' at stage {stage}. Stage it first with \
+         git add, or name a revision instead"
+    )]
+    NoSuchIndexPath {
+        /// The verb that was asked for.
+        operation: &'static str,
+        /// The revision, as the caller spelled it.
+        spec: String,
+        /// The path half of the spec.
+        path: String,
+        /// The index stage that was looked up (0 unless `:<N>:` was given).
+        stage: u8,
+        /// The repository the lookup ran against.
+        repo: PathBuf,
+    },
+
     /// A `<rev>:<path>` navigation (`show`, `ls`) named a path this tree does
     /// not contain. Exit 1 — a git-level "no", the same class git returns for
     /// a path outside a tree ("path not tracked" in E.5's table).
@@ -772,6 +792,7 @@ impl GitError {
             | GitError::WrongObjectType { .. }
             | GitError::AncestryBudgetExhausted { .. }
             | GitError::PatchRendererFailed { .. }
+            | GitError::NoSuchIndexPath { .. }
             | GitError::NoSuchPath { .. } => 1,
             #[cfg(feature = "commit")]
             GitError::Refused { code, .. } => *code,
@@ -964,6 +985,13 @@ mod tests {
                 spec: "HEAD^{tree}".into(),
                 expected: "commit",
                 found: "tree",
+                repo: repo.clone(),
+            },
+            GitError::NoSuchIndexPath {
+                operation: "tag",
+                spec: ":nope".into(),
+                path: "nope".into(),
+                stage: 0,
                 repo: repo.clone(),
             },
             GitError::NoSuchPath {

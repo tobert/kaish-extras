@@ -1921,3 +1921,40 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   `git reset -- nomatch` exits 0 and changes nothing; this shell exits 1 with
   "did not match any file known to git". Failing case:
   `reset_with_an_unmatched_pathspec_is_not_an_error_in_git`, ignored.
+- **W52 — `rm --json` lists a path under `removed` that is still on disk.** A
+  deletion that fails after an earlier one succeeded stages the path as
+  deleted and leaves the file; the warning on stderr names it, but `removed`
+  in the JSON still holds it. It needs a `left_on_disk` field (or the path
+  taken out of `removed`) so an agent reading only the JSON is not misled.
+- **W53 — `HEAD:a.txt^{tree}` reports a false "no such path".** The revision
+  parser splits `<rev>:<path>` before it reads a peel suffix, so the path is
+  `a.txt^{tree}`. Git peels the suffix after the path lookup. The suffix must
+  be parsed off the end of the path first.
+- **W54 — the `@{-0}` message contradicts itself.** `UnsupportedRevspec` says
+  `'@{...}'` is not parsed, and in the same sentence lists `@{-N}` as an
+  accepted form. `@{-0}` is not a form in git either (`fatal: not a valid
+  object name`); the message should say `@{-N}` needs N of 1 or more.
+- **W55 — `@{-N}` with a raw oid in the reflog "from" position.** Measured on
+  git 2.56: after `git switch --detach HEAD` and `git switch --detach HEAD~1`,
+  `git branch prev @{-1}` makes `prev` at the oid HEAD was on. This shell does
+  the same; `at_minus_n_resolves_a_raw_oid_in_the_reflog_from_position` pins
+  it. No divergence.
+- **W56 — the 8 MiB `logs/HEAD` scan cap.** `@{-N}` reads the last 8 MiB of
+  the log (`MAX_REFLOG_SCAN_BYTES`) and errors when N checkouts are not in
+  that span. `docs/git.md` now says so; the cap is not configurable.
+- **W57 — a pathspec from a subdirectory that cannot be canonicalized
+  resolves from the repository root.** `cwd_prefix` in `tool.rs` falls back to
+  the uncanonicalized path with `unwrap_or_else`, and `strip_prefix` then
+  fails and returns an empty prefix, so a pathspec typed in a subdirectory is
+  read as if typed at the root. It should be an error that names the
+  directory.
+- **W58 — `mv` hides a failed rollback.** In `verbs/write/mv.rs` the undo
+  after a failed rename is `let _ = std::fs::rename(t, f)`. When the undo
+  fails too, the files stay at the new names and the error names only the
+  first failure. The error should list every path the rollback did not move
+  back.
+- **W59 — read verbs still drop an empty pathspec.** `PathFilter::parse`
+  skips an empty spec, so `status`, `log` and `diff` with `--path ""` match
+  everything. The write verbs refuse the empty string as git does (exit 1,
+  `write_paths` in `tool.rs`); git's behavior for the read verbs was not
+  measured.

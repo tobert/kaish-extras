@@ -630,7 +630,9 @@ What refuses, with the exit code:
 | `add` of a nested repository the index does not track | 4 | names it |
 | `add <file real git would convert>` | 4 | names the attribute or setting |
 | any pathspec that matches nothing, a glob that matches only ignored files included | 1 | |
-| a pathspec that ends in `/` where the path is a file | 1 | `d/` names a directory only, as in git; the same holds for `status`, `log` and `diff` (they show nothing for it) |
+| a pathspec that ends in `/` where the path is a file | 1 | `d/` names a directory only, as in git. `status`, and `log` and `diff` after `--`, show nothing for it; real git refuses a bare `a.txt/` operand on `log` and `diff` (exit 128, ambiguous argument), and this shell treats it as a path |
+| an empty string as a pathspec (`rm ""`, `add ""`, `restore --staged ""`, `reset -- ""`, `commit -- ""`) | 1 | git refuses it too (exit 128); `.` is how to name every path |
+| `rm .`, `rm ./` or `rm --cached .` at the repository root, without `-r` | 1 | git refuses it too (exit 128); the text names `git rm -r .` |
 | `index` file of zero bytes | 1 | git refuses it too ("index file smaller than expected") |
 | `rm` of a path with staged or local changes | 1 | `--cached` or `-f` |
 | `rm <dir>` without `-r` | 1 | |
@@ -872,7 +874,9 @@ refuse, exit 2). A branch or tag that exists refuses (exit 1) with the name,
 and so does a name that would sit inside another (`a` beside `a/b`).
 
 **A branch** is made at HEAD or at `<start>`, a revision `git log` accepts
-(`@{-1}` is the branch HEAD was on before the last checkout). The
+(`@{-1}` is the branch HEAD was on before the last checkout; only the last
+8 MiB of `logs/HEAD` are read for it, and a log with fewer than N checkouts in
+that span refuses with exit 1 rather than saying there are fewer). The
 reflog line is `branch: Created from <start as typed>`; with no start it names
 the current branch, or `HEAD` when detached, as git does. A branch needs an
 identity for that line (the variables or the pinned one). An unborn HEAD has
@@ -905,7 +909,10 @@ With no start point, an unborn HEAD changes only `HEAD`. `--json` returns `branc
 `-u`/`--set-upstream-to`/`--unset-upstream`/`-t`/`--track`; `tag -d -f -s -u`
 and `tag -a` without a message; `switch <branch>`, `checkout <branch>` and
 `checkout <path>` (they write files); `switch -C`, `checkout -B`, `--detach`,
-`--orphan`, `-f` and `-m` on either. The differences from git, and the cost of
+`--orphan`, `-f` and `-m` on either; `tag -a` when `core.commentChar` or
+`core.commentString` is set to anything but `#` or `auto` (exit 4; those two
+leave a `-m` or `-F` message cleaned as `#` does, and the tag object is
+byte-identical to git's). The differences from git, and the cost of
 the name check, are `docs/issues.md` W34-W47.
 
 ## Non-goals

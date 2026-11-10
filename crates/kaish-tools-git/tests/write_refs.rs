@@ -742,6 +742,71 @@ async fn signing_settings_and_always_logging_refuse_a_tag() {
     assert_eq!(p.ours("", &["tag", "light"]).await.code, 0);
 }
 
+/// Review finding 4: `core.commentChar` and `core.commentString` set to `#`
+/// (or `auto`) change nothing about a `-m` tag message, so they are accepted
+/// and the tag object is byte-identical to git's. Any other value is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_comment_setting_equal_to_hash_is_accepted_and_matches_git() {
+    for (key, value) in [("core.commentChar", "#"), ("core.commentChar", "auto"), ("core.commentString", "#")] {
+        let p = Pair::new(&|d| {
+            base(d);
+            support::git(d, &["config", key, value]);
+        });
+        let argv = ["tag", "-a", "x", "-m", "hello\n# dropped\n; kept\nbye"];
+        let r = p.ours("", &argv).await;
+        assert_eq!(r.code, 0, "[{key}={value}] {}", r.err);
+        let (code, _, gerr) = p.twin(&argv);
+        assert_eq!(code, 0, "[{key}={value}] {gerr}");
+        let ours = git_raw(&p.ours, &["cat-file", "-p", "x"]).1;
+        let twin = git_raw(&p.twin, &["cat-file", "-p", "x"]).1;
+        assert!(!ours.contains("dropped") && ours.contains("; kept"), "[{key}={value}] {ours}");
+        assert_eq!(ours, twin, "[{key}={value}] tag message differs");
+    }
+    for (key, value) in [("core.commentChar", ";"), ("core.commentString", "//"), ("core.commentChar", "##")] {
+        let p = Pair::new(&|d| {
+            base(d);
+            support::git(d, &["config", key, value]);
+        });
+        let r = p.ours("", &["tag", "-a", "x", "-m", "m"]).await;
+        assert_eq!(r.code, 4, "[{key}={value}] {}", r.err);
+        assert!(r.err.contains(key), "[{key}={value}] {}", r.err);
+    }
+}
+
+/// Review finding 3: a missing index path is not "no such ref".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revision_naming_a_path_missing_from_the_index_says_so() {
+    let p = Pair::new(&base);
+    let r = p.ours("", &["tag", "x", ":nope"]).await;
+    assert_eq!(r.code, 1, "{}", r.err);
+    assert!(r.err.contains("index"), "{}", r.err);
+    assert!(r.err.contains("'nope'"), "{}", r.err);
+    assert!(!r.err.contains("no such ref"), "{}", r.err);
+    assert_eq!(p.twin(&["tag", "x", ":nope"]).0, 128);
+    // Negative control: a path that is in the index resolves.
+    let r = p.ours("", &["tag", "y", ":a.txt"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+}
+
+/// `@{-1}` when the previous checkout moved from a detached HEAD: the reflog
+/// "from" word is a full oid, and git resolves `@{-1}` to that commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn at_minus_n_resolves_a_raw_oid_in_the_reflog_from_position() {
+    let p = Pair::new(&|d| {
+        base(d);
+        support::git(d, &["switch", "-q", "--detach", "HEAD"]);
+        support::git(d, &["switch", "-q", "--detach", "HEAD~1"]);
+    });
+    let argv = ["branch", "prev", "@{-1}"];
+    let (code, _, gerr) = p.twin(&argv);
+    assert_eq!(code, 0, "{gerr}");
+    let r = p.ours("", &argv).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    let want = git_raw(&p.twin, &["rev-parse", "prev"]).1;
+    let got = git_raw(&p.ours, &["rev-parse", "prev"]).1;
+    assert_eq!(got, want, "@{{-1}} resolved to a different commit");
+}
+
 // ── switch -c and checkout -b ──────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

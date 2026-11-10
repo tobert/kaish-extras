@@ -1479,7 +1479,7 @@ impl GitTool {
         }
         let ops = operands(&parsed.operands, argv).all();
         self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, base| {
-            let specs = base.repo_paths(OP, &ops)?;
+            let specs = base.write_paths(OP, &command, &ops)?;
             verbs::write::add::run(
                 repo,
                 &verbs::write::add::AddOptions {
@@ -1506,7 +1506,7 @@ impl GitTool {
         let command = command_text(OP, argv);
         let ops = operands(&parsed.operands, argv).all();
         self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, base| {
-            let specs = base.repo_paths(OP, &ops)?;
+            let specs = base.write_paths(OP, &command, &ops)?;
             verbs::write::rm::run(
                 repo,
                 &verbs::write::rm::RmOptions {
@@ -1582,7 +1582,7 @@ impl GitTool {
             );
         }
         self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, base| {
-            let specs = base.repo_paths(OP, &ops)?;
+            let specs = base.write_paths(OP, &command, &ops)?;
             verbs::write::unstage::run(
                 repo,
                 &verbs::write::unstage::UnstageOptions { specs, operation: OP, command },
@@ -1692,7 +1692,7 @@ impl GitTool {
             // move nothing, so no policy applies.
             let moves = soft || rev.as_deref().is_some_and(|r| r != "HEAD");
             if !moves {
-                let specs = base.repo_paths(OP, &paths)?;
+                let specs = base.write_paths(OP, &command, &paths)?;
                 return verbs::write::unstage::run(
                     repo,
                     &verbs::write::unstage::UnstageOptions { specs, operation: OP, command },
@@ -1700,7 +1700,7 @@ impl GitTool {
             }
             let rev = rev.unwrap_or_else(|| "HEAD".to_string());
             if !paths.is_empty() {
-                let specs = base.repo_paths(OP, &paths)?;
+                let specs = base.write_paths(OP, &command, &paths)?;
                 return verbs::write::reset::run_paths(repo, &rev, specs, command);
             }
             verbs::write::reset::run(
@@ -1790,7 +1790,7 @@ impl GitTool {
             policy: settings.rewrite_policy,
         };
         self.with_write_repo(OP, ctx, parsed.repo.as_deref(), move |repo, base| {
-            let specs = base.repo_paths(OP, &ops)?;
+            let specs = base.write_paths(OP, &command, &ops)?;
             verbs::write::commit::run(
                 repo,
                 &env,
@@ -2171,6 +2171,23 @@ impl PathBase {
             prefix: prefix.split('/').filter(|s| !s.is_empty()).map(str::to_string).collect(),
             root_vfs: to_vfs_path(repo.root(), &resolved.mount_real, &resolved.mount_vfs),
         }
+    }
+
+    /// [`repo_paths`](Self::repo_paths) for a write verb. An empty string is
+    /// refused as git refuses it: after resolution it would read as the
+    /// repository root and match every path.
+    #[cfg(feature = "commit")]
+    fn write_paths(&self, operation: &'static str, command: &str, specs: &[String]) -> Result<Vec<String>, GitError> {
+        if specs.iter().any(String::is_empty) {
+            return verbs::write::refusal::refuse(
+                1,
+                command,
+                "An empty string is not a valid pathspec.",
+                "To name every path, use '.' instead.",
+                verbs::write::refusal::Override::Never,
+            );
+        }
+        self.repo_paths(operation, specs)
     }
 
     fn repo_paths(&self, operation: &'static str, specs: &[String]) -> Result<Vec<String>, GitError> {

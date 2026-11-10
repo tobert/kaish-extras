@@ -466,6 +466,79 @@ async fn rm_of_a_directory_needs_dash_r() {
     p.assert_same("rm d refused");
 }
 
+/// Review finding 1: an empty or `.` pathspec at the repository root used to
+/// match every tracked path, and `rm .` deleted the whole tree and exited 0.
+/// Git refuses all of these; a refusal must change nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rm_of_the_repository_root_without_dash_r_refuses_and_changes_nothing() {
+    for (label, args, needle) in [
+        ("dot", vec!["rm", "."], "git rm -r ."),
+        ("dot cached", vec!["rm", "--cached", "."], "git rm -r ."),
+        ("dot slash", vec!["rm", "./"], "git rm -r ."),
+        ("dot -f", vec!["rm", "-f", "."], "git rm -r ."),
+        ("empty", vec!["rm", ""], "empty string"),
+        ("empty cached", vec!["rm", "--cached", ""], "empty string"),
+        ("empty -r", vec!["rm", "-r", ""], "empty string"),
+        ("empty next to a file", vec!["rm", "a.txt", ""], "empty string"),
+    ] {
+        let p = Pair::new(&base);
+        let fp = support::Fingerprint::take(&p.ours);
+        let r = p.ours("", &args).await;
+        let t = p.twin(&args);
+        assert_eq!(t.0, 128, "[{label}] git refuses: {}", t.2);
+        assert_eq!(r.code, 1, "[{label}] {}", r.err);
+        assert!(r.err.contains(needle), "[{label}] {}", r.err);
+        assert!(r.err.trim_end().ends_with("Nothing was changed."), "[{label}] {}", r.err);
+        let diffs = support::Fingerprint::take(&p.ours).differences_from(&fp);
+        assert!(diffs.is_empty(), "[{label}] a refusal changed the repository: {diffs:?}");
+        p.assert_same(label);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rm_dash_r_of_the_repository_root_still_works() {
+    for (label, args) in [("dot", vec!["rm", "-r", "."]), ("dot cached", vec!["rm", "-r", "--cached", "."]), ("dot slash", vec!["rm", "-r", "./"])] {
+        let (r, t, p) = both(&base, &args, label).await;
+        assert_eq!(r.code, 0, "[{label}] {}", r.err);
+        assert_eq!(t.0, 0, "[{label}] {}", t.2);
+        p.assert_same(label);
+    }
+}
+
+/// The other write verbs that take a pathspec refuse the empty string as git
+/// does, and `add .` keeps working.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_empty_pathspec_is_refused_by_every_write_verb_that_takes_one() {
+    let edit = |d: &Path| {
+        base(d);
+        support::write_file(d, "a.txt", "alpha two\n");
+        support::git(d, &["add", "a.txt"]);
+    };
+    for (label, args) in [
+        ("add", vec!["add", ""]),
+        ("restore", vec!["restore", "--staged", ""]),
+        ("reset", vec!["reset", "--", ""]),
+        ("commit", vec!["commit", "-m", "x", "--", ""]),
+    ] {
+        let p = Pair::new(&edit);
+        let fp = support::Fingerprint::take(&p.ours);
+        let r = p.ours("", &args).await;
+        let t = p.twin(&args);
+        assert_eq!(t.0, 128, "[{label}] git refuses: {}", t.2);
+        assert_eq!(r.code, 1, "[{label}] {}", r.err);
+        assert!(r.err.contains("empty string"), "[{label}] {}", r.err);
+        let diffs = support::Fingerprint::take(&p.ours).differences_from(&fp);
+        assert!(diffs.is_empty(), "[{label}] a refusal changed the repository: {diffs:?}");
+    }
+    let p = Pair::new(&|d| {
+        base(d);
+        support::write_file(d, "n.txt", "new\n");
+    });
+    assert_eq!(p.ours("", &["add", "."]).await.code, 0);
+    assert_eq!(p.twin(&["add", "."]).0, 0);
+    p.assert_same("add .");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rm_keeps_gits_safety_checks_and_force_overrides_them() {
     // (label, setup, args that git refuses, text our refusal must carry)
@@ -1509,6 +1582,8 @@ async fn a_failed_deletion_stops_or_is_passed_over_as_git_does() {
             assert_eq!(t.2, "", "[{label}] git says nothing");
             assert!(r.err.contains("warning: could not delete d/c.txt"), "[{label}] {}", r.err);
             assert!(r.err.contains("still on disk"), "[{label}] {}", r.err);
+            // The cause stays in the warning, because the warning tells the operator to fix it.
+            assert!(r.err.contains("Permission denied"), "[{label}] the warning dropped the cause: {}", r.err);
             assert_eq!(r.text_out(), t.1, "[{label}] git prints rm '<path>' for every path");
             // The failed file is staged as deleted and left on disk: untracked.
             let status = support::git(&p.ours, &["status", "--porcelain"]);

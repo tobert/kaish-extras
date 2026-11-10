@@ -187,11 +187,16 @@ fn ensure_tag_settings(repo: &WriteRepo, command: &str, annotated: bool) -> Resu
             "Create the tag with real git, outside this shell, or set it to true: git config core.logAllRefUpdates true.".to_string(),
         )?;
     }
-    if annotated && (config_last(repo, "core", "commentchar")?.is_some() || config_last(repo, "core", "commentstring")?.is_some()) {
-        bad(
-            "core.commentChar or core.commentString is set, and this shell drops comment lines from a tag message for '#' only.".to_string(),
-            "Create the tag with real git, outside this shell, or unset it: git config --unset core.commentChar.".to_string(),
-        )?;
+    // `#` and `auto` leave a `-m` message cleaned as this shell cleans it
+    // (checked against git: `auto` chooses a character for an editor buffer
+    // only, and a message given with -m or -F drops its `#` lines).
+    for (key, shown) in [("commentchar", "core.commentChar"), ("commentstring", "core.commentString")] {
+        if annotated && config_last(repo, "core", key)?.is_some_and(|v| v != "#" && v != "auto") {
+            bad(
+                format!("{shown} is set to something other than '#' or 'auto', and this shell drops comment lines from a tag message for '#' only."),
+                format!("Create the tag with real git, outside this shell, or unset it: git config --unset {shown}."),
+            )?;
+        }
     }
     Ok(())
 }

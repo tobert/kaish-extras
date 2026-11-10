@@ -93,14 +93,14 @@ pub(crate) fn run(repo: &WriteRepo, opts: &RmOptions) -> Result<Outcome, GitErro
     // nothing staged. A failure after one is passed over: git stages every
     // path as deleted and exits 0, leaving the file on disk, where it shows
     // as untracked. Git says nothing about it; this shell says which paths.
-    let mut left: Vec<&RelPath> = Vec::new();
+    let mut left: Vec<(&RelPath, GitError)> = Vec::new();
     if !opts.cached {
         let mut removed_any = false;
         for path in &plan.paths {
             match delete_one(repo, path) {
                 Ok(()) => removed_any = true,
                 Err(e) if !removed_any => return Err(first_failure(e, &plan.paths)),
-                Err(_) => left.push(path),
+                Err(e) => left.push((path, e)),
             }
         }
     }
@@ -114,15 +114,29 @@ pub(crate) fn run(repo: &WriteRepo, opts: &RmOptions) -> Result<Outcome, GitErro
     let err = if left.is_empty() {
         String::new()
     } else {
+        let causes: Vec<String> = match left.as_slice() {
+            [(_, e)] => vec![cause(e)],
+            many => many.iter().map(|(p, e)| format!("{}: {}", show(p), cause(e))).collect(),
+        };
         format!(
-            "warning: could not delete {} from the working tree. {} staged as deleted and still on disk, so git status lists {} as untracked. Delete {} by hand after fixing the cause (for example, the directory permissions).\n",
-            show_all(left.iter().copied(), ", "),
+            "warning: could not delete {} from the working tree ({}). {} staged as deleted and still on disk, so git status lists {} as untracked. Delete {} by hand after fixing the cause.\n",
+            show_all(left.iter().map(|(p, _)| *p), ", "),
+            causes.join("; "),
             if left.len() == 1 { "It is" } else { "They are" },
             if left.len() == 1 { "it" } else { "them" },
             if left.len() == 1 { "it" } else { "them" },
         )
     };
     Ok(Outcome { text, err, json: serde_json::json!({ "removed": removed, "cached": opts.cached }) })
+}
+
+/// The operating-system cause of a failed deletion, without the path and
+/// advice the error text carries.
+fn cause(e: &GitError) -> String {
+    match e {
+        GitError::Repository { source, .. } => source.to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Delete one tracked path's working-tree file.
@@ -186,12 +200,14 @@ fn build(
         if !opts.recursive {
             for s in &opts.specs {
                 let dir = s.trim_end_matches('/');
-                if !is_glob(s) && !dir.is_empty() && dir.as_bytes() != t.path.as_slice() && is_below(&t.path, dir.as_bytes()) {
+                // An empty spec is the repository root (`.` there): it is a directory too.
+                if !is_glob(s) && dir.as_bytes() != t.path.as_slice() && (dir.is_empty() || is_below(&t.path, dir.as_bytes())) {
+                    let shown = if dir.is_empty() { "." } else { s.as_str() };
                     return refuse(
                         1,
                         &opts.command,
-                        format!("'{s}' is a directory, and removing it would remove every tracked file below it."),
-                        format!("To remove the directory, run: git rm -r {s}."),
+                        format!("'{shown}' is a directory, and removing it would remove every tracked file below it."),
+                        format!("To remove the directory, run: git rm -r {shown}."),
                         Override::Flag("-r"),
                     );
                 }

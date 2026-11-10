@@ -1042,19 +1042,21 @@ impl ReadRepo {
     /// The object id of the index entry at `stage` for `path`.
     #[cfg(feature = "commit")]
     fn index_entry_object(&self, spec: &str, stage: u8, path: &str) -> Result<gix_hash::ObjectId, GitError> {
-        let missing = || GitError::NoSuchRevision {
+        let missing = || GitError::NoSuchIndexPath {
             operation: self.operation,
-            rev: spec.to_string(),
+            spec: spec.to_string(),
+            path: path.to_string(),
+            stage,
             repo: self.git_dir.clone(),
         };
         let state = self.open_index()?.ok_or_else(missing)?;
-        let stage = match stage {
+        let stage_kind = match stage {
             0 => gix_index::entry::Stage::Unconflicted,
             1 => gix_index::entry::Stage::Base,
             2 => gix_index::entry::Stage::Ours,
             _ => gix_index::entry::Stage::Theirs,
         };
-        let entry = state.entry_by_path_and_stage(path.as_bytes().into(), stage).ok_or_else(missing)?;
+        let entry = state.entry_by_path_and_stage(path.as_bytes().into(), stage_kind).ok_or_else(missing)?;
         Ok(entry.id)
     }
 
