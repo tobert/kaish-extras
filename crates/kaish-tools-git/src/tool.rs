@@ -1691,6 +1691,14 @@ impl GitTool {
             // The unstage forms: no revision, or HEAD, without --soft. They
             // move nothing, so no policy applies.
             let moves = soft || rev.as_deref().is_some_and(|r| r != "HEAD");
+            if !moves && paths.is_empty() {
+                // Plain `git reset`: a mixed reset to HEAD, which git logs.
+                return verbs::write::reset::run_plain(
+                    repo,
+                    &env,
+                    &verbs::write::reset::ResetOptions { rev: "HEAD".to_string(), mode: Mode::Mixed, vars, command },
+                );
+            }
             if !moves {
                 let specs = base.write_paths(OP, &command, &paths)?;
                 return verbs::write::unstage::run(
@@ -2631,7 +2639,8 @@ Reads change nothing. The write verbs are add, rm, mv, restore --staged, reset a
 they write the index, and rm and mv also delete or rename the working-tree files they name; commit \
 writes a commit and moves the current branch; branch <name>, tag <name>, switch -c and checkout -b create \
 a branch or a tag (switch -c and checkout -b also point HEAD at the new branch, leaving every file as it is), \
-and never delete, rename or move a ref; commit --amend and reset --soft/--mixed <rev> replace \
+and never delete, rename or move a ref; a reset with no path also writes ORIG_HEAD and a reflog line, so it needs \
+a committer identity; commit --amend and reset --soft/--mixed <rev> replace \
 commits, which the embedding program's rewrite policy may refuse (by default when a remote-tracking ref \
 already has the commit). It never opens an editor (give the message with -m or -F, or keep it with \
 --amend --no-edit), never writes working-tree file content (reset --hard, --merge and --keep are refused), \

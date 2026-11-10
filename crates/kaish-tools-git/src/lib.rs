@@ -158,7 +158,7 @@ pub use tool::{tool, GitTool, ToolConfig};
 #[cfg(all(not(target_family = "wasm"), feature = "commit"))]
 pub use config::{Identity, RewritePolicy, WritableGitConfig};
 #[cfg(all(not(target_family = "wasm"), feature = "commit"))]
-pub use hooks::{GitHooks, HookContext, HookError, HookOutput};
+pub use hooks::{GitHooks, HookContext, HookError, HookOutput, RefTransactionState, RefUpdate, RewrittenCommit};
 
 /// The gitoxide plumbing crates this build links, and the exact versions it
 /// is pinned to (architecture.md A.4).

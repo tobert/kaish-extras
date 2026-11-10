@@ -21,7 +21,7 @@ before 0.14 (kaish `docs/EMBEDDING.md`, "Why this, and not a gate").
 | W4 | History rewrites follow `RewritePolicy::{Refuse, Unpublished, Allow}`; default `Unpublished` | §3 |
 | W5 | First cut: `add`, `rm`, `mv`, `restore --staged`, `reset` (no revision), `commit` (`-m`, `-F`, `-a`, `--only`/`-- <paths>`, `--trailer`, `--amend`), `branch <name>`, `tag <name>`, `switch -c`, `var GIT_AUTHOR_IDENT` | §4 |
 | W6 | Nothing writes file *content* into the working tree. `mv` renames; `switch <existing>` and `restore <file>` are refused in this cut | §4 |
-| W7 | Hooks: refuse when the repository has one, unless the embedder installs a `GitHooks` provider | §5 |
+| W7 | Hooks: refuse when the repository has one, unless the embedder installs a `GitHooks` provider. With one installed, `core.hooksPath` outside the tree and a `post-index-change` hook (index verbs, `reset` without `--soft`) still refuse (docs/issues.md W62, W63) | §5 |
 | W8 | Signing: refuse when `commit.gpgSign`/`tag.gpgSign` is true; no signer provider in this cut | §5 |
 | W9 | Content conversion: any `filter=` attribute refuses the path; `text`/`eol`/`ident`/`core.autocrlf` refuse only when the bytes could change | §5 |
 | W10 | Every ref move is compare-and-swap against the oid we read, and writes a reflog entry in git's format | §6 |
@@ -259,9 +259,31 @@ pub trait GitHooks: Send + Sync {
     /// May rewrite the message, as git's commit-msg hook may.
     fn commit_msg(&self, ctx: &HookContext<'_>, message: &mut String) -> Result<HookOutput, HookError>;
     /// After the ref moved. Errors are reported, not fatal (git's rule).
-    fn post_commit(&self, ctx: &HookContext<'_>, commit: ObjectId) -> HookOutput;
+    fn post_commit(&self, ctx: &HookContext<'_>, commit: &str) -> HookOutput;
+    /// Git's reference-transaction hook, per state of each ref transaction.
+    /// `Err` at `Preparing` or `Prepared` refuses the command; at `Committed`
+    /// and `Aborted` it is reported.
+    fn reference_transaction(&self, ctx: &HookContext<'_>, state: RefTransactionState, updates: &[RefUpdate]) -> Result<HookOutput, HookError>;
+    /// After `switch -c` / `checkout -b`, with git's three arguments.
+    fn post_checkout(&self, ctx: &HookContext<'_>, previous: &str, new: &str, branch_checkout: bool) -> HookOutput;
+    /// After `commit --amend`, with git's argument and `<old> <new>` lines.
+    fn post_rewrite(&self, ctx: &HookContext<'_>, command: &str, rewritten: &[RewrittenCommit]) -> HookOutput;
 }
 ```
+
+Amy, 2026-11-07: the ref-update methods are required, with no default body.
+Every provider decides each hook, and a default that returned `Ok` would be a
+silent pass. This breaks every implementer; no known one exists. Measured on
+git 2.56 (`tests/write_hooks.rs` holds the comparison): git runs the
+`reference-transaction` hook for `commit`, `commit --amend`, `reset <rev>`,
+plain `reset` (`ORIG_HEAD`, then the branch), `branch`, `tag`, `tag -a`,
+`switch -c` and `checkout -b` (the branch, then `HEAD` as `<null> ref:<branch>
+HEAD`), and for none of `reset -- <path>`; it runs `post-checkout <old> <new>
+1` for the two switches (not on an unborn HEAD), and `post-rewrite amend` after
+`post-commit` for an amend only. Git also runs the hook in a `preparing` state before any lock, and a non-zero exit there refuses too (git then runs `aborted`); `GitHooks` sends all four states, and `Err` at `Preparing` or `Prepared` refuses (2026-11-07: the first draft took `prepared` for git's only veto point, and the measurement said otherwise). Git's housekeeping transaction on
+`AUTO_MERGE` (null to null) is not sent. `aborted` is sent for every
+transaction that was sent as `preparing` and did not complete, as git does after
+a veto.
 
 `HookContext` carries the repository's real paths (worktree, git dir), the
 tree oid about to be committed, the hook directory we resolved, and the names
@@ -518,7 +540,7 @@ corrected.
    refuses.
 4. `branch <name>`, `tag <name>`, `switch -c`/`checkout -b`. **Built**
    (docs/embedding-git.md, "The commit profile"); the differences from this
-   design are docs/issues.md W34-W39. Checked against git 2.56 and different
+   design are docs/issues.md W36-W39. Checked against git 2.56 and different
    from the first draft: `branch` with no start writes `Created from <current
    branch>`, not `Created from HEAD`; `tag -m` without `-a` makes an annotated
    tag; a tag message loses its `#` lines (a commit's does not); an empty tag

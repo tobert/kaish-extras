@@ -165,6 +165,11 @@ fn lockfiles(git_dir: &Path) -> Vec<String> {
 pub async fn run_tool(root: &Path, cwd: &str, argv: &[&str]) -> kaish_types::ExecResult {
     let backend = Arc::new(StrictBackend::single(PathBuf::from("/mnt"), root));
     let mut ctx = TestCtx::new(backend, cwd);
+    // A plain `reset` writes ORIG_HEAD and a reflog line, so it needs a
+    // committer (W30). The other verbs here ignore it.
+    for (k, v) in [("GIT_COMMITTER_NAME", "Fixture Committer"), ("GIT_COMMITTER_EMAIL", "committer@example.invalid")] {
+        kaish_tool_api::ToolCtx::set_var(&mut ctx, k, kaish_types::Value::String(v.to_string()));
+    }
     let git = kaish_tools_git::tool(GitConfig::read_only().with_commit_profile()).expect("config builds");
     let (verb, rest) = argv.split_first().expect("a verb");
     git.execute(support::verb_words(verb, rest), &mut ctx).await
@@ -854,6 +859,9 @@ async fn writes_refuse_in_repository_states_they_must_not_run_in() {
             base(d);
             let h = d.join(".git/hooks/post-index-change");
             std::fs::write(&h, "#!/bin/sh\n").expect("hook");
+            // Git runs a hook that is an executable file, and no other.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&h, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }, "post-index-change hook"),
         ("hooksPath outside the tree", |d| { base(d); support::git(d, &["config", "core.hooksPath", "/elsewhere"]); }, "core.hooksPath points outside"),
     ];
@@ -868,6 +876,26 @@ async fn writes_refuse_in_repository_states_they_must_not_run_in() {
             assert!(support::Fingerprint::take(&p.ours).differences_from(&fp).is_empty(), "[{label}] {args:?} changed the repository");
         }
     }
+}
+
+/// Git runs `post-index-change` only when it is an executable file (or a link
+/// to one); a mode 0644 file is ignored with a hint and `git add` succeeds.
+/// This build refuses only what git would run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_post_index_change_file_git_would_not_run_does_not_refuse() {
+    use std::os::unix::fs::PermissionsExt;
+    let p = Pair::new(&|d| {
+        base(d);
+        let h = d.join(".git/hooks/post-index-change");
+        std::fs::write(&h, "#!/bin/sh\nexit 1\n").expect("hook");
+        std::fs::set_permissions(&h, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        support::write_file(d, "a.txt", "changed\n");
+    });
+    let (code, _, err) = p.twin(&["add", "a.txt"]);
+    assert_eq!(code, 0, "git ignores a hook that is not executable: {err}");
+    let r = p.ours("", &["add", "a.txt"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    p.assert_same("0644 post-index-change");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

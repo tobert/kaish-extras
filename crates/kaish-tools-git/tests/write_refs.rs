@@ -20,10 +20,10 @@ mod support;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use kaish_tool_api::Tool;
-use kaish_tools_git::{GitConfig, GitHooks, HookContext, HookError, HookOutput};
+use kaish_tools_git::GitConfig;
 use kaish_types::Value;
 
 use support::{Fixture, StrictBackend, TestCtx};
@@ -1187,41 +1187,6 @@ async fn post_checkout_refuses_switch_only_and_other_hooks_refuse_nothing_here()
     // A sample is not a hook.
     std::fs::write(p.ours.join(".git/hooks/reference-transaction.sample"), "#!/bin/sh\n").expect("sample");
     assert_eq!(p.ours("", &["branch", "w"]).await.code, 0);
-}
-
-struct QuietHooks(Mutex<Vec<String>>);
-impl GitHooks for QuietHooks {
-    fn pre_commit(&self, _: &HookContext<'_>) -> Result<HookOutput, HookError> {
-        self.0.lock().expect("lock").push("pre_commit".into());
-        Ok(HookOutput::none())
-    }
-    fn commit_msg(&self, _: &HookContext<'_>, _: &mut String) -> Result<HookOutput, HookError> {
-        self.0.lock().expect("lock").push("commit_msg".into());
-        Ok(HookOutput::none())
-    }
-    fn post_commit(&self, _: &HookContext<'_>, _: &str) -> HookOutput {
-        self.0.lock().expect("lock").push("post_commit".into());
-        HookOutput::none()
-    }
-}
-
-/// With a provider installed the ref writes proceed, the provider's trait has
-/// no entry for them, and the repository's hook file does not run. This pins
-/// that behavior (docs/issues.md W34).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn with_a_provider_the_ref_writes_proceed_and_the_provider_is_not_called() {
-    let p = Pair::new(&base);
-    let sentinel = p.fx.path("sentinel");
-    plant_hook(&p.ours, "reference-transaction", &sentinel);
-    plant_hook(&p.ours, "post-checkout", &sentinel);
-    let hooks = Arc::new(QuietHooks(Mutex::new(Vec::new())));
-    let config = || commit_profile().with_hooks(hooks.clone());
-    for argv in [vec!["branch", "x"], vec!["tag", "y"], vec!["switch", "-c", "z"]] {
-        let r = run_with(&p.fx.root(), "/mnt/ours", &argv, &default_vars(), config()).await;
-        assert_eq!(r.code, 0, "{argv:?}: {}", r.err);
-    }
-    assert!(hooks.0.lock().expect("lock").is_empty());
-    assert!(!sentinel.exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

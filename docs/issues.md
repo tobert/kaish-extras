@@ -1719,16 +1719,55 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   index after a commit (new cache-tree, refreshed stat). A plain commit here
   leaves the file untouched; `-a` and `--only` rewrite it without the
   cache-tree extension, as the index verbs do.
-- **W21 — hook accounting.** `prepare-commit-msg` and `reference-transaction`
+- **W21 — hook accounting.** `prepare-commit-msg` and `post-index-change`
   have no `GitHooks` method: with a provider they appear in
-  `HookContext::hooks_present` and the provider decides. `post-rewrite`
-  (an amend) is the same: scanned, refused without a provider, listed with
-  one, and never called with the old and new oids git feeds it. `reset`
-  scans `reference-transaction` only. `post-checkout` belongs to a later verb.
-  `pre_commit` and `commit_msg` run
-  while `index.lock` is held for `-a` and `--only`, so a provider that runs a
-  real hook script which itself writes the index will find it locked.
-  `--no-verify` is passed to the provider and the provider decides.
+  `HookContext::hooks_present` and the provider decides. `commit -a` and
+  `--only` scan `post-index-change` (refused without a provider); git (2.56,
+  measured) also runs it for a plain `commit` that rewrites the index, which
+  this build neither scans nor calls. The index verbs and `reset` without
+  `--soft` refuse a repository that has the hook whether or not a provider is
+  installed (W62).
+
+  `reference_transaction` is sent in all four states git runs the hook in
+  (`preparing`, `prepared`, `committed`, `aborted`); `Err` at `preparing` or
+  `prepared` refuses. At `preparing` git names a move of the current branch
+  `HEAD` (commit, amend, and the branch move of `reset`), and so does
+  `GitHooks`; every other line is the same in all states. After a veto,
+  `aborted` carries the lines of the last state sent for that transaction, as
+  git's does. Git's transaction on `AUTO_MERGE` (null to null, after `commit`
+  and `reset`) is not sent. The deletion of `ORIG_HEAD` by `reset <rev>` from
+  a branch with no commit calls no hook here, and git runs one (W69).
+
+  The order differs from git's for the verbs that make two transactions. S, P
+  and C are `preparing`, `prepared` and `committed`:
+
+  | Verb | `GitHooks` sends | Git runs |
+  |---|---|---|
+  | `commit`, `commit --amend` | S P C, then `post_commit`, then `post_rewrite` for an amend | the same |
+  | `branch`, `tag` | S P C | the same |
+  | `switch -c`, `checkout -b` on an unborn HEAD | S P C for `HEAD` | the same |
+  | `switch -c`, `checkout -b` | S(branch) S(HEAD) P(branch) P(HEAD) C(branch) C(HEAD), then `post_checkout` | S P C (branch), S P C (HEAD), then `post-checkout` |
+  | `reset`, plain `reset` | S(ORIG_HEAD) S(branch) P(ORIG_HEAD) P(branch) C(ORIG_HEAD) C(branch) | S P C (ORIG_HEAD), S P C (branch) |
+  | `reset -- <path>`, plain `reset` on an unborn branch | none | none |
+
+  Sending every `preparing` and `prepared` before the first write lets a veto
+  of the second transaction leave `.git` as it was; git would already have
+  written the first. A veto of any transaction sends `aborted` for every
+  transaction that was sent `preparing`. A provider that forwards to the
+  repository's scripts sees the same state order per transaction, with the
+  second transaction's `preparing` and `prepared` before the first's
+  `committed`.
+
+  `pre_commit`, `commit_msg` and, for `reset --mixed`, `reference_transaction`
+  run while `index.lock` is held (for `commit`, with `-a` and `--only`), so a
+  provider that runs a real hook script which itself writes the index will find
+  it locked. `--no-verify` is passed to the provider and the provider decides.
+  What a provider prints is kept on a refusal: the text of every call that
+  returned `Ok` before it (`pre_commit`, `commit_msg`, `Preparing`,
+  `Prepared`) and of the `Aborted` calls that follow it is appended to the
+  refusal. It is still dropped when the command fails after the first write
+  with an error that is not a refusal (a lost lock, a failed index write): only
+  the failure shows.
 - **W22 — `-F -` and a non-UTF-8 message.** The message file is read through
   the kernel's filesystem, capped at 1 MiB, and must be UTF-8. Standard input
   is not read. Git accepts any bytes.
@@ -1784,18 +1823,21 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   since looks unpublished. Under `Unpublished`, a shallow repository refuses
   (exit 4) even when no remote ref exists, and with no remote-tracking refs at
   all a non-shallow repository allows every rewrite.
-- **W30 — `reset` and `ORIG_HEAD`.** `reset --soft|--mixed <rev>`, with or
-  without `--soft` and a revision other than `HEAD`, writes `ORIG_HEAD` (the
-  old tip) and `reset: moving to <rev as typed>` in the branch's log and
-  `logs/HEAD`, as git does, including when the tip does not change. The
-  no-revision forms (`reset`, `reset HEAD`, `reset --mixed`, `reset -- <path>`)
-  write neither; git writes both for the first three (checked: git 2.56 writes
-  `ORIG_HEAD` and a `reset: moving to HEAD` line for `git reset HEAD`). Git
-  deletes `ORIG_HEAD` when a reset starts from an unborn branch; this does not.
-  A reset needs a committer identity (the variables or the pinned one) for
-  the reflog line, where git falls back to its own identity detection. `reset
-  --mixed` prints no "Unstaged changes after reset" (W4). `reset <rev> --
-  <path>` is supported and moves nothing.
+- **W30 — what `reset` still differs on.** Checked on git 2.56: `reset @`
+  logs `reset: moving to HEAD`, where this shell logs the word as typed
+  (`moving to @`; `reset_at_sign_logs_head_as_git_does` is ignored until it
+  changes). `reset HEAD` on a branch with no commit exits 128 in git
+  (`ambiguous argument 'HEAD'`) and succeeds here
+  (`reset_head_on_an_unborn_branch_fails_as_git_does`, ignored); `reset --soft`
+  with no revision on such a branch exits 0 in git and exits 1 here with a
+  gix-ref message (`reset_soft_with_no_revision_on_an_unborn_branch_succeeds_as_git_does`,
+  ignored). A reset that git would log needs a committer identity (the
+  variables or the pinned one) and refuses before writing without one, where
+  git falls back to its own identity detection. `reset --mixed` prints no
+  "Unstaged changes after reset" (W4). `reset <rev> -- <path>` is supported and
+  moves nothing. The index file after a reset holds the same entries as git's
+  but not the same bytes: git adds a cache-tree extension and the stat data
+  belongs to each checkout's files.
 - **W31 — what `--amend` cannot carry over.** A commit with an `encoding`
   header, or a message that is not UTF-8, refuses the amend (exit 4). Other
   extra headers are copied; `gpgsig` and `gpgsig-sha256` are dropped, as git
@@ -1810,16 +1852,6 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   in name order that reaches it. `reset <rev>` accepts the read side's
   revision grammar: `HEAD~N`, `^`, `^{type}`, `@{-N}`, branches, tags, oids;
   `A..B` is refused by the revision parser.
-- **W34 — the hook provider is not called for `branch`, `tag`, `switch -c`,
-  `checkout -b` or `reset`.** `GitHooks` has `pre_commit`, `commit_msg` and
-  `post_commit` and nothing for a ref update. Without a provider these verbs
-  refuse when the repository has a `reference-transaction` hook (and
-  `post-checkout`, for the two switches). With a provider installed they
-  proceed, the hook file does not run, and the provider hears nothing
-  (`tests/write_refs.rs`, `with_a_provider_the_ref_writes_proceed_and_the_provider_is_not_called`).
-  An embedder that installs a provider to run `pre-commit` therefore loses the
-  `reference-transaction` check for these verbs. The fix is a `GitHooks`
-  method for a ref update, called with the ref, old and new value.
 - **W36 — an empty directory where a ref goes is refused.** A directory at
   `refs/heads/x` (left behind when its last branch was deleted) makes git
   remove it and create the branch. The containment walk wants a regular file
@@ -1958,3 +1990,61 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   everything. The write verbs refuse the empty string as git does (exit 1,
   `write_paths` in `tool.rs`); git's behavior for the read verbs was not
   measured.
+- **W60 — `Prepared` is not git's `prepared`.** This crate sends `Prepared`
+  after its own checks and before it takes any ref lock. Git sends `prepared`
+  with the refs locked, so a provider that treats `Prepared` as "the refs are
+  mine" is wrong: a lock another process takes afterward fails the write and
+  `Aborted` follows (`a_write_that_fails_after_prepared_is_aborted_for_each_verb`
+  pins that). Locking first would need the lock held across the provider call
+  and released on every path; deferred.
+- **W61 — a veto of the second transaction aborts the first.** `reset` and
+  `switch -c` send every `Preparing` and `Prepared` before the first write, so
+  a veto of the second transaction sends `Aborted` for the first, which git
+  would already have written and sent `committed` for (git runs all states of
+  the first transaction before it starts the second). The reordering is
+  deliberate (a veto leaves `.git` as it was); the cost is that the provider's
+  view of the first transaction differs from a script's. See the table in W21.
+- **W62 — the index verbs refuse a `post-index-change` hook even with a
+  provider.** `add`, `rm`, `mv`, `restore --staged` and `reset` without
+  `--soft` call `ensure_no_index_hook` from `ensure_writable`, which does not
+  look at `with_hooks`; `GitHooks` has no method for the hook, so a provider
+  cannot decide it. Git runs the hook only for an executable file (a 0644 file
+  is ignored with a hint, measured on 2.56.0), and so does this build; a
+  symbolic link counts as present without being followed, so a link git would
+  not run (a broken one, or one to a 0644 file) still refuses. Fixing it needs
+  a `GitHooks` method for the hook, or a provider-set answer.
+- **W63 — `core.hooksPath` outside the working tree refuses with a provider
+  too.** `hooks_dir` refuses an absolute path, a path that leaves the tree and
+  a path through a link before any provider is consulted, for every verb that
+  scans hooks. A provider cannot say "run the hooks there".
+- **W64 — a veto of `reset --mixed` moves `.git`'s own mtime.** The plan for
+  the index takes `index.lock` before the `reference-transaction` calls and
+  releases it when the veto drops the plan, so `.git`'s directory mtime moves
+  while the refusal says "Nothing was changed." `Fingerprint` walks the entries
+  inside `.git` and not `.git` itself, so the test does not see it. The
+  contents of `.git` are unchanged.
+- **W65 — `post_commit` and `post_rewrite` are skipped when the index write
+  fails.** For `commit -a` and `--only`, a failed index write after the ref
+  moved returns the error before the two hooks run. Git runs `post-commit`
+  after the ref moves and then reports the index. The error says the commit was
+  made.
+- **W66 — a failed summary does not say the commit was made.** After the ref
+  moved, a failure while building the diffstat for the output returns its own
+  error, and an agent reading it may commit again. The summary reads objects
+  that were just written, so it is unlikely.
+- **W67 — what the identity refusal says.** `resolve_committer` falls back to
+  `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL` when the committer variables are
+  unset, but the refusal says the committer variables are "not both set" and
+  suggests only those. Setting the author pair would also have worked. The
+  refusal is raised by `commit`, `var`, `reset`, `branch`, `tag`, `switch -c`
+  and `checkout -b`, with exit 2.
+- **W68 — a lock refusal suggests a branch path for any ref.** The next step
+  for a lock file names `rm .git/refs/heads/<branch>.lock`, also for a tag or
+  `ORIG_HEAD`.
+- **W69 — `reset <rev>` from an unborn branch with an `ORIG_HEAD`: git runs
+  `reference-transaction` for the deletion.** Measured with git 2.56.0 scripts:
+  `preparing`, `prepared` and `committed` for `<old> 000.. ORIG_HEAD`, and an
+  `aborted` line for `000.. 000.. ORIG_HEAD`, then the branch's transaction.
+  This build deletes the file and sends nothing for it. Failing case:
+  `reset_to_a_revision_from_an_unborn_branch_tells_the_provider_what_git_tells_its_scripts`
+  in `tests/write_hooks.rs`, ignored.

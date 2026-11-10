@@ -236,7 +236,7 @@ pub(crate) fn hooks_dir(repo: &WriteRepo, command: &str) -> Result<std::path::Pa
                     4,
                     command,
                     "core.hooksPath points outside the working tree, so this shell cannot tell whether a hook would run.",
-                    "Use real git for this write, outside this shell, for example: git add <path>.",
+                    format!("Run the same command with real git, outside this shell: {command}."),
                     Override::Repository,
                 );
             }
@@ -245,7 +245,7 @@ pub(crate) fn hooks_dir(repo: &WriteRepo, command: &str) -> Result<std::path::Pa
                     4,
                     command,
                     format!("core.hooksPath is '{path}', and '{at}' on the way to it is {found}. This shell does not read through a link, so it cannot tell whether a hook would run."),
-                    "Use real git for this write, outside this shell, for example: git add <path>.",
+                    format!("Run the same command with real git, outside this shell: {command}."),
                     Override::Repository,
                 )
             };
@@ -266,7 +266,9 @@ pub(crate) fn hooks_dir(repo: &WriteRepo, command: &str) -> Result<std::path::Pa
 fn ensure_no_index_hook(repo: &WriteRepo, command: &str) -> Result<(), GitError> {
     const HOOK: &str = "post-index-change";
     let dir = hooks_dir(repo, command)?;
-    if std::fs::symlink_metadata(dir.join(HOOK)).is_ok() {
+    // The same rule the other verbs use: git runs an executable file, and a
+    // mode 0644 file is ignored.
+    if crate::verbs::write::commit::hook_present(&dir, HOOK) {
         return refuse(
             4,
             command,

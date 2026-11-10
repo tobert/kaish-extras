@@ -529,7 +529,9 @@ A build with the `commit` cargo feature (off by default) has:
   verbs declare none. The root of a read-only tool declares none, and a
   read-only tool's `branch` and `tag` accept no creation flag.
 - `WritableGitConfig::with_hooks` and `with_identity`, and the types they take
-  (`GitHooks`, `Identity`), which `commit`, `reset` and `var` read.
+  (`GitHooks`, `Identity`). `with_hooks` is read by `commit`, `reset`, `branch`,
+  `tag`, `switch -c` and `checkout -b`; `with_identity` by those verbs when
+  they write a reflog line or a tag, and by `var`.
   `with_rewrite_policy` takes a `RewritePolicy`, described next.
 - The per-profile router text. A tool without write settings answers `git add`
   with "this git is read-only". A tool with them never says that: for a git
@@ -570,26 +572,54 @@ nothing counts as published. Cost, trust and the other limits are
   them from the process environment), `GIT_COMMITTER_NAME` and
   `GIT_COMMITTER_EMAIL` fall back to the author's field by field, and
   `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` are optional. With nothing to
-  use, `commit` and `var` exit 2 naming both variables and the pin. Repo-local
+  use, `commit`, `var`, `reset`, `branch`, `tag`, `switch -c` and `checkout -b`
+  exit 2 naming both variables and the pin (a reset or a branch needs a
+  committer only). Repo-local
   `user.name`/`user.email` are not read. A date with no offset and the clock
   are UTC.
 - *Hooks.* This crate spawns nothing. Without a provider, a hook git would run
-  for a commit (`pre-commit`, `prepare-commit-msg`, `commit-msg`,
+  for a write (`pre-commit`, `prepare-commit-msg`, `commit-msg`,
   `post-commit`, `reference-transaction`, `post-rewrite` for `--amend`, and
   `post-index-change` when `-a` or `--only` writes the index) refuses the
-  commit, exit 4, naming it; a `reset`, `branch <name>` and `tag <name>`
+  write, exit 4, naming it; a `reset`, `branch <name>` and `tag <name>`
   refuse for `reference-transaction`, and `switch -c` and `checkout -b` for that
-  and for `post-checkout`; so does
-  `--no-verify` when one is present. A provider does not change the ref-only
-  verbs: they proceed, the hook file does not run and the provider is not told
-  (W34). "Present" is an executable regular file
-  or a link, not a `.sample`, in `<common dir>/hooks` or the directory
-  `core.hooksPath` names (any value counts; a path outside the working tree, or
-  through a symbolic link, refuses by name). With a `GitHooks` provider, `pre_commit` gets the tree oid
-  before the commit object is written (its `Err` aborts, exit 1),
-  `commit_msg` may rewrite the message (git cleans it again afterward), and
-  `post_commit` runs after the ref moved, its failures reported on stderr and
-  not fatal. The provider is told `no_verify` and decides what it means.
+  and for `post-checkout`; so does `--no-verify` when one is present. "Present"
+  is an executable regular file or a link, not a `.sample`, in
+  `<common dir>/hooks` or the directory `core.hooksPath` names (any value
+  counts; a path outside the working tree, or through a symbolic link, refuses
+  by name). With a `GitHooks` provider the hook file is not run and does not
+  refuse for `commit`, `reset --soft`, `branch`, `tag`, `switch -c` and
+  `checkout -b`: the provider is called whether or not the file exists, and
+  decides. Two refusals stay with a provider installed: a `core.hooksPath`
+  outside the working tree or through a link (W63), and a `post-index-change`
+  hook, which refuses `add`, `rm`, `mv`, `restore --staged` and `reset` without
+  `--soft` (W62). `post-index-change` and `prepare-commit-msg` have no method.
+  Every method of `GitHooks` is required, so a provider decides each hook.
+  `pre_commit` gets the tree oid before the commit object is written (its
+  `Err` aborts, exit 1), `commit_msg` may rewrite the message (git cleans it
+  again afterward), and `post_commit` runs after the ref moved, its failures
+  reported on stderr and not fatal. Every verb that writes a ref calls
+  `reference_transaction` with `RefTransactionState::Preparing` and then
+  `Prepared`, with the `<old> <new> <ref>` lines git would pass its hook,
+  before it writes anything; `Err` at either refuses the command (exit 1) and
+  leaves `.git` as it was, apart from objects already written (a commit's, an
+  annotated tag's), and the refusal says which. It then sends `Committed` as
+  each transaction is written, or `Aborted` for each that was not (a refusal, or
+  a write that failed after `Prepared`). These are the four states git runs
+  the hook in, so a provider can forward to the repository's script for each.
+  `reset` makes two transactions (`ORIG_HEAD`, then the branch), `switch -c`
+  and `checkout -b` two (the branch, then `HEAD`), and the rest one; every
+  `Preparing` and `Prepared` is sent before the first write, which is not git's
+  order (docs/issues.md W21 lists both, per verb). `Prepared` is also sent
+  before any ref lock is taken, where git's `prepared` follows the locks
+  (W60). `switch -c` and `checkout -b` then call `post_checkout` when HEAD has
+  a commit, and `commit --amend` calls
+  `post_rewrite` with `amend` after `post_commit`. The provider is told
+  `no_verify` and decides what it means. `HookContext::tree` is `None` for
+  the verbs that make no commit. The lines each state carries, and the state
+  order for each transaction, were compared with git 2.56's scripts in
+  `tests/write_hooks.rs`; the order across the two transactions of one command
+  differs from git's, as the table in W21 shows.
 - *Signing* is refused: `-S`, `tag -s` and `-u`, and `commit.gpgSign` or
   `tag.gpgSign` true in the repository's own config (`tag.forceSignAnnotated`
   refuses an annotated tag). Host `~/.gitconfig` is never read, so a host
@@ -641,7 +671,7 @@ exists is never removed (exit 4). An annotated tag writes its object before the
 ref, and a commit writes its objects before the branch moves, so a refusal or
 an I/O failure after that says the objects remain, that nothing refers to them
 and that `git gc` prunes them. The differences from git are `docs/issues.md`
-W34-W47.
+W36-W47.
 
 What the verbs do not do, stated plainly:
 
@@ -674,9 +704,12 @@ Write safety, in the order it applies:
 
 1. Refusals first. A verb decides everything it will refuse from a read-only
    snapshot of the index and the working tree, before it creates a file. A
-   refusal that says "Nothing was changed." leaves `.git` byte-identical,
-   directory mtimes included (`tests/write_fingerprint.rs`, and the commit
-   refusals in `tests/write_commit.rs`). Every blob's object path passes
+   refusal that says "Nothing was changed." leaves the files in `.git`
+   byte-identical, and the mtimes of the directories inside it
+   (`tests/write_fingerprint.rs`, and the commit refusals in
+   `tests/write_commit.rs`). One refusal moves the mtime of `.git` itself: a
+   hook veto of `reset --mixed`, which takes and releases `index.lock` first
+   (W64). Every blob's object path passes
    containment before the first blob is written.
 2. Then `index.lock` is created exclusively, the index is read again under it,
    and the plan is rebuilt if the bytes changed. A lock that already exists is
@@ -1069,15 +1102,15 @@ tree-depth bounds and the entries not listed here.
 
 ## Version and pin guidance
 
-This crate publishes as **`0.9.0`** and does **not** inherit
+This crate publishes as **`0.10.0`** and does **not** inherit
 `[workspace.package].version` (`0.1.0` in this repo) — see
 `docs/design/publishing.md` for why: crates.io already holds a libgit2-era
 `kaish-tools-git` at `0.8.x` under the same owner, a different codebase, and
-`^0.8` does not resolve to `0.9.0`, so publishing forward rather than
+`^0.8` does not resolve to `0.10.0`, so publishing forward rather than
 resetting the number does not move any existing consumer.
 
 Depend on it the way the root `Cargo.toml` here depends on the four kaish
-crates: a caret range on a **published** version (`"0.9"`, not a git rev), so
+crates: a caret range on a **published** version (`"0.10"`, not a git rev), so
 a patch release resolves automatically and a minor bump — pre-1.0, a minor
 here can carry a breaking change — is a deliberate, reviewed step rather
 than something that rides in silently. `git info`'s `capabilities.limits`

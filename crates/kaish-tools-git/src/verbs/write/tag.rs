@@ -25,7 +25,8 @@ use gix_object::Find as _;
 
 use crate::error::GitError;
 use crate::verbs::tag::TagArgs;
-use crate::verbs::write::branch::{blocked_refusal, refuse_hooks, RefsEnv};
+use crate::verbs::write::branch::{blocked_refusal, scan_ref_hooks, RefsEnv};
+use crate::verbs::write::hookrun::{self, Tx};
 use crate::verbs::write::ident::{self, KernelVars};
 use crate::verbs::write::objects::BlobWriter;
 use crate::verbs::write::refmove::{self, MoveKind};
@@ -206,7 +207,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &TagCreate) -> Result<O
     let full = refname::full_name(RefKind::Tag, cmd, &opts.name)?;
     let annotated = opts.raw_message.is_some();
     ensure_tag_settings(repo, cmd, annotated)?;
-    refuse_hooks(repo, env, cmd, &["reference-transaction"], "tag")?;
+    let scan = scan_ref_hooks(repo, env.hooks.is_some(), cmd, &["reference-transaction"], "tag")?;
 
     if refname::exists(repo, &full)?.is_some() {
         return refuse(
@@ -241,9 +242,31 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &TagCreate) -> Result<O
     };
     refmove::precheck_ref(repo, cmd, &full)?;
 
+    let ctx = scan.context(repo);
+    let mut err = String::new();
+    // Creates the tag under the hook's transaction. `objects` says a tag
+    // object was written first, so a refusal or failure names it.
+    let create = |oid: ObjectId, objects: bool, err: &mut String| -> Result<(), GitError> {
+        let after = |e: GitError| if objects { e.after_objects() } else { e };
+        let tx = Tx::new(hookrun::null(), oid.to_string(), full.clone());
+        if let Some(h) = env.hooks.as_ref() {
+            hookrun::prepared(h.as_ref(), &ctx, MoveKind::TAG, cmd, std::slice::from_ref(&tx), err).map_err(after)?;
+        }
+        if let Err(e) = refmove::create_ref(repo, MoveKind::TAG, cmd, &full, oid, None) {
+            if let Some(h) = env.hooks.as_ref() {
+                hookrun::aborted(h.as_ref(), &ctx, &tx, err);
+            }
+            return Err(after(e));
+        }
+        if let Some(h) = env.hooks.as_ref() {
+            hookrun::committed(h.as_ref(), &ctx, &tx, err);
+        }
+        Ok(())
+    };
+
     let Some(raw) = &opts.raw_message else {
-        refmove::create_ref(repo, MoveKind::TAG, cmd, &full, target, None)?;
-        return Ok(outcome(opts, &full, target, target, "lightweight"));
+        create(target, false, &mut err)?;
+        return Ok(outcome(opts, &full, target, target, "lightweight", err));
     };
 
     let tagger = ident::resolve_committer(cmd, env.identity.as_ref(), &opts.vars, ident::now())?;
@@ -269,14 +292,14 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &TagCreate) -> Result<O
     let mut writer = BlobWriter::new(repo, OP);
     let tag_id = writer.write_object(gix_object::Kind::Tag, &bytes)?;
     writer.sync().map_err(GitError::after_objects)?;
-    refmove::create_ref(repo, MoveKind::TAG, cmd, &full, tag_id, None).map_err(GitError::after_objects)?;
-    Ok(outcome(opts, &full, tag_id, target, "annotated"))
+    create(tag_id, true, &mut err)?;
+    Ok(outcome(opts, &full, tag_id, target, "annotated", err))
 }
 
-fn outcome(opts: &TagCreate, full: &str, oid: ObjectId, target: ObjectId, kind: &str) -> Outcome {
+fn outcome(opts: &TagCreate, full: &str, oid: ObjectId, target: ObjectId, kind: &str, err: String) -> Outcome {
     Outcome {
         text: String::new(),
-        err: String::new(),
+        err,
         json: serde_json::json!({ "tag": opts.name, "ref": full, "object": oid.to_string(), "target": target.to_string(), "kind": kind }),
     }
 }

@@ -613,7 +613,12 @@ kaish> git reset HEAD~1 -- notes.txt # that index entry from another revision; n
 ```
 
 `reset --soft <rev>` and `reset --mixed <rev>` (also `reset <rev>`) move the
-branch and are described under "Rewriting history" below.
+branch and are described under "Rewriting history" below. A plain `reset`
+(also `reset HEAD` and `reset --mixed`, with no path) is a `--mixed` reset to
+`HEAD`: it writes `ORIG_HEAD` and the reflog line `reset: moving to HEAD`, as
+git does for these spellings (`reset @` differs: docs/issues.md W30), so it needs a committer identity and exits 2 without one. On a branch
+with no commit it only empties the index, as git does, and needs no identity.
+`reset -- <path>` and `reset HEAD -- <path>` write neither.
 
 Each returns its summary in `--json` (`added`, `modified`, `removed`,
 `refreshed`; `removed`, `cached`; `moved`; `unstaged`). The text surface is
@@ -641,6 +646,7 @@ What refuses, with the exit code:
 | `reset --hard`, `--merge`, `--keep` | 2 | they write working-tree files; never |
 | `reset --soft` with a path; two of `--soft`, `--mixed`, `--hard`, `--merge`, `--keep` | 2 | usage |
 | any of them in a merge, rebase, ... or with a split index, ... | 4 | design section 4 |
+| `add`, `rm`, `mv`, `restore --staged` or `reset` without `--soft` in a repository with an executable `post-index-change` hook, with or without a hook provider | 4 | git runs the hook after it writes the index, and this shell cannot (W62) |
 
 `reset HEAD` and `reset HEAD -- <path>` are the unstage forms. Any other first
 word that names a revision, or contains `~`, `^`, `@` or `{`, is a revision:
@@ -652,9 +658,7 @@ copies those index entries from that revision and moves nothing.
 - `add` refuses the whole command when a named path is ignored; git stages the
   other paths and exits 1.
 - `reset` and `restore --staged` do not print "Unstaged changes after reset"
-  and do not refresh the stat of entries they restore. `reset`, `reset HEAD`
-  and `reset -- <path>` write no `ORIG_HEAD` or reflog line; git writes both
-  for the first two, even though HEAD does not move (`docs/issues.md` W30).
+  and do not refresh the stat of entries they restore.
 - `restore --staged` and `reset` give a restored entry an all-zero stat, as git
   does; an entry that already matches HEAD is left alone.
 - `add` reads whole files: a file over 128 MiB refuses (git streams).
@@ -818,7 +822,9 @@ hook provider (exit 4), before anything is written. The output is git's, with
 (or a detached HEAD) and nothing else. `--mixed` also puts the whole index back
 to `<rev>`'s tree. The working tree is never written. Both write `ORIG_HEAD`
 (the old tip) and the reflog line `reset: moving to <rev as typed>` in the
-branch's log and `logs/HEAD`, as git does, and need an identity for the line.
+branch's log and `logs/HEAD`, as git does for a revision that is not `@`
+(git logs `HEAD` for `@`, and this shell logs `@`; W30), and need an identity
+for the line.
 `<rev>` is what `git log` accepts: `HEAD~N`, `^`, `@{-N}`, a branch, a tag, an oid.
 `--json` returns `head`, `previous`, `mode`, `branch` and `unstaged`.
 
@@ -844,8 +850,8 @@ the policy is unless it is `Allow`.
 
 ### Where it differs from git, on purpose
 
-- `reset` with no revision or `HEAD` writes no `ORIG_HEAD` and no reflog line;
-  with a revision it writes both. Git writes both always.
+- A `reset` from a branch with no commit to a revision deletes a stale
+  `ORIG_HEAD`, as git does.
 - No "Unstaged changes after reset" list; entries a `--mixed` reset restores
   get an all-zero stat.
 - Amend refuses a commit with an `encoding` header or a non-UTF-8 message.
@@ -913,7 +919,7 @@ and `tag -a` without a message; `switch <branch>`, `checkout <branch>` and
 `core.commentString` is set to anything but `#` or `auto` (exit 4; those two
 leave a `-m` or `-F` message cleaned as `#` does, and the tag object is
 byte-identical to git's). The differences from git, and the cost of
-the name check, are `docs/issues.md` W34-W47.
+the name check, are `docs/issues.md` W36-W47.
 
 ## Non-goals
 

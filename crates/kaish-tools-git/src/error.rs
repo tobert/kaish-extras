@@ -833,6 +833,16 @@ impl GitError {
         }
     }
 
+    /// Attach what hooks said before a refusal, so it is not lost with it.
+    /// Any other error is returned as it is.
+    #[cfg(feature = "commit")]
+    pub(crate) fn with_hook_output(self, text: &str) -> Self {
+        match self {
+            GitError::Refused { code, refusal } => GitError::Refused { code, refusal: Box::new(refusal.with_hook_output(text)) },
+            other => other,
+        }
+    }
+
     /// [`Self::after_objects`] for a failure after `ORIG_HEAD` was written (a
     /// `reset` whose branch move lost).
     #[cfg(feature = "commit")]

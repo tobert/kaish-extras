@@ -24,7 +24,9 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use kaish_tool_api::Tool;
-use kaish_tools_git::{GitConfig, GitHooks, HookContext, HookError, HookOutput, Identity};
+use kaish_tools_git::{
+    GitConfig, GitHooks, HookContext, HookError, HookOutput, Identity, RefTransactionState, RefUpdate, RewrittenCommit,
+};
 use kaish_types::Value;
 
 use support::{Fixture, StrictBackend, TestCtx};
@@ -889,14 +891,14 @@ struct Recorder {
 
 impl GitHooks for Recorder {
     fn pre_commit(&self, ctx: &HookContext<'_>) -> Result<HookOutput, HookError> {
-        self.calls.lock().expect("lock").push(format!("pre-commit tree={} hooks={:?} no_verify={}", ctx.tree, ctx.hooks_present, ctx.no_verify));
+        self.calls.lock().expect("lock").push(format!("pre-commit tree={} hooks={:?} no_verify={}", ctx.tree.expect("a commit has a tree"), ctx.hooks_present, ctx.no_verify));
         if let Some(repo) = &self.race {
             git_raw(repo, &["update-ref", "refs/heads/main", "HEAD~0"]);
             let other = git_raw(repo, &["commit-tree", "-p", "HEAD", "-m", "raced", "HEAD^{tree}"]).1;
             git_raw(repo, &["update-ref", "refs/heads/main", other.trim()]);
         }
         if self.reject_pre_commit {
-            return Err(HookError::new("pre-commit", "lint failed"));
+            return Err(HookError::new("lint failed"));
         }
         Ok(HookOutput::with_message("pre-commit ran"))
     }
@@ -912,6 +914,18 @@ impl GitHooks for Recorder {
     fn post_commit(&self, ctx: &HookContext<'_>, commit: &str) -> HookOutput {
         self.calls.lock().expect("lock").push(format!("post-commit {commit} worktree={}", ctx.worktree.is_some()));
         HookOutput::with_message("post-commit ran")
+    }
+
+    // This suite is about commit's own hooks; the ref-update hooks are pinned
+    // in tests/write_hooks.rs, so here they only agree to everything.
+    fn reference_transaction(&self, _: &HookContext<'_>, _: RefTransactionState, _: &[RefUpdate]) -> Result<HookOutput, HookError> {
+        Ok(HookOutput::none())
+    }
+    fn post_checkout(&self, _: &HookContext<'_>, _: &str, _: &str, _: bool) -> HookOutput {
+        HookOutput::none()
+    }
+    fn post_rewrite(&self, _: &HookContext<'_>, _: &str, _: &[RewrittenCommit]) -> HookOutput {
+        HookOutput::none()
     }
 }
 

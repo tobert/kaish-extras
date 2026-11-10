@@ -23,7 +23,9 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use kaish_tool_api::Tool;
-use kaish_tools_git::{GitConfig, GitHooks, HookContext, HookError, HookOutput, RewritePolicy};
+use kaish_tools_git::{
+    GitConfig, GitHooks, HookContext, HookError, HookOutput, RefTransactionState, RefUpdate, RewritePolicy, RewrittenCommit,
+};
 use kaish_types::Value;
 
 use support::{Fixture, StrictBackend, TestCtx};
@@ -487,6 +489,188 @@ async fn reset_with_a_revision_and_paths_copies_index_entries_without_moving() {
     assert!(!p.ours.join(".git/ORIG_HEAD").exists(), "no branch moved, so no ORIG_HEAD");
 }
 
+/// Plain `git reset` is a mixed reset to HEAD, and git logs it (W30).
+fn staged_with_orig_head(d: &Path) {
+    staged(d);
+    support::git(d, &["update-ref", "ORIG_HEAD", "HEAD~1"]);
+}
+
+fn staged_detached(d: &Path) {
+    staged(d);
+    support::git(d, &["checkout", "-q", "--detach"]);
+}
+
+/// ORIG_HEAD and both reflogs, byte for byte, and the staged entries.
+fn assert_same_bytes(p: &Pair, label: &str) {
+    p.assert_same(label);
+    let bytes = |d: &Path, f: &str| std::fs::read(d.join(".git").join(f)).ok();
+    assert_eq!(bytes(&p.ours, "ORIG_HEAD"), bytes(&p.twin, "ORIG_HEAD"), "[{label}] ORIG_HEAD");
+    for log in ["logs/HEAD", "logs/refs/heads/main"] {
+        assert_eq!(bytes(&p.ours, log), bytes(&p.twin, log), "[{label}] {log}");
+    }
+    // The index file is compared by what it stages (`assert_same` above): its
+    // bytes also hold file stat data, which differs between two checkouts, and
+    // git's cache-tree extension, which this crate does not write.
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plain_reset_writes_orig_head_and_the_reflog_line_as_git_does_for_each_spelling() {
+    type Setup = fn(&Path);
+    let spellings: &[&[&str]] = &[&["reset"], &["reset", "HEAD"], &["reset", "--mixed"], &["reset", "--mixed", "HEAD"]];
+    let setups: &[(&str, Setup)] =
+        &[("on a branch", staged), ("with an ORIG_HEAD already", staged_with_orig_head), ("detached", staged_detached)];
+    for (where_, setup) in setups {
+        for argv in spellings {
+            let label = format!("{} {where_}", argv.join(" "));
+            let p = Pair::new(&setup);
+            let r = p.ours(argv).await;
+            assert_eq!(r.code, 0, "[{label}] {}", r.err);
+            let (code, _, err) = p.twin(argv);
+            assert_eq!(code, 0, "[{label}] {err}");
+            assert_same_bytes(&p, &label);
+            // The negative control: what is being compared exists.
+            let orig = std::fs::read_to_string(p.ours.join(".git/ORIG_HEAD")).expect("ORIG_HEAD");
+            let head = git_raw(&p.ours, &["rev-parse", "HEAD"]).1;
+            assert_eq!(orig, head, "[{label}] ORIG_HEAD names the tip the reset started from");
+            // The index went back to HEAD's tree: the staged change is gone.
+            assert_eq!(git_raw(&p.ours, &["diff", "--cached", "--name-only"]).1, "", "[{label}]");
+            let head_log = read_log(&p.ours, "logs/HEAD");
+            if *where_ != "detached" {
+                assert!(
+                    head_log.lines().last().expect("a line").ends_with("\treset: moving to HEAD"),
+                    "[{label}] logs/HEAD: {head_log}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_with_a_path_writes_no_orig_head_and_no_reflog_line() {
+    for argv in [&["reset", "--", "a.txt"][..], &["reset", "HEAD", "--", "a.txt"], &["reset", "a.txt"]] {
+        let p = Pair::new(&staged);
+        let before = read_log(&p.ours, "logs/HEAD");
+        let r = p.ours(argv).await;
+        assert_eq!(r.code, 0, "{argv:?}: {}", r.err);
+        assert_eq!(p.twin(argv).0, 0, "{argv:?}");
+        assert_same_bytes(&p, &argv.join(" "));
+        assert!(!p.ours.join(".git/ORIG_HEAD").exists(), "{argv:?}: git writes no ORIG_HEAD for a path reset");
+        assert_eq!(read_log(&p.ours, "logs/HEAD"), before, "{argv:?}");
+        assert_eq!(git_raw(&p.ours, &["diff", "--cached", "--name-only"]).1, "", "{argv:?}: the path was unstaged");
+    }
+}
+
+fn unborn_with_orig_head(d: &Path) {
+    support::write_file(d, "a.txt", "alpha\n");
+    support::git(d, &["add", "a.txt"]);
+    // A real commit's id, made elsewhere, so ORIG_HEAD is well formed.
+    std::fs::write(d.join(".git/ORIG_HEAD"), "1111111111111111111111111111111111111111\n").expect("ORIG_HEAD");
+}
+
+/// Git 2.56 (measured): a plain reset on a branch with no commit resets the
+/// index and nothing else. It keeps ORIG_HEAD, writes no log, needs no identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plain_reset_on_an_unborn_branch_resets_the_index_and_writes_nothing_else() {
+    for argv in [&["reset"][..], &["reset", "--mixed"]] {
+        let p = Pair::new(&unborn_with_orig_head);
+        let r = run_tool_with(&p.fx.root(), "/mnt/ours", argv, &[], config(RewritePolicy::Allow)).await;
+        assert_eq!(r.code, 0, "{argv:?}: {}", r.err);
+        assert_eq!(p.twin(argv).0, 0, "{argv:?}");
+        // The negative control: ORIG_HEAD was there, and git kept it.
+        assert!(p.twin.join(".git/ORIG_HEAD").exists(), "{argv:?}: git kept ORIG_HEAD");
+        assert!(p.ours.join(".git/ORIG_HEAD").exists(), "{argv:?}: ours must keep it too");
+        assert!(!p.ours.join(".git/logs").exists(), "{argv:?}: no log line");
+        let staged = |d: &Path| git_raw(d, &["ls-files", "-s"]).1;
+        assert_eq!(staged(&p.ours), staged(&p.twin), "{argv:?}");
+        assert_eq!(staged(&p.ours), "", "{argv:?}: the index was emptied");
+    }
+}
+
+/// `reset <rev>` from an unborn branch is the form that deletes ORIG_HEAD.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_to_a_revision_from_an_unborn_branch_deletes_orig_head_as_git_does() {
+    let setup = |d: &Path| {
+        history(d);
+        support::git(d, &["checkout", "-q", "--orphan", "fresh"]);
+        std::fs::write(d.join(".git/ORIG_HEAD"), "1111111111111111111111111111111111111111\n").expect("ORIG_HEAD");
+    };
+    for argv in [&["reset", "--soft", "main"][..], &["reset", "main"]] {
+        let p = Pair::new(&setup);
+        assert!(p.ours.join(".git/ORIG_HEAD").exists(), "the control: ORIG_HEAD starts out present");
+        let r = p.ours(argv).await;
+        assert_eq!(r.code, 0, "{argv:?}: {}", r.err);
+        assert_eq!(p.twin(argv).0, 0, "{argv:?}");
+        assert!(!p.twin.join(".git/ORIG_HEAD").exists(), "{argv:?}: git deletes ORIG_HEAD");
+        assert!(!p.ours.join(".git/ORIG_HEAD").exists(), "{argv:?}: ours must too");
+        for log in ["logs/HEAD", "logs/refs/heads/fresh"] {
+            assert_eq!(read_log(&p.ours, log), read_log(&p.twin, log), "{argv:?}: {log}");
+        }
+        let refs = |d: &Path| git_raw(d, &["for-each-ref", "--format=%(refname) %(objectname)"]).1;
+        assert_eq!(refs(&p.ours), refs(&p.twin), "{argv:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plain_reset_that_git_would_log_refuses_without_an_identity_and_changes_nothing() {
+    type Setup = fn(&Path);
+    let setups: &[(&str, Setup)] = &[("on a branch", staged), ("detached", staged_detached)];
+    for (where_, setup) in setups {
+        for argv in [&["reset"][..], &["reset", "HEAD"], &["reset", "--mixed"]] {
+            let p = Pair::new(setup);
+            let before = support::Fingerprint::take(&p.git_dir());
+            let index = std::fs::read(p.ours.join(".git/index")).expect("index");
+            let r = run_tool_with(&p.fx.root(), "/mnt/ours", argv, &[], config(RewritePolicy::Allow)).await;
+            let label = format!("{} {where_}", argv.join(" "));
+            assert_eq!(r.code, 2, "[{label}] {}", r.err);
+            assert!(r.err.contains("GIT_COMMITTER_NAME") && r.err.contains("GIT_COMMITTER_EMAIL"), "[{label}] names the variables: {}", r.err);
+            assert!(r.err.contains("pinned an identity"), "[{label}] names the pin: {}", r.err);
+            p.refused_unchanged(&r, &before, &label);
+            assert_eq!(std::fs::read(p.ours.join(".git/index")).expect("index"), index, "[{label}] the index");
+            assert!(!p.ours.join(".git/ORIG_HEAD").exists(), "[{label}]");
+        }
+    }
+    // The controls: a reset git would not log needs no identity.
+    let p = Pair::new(&staged);
+    assert_eq!(run_tool_with(&p.fx.root(), "/mnt/ours", &["reset", "--", "a.txt"], &[], config(RewritePolicy::Allow)).await.code, 0);
+    // Nor does a plain reset on a branch with no commit: git writes no log line.
+    let p = Pair::new(&unborn_with_orig_head);
+    assert_eq!(run_tool_with(&p.fx.root(), "/mnt/ours", &["reset"], &[], config(RewritePolicy::Allow)).await.code, 0);
+}
+
+/// Git writes the log line for `reset @` as `moving to HEAD`: `@` is HEAD's
+/// other name, and git normalizes it. This shell writes the word as typed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "BUG: reset @ writes `reset: moving to @`; git 2.56 writes `moving to HEAD` (found with W30)"]
+async fn reset_at_sign_logs_head_as_git_does() {
+    let p = Pair::new(&staged);
+    assert_eq!(p.ours(&["reset", "@"]).await.code, 0);
+    assert_eq!(p.twin(&["reset", "@"]).0, 0);
+    assert_same_bytes(&p, "reset @");
+}
+
+/// `git reset --soft` with no revision on a branch with no commit is a no-op
+/// that succeeds in git 2.56.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "BUG: reset --soft on an unborn branch exits 1 with a gix-ref error (\"Could not follow a single level of a symbolic reference\"); git 2.56 exits 0"]
+async fn reset_soft_with_no_revision_on_an_unborn_branch_succeeds_as_git_does() {
+    let p = Pair::new(&unborn_with_orig_head);
+    let (code, _, err) = p.twin(&["reset", "--soft"]);
+    assert_eq!(code, 0, "the control: git succeeds: {err}");
+    let r = p.ours(&["reset", "--soft"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+}
+
+/// `git reset HEAD` on a branch with no commit fails: HEAD names nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "BUG: reset HEAD on an unborn branch succeeds; git 2.56 exits 128 (ambiguous argument 'HEAD')"]
+async fn reset_head_on_an_unborn_branch_fails_as_git_does() {
+    let p = Pair::new(&unborn_with_orig_head);
+    let r = p.ours(&["reset", "HEAD"]).await;
+    let (code, _, _) = p.twin(&["reset", "HEAD"]);
+    assert_ne!(code, 0, "the control: git refuses");
+    assert_ne!(r.code, 0, "ours succeeded: {}", r.err);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reset_to_a_missing_revision_refuses_and_changes_nothing() {
     let p = Pair::new(&staged);
@@ -773,18 +957,37 @@ impl GitHooks for Seen {
         self.calls.lock().expect("lock").push("post-commit".to_string());
         HookOutput::none()
     }
+    // The ref-update hooks are pinned in tests/write_hooks.rs.
+    fn reference_transaction(&self, _: &HookContext<'_>, _: RefTransactionState, _: &[RefUpdate]) -> Result<HookOutput, HookError> {
+        Ok(HookOutput::none())
+    }
+    fn post_checkout(&self, _: &HookContext<'_>, _: &str, _: &str, _: bool) -> HookOutput {
+        HookOutput::none()
+    }
+    fn post_rewrite(&self, _: &HookContext<'_>, command: &str, rewritten: &[RewrittenCommit]) -> HookOutput {
+        let lines: Vec<String> = rewritten.iter().map(RewrittenCommit::line).collect();
+        self.calls.lock().expect("lock").push(format!("post-rewrite {command} {lines:?}"));
+        HookOutput::none()
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_provider_is_told_about_post_rewrite_and_runs_for_an_amend() {
+async fn a_provider_hears_post_rewrite_with_the_old_and_new_commit_for_an_amend() {
     let p = Pair::new(&staged);
     plant_hook(&p.ours, "post-rewrite", "#!/bin/sh\nexit 1\n");
+    let before = git_raw(&p.ours, &["rev-parse", "HEAD"]).1.trim().to_string();
     let seen = Arc::new(Seen::default());
     let cfg = config(RewritePolicy::Allow).with_hooks(seen.clone());
     let r = run_tool_with(&p.fx.root(), "/mnt/ours", &["commit", "--amend", "-m", "x"], &later_vars(), cfg).await;
     assert_eq!(r.code, 0, "{}", r.err);
+    let after = git_raw(&p.ours, &["rev-parse", "HEAD"]).1.trim().to_string();
+    assert_ne!(before, after);
     let calls = seen.calls.lock().expect("lock").clone();
-    assert_eq!(calls, ["pre-commit [\"post-rewrite\"]", "commit-msg", "post-commit"], "{calls:?}");
+    assert_eq!(
+        calls,
+        ["pre-commit [\"post-rewrite\"]".to_string(), "commit-msg".to_string(), "post-commit".to_string(), format!("post-rewrite amend [\"{before} {after}\"]")],
+        "{calls:?}"
+    );
 }
 
 // ── operations ids ──────────────────────────────────────────────────────────
@@ -796,5 +999,26 @@ fn amend_and_reset_declare_the_rewrite_operation() {
         let leaf = schema.subcommands.iter().find(|c| c.name == verb).expect("leaf");
         assert!(leaf.operations.iter().any(|o| o == "git.rewrite"), "{verb}: {:?}", leaf.operations);
         assert!(leaf.operations.iter().any(|o| o == "git.ref"), "{verb}: {:?}", leaf.operations);
+    }
+}
+
+/// An `ORIG_HEAD` that has a reflog gets a line from a reset, as git writes it:
+/// the same bytes in `logs/ORIG_HEAD`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reset_appends_to_the_orig_head_reflog_as_git_does() {
+    let setup = |d: &Path| {
+        staged(d);
+        support::git(d, &["update-ref", "--create-reflog", "-m", "seed", "ORIG_HEAD", "HEAD~1"]);
+    };
+    for argv in [&["reset", "--soft", "HEAD~1"][..], &["reset", "HEAD~1"], &["reset"]] {
+        let p = Pair::new(&setup);
+        let seeded = read_log(&p.ours, "logs/ORIG_HEAD");
+        assert!(seeded.contains("\tseed"), "the control: the seed wrote a reflog line: {seeded}");
+        let r = p.ours(argv).await;
+        assert_eq!(r.code, 0, "{argv:?}: {}", r.err);
+        assert_eq!(p.twin(argv).0, 0, "{argv:?}");
+        let bytes = |d: &Path| std::fs::read(d.join(".git/logs/ORIG_HEAD")).expect("logs/ORIG_HEAD");
+        assert_eq!(bytes(&p.ours), bytes(&p.twin), "{argv:?}: logs/ORIG_HEAD differs");
+        assert!(bytes(&p.ours).len() > seeded.len(), "{argv:?}: git appended a line, so the comparison is not of an untouched file");
     }
 }

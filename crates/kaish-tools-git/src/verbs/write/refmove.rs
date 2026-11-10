@@ -49,6 +49,8 @@ pub(crate) struct MoveKind {
     pub(crate) again: &'static str,
     /// Says the move happened, for a failure after the branch moved.
     pub(crate) done: &'static str,
+    /// The command as a noun, for "the hook refused the ...".
+    pub(crate) noun: &'static str,
 }
 
 impl MoveKind {
@@ -57,30 +59,43 @@ impl MoveKind {
         during: "this commit was being made",
         again: "make the commit again",
         done: "the commit was made",
+        noun: "commit",
     };
     pub(crate) const RESET: MoveKind = MoveKind {
         op: "reset",
         during: "this reset was running",
         again: "run the reset again",
         done: "the reset was made",
+        noun: "reset",
     };
     pub(crate) const BRANCH: MoveKind = MoveKind {
         op: "branch",
         during: "this branch was being created",
         again: "create the branch again",
         done: "the branch was created",
+        noun: "branch",
     };
     pub(crate) const TAG: MoveKind = MoveKind {
         op: "tag",
         during: "this tag was being created",
         again: "create the tag again",
         done: "the tag was created",
+        noun: "tag",
     };
     pub(crate) const SWITCH: MoveKind = MoveKind {
         op: "switch",
         during: "this switch was running",
         again: "run the switch again",
         done: "the branch was created",
+        noun: "switch",
+    };
+    /// `checkout -b`: the same move as [`Self::SWITCH`], named as typed.
+    pub(crate) const CHECKOUT: MoveKind = MoveKind {
+        op: "checkout",
+        during: "this checkout was running",
+        again: "run the checkout again",
+        done: "the branch was created",
+        noun: "checkout",
     };
 }
 
@@ -224,7 +239,7 @@ fn hold_head(repo: &WriteRepo, kind: MoveKind, command: &str, full: &str) -> Res
     let head = repo.check(std::path::Path::new("HEAD"), Leaf::File)?;
     let _ = repo.check(std::path::Path::new("HEAD.lock"), Leaf::File)?;
     let marker = gix_lock::Marker::acquire_to_hold_resource(&head, gix_lock::acquire::Fail::Immediately, None)
-        .map_err(|e| lock_error(kind, command, "HEAD.lock", full, repo, e))?;
+        .map_err(|e| lock_error(kind, command, "HEAD.lock", full, "moving", repo, e))?;
     let now = repo
         .refs()
         .find("HEAD")
@@ -307,6 +322,9 @@ pub(crate) struct HeadSwitch<'a> {
     /// The branch's reflog line, and the committer, when the branch is made.
     /// An unborn HEAD makes no branch: HEAD just names the new one.
     pub(crate) create: Option<(&'a str, &'a Signature)>,
+    /// Set to true once the branch exists, so a caller that failed later can
+    /// tell the branch transaction from the HEAD one.
+    pub(crate) created: Option<&'a std::cell::Cell<bool>>,
 }
 
 /// Create the branch (unless HEAD is unborn) and point HEAD at it, holding
@@ -320,7 +338,7 @@ pub(crate) fn switch_head(repo: &WriteRepo, s: &HeadSwitch<'_>) -> Result<(), Gi
     refuse_if_locked(repo, s.command, &checked, s.full)?;
     let head = repo.check(std::path::Path::new("HEAD"), Leaf::File)?;
     let mut lock = gix_lock::File::acquire_to_update_resource(&head, gix_lock::acquire::Fail::Immediately, None)
-        .map_err(|e| lock_error(kind, s.command, "HEAD.lock", s.full, repo, e))?;
+        .map_err(|e| lock_error(kind, s.command, "HEAD.lock", s.full, "moving", repo, e))?;
     // HEAD must still be what the caller read: the lock is held, so nothing
     // else changes it from here on.
     let now = repo
@@ -343,6 +361,9 @@ pub(crate) fn switch_head(repo: &WriteRepo, s: &HeadSwitch<'_>) -> Result<(), Gi
     }
     if let (Some(oid), Some((message, committer))) = (s.head_oid, s.create) {
         create_ref(repo, kind, s.command, s.full, oid, Some((message, committer)))?;
+        if let Some(flag) = s.created {
+            flag.set(true);
+        }
     }
     let created = s.create.is_some();
     let after_branch = |what: String, source: std::io::Error| -> GitError {
@@ -404,7 +425,7 @@ fn refuse_if_ref_locked(repo: &WriteRepo, command: &str, checked: &[std::path::P
                 .strip_prefix(repo.common_dir())
                 .or_else(|_| lock.strip_prefix(repo.git_dir()))
                 .map_or_else(|_| "a lock file".to_string(), |p| p.display().to_string());
-            return Err(lock_refusal(command, &shown, refname));
+            return Err(lock_refusal(command, &shown, refname, "creating"));
         }
     }
     Ok(())
@@ -491,19 +512,19 @@ fn refuse_if_locked(
                 .strip_prefix(repo.common_dir())
                 .or_else(|_| lock.strip_prefix(repo.git_dir()))
                 .map_or_else(|_| "a lock file".to_string(), |p| p.display().to_string());
-            return Err(lock_refusal(command, &shown, refname));
+            return Err(lock_refusal(command, &shown, refname, "moving"));
         }
     }
     Ok(())
 }
 
 /// The exit-4 refusal for a lock file that exists. `shown` is relative to
-/// the git directory.
-fn lock_refusal(command: &str, shown: &str, refname: &str) -> GitError {
+/// the git directory. `action` is `moving` or `creating`.
+fn lock_refusal(command: &str, shown: &str, refname: &str, action: &str) -> GitError {
     refuse::<()>(
         4,
         command,
-        format!("The lock file '{shown}' already exists in the git directory (moving '{refname}' needs it), so another git process may be running. This shell does not remove a lock it did not take."),
+        format!("The lock file '{shown}' already exists in the git directory ({action} '{refname}' needs it), so another git process may be running. This shell does not remove a lock it did not take."),
         "Wait and run the same command again. If no other git process is running, remove the lock with real git's environment, for example: rm .git/refs/heads/<branch>.lock.",
         Override::Repository,
     )
@@ -512,9 +533,9 @@ fn lock_refusal(command: &str, shown: &str, refname: &str) -> GitError {
 
 /// Map a failed lock acquire: a lock that exists is the exit-4 refusal naming
 /// `shown`; anything else is a repository error.
-fn lock_error(kind: MoveKind, command: &str, shown: &str, refname: &str, repo: &WriteRepo, source: gix_lock::acquire::Error) -> GitError {
+fn lock_error(kind: MoveKind, command: &str, shown: &str, refname: &str, action: &str, repo: &WriteRepo, source: gix_lock::acquire::Error) -> GitError {
     if matches!(source, gix_lock::acquire::Error::PermanentlyLocked { .. }) {
-        lock_refusal(command, shown, refname)
+        lock_refusal(command, shown, refname, action)
     } else {
         GitError::repository(kind.op, format!("locking '{shown}'"), repo.common_dir(), source)
     }
@@ -529,12 +550,14 @@ fn prepare_error(
     e: gix_ref::file::transaction::prepare::Error,
 ) -> GitError {
     use gix_ref::file::transaction::prepare::Error as E;
+    // A ref with no old value is being created.
+    let action = if old.is_some() { "moving" } else { "creating" };
     match e {
         E::ReferenceOutOfDate { actual, .. } => cas_failure(kind, command, refname, old, Some(&actual)).unwrap_err(),
         E::MustNotExist { actual, .. } => cas_failure(kind, command, refname, None, Some(&actual)).unwrap_err(),
         E::MustExist { .. } => cas_failure(kind, command, refname, old, None).unwrap_err(),
-        E::LockAcquire { source, .. } => lock_error(kind, command, &format!("{refname}.lock"), refname, repo, source),
-        E::PackedTransactionAcquire(source) => lock_error(kind, command, "packed-refs.lock", refname, repo, source),
+        E::LockAcquire { source, .. } => lock_error(kind, command, &format!("{refname}.lock"), refname, action, repo, source),
+        E::PackedTransactionAcquire(source) => lock_error(kind, command, "packed-refs.lock", refname, action, repo, source),
         other => GitError::repository(kind.op, format!("moving '{refname}'"), repo.common_dir(), other),
     }
 }
@@ -745,6 +768,7 @@ mod tests {
                 head_oid: Some(oid),
                 full,
                 create: Some(("branch: Created from HEAD", &committer())),
+                created: None,
             },
         )
     }

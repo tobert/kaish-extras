@@ -25,6 +25,7 @@ pub(crate) mod attributes;
 pub(crate) mod containment;
 pub(crate) mod reflog;
 pub(crate) mod head;
+pub(crate) mod hookrun;
 pub(crate) mod ignore;
 pub(crate) mod indexfile;
 pub(crate) mod mv;

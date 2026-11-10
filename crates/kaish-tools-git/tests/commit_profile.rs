@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use kaish_tool_api::Tool;
 use kaish_tools_git::{
-    GitConfig, GitHooks, HookContext, HookError, HookOutput, Identity, Profile, RewritePolicy, Verb,
+    GitConfig, GitHooks, HookContext, HookError, HookOutput, Identity, Profile, RefTransactionState, RefUpdate, RewritePolicy,
+    RewrittenCommit, Verb,
 };
 
 use support::{RichRepo, StrictBackend, TestCtx};
@@ -25,6 +26,18 @@ impl GitHooks for NoHooks {
         Ok(HookOutput::none())
     }
     fn post_commit(&self, _: &HookContext<'_>, _: &str) -> HookOutput {
+        HookOutput::none()
+    }
+
+    // This suite is about commit's own hooks; the ref-update hooks are pinned
+    // in tests/write_hooks.rs, so here they only agree to everything.
+    fn reference_transaction(&self, _: &HookContext<'_>, _: RefTransactionState, _: &[RefUpdate]) -> Result<HookOutput, HookError> {
+        Ok(HookOutput::none())
+    }
+    fn post_checkout(&self, _: &HookContext<'_>, _: &str, _: &str, _: bool) -> HookOutput {
+        HookOutput::none()
+    }
+    fn post_rewrite(&self, _: &HookContext<'_>, _: &str, _: &[RewrittenCommit]) -> HookOutput {
         HookOutput::none()
     }
 }

@@ -1,5 +1,5 @@
-//! `git reset --soft|--mixed <rev>` and `git reset <rev> -- <paths>`
-//! (git-write-profile.md §3, §4).
+//! `git reset --soft|--mixed <rev>`, plain `git reset`, and `git reset <rev> --
+//! <paths>` (git-write-profile.md §3, §4).
 //!
 //! `--soft` moves the branch and nothing else. `--mixed` (the default) moves
 //! the branch and puts the whole index back to the target's tree. Neither
@@ -7,6 +7,12 @@
 //! [`rewrite::check_move`] before anything is written. Like git, both write
 //! `ORIG_HEAD` (the old tip) and the reflog line `reset: moving to <rev as
 //! typed>` in the branch's log and HEAD's, even when the tip does not change.
+//!
+//! Plain `git reset` (also `reset HEAD` and `reset --mixed`, with no path) is a
+//! `--mixed` reset to `HEAD`: the same two writes and the same line, `reset:
+//! moving to HEAD`, as git writes. On a branch with no commit it writes
+//! neither (see [`run_plain`]). A `reset <rev>` from such a branch deletes a
+//! stale `ORIG_HEAD`, as git does.
 //!
 //! The order is a commit's: plan and lock the index, move the ref with a
 //! compare-and-swap, then write the index. A failure before the move leaves
@@ -21,18 +27,19 @@ use gix_ref::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
 use gix_ref::Target;
 
 use crate::config::{Identity, RewritePolicy};
-use crate::error::GitError;
+use crate::error::{GitError, Wrote};
 use crate::hooks::GitHooks;
-use crate::verbs::write::commit::hook_present;
 use crate::verbs::write::containment::Leaf;
 use crate::verbs::write::head;
+use crate::verbs::write::hookrun::{self, Tx};
 use crate::verbs::write::ident::{self, KernelVars, Signature};
 use crate::verbs::write::refmove::{self, MoveKind};
+use crate::verbs::write::branch::scan_ref_hooks;
 use crate::verbs::write::refusal::{refuse, Override};
 use crate::verbs::write::repo::WriteRepo;
 use crate::verbs::write::rewrite::{self, MoveCheck, Mover, NewTip};
 use crate::verbs::write::spec::Outcome;
-use crate::verbs::write::state::{ensure_reflog_on, ensure_writable, ensure_writable_with, hooks_dir};
+use crate::verbs::write::state::{ensure_reflog_on, ensure_writable, ensure_writable_with};
 use crate::verbs::write::unstage::{self, UnstageOptions};
 
 const OP: &str = "reset";
@@ -78,18 +85,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &ResetEnv, opts: &ResetOptions) -> Resu
         }
     }
     ensure_reflog_on(repo, cmd)?;
-    if env.hooks.is_none() {
-        let dir = hooks_dir(repo, cmd)?;
-        if hook_present(&dir, "reference-transaction") {
-            return refuse(
-                4,
-                cmd,
-                "The repository has a reference-transaction hook, and this shell runs no hooks.",
-                "Use real git for this reset, outside this shell, or ask the embedder for a hook provider.",
-                Override::Embedder,
-            );
-        }
-    }
+    let scan = scan_ref_hooks(repo, env.hooks.is_some(), cmd, &["reference-transaction"], "reset")?;
 
     let head_state = repo.read().head()?;
     let old = head_state
@@ -122,26 +118,77 @@ pub(crate) fn run(repo: &WriteRepo, env: &ResetEnv, opts: &ResetOptions) -> Resu
         }
     };
 
+    // Git's transactions: `ORIG_HEAD`, then the branch (or HEAD, detached).
+    // All are sent as prepared before the first write.
+    let mut err = String::new();
+    let ctx = scan.context(repo);
+    let mut txs: Vec<Tx> = Vec::new();
+    if let (Some(old), Some(_)) = (old, env.hooks.as_ref()) {
+        let before = orig_head_value(repo)?;
+        txs.push(Tx::new(hookrun::oid_or_null(before), old.to_string(), "ORIG_HEAD"));
+    }
+    let moved_ref = match &target {
+        refmove::HeadTarget::Branch(full) => full.clone(),
+        refmove::HeadTarget::Detached => "HEAD".to_string(),
+    };
+    txs.push(Tx::via_head(hookrun::oid_or_null(old), new.to_string(), moved_ref));
+    let hooks = env.hooks.as_deref();
+    if let Some(h) = hooks {
+        hookrun::prepared(h, &ctx, MoveKind::RESET, cmd, &txs, &mut err)?;
+    }
+    let abort_all = |from: usize, err: &mut String| {
+        if let Some(h) = hooks {
+            txs[from..].iter().for_each(|tx| hookrun::aborted(h, &ctx, tx, err));
+        }
+    };
+
     let wrote_orig_head = old.is_some();
-    if let Some(old) = old {
-        write_orig_head(repo, old, &committer)?;
+    match old {
+        Some(old) => {
+            if let Err(e) = write_orig_head(repo, old, &committer) {
+                abort_all(0, &mut err);
+                return Err(e);
+            }
+            if let Some(h) = hooks {
+                hookrun::committed(h, &ctx, &txs[0], &mut err);
+            }
+        }
+        // Git deletes a stale pointer when the reset starts from no commit.
+        None => {
+            if let Err(e) = remove_orig_head(repo) {
+                abort_all(0, &mut err);
+                return Err(e);
+            }
+        }
     }
     let message = format!("reset: moving to {}", opts.rev);
     // A refusal from here on (a lost compare-and-swap, a HEAD that moved)
     // comes after ORIG_HEAD was written, and says so.
-    refmove::move_head_as(repo, MoveKind::RESET, cmd, &target, old, new, &message, &committer)
-        .map_err(|e| if wrote_orig_head { e.after_orig_head() } else { e })?;
+    if let Err(e) = refmove::move_head_as(repo, MoveKind::RESET, cmd, &target, old, new, &message, &committer) {
+        match hooks {
+            // A branch that moved before the failure is committed, not aborted.
+            Some(h) if hookrun::ref_written(&e) => hookrun::committed(h, &ctx, &txs[txs.len() - 1], &mut err),
+            _ => abort_all(txs.len() - 1, &mut err),
+        }
+        return Err(if wrote_orig_head { e.after_orig_head() } else { e });
+    }
+    if let Some(h) = hooks {
+        hookrun::committed(h, &ctx, &txs[txs.len() - 1], &mut err);
+    }
 
     let unstaged = prepared.as_ref().map(unstage::Prepared::paths).unwrap_or_default();
     if let Some(p) = prepared {
         // The branch has moved; a failure here leaves the index as it was.
-        p.finish(repo).map_err(|e| GitError::Usage {
+        // A repository failure (exit 1) whose text says the reset was made.
+        p.finish(repo).map_err(|e| GitError::Repository {
             operation: OP,
-            message: format!("the branch now names {new}, but the index could not be written afterward ({e}). Run git status; the index still holds the state from before the reset"),
+            what: format!("the branch now names {new}, but the index could not be written afterward (run git status: the index still holds the state from before the reset)"),
+            path: repo.git_dir().join("index"),
+            source: Box::new(std::io::Error::other(e.to_string())),
+            wrote: Wrote::Described,
         })?;
     }
     let detached = matches!(target, refmove::HeadTarget::Detached);
-    let mut err = String::new();
     if detached {
         err.push_str(&format!(
             "git reset: HEAD is detached and now names {new}. To keep work on a branch: git switch -c <name>.\n"
@@ -158,6 +205,20 @@ pub(crate) fn run(repo: &WriteRepo, env: &ResetEnv, opts: &ResetOptions) -> Resu
             "unstaged": unstaged,
         }),
     })
+}
+
+/// Plain `git reset` (and `reset HEAD`, `reset --mixed`) with no path.
+///
+/// With a commit on HEAD this is `--mixed` to `HEAD`, which writes `ORIG_HEAD`
+/// and the `reset: moving to HEAD` line like any other revision. With none,
+/// git (2.56, measured) resets the index to the empty tree and writes nothing
+/// else: it leaves `ORIG_HEAD` alone, writes no log line and needs no
+/// identity. Only `reset <rev>` from such a branch deletes `ORIG_HEAD`.
+pub(crate) fn run_plain(repo: &WriteRepo, env: &ResetEnv, opts: &ResetOptions) -> Result<Outcome, GitError> {
+    if repo.read().head()?.oid.is_some() {
+        return run(repo, env, opts);
+    }
+    unstage::run(repo, &UnstageOptions { specs: Vec::new(), operation: OP, command: opts.command.clone() })
 }
 
 /// `git reset <rev> -- <paths>`: those index entries from `<rev>`'s tree.
@@ -190,7 +251,7 @@ fn write_orig_head(repo: &WriteRepo, old: ObjectId, committer: &Signature) -> Re
     repo.check(std::path::Path::new("ORIG_HEAD"), Leaf::File)?;
     let edit = RefEdit {
         change: Change::Update {
-            log: LogChange { mode: RefLog::AndReference, force_create_reflog: false, message: "updating ORIG_HEAD".into() },
+            log: LogChange { mode: RefLog::AndReference, force_create_reflog: false, message: "reset: updating ORIG_HEAD".into() },
             expected: PreviousValue::Any,
             new: Target::Object(old),
         },
@@ -212,4 +273,35 @@ fn write_orig_head(repo: &WriteRepo, old: ObjectId, committer: &Signature) -> Re
         .commit(Some(sig))
         .map_err(|e| GitError::repository(OP, "writing ORIG_HEAD", repo.git_dir(), e))?;
     Ok(())
+}
+
+/// What `ORIG_HEAD` holds now, for the old value of its transaction line.
+fn orig_head_value(repo: &WriteRepo) -> Result<Option<ObjectId>, GitError> {
+    repo.check(std::path::Path::new("ORIG_HEAD"), Leaf::File)?;
+    let found = repo
+        .refs()
+        .try_find("ORIG_HEAD")
+        .map_err(|e| GitError::repository(OP, "reading ORIG_HEAD", repo.git_dir(), e))?;
+    match found.map(|r| r.target) {
+        None => Ok(None),
+        Some(Target::Object(id)) => Ok(Some(id)),
+        Some(Target::Symbolic(name)) => Err(GitError::repository(
+            OP,
+            "reading ORIG_HEAD",
+            repo.git_dir(),
+            std::io::Error::other(format!("it is a symbolic ref to {}", name.as_bstr())),
+        )),
+    }
+}
+
+/// Delete `ORIG_HEAD` when it exists, as git does for a reset that starts
+/// from a branch with no commit. Git runs no hook for this.
+fn remove_orig_head(repo: &WriteRepo) -> Result<(), GitError> {
+    let path = repo.check(std::path::Path::new("ORIG_HEAD"), Leaf::File)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        // Nothing to delete is the common case, and the intended end state.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(GitError::repository(OP, "removing ORIG_HEAD", repo.git_dir(), e)),
+    }
 }
