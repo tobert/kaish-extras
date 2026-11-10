@@ -98,8 +98,8 @@ deno run --allow-net --allow-run scripts/e2e.ts
 
 ## kaish dependency
 
-All four kaish crates are pinned to **published crates.io versions** — `"0.18"`
-as of 2026-10-11 — which keeps kaish-extras an honest external embedder of the
+All four kaish crates are pinned to **published crates.io versions** — `"0.19"`
+as of 2026-11-10 — which keeps kaish-extras an honest external embedder of the
 same API everyone else gets. A git rev is an affordance no real embedder has,
 so it is used only while developing against an unreleased kaish boundary.
 
