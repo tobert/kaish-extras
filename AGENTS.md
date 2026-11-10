@@ -34,14 +34,14 @@ has caught real broken deploys.
 ## kaish dependency pinning
 
 `[workspace.dependencies]` in the root `Cargo.toml` pins all four kaish crates
-to **published crates.io versions** (`"0.18"` as of 2026-10-11, resolving
-0.18.1). Rules:
+to **published crates.io versions** (`"0.19"` as of 2026-11-10, resolving
+0.19.0). Rules:
 
 - **All four must pin the SAME version** — mixing them puts two copies of a
   kaish crate in the dependency graph.
-- **The pin is a caret range, and downstream depends on that.** `"0.18"` is
-  `^0.18`: any 0.18.x patch resolves, so an embedder that consumes both a tool
-  crate from here and kaish directly (kaijutsu) can move between 0.18 patches
+- **The pin is a caret range, and downstream depends on that.** `"0.19"` is
+  `^0.19`: any 0.19.x patch resolves, so an embedder that consumes both a tool
+  crate from here and kaish directly (kaijutsu) can move between 0.19 patches
   and still unify on one copy of each kaish crate. The next minor cannot ride
   along — pre-1.0 a minor carries breaking changes — so a kaish minor is a
   bump here that has to build and pass the checks, and kaijutsu has to move
@@ -118,6 +118,16 @@ to **published crates.io versions** (`"0.18"` as of 2026-10-11, resolving
   and `HEAD^` unquoted, which retired the K3 canary; 0.18.1 carries
   `to_argv`'s repeatable-flag fix (kaish #525), which neither crate here
   needs now (git binds verbatim, curl binds raw argv).
+- **What 0.19 changed here** (bumped 2026-11-10). Nothing failed to build and
+  nothing failed a test: both tool crates and `kaish-web` compiled unchanged,
+  and clippy is clean on native and wasm. The 0.19 entries decided against
+  this workspace: `DirEntry` gains `links`, `blocks`, `owner` and `group`
+  (no crate here implements `Filesystem`; a grep for `impl .* Filesystem for`
+  finds none); `ls -l`, `stat` and `date` print GNU's formats (`scripts/e2e.ts`
+  runs none of the three); `%` is now a word character, so `git log
+  --format=%an` lexes unquoted and reaches the tool (kaish #528; measured with
+  the git probe, where the tool then refuses `--format`). Quoted forms in our
+  docs and tests still work and are not changed here.
 - `kaish-kernel` is `default-features = false`. Keep it that way: a sibling
   crate enabling kernel default features tramples the no-default choice
   (`localfs` etc. must not leak into the browser build).
