@@ -1726,7 +1726,7 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   measured) also runs it for a plain `commit` that rewrites the index, which
   this build neither scans nor calls. The index verbs and `reset` without
   `--soft` refuse a repository that has the hook whether or not a provider is
-  installed (W50).
+  installed (W62).
 
   `reference_transaction` is sent in all four states git runs the hook in
   (`preparing`, `prepared`, `committed`, `aborted`); `Err` at `preparing` or
@@ -1736,7 +1736,7 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   `aborted` carries the lines of the last state sent for that transaction, as
   git's does. Git's transaction on `AUTO_MERGE` (null to null, after `commit`
   and `reset`) is not sent. The deletion of `ORIG_HEAD` by `reset <rev>` from
-  a branch with no commit calls no hook here, and git runs one (W57).
+  a branch with no commit calls no hook here, and git runs one (W69).
 
   The order differs from git's for the verbs that make two transactions. S, P
   and C are `preparing`, `prepared` and `committed`:
@@ -1783,9 +1783,6 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   asked for version 4 loses it until real git runs `git update-index
   --index-version 4`. `tests/write_index.rs`
   (`a_version_4_index_is_read_and_rewritten_as_version_2`) pins it.
-- **W26 — `rm` stops at the first deletion failure.** Git continues past it and
-  warns; this shell stops, stages the deletions that happened and names the
-  rest, so the next command is exact. See W8 for the earlier shape.
 - **W28 — `mv` into `.git` refuses here; git moves the file.** `git mv a.txt
   .git/x` prints "invalid path '.git/x'" and still renames the file into `.git`
   and stages the deletion of `a.txt` (measured on git 2.56.0). This shell
@@ -1853,22 +1850,8 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   several published commits names one of them (the highest in generation
   order with a graph, the lowest oid without) and the first remote-tracking ref
   in name order that reaches it. `reset <rev>` accepts the read side's
-  revision grammar: `HEAD~N`, `^`, branches, tags, oids; `@{...}`, `^{tree}`
-  and `A..B` are refused by the revision parser.
-- **W33 — a trailing `/` in a pathspec still matches a file.** `PathFilter`
-  (`pathfilter.rs`, `parse`) strips a trailing `/` before it builds a
-  `Spec::Literal`, so the spec `d/` matches a file named `d`. Git 2.56.0 matches
-  only a directory: with `d` a tracked file, `git ls-files -- d/` prints
-  nothing and `git ls-files -- d` prints `d`. It affects every verb that takes
-  a pathspec, and it predates the commit profile. The fix is to keep the
-  trailing `/` in the spec and match directories only.
-- **W35 — `commit` keeps no trailing form feed or vertical tab, and git
-  does.** `message::cleanup` strips `\x0c` and `\x0b` from the end of a line;
-  git's `isspace` is space, tab, newline and carriage return, so git keeps them
-  (checked on git 2.56: `commit -m $'a\f'` and `tag -a -m $'a\f'` both store
-  `a\f\n`). `tag` has its own cleanup with git's set. The failing case for
-  `commit` is `a_trailing_form_feed_or_vertical_tab_stays_in_the_message_as_in_git`
-  in `tests/write_commit.rs`, ignored until the cleanup changes.
+  revision grammar: `HEAD~N`, `^`, `^{type}`, `@{-N}`, branches, tags, oids;
+  `A..B` is refused by the revision parser.
 - **W36 — an empty directory where a ref goes is refused.** A directory at
   `refs/heads/x` (left behind when its last branch was deleted) makes git
   remove it and create the branch. The containment walk wants a regular file
@@ -1932,13 +1915,6 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   (exit 4) any start under `refs/remotes/` unless `--no-track` is given (see
   W38). Failing case: `auto_setup_merge_simple_writes_no_tracking_when_the_names_differ`,
   ignored.
-- **W42 — `@{-1}` is not a start point.** Git expands it to the previous
-  branch; the revision parser has no `@{...}` form and exits 2. Failing case:
-  `at_minus_one_is_a_start_point_as_in_git`, ignored.
-- **W43 — a tag target of `HEAD^{tree}` or `HEAD:<path>` exits 2.** Git tags
-  the tree or the blob. The same object given by its id works (pinned in
-  `a_tag_of_a_tree_or_a_blob_is_made_as_git_makes_it`). Failing case:
-  `a_tag_target_may_be_a_tree_or_blob_spelling`, ignored.
 - **W44 — an existing log file for a new tag.** Git appends the tag's line to a
   file that already exists at `logs/refs/tags/<name>` (checked: a stale file
   gains `tag: tagging ...`); this shell writes no tag log. Failing case:
@@ -1960,21 +1936,75 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   `git config --type=bool`). A key with no `=` is told from `key =` by
   `ReadRepo::config_entries`; the older `config_values` paired a bare key with
   the value of the next key and no longer does.
-- **W48 — `Prepared` is not git's `prepared`.** This crate sends `Prepared`
+- **W48 — `log <tree>` exits 1 here and 0 in git.** `git log HEAD^{tree}` and
+  `git log HEAD:a.txt` print nothing and exit 0; this shell refuses them as
+  "names a tree, not a commit" (exit 1), as it refuses a tree id. Pinned by
+  `a_tree_where_a_commit_is_wanted_is_refused_by_type` in `tests/log.rs`.
+- **W49 — `HEAD:./path` is refused.** Git reads a path that starts with `./` or
+  `../` from the current directory (`git tag t HEAD:./a.txt` works). The
+  revision parser refuses both with exit 2 and asks for the path from the
+  repository root. `:N:path` takes stages 0 to 3 from the index, and an
+  unmerged entry at stage 0 is reported as no such revision, where git says
+  the entry is "in the index, but not at stage 0".
+- **W50 — `show :<path>` and `show :<N>:<path>` are refused.** `tag` takes an
+  index path as a target; `show` and `ls` split `<rev>:<path>` themselves and
+  read an empty revision as a usage error (exit 2). Git shows the staged blob.
+- **W51 — `reset -- <pathspec>` refuses when the pathspec matches nothing.**
+  `git reset -- nomatch` exits 0 and changes nothing; this shell exits 1 with
+  "did not match any file known to git". Failing case:
+  `reset_with_an_unmatched_pathspec_is_not_an_error_in_git`, ignored.
+- **W52 — `rm --json` lists a path under `removed` that is still on disk.** A
+  deletion that fails after an earlier one succeeded stages the path as
+  deleted and leaves the file; the warning on stderr names it, but `removed`
+  in the JSON still holds it. It needs a `left_on_disk` field (or the path
+  taken out of `removed`) so an agent reading only the JSON is not misled.
+- **W53 — `HEAD:a.txt^{tree}` reports a false "no such path".** The revision
+  parser splits `<rev>:<path>` before it reads a peel suffix, so the path is
+  `a.txt^{tree}`. Git peels the suffix after the path lookup. The suffix must
+  be parsed off the end of the path first.
+- **W54 — the `@{-0}` message contradicts itself.** `UnsupportedRevspec` says
+  `'@{...}'` is not parsed, and in the same sentence lists `@{-N}` as an
+  accepted form. `@{-0}` is not a form in git either (`fatal: not a valid
+  object name`); the message should say `@{-N}` needs N of 1 or more.
+- **W55 — `@{-N}` with a raw oid in the reflog "from" position.** Measured on
+  git 2.56: after `git switch --detach HEAD` and `git switch --detach HEAD~1`,
+  `git branch prev @{-1}` makes `prev` at the oid HEAD was on. This shell does
+  the same; `at_minus_n_resolves_a_raw_oid_in_the_reflog_from_position` pins
+  it. No divergence.
+- **W56 — the 8 MiB `logs/HEAD` scan cap.** `@{-N}` reads the last 8 MiB of
+  the log (`MAX_REFLOG_SCAN_BYTES`) and errors when N checkouts are not in
+  that span. `docs/git.md` now says so; the cap is not configurable.
+- **W57 — a pathspec from a subdirectory that cannot be canonicalized
+  resolves from the repository root.** `cwd_prefix` in `tool.rs` falls back to
+  the uncanonicalized path with `unwrap_or_else`, and `strip_prefix` then
+  fails and returns an empty prefix, so a pathspec typed in a subdirectory is
+  read as if typed at the root. It should be an error that names the
+  directory.
+- **W58 — `mv` hides a failed rollback.** In `verbs/write/mv.rs` the undo
+  after a failed rename is `let _ = std::fs::rename(t, f)`. When the undo
+  fails too, the files stay at the new names and the error names only the
+  first failure. The error should list every path the rollback did not move
+  back.
+- **W59 — read verbs still drop an empty pathspec.** `PathFilter::parse`
+  skips an empty spec, so `status`, `log` and `diff` with `--path ""` match
+  everything. The write verbs refuse the empty string as git does (exit 1,
+  `write_paths` in `tool.rs`); git's behavior for the read verbs was not
+  measured.
+- **W60 — `Prepared` is not git's `prepared`.** This crate sends `Prepared`
   after its own checks and before it takes any ref lock. Git sends `prepared`
   with the refs locked, so a provider that treats `Prepared` as "the refs are
   mine" is wrong: a lock another process takes afterward fails the write and
   `Aborted` follows (`a_write_that_fails_after_prepared_is_aborted_for_each_verb`
   pins that). Locking first would need the lock held across the provider call
   and released on every path; deferred.
-- **W49 — a veto of the second transaction aborts the first.** `reset` and
+- **W61 — a veto of the second transaction aborts the first.** `reset` and
   `switch -c` send every `Preparing` and `Prepared` before the first write, so
   a veto of the second transaction sends `Aborted` for the first, which git
   would already have written and sent `committed` for (git runs all states of
   the first transaction before it starts the second). The reordering is
   deliberate (a veto leaves `.git` as it was); the cost is that the provider's
   view of the first transaction differs from a script's. See the table in W21.
-- **W50 — the index verbs refuse a `post-index-change` hook even with a
+- **W62 — the index verbs refuse a `post-index-change` hook even with a
   provider.** `add`, `rm`, `mv`, `restore --staged` and `reset` without
   `--soft` call `ensure_no_index_hook` from `ensure_writable`, which does not
   look at `with_hooks`; `GitHooks` has no method for the hook, so a provider
@@ -1983,35 +2013,35 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   symbolic link counts as present without being followed, so a link git would
   not run (a broken one, or one to a 0644 file) still refuses. Fixing it needs
   a `GitHooks` method for the hook, or a provider-set answer.
-- **W51 — `core.hooksPath` outside the working tree refuses with a provider
+- **W63 — `core.hooksPath` outside the working tree refuses with a provider
   too.** `hooks_dir` refuses an absolute path, a path that leaves the tree and
   a path through a link before any provider is consulted, for every verb that
   scans hooks. A provider cannot say "run the hooks there".
-- **W52 — a veto of `reset --mixed` moves `.git`'s own mtime.** The plan for
+- **W64 — a veto of `reset --mixed` moves `.git`'s own mtime.** The plan for
   the index takes `index.lock` before the `reference-transaction` calls and
   releases it when the veto drops the plan, so `.git`'s directory mtime moves
   while the refusal says "Nothing was changed." `Fingerprint` walks the entries
   inside `.git` and not `.git` itself, so the test does not see it. The
   contents of `.git` are unchanged.
-- **W53 — `post_commit` and `post_rewrite` are skipped when the index write
+- **W65 — `post_commit` and `post_rewrite` are skipped when the index write
   fails.** For `commit -a` and `--only`, a failed index write after the ref
   moved returns the error before the two hooks run. Git runs `post-commit`
   after the ref moves and then reports the index. The error says the commit was
   made.
-- **W54 — a failed summary does not say the commit was made.** After the ref
+- **W66 — a failed summary does not say the commit was made.** After the ref
   moved, a failure while building the diffstat for the output returns its own
   error, and an agent reading it may commit again. The summary reads objects
   that were just written, so it is unlikely.
-- **W55 — what the identity refusal says.** `resolve_committer` falls back to
+- **W67 — what the identity refusal says.** `resolve_committer` falls back to
   `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL` when the committer variables are
   unset, but the refusal says the committer variables are "not both set" and
   suggests only those. Setting the author pair would also have worked. The
   refusal is raised by `commit`, `var`, `reset`, `branch`, `tag`, `switch -c`
   and `checkout -b`, with exit 2.
-- **W56 — a lock refusal suggests a branch path for any ref.** The next step
+- **W68 — a lock refusal suggests a branch path for any ref.** The next step
   for a lock file names `rm .git/refs/heads/<branch>.lock`, also for a tag or
   `ORIG_HEAD`.
-- **W57 — `reset <rev>` from an unborn branch with an `ORIG_HEAD`: git runs
+- **W69 — `reset <rev>` from an unborn branch with an `ORIG_HEAD`: git runs
   `reference-transaction` for the deletion.** Measured with git 2.56.0 scripts:
   `preparing`, `prepared` and `committed` for `<old> 000.. ORIG_HEAD`, and an
   `aborted` line for `000.. 000.. ORIG_HEAD`, then the branch's transaction.

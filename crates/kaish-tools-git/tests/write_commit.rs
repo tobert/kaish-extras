@@ -324,11 +324,18 @@ async fn messages_are_assembled_and_cleaned_as_git_does() {
 
 /// Found while building `tag` (phase 4): git's whitespace is space, tab,
 /// newline and carriage return, so a trailing form feed or vertical tab stays
-/// in the message. `message::cleanup` strips both. docs/issues.md W35.
+/// in the message, and a line of only one is not blank.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "W35: message::cleanup strips a trailing form feed and vertical tab, which git keeps"]
 async fn a_trailing_form_feed_or_vertical_tab_stays_in_the_message_as_in_git() {
-    for (label, msg) in [("form feed", "subject\u{c}"), ("vertical tab", "subject\u{b}")] {
+    for (label, msg) in [
+        ("form feed", "subject\u{c}"),
+        ("vertical tab", "subject\u{b}"),
+        ("a line of a form feed is not blank", "subject\n\u{c}\nbody\n"),
+        ("a leading vertical tab", "\u{b}\nsubject"),
+        ("tab, space and carriage return go", "subject \t\r\n\n\n\nbody  \r\n"),
+        ("no-break space stays", "subject\u{a0}"),
+        ("next line stays", "subject\u{85}"),
+    ] {
         let setup = |dir: &Path| {
             base(dir);
             support::write_file(dir, "a.txt", "changed\n");
@@ -503,6 +510,25 @@ async fn only_commits_the_named_paths_and_leaves_other_staged_changes_like_git()
             assert!(status.contains("D  e"), "the staged deletion must stay staged: {status}");
         }
     }
+}
+
+/// `a/` names a directory, so `commit a/` is refused where `a` is a file
+/// (git: "did not match any file(s) known to git"), and `d/` commits the
+/// directory like `d`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trailing_slash_commits_a_directory_and_refuses_a_file() {
+    let p = Pair::new(&only_setup);
+    let before = support::Fingerprint::take(&p.ours.join(".git"));
+    let r = p.ours("", &["commit", "a/", "-m", "x"]).await;
+    assert_ne!(r.code, 0, "{}", r.err);
+    assert!(support::Fingerprint::take(&p.ours.join(".git")).differences_from(&before).is_empty());
+    assert_ne!(p.twin(&["commit", "-q", "a/", "-m", "x"]).0, 0, "git refuses it too");
+
+    let p = Pair::new(&only_setup);
+    let r = p.ours("", &["commit", "d/", "-m", "dir"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(p.twin(&["commit", "-q", "d/", "-m", "dir"]).0, 0);
+    p.assert_same("commit d/");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

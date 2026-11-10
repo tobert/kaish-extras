@@ -237,7 +237,7 @@ pub(crate) fn build(
             continue;
         }
         if t.flags.contains(Flags::SKIP_WORKTREE) {
-            if specs.names_exactly(&t.path) {
+            if specs.names_exactly(&t.path, false) {
                 return refuse(
                     1,
                     &opts.command,
@@ -330,13 +330,16 @@ pub(crate) fn build(
 
         // A path named exactly that the walk did not reach: inside an ignored
         // directory, or past a prune.
-        for lit in specs.literals() {
-            if specs.is_marked(&lit) {
+        for (lit, dir_only) in specs.literals() {
+            if specs.is_marked(&lit, dir_only) {
                 continue;
             }
             let abs = repo.check_worktree_any(Path::new(&lit))?;
             let Ok(meta) = std::fs::symlink_metadata(&abs) else { continue };
-            specs.mark_literal(lit.as_bytes());
+            if dir_only && !meta.is_dir() {
+                continue;
+            }
+            specs.mark_literal(lit.as_bytes(), meta.is_dir());
             if meta.is_dir() || tracked_paths.contains(lit.as_bytes()) {
                 continue;
             }
@@ -506,8 +509,8 @@ impl Walker<'_> {
                     // Only a spec that names the file exactly counts it as
                     // matched. Git says a glob that matches nothing else
                     // "did not match any files" and stages nothing.
-                    if self.specs.names_exactly(&rel) {
-                        self.specs.mark_literal(&rel);
+                    if self.specs.names_exactly(&rel, false) {
+                        self.specs.mark_literal(&rel, false);
                         self.ignored_hits.push(rel);
                     }
                     continue;
@@ -527,8 +530,8 @@ impl Walker<'_> {
             return Ok(());
         }
         if self.is_ignored(rel, true)? {
-            if self.specs.names_exactly(rel) {
-                self.specs.mark_literal(rel);
+            if self.specs.names_exactly(rel, true) {
+                self.specs.mark_literal(rel, true);
                 // Naming an ignored directory is naming ignored paths, even
                 // when it is empty or the index tracks everything in it.
                 self.ignored_hits.push(rel.into());
@@ -541,8 +544,8 @@ impl Walker<'_> {
         }
         // A literal directory spec that exists is a match even if it holds
         // nothing to stage (git: `add emptydir` is not an error).
-        if self.specs.names_exactly(rel) {
-            self.specs.mark_literal(rel);
+        if self.specs.names_exactly(rel, true) {
+            self.specs.mark_literal(rel, true);
         }
         self.dir(rel)
     }

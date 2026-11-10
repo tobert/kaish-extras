@@ -14,7 +14,8 @@
 //! and `?` cross `/` and `**` is two stars. `ca*` matches `ca.txt` and
 //! `cab/x` and not `d/ca.txt`; `*.txt` matches `d/ca.txt`. This is not
 //! gitignore's rule (a pattern without a slash matches the basename), which
-//! is what this module used before. Git's pathspec *magic* — `:(exclude)`, `:!`, `:/`, the signature
+//! is what this module used before. A trailing `/` makes a spec name a
+//! directory only: `d/` matches `d/x` and not a file `d`. Git's pathspec *magic* — `:(exclude)`, `:!`, `:/`, the signature
 //! letters — is a loud usage error rather than a silent near-match, because
 //! quietly treating `:(exclude)docs` as a literal path named `:(exclude)docs`
 //! would answer a question nobody asked.
@@ -29,12 +30,14 @@ pub(crate) struct PathFilter {
 
 #[derive(Debug)]
 enum Spec {
-    /// A literal path: matches itself and anything under it.
-    Literal(Vec<u8>),
+    /// A literal path: matches itself and anything under it. With a trailing
+    /// `/` in the spec (`dir_only`), only what lies under it: `d/` does not
+    /// match a file named `d`.
+    Literal { path: Vec<u8>, dir_only: bool },
     /// A path with glob characters. Git tries the text as a literal first
     /// (a file named `a[1].txt` matches the spec `a[1].txt`), then as a
     /// wildmatch on the whole path.
-    Glob(Vec<u8>),
+    Glob { pattern: Vec<u8>, dir_only: bool },
 }
 
 impl PathFilter {
@@ -51,14 +54,17 @@ impl PathFilter {
                     magic,
                 });
             }
-            let normalized = raw.trim_start_matches('/').trim_end_matches('/');
+            let trimmed = raw.trim_start_matches('/');
+            let normalized = trimmed.trim_end_matches('/');
             if normalized.is_empty() {
                 continue;
             }
+            let dir_only = normalized.len() != trimmed.len();
+            let bytes = normalized.as_bytes().to_vec();
             if normalized.contains(['*', '?', '[', '\\']) {
-                specs.push(Spec::Glob(normalized.as_bytes().to_vec()));
+                specs.push(Spec::Glob { pattern: bytes, dir_only });
             } else {
-                specs.push(Spec::Literal(normalized.as_bytes().to_vec()));
+                specs.push(Spec::Literal { path: bytes, dir_only });
             }
         }
         Ok(PathFilter { specs })
@@ -76,18 +82,20 @@ impl PathFilter {
             return true;
         }
         self.specs.iter().any(|spec| match spec {
-            Spec::Literal(lit) => literal_matches(lit, path),
-            Spec::Glob(pattern) => {
-                literal_matches(pattern, path)
-                    || gix_glob::wildmatch(pattern.as_slice().into(), path.into(), gix_glob::wildmatch::Mode::empty())
+            Spec::Literal { path: lit, dir_only } => literal_matches(lit, *dir_only, path),
+            Spec::Glob { pattern, dir_only } => {
+                literal_matches(pattern, *dir_only, path)
+                    || (!*dir_only
+                        && gix_glob::wildmatch(pattern.as_slice().into(), path.into(), gix_glob::wildmatch::Mode::empty()))
             }
         })
     }
 }
 
-/// The path is `lit` or lies under it.
-fn literal_matches(lit: &[u8], path: &[u8]) -> bool {
-    path == lit || (path.len() > lit.len() && path.starts_with(lit) && path[lit.len()] == b'/')
+/// The path is `lit` or lies under it; with `dir_only`, only lies under it
+/// (a collapsed directory row such as `lit/` counts as under).
+fn literal_matches(lit: &[u8], dir_only: bool, path: &[u8]) -> bool {
+    (!dir_only && path == lit) || (dir_only && path.len() == lit.len() + 1 && path.starts_with(lit) && path[lit.len()] == b'/') || (path.len() > lit.len() && path.starts_with(lit) && path[lit.len()] == b'/')
 }
 
 /// Recognize git pathspec magic, returning the offending token if present.
@@ -128,6 +136,20 @@ mod tests {
         assert!(filter.matches("src/lib.rs"));
         assert!(!filter.matches("README.md"));
         assert!(!filter.matches("srcx"));
+    }
+
+    #[test]
+    fn a_trailing_slash_matches_a_directory_only() {
+        let filter = PathFilter::parse("status", &["d/".into()]).expect("parses");
+        assert!(filter.matches("d/x"));
+        assert!(filter.matches("d/"));
+        assert!(!filter.matches("d"));
+        let filter = PathFilter::parse("status", &["d//".into()]).expect("parses");
+        assert!(filter.matches("d/x") && !filter.matches("d"));
+        // A glob with a trailing slash is a wildmatch of the whole path, which a
+        // file path never ends with: git's `ls-files -- 'd*/'` prints nothing.
+        let filter = PathFilter::parse("status", &["d*/".into()]).expect("parses");
+        assert!(!filter.matches("d/x") && !filter.matches("dx"));
     }
 
     #[test]

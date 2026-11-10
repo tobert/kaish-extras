@@ -591,9 +591,9 @@ nothing counts as published. Cost, trust and the other limits are
   refuse for `commit`, `reset --soft`, `branch`, `tag`, `switch -c` and
   `checkout -b`: the provider is called whether or not the file exists, and
   decides. Two refusals stay with a provider installed: a `core.hooksPath`
-  outside the working tree or through a link (W51), and a `post-index-change`
+  outside the working tree or through a link (W63), and a `post-index-change`
   hook, which refuses `add`, `rm`, `mv`, `restore --staged` and `reset` without
-  `--soft` (W50). `post-index-change` and `prepare-commit-msg` have no method.
+  `--soft` (W62). `post-index-change` and `prepare-commit-msg` have no method.
   Every method of `GitHooks` is required, so a provider decides each hook.
   `pre_commit` gets the tree oid before the commit object is written (its
   `Err` aborts, exit 1), `commit_msg` may rewrite the message (git cleans it
@@ -612,7 +612,7 @@ nothing counts as published. Cost, trust and the other limits are
   `Preparing` and `Prepared` is sent before the first write, which is not git's
   order (docs/issues.md W21 lists both, per verb). `Prepared` is also sent
   before any ref lock is taken, where git's `prepared` follows the locks
-  (W48). `switch -c` and `checkout -b` then call `post_checkout` when HEAD has
+  (W60). `switch -c` and `checkout -b` then call `post_checkout` when HEAD has
   a commit, and `commit --amend` calls
   `post_rewrite` with `amend` after `post_commit`. The provider is told
   `no_verify` and decides what it means. `HookContext::tree` is `None` for
@@ -671,7 +671,7 @@ exists is never removed (exit 4). An annotated tag writes its object before the
 ref, and a commit writes its objects before the branch moves, so a refusal or
 an I/O failure after that says the objects remain, that nothing refers to them
 and that `git gc` prunes them. The differences from git are `docs/issues.md`
-W35-W47.
+W36-W47.
 
 What the verbs do not do, stated plainly:
 
@@ -709,7 +709,7 @@ Write safety, in the order it applies:
    (`tests/write_fingerprint.rs`, and the commit refusals in
    `tests/write_commit.rs`). One refusal moves the mtime of `.git` itself: a
    hook veto of `reset --mixed`, which takes and releases `index.lock` first
-   (W52). Every blob's object path passes
+   (W64). Every blob's object path passes
    containment before the first blob is written.
 2. Then `index.lock` is created exclusively, the index is read again under it,
    and the plan is rebuilt if the bytes changed. A lock that already exists is

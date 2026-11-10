@@ -635,6 +635,9 @@ What refuses, with the exit code:
 | `add` of a nested repository the index does not track | 4 | names it |
 | `add <file real git would convert>` | 4 | names the attribute or setting |
 | any pathspec that matches nothing, a glob that matches only ignored files included | 1 | |
+| a pathspec that ends in `/` where the path is a file | 1 | `d/` names a directory only, as in git. `status`, and `log` and `diff` after `--`, show nothing for it; real git refuses a bare `a.txt/` operand on `log` and `diff` (exit 128, ambiguous argument), and this shell treats it as a path |
+| an empty string as a pathspec (`rm ""`, `add ""`, `restore --staged ""`, `reset -- ""`, `commit -- ""`) | 1 | git refuses it too (exit 128); `.` is how to name every path |
+| `rm .`, `rm ./` or `rm --cached .` at the repository root, without `-r` | 1 | git refuses it too (exit 128); the text names `git rm -r .` |
 | `index` file of zero bytes | 1 | git refuses it too ("index file smaller than expected") |
 | `rm` of a path with staged or local changes | 1 | `--cached` or `-f` |
 | `rm <dir>` without `-r` | 1 | |
@@ -643,7 +646,7 @@ What refuses, with the exit code:
 | `reset --hard`, `--merge`, `--keep` | 2 | they write working-tree files; never |
 | `reset --soft` with a path; two of `--soft`, `--mixed`, `--hard`, `--merge`, `--keep` | 2 | usage |
 | any of them in a merge, rebase, ... or with a split index, ... | 4 | design section 4 |
-| `add`, `rm`, `mv`, `restore --staged` or `reset` without `--soft` in a repository with an executable `post-index-change` hook, with or without a hook provider | 4 | git runs the hook after it writes the index, and this shell cannot (W50) |
+| `add`, `rm`, `mv`, `restore --staged` or `reset` without `--soft` in a repository with an executable `post-index-change` hook, with or without a hook provider | 4 | git runs the hook after it writes the index, and this shell cannot (W62) |
 
 `reset HEAD` and `reset HEAD -- <path>` are the unstage forms. Any other first
 word that names a revision, or contains `~`, `^`, `@` or `{`, is a revision:
@@ -663,9 +666,12 @@ copies those index entries from that revision and moves nothing.
   and on disk, by every verb here. A message that names such a path shows git's
   C-quoted form (`"caf\351.txt"`), which is not the path itself; a path on the
   command line must be UTF-8, so a glob such as `*af?.txt` is how to name one.
-- A partial `rm` failure (a file that cannot be deleted) stops at the first
-  failure, stages the deletions that happened, and says which paths are left
-  and the command to run. Git continues past the failure and warns.
+- `rm` deletes in index order and passes over a file it cannot delete once an
+  earlier deletion has succeeded, as git does (checked on git 2.56): every
+  path is staged as deleted, the command exits 0, and the file stays on disk
+  as an untracked file. Git says nothing; this shell prints a warning that
+  names the paths. When the first deletion fails, `rm` stops with nothing
+  removed and nothing staged (exit 1; git exits 128).
 - An index in version 4 is read and written back as version 2
   (docs/issues.md W24).
 - `rm` and `mv` do not support `-n`, `-q`, `-v` or `-k`.
@@ -819,7 +825,7 @@ to `<rev>`'s tree. The working tree is never written. Both write `ORIG_HEAD`
 branch's log and `logs/HEAD`, as git does for a revision that is not `@`
 (git logs `HEAD` for `@`, and this shell logs `@`; W30), and need an identity
 for the line.
-`<rev>` is what `git log` accepts: `HEAD~N`, `^`, a branch, a tag, an oid.
+`<rev>` is what `git log` accepts: `HEAD~N`, `^`, `@{-N}`, a branch, a tag, an oid.
 `--json` returns `head`, `previous`, `mode`, `branch` and `unstaged`.
 
 **The policy.** `Refuse` forbids a move that drops commits; `Unpublished`, the
@@ -873,7 +879,10 @@ kaish> git checkout -b feature-x             # the same
 refuse, exit 2). A branch or tag that exists refuses (exit 1) with the name,
 and so does a name that would sit inside another (`a` beside `a/b`).
 
-**A branch** is made at HEAD or at `<start>`, a revision `git log` accepts. The
+**A branch** is made at HEAD or at `<start>`, a revision `git log` accepts
+(`@{-1}` is the branch HEAD was on before the last checkout; only the last
+8 MiB of `logs/HEAD` are read for it, and a log with fewer than N checkouts in
+that span refuses with exit 1 rather than saying there are fewer). The
 reflog line is `branch: Created from <start as typed>`; with no start it names
 the current branch, or `HEAD` when detached, as git does. A branch needs an
 identity for that line (the variables or the pinned one). An unborn HEAD has
@@ -882,8 +891,9 @@ git write tracking configuration, which this shell never does: it refuses
 (exit 4) unless `--no-track` is given.
 
 **A tag** at `<rev>` (HEAD by default) can name a commit, a tag, a tree or a
-blob, given as a branch, a tag, a ref, an object id or a `~N`/`^` suffix on one
-of those. `HEAD^{tree}` and `HEAD:<path>` are not parsed (exit 2, W43). `-a` makes an
+blob, given as a branch, a tag, a ref, an object id, `@{-N}`, a `~N`/`^`/`^{type}`
+suffix on one of those (`HEAD^{tree}`, `v1^{}`), `<rev>:<path>` (`HEAD:a.txt`) or
+`:<path>` and `:<N>:<path>` from the index. `-a` makes an
 annotated tag, and so do `-m` and `-F`; there is no editor, so `-a` alone
 refuses. The tag object is git's, byte for byte: `object`, `type`, `tag`,
 `tagger` (the committer identity, with its date), a blank line and the
@@ -905,8 +915,11 @@ With no start point, an unborn HEAD changes only `HEAD`. `--json` returns `branc
 `-u`/`--set-upstream-to`/`--unset-upstream`/`-t`/`--track`; `tag -d -f -s -u`
 and `tag -a` without a message; `switch <branch>`, `checkout <branch>` and
 `checkout <path>` (they write files); `switch -C`, `checkout -B`, `--detach`,
-`--orphan`, `-f` and `-m` on either. The differences from git, and the cost of
-the name check, are `docs/issues.md` W35-W47.
+`--orphan`, `-f` and `-m` on either; `tag -a` when `core.commentChar` or
+`core.commentString` is set to anything but `#` or `auto` (exit 4; those two
+leave a `-m` or `-F` message cleaned as `#` does, and the tag object is
+byte-identical to git's). The differences from git, and the cost of
+the name check, are `docs/issues.md` W36-W47.
 
 ## Non-goals
 

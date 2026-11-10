@@ -241,6 +241,20 @@ async fn from_and_to_compare_two_revisions() {
     );
 }
 
+/// A tree or a peeled revision is an endpoint, as in git's `diff <tree-ish>`.
+#[tokio::test]
+async fn peel_suffixes_are_endpoints_as_in_git() {
+    let repo = DiffRepo::build();
+    for (from, to) in [("HEAD~1^{tree}", "HEAD^{tree}"), ("HEAD~1^{commit}", "HEAD^{}"), ("HEAD~1^{tree}", "HEAD")] {
+        let model = json(&diff(&repo.scratch(), "/mnt/repo", &["--from", from, "--to", to]).await);
+        assert_eq!(
+            sorted(our_name_status(&model)),
+            git_lines(&repo.root, &["diff", from, to, "--name-status"]),
+            "{from} {to}"
+        );
+    }
+}
+
 /// The phasing gate, second half: **every** result states its endpoints, in
 /// `--json` and on the first line of the text surface. An empty diff has no
 /// rows to infer them from, which is exactly when it matters most.

@@ -838,9 +838,9 @@ async fn an_index_write_that_fails_after_the_ref_moved_exits_1_and_says_it_was_m
 }
 
 /// `reset <rev>` from a branch with no commit, where `ORIG_HEAD` exists: git
-/// deletes it in a transaction its hook sees (docs/issues.md W57).
+/// deletes it in a transaction its hook sees (docs/issues.md W69).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "docs/issues.md W57: git runs a reference-transaction for the ORIG_HEAD it deletes; this crate sends none"]
+#[ignore = "docs/issues.md W69: git runs a reference-transaction for the ORIG_HEAD it deletes; this crate sends none"]
 async fn reset_to_a_revision_from_an_unborn_branch_tells_the_provider_what_git_tells_its_scripts() {
     let setup = |d: &Path| {
         base(d);

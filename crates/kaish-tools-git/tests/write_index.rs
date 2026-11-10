@@ -471,6 +471,79 @@ async fn rm_of_a_directory_needs_dash_r() {
     p.assert_same("rm d refused");
 }
 
+/// Review finding 1: an empty or `.` pathspec at the repository root used to
+/// match every tracked path, and `rm .` deleted the whole tree and exited 0.
+/// Git refuses all of these; a refusal must change nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rm_of_the_repository_root_without_dash_r_refuses_and_changes_nothing() {
+    for (label, args, needle) in [
+        ("dot", vec!["rm", "."], "git rm -r ."),
+        ("dot cached", vec!["rm", "--cached", "."], "git rm -r ."),
+        ("dot slash", vec!["rm", "./"], "git rm -r ."),
+        ("dot -f", vec!["rm", "-f", "."], "git rm -r ."),
+        ("empty", vec!["rm", ""], "empty string"),
+        ("empty cached", vec!["rm", "--cached", ""], "empty string"),
+        ("empty -r", vec!["rm", "-r", ""], "empty string"),
+        ("empty next to a file", vec!["rm", "a.txt", ""], "empty string"),
+    ] {
+        let p = Pair::new(&base);
+        let fp = support::Fingerprint::take(&p.ours);
+        let r = p.ours("", &args).await;
+        let t = p.twin(&args);
+        assert_eq!(t.0, 128, "[{label}] git refuses: {}", t.2);
+        assert_eq!(r.code, 1, "[{label}] {}", r.err);
+        assert!(r.err.contains(needle), "[{label}] {}", r.err);
+        assert!(r.err.trim_end().ends_with("Nothing was changed."), "[{label}] {}", r.err);
+        let diffs = support::Fingerprint::take(&p.ours).differences_from(&fp);
+        assert!(diffs.is_empty(), "[{label}] a refusal changed the repository: {diffs:?}");
+        p.assert_same(label);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rm_dash_r_of_the_repository_root_still_works() {
+    for (label, args) in [("dot", vec!["rm", "-r", "."]), ("dot cached", vec!["rm", "-r", "--cached", "."]), ("dot slash", vec!["rm", "-r", "./"])] {
+        let (r, t, p) = both(&base, &args, label).await;
+        assert_eq!(r.code, 0, "[{label}] {}", r.err);
+        assert_eq!(t.0, 0, "[{label}] {}", t.2);
+        p.assert_same(label);
+    }
+}
+
+/// The other write verbs that take a pathspec refuse the empty string as git
+/// does, and `add .` keeps working.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_empty_pathspec_is_refused_by_every_write_verb_that_takes_one() {
+    let edit = |d: &Path| {
+        base(d);
+        support::write_file(d, "a.txt", "alpha two\n");
+        support::git(d, &["add", "a.txt"]);
+    };
+    for (label, args) in [
+        ("add", vec!["add", ""]),
+        ("restore", vec!["restore", "--staged", ""]),
+        ("reset", vec!["reset", "--", ""]),
+        ("commit", vec!["commit", "-m", "x", "--", ""]),
+    ] {
+        let p = Pair::new(&edit);
+        let fp = support::Fingerprint::take(&p.ours);
+        let r = p.ours("", &args).await;
+        let t = p.twin(&args);
+        assert_eq!(t.0, 128, "[{label}] git refuses: {}", t.2);
+        assert_eq!(r.code, 1, "[{label}] {}", r.err);
+        assert!(r.err.contains("empty string"), "[{label}] {}", r.err);
+        let diffs = support::Fingerprint::take(&p.ours).differences_from(&fp);
+        assert!(diffs.is_empty(), "[{label}] a refusal changed the repository: {diffs:?}");
+    }
+    let p = Pair::new(&|d| {
+        base(d);
+        support::write_file(d, "n.txt", "new\n");
+    });
+    assert_eq!(p.ours("", &["add", "."]).await.code, 0);
+    assert_eq!(p.twin(&["add", "."]).0, 0);
+    p.assert_same("add .");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rm_keeps_gits_safety_checks_and_force_overrides_them() {
     // (label, setup, args that git refuses, text our refusal must carry)
@@ -547,6 +620,68 @@ async fn rm_of_an_untracked_path_is_a_pathspec_error() {
     assert_eq!(r.code, 1, "{}", r.err);
     assert_ne!(t.0, 0);
     assert!(r.err.contains("'u.txt' did not match"), "{}", r.err);
+}
+
+/// `git reset -- <pathspec>` exits 0 and changes nothing when the pathspec
+/// matches no entry; this shell refuses (exit 1). docs/issues.md W51.
+#[ignore = "BUG: reset -- <unmatched pathspec> refuses here; git exits 0 and unstages nothing"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_with_an_unmatched_pathspec_is_not_an_error_in_git() {
+    let (r, t, p) = both(&staged_edits, &["reset", "--", "nomatch"], "reset -- nomatch").await;
+    assert_eq!(t.0, 0, "git: {}", t.2);
+    assert_eq!(r.code, 0, "{}", r.err);
+    p.assert_same("reset -- nomatch");
+}
+
+/// `rm d/` needs `-r` as `rm d` does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rm_of_a_directory_spelled_with_a_slash_needs_dash_r() {
+    let (r, t, p) = both(&base, &["rm", "d/"], "rm d/").await;
+    assert_ne!(t.0, 0, "git: {}", t.2);
+    assert_eq!(r.code, 1, "{}", r.err);
+    assert!(r.err.contains("git rm -r d/"), "{}", r.err);
+    p.assert_same("rm d/");
+}
+
+/// A trailing `/` in a pathspec names a directory only. `a.txt/` is
+/// refused where `a.txt` is a file; `d/` and `d//` reach into the directory.
+/// The row for a file spelled with a slash is held to git's exit status
+/// (nonzero) and an unchanged index; the directory rows to git's result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trailing_slash_in_a_pathspec_matches_a_directory_only_in_the_index_verbs() {
+    let setup = |d: &Path| {
+        staged_edits(d);
+        support::write_file(d, "d/e/f.txt", "foxtrot two\n");
+        support::git(d, &["add", "d/e/f.txt"]);
+        support::write_file(d, "d/c.txt", "charlie three\n");
+    };
+    // Refused by both: the file is not a directory.
+    for (label, args) in [
+        ("add file/", vec!["add", "a.txt/"]),
+        ("rm file/", vec!["rm", "b.txt/"]),
+        ("rm --cached file/", vec!["rm", "--cached", "b.txt/"]),
+        ("restore --staged file/", vec!["restore", "--staged", "a.txt/"]),
+    ] {
+        let (r, t, p) = both(&setup, &args, label).await;
+        assert_ne!(t.0, 0, "[{label}] git must refuse (negative control): {}", t.2);
+        assert_ne!(r.code, 0, "[{label}] we must refuse like git");
+        p.assert_same(label);
+    }
+    // Accepted by both, with the same result.
+    for (label, args) in [
+        ("add dir/", vec!["add", "d/"]),
+        ("add dir//", vec!["add", "d//"]),
+        ("add -u dir/", vec!["add", "-u", "d/"]),
+        ("rm -r dir/", vec!["rm", "-r", "-f", "d/e/"]),
+        ("rm -r --cached dir/", vec!["rm", "-r", "-f", "--cached", "d/"]),
+        ("restore --staged dir/", vec!["restore", "--staged", "d/"]),
+        ("reset -- dir/", vec!["reset", "--", "d/"]),
+    ] {
+        let (r, t, p) = both(&setup, &args, label).await;
+        assert_eq!(t.0, 0, "[{label}] git: {}", t.2);
+        assert_eq!(r.code, 0, "[{label}] {}", r.err);
+        p.assert_same(label);
+    }
 }
 
 // ── mv ──────────────────────────────────────────────────────────────────────
@@ -1412,32 +1547,79 @@ async fn a_glob_that_matches_only_ignored_files_matched_nothing() {
 
 // ── a partial `rm` failure says what is left and what to run (review T14) ───
 
+/// Make `d` unwritable in both repositories, so no file in it can be
+/// unlinked. Returns false (and restores) where the user ignores directory
+/// permissions and the failure cannot be produced.
+#[cfg(unix)]
+fn lock_d(p: &Pair) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    for dir in [&p.ours, &p.twin] {
+        std::fs::set_permissions(dir.join("d"), std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    }
+    if std::fs::File::create(p.ours.join("d/probe")).is_ok() {
+        std::fs::remove_file(p.ours.join("d/probe")).expect("probe");
+        unlock_d(p);
+        return false;
+    }
+    true
+}
+
+#[cfg(unix)]
+fn unlock_d(p: &Pair) {
+    use std::os::unix::fs::PermissionsExt;
+    for dir in [&p.ours, &p.twin] {
+        std::fs::set_permissions(dir.join("d"), std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+}
+
+/// Measured on git 2.56: `git rm` removes in index order. A deletion that
+/// fails before any has succeeded dies (128) with nothing removed and nothing
+/// staged. A deletion that fails after one has succeeded is passed over: git
+/// prints nothing, stages every path as deleted, exits 0 and leaves the file,
+/// which then shows as untracked. This shell matches the state and the exit
+/// code, and adds a warning on stderr that names the paths left on disk.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_failed_deletion_names_what_was_removed_and_the_command_to_finish() {
-    use std::os::unix::fs::PermissionsExt;
-    let p = Pair::new(&base);
-    // `d/c.txt` cannot be unlinked from a directory without write permission.
-    let locked = p.ours.join("d");
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).expect("chmod");
-    if std::fs::File::create(locked.join("probe")).is_ok() {
-        // Running as a user that ignores directory permissions: the failure
-        // cannot be produced here.
-        std::fs::remove_file(locked.join("probe")).expect("probe");
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        return;
+async fn a_failed_deletion_stops_or_is_passed_over_as_git_does() {
+    // (arguments, git dies on the first deletion)
+    for (args, dies) in [
+        (vec!["rm", "d/c.txt"], true),
+        (vec!["rm", "d/c.txt", "d/e/f.txt"], true),
+        (vec!["rm", "a.txt", "d/c.txt"], false),
+        (vec!["rm", "a.txt", "d/c.txt", "b.txt"], false),
+        (vec!["rm", "-r", "a.txt", "d"], false),
+        (vec!["rm", "-f", "a.txt", "d/c.txt"], false),
+    ] {
+        let p = Pair::new(&base);
+        if !lock_d(&p) {
+            return;
+        }
+        let r = p.ours("", &args).await;
+        let t = p.twin(&args);
+        unlock_d(&p);
+        let label = args.join(" ");
+        if dies {
+            assert_eq!(t.0, 128, "[{label}] git dies: {}", t.2);
+            assert_eq!(r.code, 1, "[{label}] {}", r.err);
+            assert!(r.err.contains("Nothing was removed or staged"), "[{label}] {}", r.err);
+            assert!(r.err.contains("git rm d/c.txt"), "[{label}] {}", r.err);
+            assert_eq!(support::git(&p.ours, &["status", "--porcelain"]), "", "[{label}] nothing may be staged");
+        } else {
+            assert_eq!(t.0, 0, "[{label}] git goes on: {}", t.2);
+            assert_eq!(r.code, 0, "[{label}] {}", r.err);
+            assert_eq!(t.2, "", "[{label}] git says nothing");
+            assert!(r.err.contains("warning: could not delete d/c.txt"), "[{label}] {}", r.err);
+            assert!(r.err.contains("still on disk"), "[{label}] {}", r.err);
+            // The cause stays in the warning, because the warning tells the operator to fix it.
+            assert!(r.err.contains("Permission denied"), "[{label}] the warning dropped the cause: {}", r.err);
+            assert_eq!(r.text_out(), t.1, "[{label}] git prints rm '<path>' for every path");
+            // The failed file is staged as deleted and left on disk: untracked.
+            let status = support::git(&p.ours, &["status", "--porcelain"]);
+            assert!(status.contains("D  d/c.txt"), "[{label}] {status}");
+            assert!(p.ours.join("d/c.txt").exists(), "[{label}] the file is still on disk");
+        }
+        p.assert_same(&label);
     }
-    let r = p.ours("", &["rm", "a.txt", "b.txt", "d/c.txt"]).await;
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    assert_ne!(r.code, 0);
-    assert!(r.err.contains("removing a working-tree file"), "{}", r.err);
-    assert!(r.err.contains("2 of 3 paths were removed and are staged as deleted"), "{}", r.err);
-    assert!(r.err.contains("git rm d/c.txt"), "{}", r.err);
-    // The state matches the words: the first two are gone and staged (index
-    // order), the third is untouched.
-    let status = support::git(&p.ours, &["status", "--porcelain"]);
-    assert_eq!(status, "D  a.txt\nD  b.txt", "{status}");
-    assert!(p.ours.join("d/c.txt").exists());
 }
 
 // ── a zero-length index is corrupt, not empty (review T7) ──────────────────

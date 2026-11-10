@@ -21,12 +21,12 @@ use kaish_tools_git::GitConfig;
 
 use support::{git, git_as, require_git, write_file, Fixture, StrictBackend, TestCtx};
 
-const FILES: [&str; 8] = ["ca.txt", "cb.txt", "cab/x", "d/ca.txt", "d/e/ca.txt", "a1.txt", "a[1].txt", "d/other.md"];
+const FILES: [&str; 9] = ["ca.txt", "cb.txt", "cab/x", "d/ca.txt", "d/e/ca.txt", "a1.txt", "a[1].txt", "d/other.md", "f"];
 
 /// Specs from the repository root. Each one pins a different clause of the rule.
-const SPECS: [&str; 15] = [
+const SPECS: [&str; 20] = [
     "*.txt", "ca*", "d/*", "d", "d/", "?a.txt", "**/ca.txt", "*/ca.txt", "a[1].txt", "[ac]1.txt", "a\\[1\\].txt", "c*b", "cab", "d*/ca*",
-    "nomatch*",
+    "nomatch*", "f", "f/", "d//", "d/e/", "d*/",
 ];
 
 /// Specs from inside `d`, where git prepends the prefix `d/` to the spec.

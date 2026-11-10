@@ -21,7 +21,7 @@ before 0.14 (kaish `docs/EMBEDDING.md`, "Why this, and not a gate").
 | W4 | History rewrites follow `RewritePolicy::{Refuse, Unpublished, Allow}`; default `Unpublished` | §3 |
 | W5 | First cut: `add`, `rm`, `mv`, `restore --staged`, `reset` (no revision), `commit` (`-m`, `-F`, `-a`, `--only`/`-- <paths>`, `--trailer`, `--amend`), `branch <name>`, `tag <name>`, `switch -c`, `var GIT_AUTHOR_IDENT` | §4 |
 | W6 | Nothing writes file *content* into the working tree. `mv` renames; `switch <existing>` and `restore <file>` are refused in this cut | §4 |
-| W7 | Hooks: refuse when the repository has one, unless the embedder installs a `GitHooks` provider. With one installed, `core.hooksPath` outside the tree and a `post-index-change` hook (index verbs, `reset` without `--soft`) still refuse (docs/issues.md W50, W51) | §5 |
+| W7 | Hooks: refuse when the repository has one, unless the embedder installs a `GitHooks` provider. With one installed, `core.hooksPath` outside the tree and a `post-index-change` hook (index verbs, `reset` without `--soft`) still refuse (docs/issues.md W62, W63) | §5 |
 | W8 | Signing: refuse when `commit.gpgSign`/`tag.gpgSign` is true; no signer provider in this cut | §5 |
 | W9 | Content conversion: any `filter=` attribute refuses the path; `text`/`eol`/`ident`/`core.autocrlf` refuse only when the bytes could change | §5 |
 | W10 | Every ref move is compare-and-swap against the oid we read, and writes a reflog entry in git's format | §6 |
@@ -540,7 +540,7 @@ corrected.
    refuses.
 4. `branch <name>`, `tag <name>`, `switch -c`/`checkout -b`. **Built**
    (docs/embedding-git.md, "The commit profile"); the differences from this
-   design are docs/issues.md W35-W39. Checked against git 2.56 and different
+   design are docs/issues.md W36-W39. Checked against git 2.56 and different
    from the first draft: `branch` with no start writes `Created from <current
    branch>`, not `Created from HEAD`; `tag -m` without `-a` makes an annotated
    tag; a tag message loses its `#` lines (a commit's does not); an empty tag

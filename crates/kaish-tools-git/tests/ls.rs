@@ -170,6 +170,18 @@ async fn ls_at_a_tag_matches_git_ls_tree_at_the_tag() {
     assert_eq!(rows(&result), git_ls_tree(&repo.root, "v1.0.0", None, false));
 }
 
+/// `^{type}` suffixes name the same tree git lists.
+#[tokio::test]
+async fn ls_takes_peel_suffixes_as_git_does() {
+    let repo = TreeRepo::build();
+    for spec in ["HEAD^{tree}", "HEAD^{commit}", "HEAD^{}", "v1.0.0^{tree}", "v1.0.0^{commit}", "v1.0.0^{}", "HEAD^{commit}^{tree}"] {
+        let result = ls(&repo.scratch(), "/mnt/repo", &[spec, "--json"]).await;
+        assert_eq!(rows(&result), git_ls_tree(&repo.root, spec, None, false), "{spec}");
+    }
+    let result = ls(&repo.scratch(), "/mnt/repo", &["HEAD^{blob}", "--json"]).await;
+    assert_eq!(result.code, 1, "{}", result.err);
+}
+
 /// A linked worktree reads its own HEAD, not the main repository's.
 #[tokio::test]
 async fn ls_from_a_linked_worktree_reads_its_own_head() {

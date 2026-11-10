@@ -22,7 +22,7 @@
 //! `mv`, `restore --staged` and `reset` without `--soft`) refuse a repository
 //! that has a `post-index-change` hook whether or not a provider is installed,
 //! and every verb refuses a `core.hooksPath` that points outside the working
-//! tree (docs/issues.md, W21, W50 and W51).
+//! tree (docs/issues.md, W21, W62 and W63).
 
 use std::path::Path;
 
@@ -112,7 +112,7 @@ pub enum RefTransactionState {
     /// `Err` refuses the command as at `Preparing`. This is sent before any ref
     /// lock is taken, where git sends `prepared` after it has locked the refs:
     /// a lock that another process holds can still fail the write after this
-    /// state, and [`Aborted`](Self::Aborted) follows (docs/issues.md W48).
+    /// state, and [`Aborted`](Self::Aborted) follows (docs/issues.md W60).
     Prepared,
     /// The refs in the transaction were written. `Err` here is shown on
     /// stderr and changes nothing, as git ignores the hook's exit status.
