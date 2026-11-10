@@ -1744,9 +1744,6 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   asked for version 4 loses it until real git runs `git update-index
   --index-version 4`. `tests/write_index.rs`
   (`a_version_4_index_is_read_and_rewritten_as_version_2`) pins it.
-- **W26 — `rm` stops at the first deletion failure.** Git continues past it and
-  warns; this shell stops, stages the deletions that happened and names the
-  rest, so the next command is exact. See W8 for the earlier shape.
 - **W28 — `mv` into `.git` refuses here; git moves the file.** `git mv a.txt
   .git/x` prints "invalid path '.git/x'" and still renames the file into `.git`
   and stages the deletion of `a.txt` (measured on git 2.56.0). This shell
@@ -1811,15 +1808,8 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   several published commits names one of them (the highest in generation
   order with a graph, the lowest oid without) and the first remote-tracking ref
   in name order that reaches it. `reset <rev>` accepts the read side's
-  revision grammar: `HEAD~N`, `^`, branches, tags, oids; `@{...}`, `^{tree}`
-  and `A..B` are refused by the revision parser.
-- **W33 — a trailing `/` in a pathspec still matches a file.** `PathFilter`
-  (`pathfilter.rs`, `parse`) strips a trailing `/` before it builds a
-  `Spec::Literal`, so the spec `d/` matches a file named `d`. Git 2.56.0 matches
-  only a directory: with `d` a tracked file, `git ls-files -- d/` prints
-  nothing and `git ls-files -- d` prints `d`. It affects every verb that takes
-  a pathspec, and it predates the commit profile. The fix is to keep the
-  trailing `/` in the spec and match directories only.
+  revision grammar: `HEAD~N`, `^`, `^{type}`, `@{-N}`, branches, tags, oids;
+  `A..B` is refused by the revision parser.
 - **W34 — the hook provider is not called for `branch`, `tag`, `switch -c`,
   `checkout -b` or `reset`.** `GitHooks` has `pre_commit`, `commit_msg` and
   `post_commit` and nothing for a ref update. Without a provider these verbs
@@ -1830,13 +1820,6 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   An embedder that installs a provider to run `pre-commit` therefore loses the
   `reference-transaction` check for these verbs. The fix is a `GitHooks`
   method for a ref update, called with the ref, old and new value.
-- **W35 — `commit` keeps no trailing form feed or vertical tab, and git
-  does.** `message::cleanup` strips `\x0c` and `\x0b` from the end of a line;
-  git's `isspace` is space, tab, newline and carriage return, so git keeps them
-  (checked on git 2.56: `commit -m $'a\f'` and `tag -a -m $'a\f'` both store
-  `a\f\n`). `tag` has its own cleanup with git's set. The failing case for
-  `commit` is `a_trailing_form_feed_or_vertical_tab_stays_in_the_message_as_in_git`
-  in `tests/write_commit.rs`, ignored until the cleanup changes.
 - **W36 — an empty directory where a ref goes is refused.** A directory at
   `refs/heads/x` (left behind when its last branch was deleted) makes git
   remove it and create the branch. The containment walk wants a regular file
@@ -1900,13 +1883,6 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   (exit 4) any start under `refs/remotes/` unless `--no-track` is given (see
   W38). Failing case: `auto_setup_merge_simple_writes_no_tracking_when_the_names_differ`,
   ignored.
-- **W42 — `@{-1}` is not a start point.** Git expands it to the previous
-  branch; the revision parser has no `@{...}` form and exits 2. Failing case:
-  `at_minus_one_is_a_start_point_as_in_git`, ignored.
-- **W43 — a tag target of `HEAD^{tree}` or `HEAD:<path>` exits 2.** Git tags
-  the tree or the blob. The same object given by its id works (pinned in
-  `a_tag_of_a_tree_or_a_blob_is_made_as_git_makes_it`). Failing case:
-  `a_tag_target_may_be_a_tree_or_blob_spelling`, ignored.
 - **W44 — an existing log file for a new tag.** Git appends the tag's line to a
   file that already exists at `logs/refs/tags/<name>` (checked: a stale file
   gains `tag: tagging ...`); this shell writes no tag log. Failing case:
@@ -1928,3 +1904,57 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   `git config --type=bool`). A key with no `=` is told from `key =` by
   `ReadRepo::config_entries`; the older `config_values` paired a bare key with
   the value of the next key and no longer does.
+- **W48 — `log <tree>` exits 1 here and 0 in git.** `git log HEAD^{tree}` and
+  `git log HEAD:a.txt` print nothing and exit 0; this shell refuses them as
+  "names a tree, not a commit" (exit 1), as it refuses a tree id. Pinned by
+  `a_tree_where_a_commit_is_wanted_is_refused_by_type` in `tests/log.rs`.
+- **W49 — `HEAD:./path` is refused.** Git reads a path that starts with `./` or
+  `../` from the current directory (`git tag t HEAD:./a.txt` works). The
+  revision parser refuses both with exit 2 and asks for the path from the
+  repository root. `:N:path` takes stages 0 to 3 from the index, and an
+  unmerged entry at stage 0 is reported as no such revision, where git says
+  the entry is "in the index, but not at stage 0".
+- **W50 — `show :<path>` and `show :<N>:<path>` are refused.** `tag` takes an
+  index path as a target; `show` and `ls` split `<rev>:<path>` themselves and
+  read an empty revision as a usage error (exit 2). Git shows the staged blob.
+- **W51 — `reset -- <pathspec>` refuses when the pathspec matches nothing.**
+  `git reset -- nomatch` exits 0 and changes nothing; this shell exits 1 with
+  "did not match any file known to git". Failing case:
+  `reset_with_an_unmatched_pathspec_is_not_an_error_in_git`, ignored.
+- **W52 — `rm --json` lists a path under `removed` that is still on disk.** A
+  deletion that fails after an earlier one succeeded stages the path as
+  deleted and leaves the file; the warning on stderr names it, but `removed`
+  in the JSON still holds it. It needs a `left_on_disk` field (or the path
+  taken out of `removed`) so an agent reading only the JSON is not misled.
+- **W53 — `HEAD:a.txt^{tree}` reports a false "no such path".** The revision
+  parser splits `<rev>:<path>` before it reads a peel suffix, so the path is
+  `a.txt^{tree}`. Git peels the suffix after the path lookup. The suffix must
+  be parsed off the end of the path first.
+- **W54 — the `@{-0}` message contradicts itself.** `UnsupportedRevspec` says
+  `'@{...}'` is not parsed, and in the same sentence lists `@{-N}` as an
+  accepted form. `@{-0}` is not a form in git either (`fatal: not a valid
+  object name`); the message should say `@{-N}` needs N of 1 or more.
+- **W55 — `@{-N}` with a raw oid in the reflog "from" position.** Measured on
+  git 2.56: after `git switch --detach HEAD` and `git switch --detach HEAD~1`,
+  `git branch prev @{-1}` makes `prev` at the oid HEAD was on. This shell does
+  the same; `at_minus_n_resolves_a_raw_oid_in_the_reflog_from_position` pins
+  it. No divergence.
+- **W56 — the 8 MiB `logs/HEAD` scan cap.** `@{-N}` reads the last 8 MiB of
+  the log (`MAX_REFLOG_SCAN_BYTES`) and errors when N checkouts are not in
+  that span. `docs/git.md` now says so; the cap is not configurable.
+- **W57 — a pathspec from a subdirectory that cannot be canonicalized
+  resolves from the repository root.** `cwd_prefix` in `tool.rs` falls back to
+  the uncanonicalized path with `unwrap_or_else`, and `strip_prefix` then
+  fails and returns an empty prefix, so a pathspec typed in a subdirectory is
+  read as if typed at the root. It should be an error that names the
+  directory.
+- **W58 — `mv` hides a failed rollback.** In `verbs/write/mv.rs` the undo
+  after a failed rename is `let _ = std::fs::rename(t, f)`. When the undo
+  fails too, the files stay at the new names and the error names only the
+  first failure. The error should list every path the rollback did not move
+  back.
+- **W59 — read verbs still drop an empty pathspec.** `PathFilter::parse`
+  skips an empty spec, so `status`, `log` and `diff` with `--path ""` match
+  everything. The write verbs refuse the empty string as git does (exit 1,
+  `write_paths` in `tool.rs`); git's behavior for the read verbs was not
+  measured.

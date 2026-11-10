@@ -143,8 +143,7 @@ pub(crate) struct TagCreate {
 ///
 /// Whitespace is git's own `isspace`: space, tab, newline and carriage
 /// return. A form feed or a vertical tab stays (checked against git 2.56;
-/// `commit`'s cleanup treats them as whitespace, which differs: docs/issues.md
-/// W35).
+/// `commit`'s cleanup agrees).
 pub(crate) fn cleanup(raw: &str) -> String {
     let mut out = String::new();
     let mut pending_blank = false;
@@ -188,11 +187,16 @@ fn ensure_tag_settings(repo: &WriteRepo, command: &str, annotated: bool) -> Resu
             "Create the tag with real git, outside this shell, or set it to true: git config core.logAllRefUpdates true.".to_string(),
         )?;
     }
-    if annotated && (config_last(repo, "core", "commentchar")?.is_some() || config_last(repo, "core", "commentstring")?.is_some()) {
-        bad(
-            "core.commentChar or core.commentString is set, and this shell drops comment lines from a tag message for '#' only.".to_string(),
-            "Create the tag with real git, outside this shell, or unset it: git config --unset core.commentChar.".to_string(),
-        )?;
+    // `#` and `auto` leave a `-m` message cleaned as this shell cleans it
+    // (checked against git: `auto` chooses a character for an editor buffer
+    // only, and a message given with -m or -F drops its `#` lines).
+    for (key, shown) in [("commentchar", "core.commentChar"), ("commentstring", "core.commentString")] {
+        if annotated && config_last(repo, "core", key)?.is_some_and(|v| v != "#" && v != "auto") {
+            bad(
+                format!("{shown} is set to something other than '#' or 'auto', and this shell drops comment lines from a tag message for '#' only."),
+                format!("Create the tag with real git, outside this shell, or unset it: git config --unset {shown}."),
+            )?;
+        }
     }
     Ok(())
 }
@@ -218,7 +222,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &TagCreate) -> Result<O
     }
 
     let target = match &opts.target {
-        Some(spec) => repo.read().resolve_object(spec)?,
+        Some(spec) => repo.read().resolve_object_expr(spec)?,
         None => {
             let head = repo.read().head()?;
             match head.oid.as_deref() {

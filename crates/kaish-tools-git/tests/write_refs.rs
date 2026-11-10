@@ -742,6 +742,71 @@ async fn signing_settings_and_always_logging_refuse_a_tag() {
     assert_eq!(p.ours("", &["tag", "light"]).await.code, 0);
 }
 
+/// Review finding 4: `core.commentChar` and `core.commentString` set to `#`
+/// (or `auto`) change nothing about a `-m` tag message, so they are accepted
+/// and the tag object is byte-identical to git's. Any other value is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_comment_setting_equal_to_hash_is_accepted_and_matches_git() {
+    for (key, value) in [("core.commentChar", "#"), ("core.commentChar", "auto"), ("core.commentString", "#")] {
+        let p = Pair::new(&|d| {
+            base(d);
+            support::git(d, &["config", key, value]);
+        });
+        let argv = ["tag", "-a", "x", "-m", "hello\n# dropped\n; kept\nbye"];
+        let r = p.ours("", &argv).await;
+        assert_eq!(r.code, 0, "[{key}={value}] {}", r.err);
+        let (code, _, gerr) = p.twin(&argv);
+        assert_eq!(code, 0, "[{key}={value}] {gerr}");
+        let ours = git_raw(&p.ours, &["cat-file", "-p", "x"]).1;
+        let twin = git_raw(&p.twin, &["cat-file", "-p", "x"]).1;
+        assert!(!ours.contains("dropped") && ours.contains("; kept"), "[{key}={value}] {ours}");
+        assert_eq!(ours, twin, "[{key}={value}] tag message differs");
+    }
+    for (key, value) in [("core.commentChar", ";"), ("core.commentString", "//"), ("core.commentChar", "##")] {
+        let p = Pair::new(&|d| {
+            base(d);
+            support::git(d, &["config", key, value]);
+        });
+        let r = p.ours("", &["tag", "-a", "x", "-m", "m"]).await;
+        assert_eq!(r.code, 4, "[{key}={value}] {}", r.err);
+        assert!(r.err.contains(key), "[{key}={value}] {}", r.err);
+    }
+}
+
+/// Review finding 3: a missing index path is not "no such ref".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revision_naming_a_path_missing_from_the_index_says_so() {
+    let p = Pair::new(&base);
+    let r = p.ours("", &["tag", "x", ":nope"]).await;
+    assert_eq!(r.code, 1, "{}", r.err);
+    assert!(r.err.contains("index"), "{}", r.err);
+    assert!(r.err.contains("'nope'"), "{}", r.err);
+    assert!(!r.err.contains("no such ref"), "{}", r.err);
+    assert_eq!(p.twin(&["tag", "x", ":nope"]).0, 128);
+    // Negative control: a path that is in the index resolves.
+    let r = p.ours("", &["tag", "y", ":a.txt"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+}
+
+/// `@{-1}` when the previous checkout moved from a detached HEAD: the reflog
+/// "from" word is a full oid, and git resolves `@{-1}` to that commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn at_minus_n_resolves_a_raw_oid_in_the_reflog_from_position() {
+    let p = Pair::new(&|d| {
+        base(d);
+        support::git(d, &["switch", "-q", "--detach", "HEAD"]);
+        support::git(d, &["switch", "-q", "--detach", "HEAD~1"]);
+    });
+    let argv = ["branch", "prev", "@{-1}"];
+    let (code, _, gerr) = p.twin(&argv);
+    assert_eq!(code, 0, "{gerr}");
+    let r = p.ours("", &argv).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    let want = git_raw(&p.twin, &["rev-parse", "prev"]).1;
+    let got = git_raw(&p.ours, &["rev-parse", "prev"]).1;
+    assert_eq!(got, want, "@{{-1}} resolved to a different commit");
+}
+
 // ── switch -c and checkout -b ──────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1686,30 +1751,220 @@ async fn auto_setup_merge_simple_writes_no_tracking_when_the_names_differ() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "W42: @{-1} is not expanded as a start point"]
 async fn at_minus_one_is_a_start_point_as_in_git() {
+    let p = Pair::new(&|d| {
+        base(d);
+        support::git(d, &["switch", "-q", "-c", "other"]);
+        support::write_file(d, "b.txt", "bravo\n");
+        support::git(d, &["add", "b.txt"]);
+        support::git(d, &["commit", "-qm", "three"]);
+        support::git(d, &["switch", "-q", "main"]);
+        support::git(d, &["switch", "-q", "-c", "third"]);
+        support::git(d, &["switch", "-q", "main"]);
+    });
+    // The newest checkout moved from `third` to main; the one before from
+    // main to `third`; before that from `other` to main. `third` and `main`
+    // are one commit, `other` is a commit ahead, so the commits tell the
+    // numbers apart.
+    for (n, start) in [
+        ("p1", "@{-1}"),
+        ("p2", "@{-2}"),
+        ("p3", "@{-3}"),
+        ("p4", "@{-4}"),
+        ("p01", "@{-01}"),
+        ("p1b", "@{-1}~1"),
+        ("p3c", "@{-3}^{tree}"),
+    ] {
+        let twin = p.twin(&["branch", n, start]);
+        let r = p.ours("", &["branch", n, start]).await;
+        if twin.0 == 0 {
+            assert_eq!(r.code, 0, "{start}: {}", r.err);
+        } else {
+            assert_ne!(r.code, 0, "{start}: git refuses ({}) and so must this", twin.2);
+        }
+    }
+    // Negative controls: the numbers name different commits, and one of them
+    // is a commit the branch checked out, so a wrong count or a wrong end of
+    // the log shows.
+    let at = |n: &str| git_raw(&p.twin, &["rev-parse", n]).1;
+    assert_ne!(at("p1"), at("p3"), "git: @{{-1}} and @{{-3}} differ");
+    assert_eq!(at("p3"), at("other"), "git: @{{-3}} is `other`");
+    p.assert_same("@{-N} as a start point");
+}
+
+/// Too few checkouts, and the spellings git does not take, are refused and
+/// change nothing, as git refuses them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn at_minus_n_with_too_few_checkouts_or_a_bad_spelling_is_refused() {
     let p = Pair::new(&|d| {
         base(d);
         support::git(d, &["switch", "-q", "-c", "other"]);
         support::git(d, &["switch", "-q", "main"]);
     });
+    let before = support::Fingerprint::take(&p.git_dir(true));
+    for start in ["@{-3}", "@{-99999999999999999999}", "@{-0}", "@{-}", "@{-1}x", "HEAD@{-1}", "main@{-1}", "@{-1"] {
+        let (code, _, err) = p.twin(&["branch", "x", start]);
+        assert_ne!(code, 0, "git refuses {start}: {err}");
+        let r = p.ours("", &["branch", "x", start]).await;
+        assert_ne!(r.code, 0, "{start} must be refused: {}", r.err);
+    }
+    let r = p.ours("", &["branch", "x", "@{-3}"]).await;
+    assert_eq!(r.code, 1, "too few checkouts is a missing revision: {}", r.err);
+    assert!(r.err.contains("@{-3}") && r.err.contains("does not name a commit"), "{}", r.err);
+    let r = p.ours("", &["branch", "x", "@{-0}"]).await;
+    assert_eq!(r.code, 2, "{}", r.err);
+    assert!(support::Fingerprint::take(&p.git_dir(true)).differences_from(&before).is_empty(), "a refusal wrote");
+}
+
+/// A detached HEAD leaves its oid in `logs/HEAD`, and `@{-1}` yields that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn at_minus_one_after_a_detached_head_names_the_commit() {
+    let p = Pair::new(&|d| {
+        base(d);
+        support::git(d, &["switch", "-q", "--detach", "HEAD~1"]);
+        support::git(d, &["switch", "-q", "main"]);
+    });
     assert_eq!(p.twin(&["branch", "prev", "@{-1}"]).0, 0);
     let r = p.ours("", &["branch", "prev", "@{-1}"]).await;
     assert_eq!(r.code, 0, "{}", r.err);
-    p.assert_same("@{-1}");
+    p.assert_same("@{-1} after a detached HEAD");
+}
+
+/// `logs/HEAD` is read through the contained path: a symlink out of the mount
+/// is refused, and what it points at is never read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_symlinked_head_reflog_is_not_followed_out_of_the_mount() {
+    let p = Pair::new(&|d| {
+        base(d);
+        support::git(d, &["switch", "-q", "-c", "other"]);
+        support::git(d, &["switch", "-q", "main"]);
+    });
+    // A decoy outside the mount with an `other` checkout in it, as the
+    // real log has. If it were read, `prev` would be made.
+    let outside = tempfile::tempdir().expect("outside");
+    let real = std::fs::read(p.ours.join(".git/logs/HEAD")).expect("log");
+    std::fs::write(outside.path().join("HEAD"), &real).expect("decoy");
+    for (what, link_dir) in [("logs/HEAD", false), ("logs", true)] {
+        let pair = Pair::new(&|d| {
+            base(d);
+            support::git(d, &["switch", "-q", "-c", "other"]);
+            support::git(d, &["switch", "-q", "main"]);
+        });
+        let logs = pair.ours.join(".git/logs");
+        if link_dir {
+            let moved = pair.ours.join(".git/logs-real");
+            std::fs::rename(&logs, &moved).expect("move");
+            std::fs::remove_file(outside.path().join("HEAD")).ok();
+            std::fs::write(outside.path().join("HEAD"), &real).expect("decoy");
+            std::os::unix::fs::symlink(outside.path(), &logs).expect("link dir");
+        } else {
+            std::fs::remove_file(logs.join("HEAD")).expect("rm");
+            std::os::unix::fs::symlink(outside.path().join("HEAD"), logs.join("HEAD")).expect("link");
+        }
+        let r = pair.ours("", &["branch", "prev", "@{-1}"]).await;
+        assert_eq!(r.code, 4, "[{what}] the link out of the mount is refused: {}", r.err);
+        assert!(r.err.contains("outside the mount"), "[{what}] {}", r.err);
+        let (code, _, _) = git_raw(&pair.ours, &["rev-parse", "--verify", "-q", "refs/heads/prev"]);
+        assert_ne!(code, 0, "[{what}] a branch was made from a log outside the mount");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "W43: a tag target written as HEAD^{tree} or HEAD:path is not resolved; git tags the tree or the blob"]
 async fn a_tag_target_may_be_a_tree_or_blob_spelling() {
-    let p = Pair::new(&base);
-    for target in ["HEAD^{tree}", "HEAD:a.txt"] {
-        let name = format!("t-{}", target.len());
-        assert_eq!(p.twin(&["tag", &name, target]).0, 0, "git tags {target}");
-        let r = p.ours("", &["tag", &name, target]).await;
-        assert_eq!(r.code, 0, "{target}: {}", r.err);
+    let setup = |d: &Path| {
+        base(d);
+        support::write_file(d, "d/b.txt", "bravo\n");
+        support::git(d, &["add", "."]);
+        support::git(d, &["commit", "-qm", "three"]);
+        support::git(d, &["tag", "-a", "-m", "release", "v1", "HEAD~1"]);
+        support::git(d, &["tag", "-a", "-m", "of a tree", "vtree", "HEAD^{tree}"]);
+        support::git(d, &["tag", "-a", "-m", "of a blob", "vblob", "HEAD:a.txt"]);
+        support::git(d, &["switch", "-q", "-c", "other"]);
+        support::git(d, &["switch", "-q", "main"]);
+    };
+    // Every spelling git takes, as a lightweight tag and as an annotated one.
+    let accepted = [
+        "HEAD^{tree}",
+        "HEAD:a.txt",
+        "HEAD:d",
+        "HEAD:d/",
+        "HEAD:d/b.txt",
+        "HEAD:",
+        ":a.txt",
+        ":0:a.txt",
+        ":d/b.txt",
+        "HEAD^{commit}",
+        "HEAD^{object}",
+        "HEAD^{}",
+        "v1^{}",
+        "v1^{commit}",
+        "v1^{tag}",
+        "v1^{tree}",
+        "v1:a.txt",
+        "HEAD~1^{tree}",
+        "HEAD~1:a.txt",
+        "HEAD^{commit}^{tree}",
+        "HEAD^{tree}:d",
+        "HEAD^{tree}:a.txt",
+        "main^{tree}",
+        "@{-1}",
+        "@{-1}^{tree}",
+        "@{-1}:a.txt",
+        "vtree^{}",
+        "vtree^{tree}",
+        "vtree",
+        "vblob^{}",
+        "vblob^{blob}",
+    ];
+    // Every spelling git refuses.
+    let refused = [
+        "HEAD^{blob}",
+        "HEAD^{tag}",
+        "HEAD^{foo}",
+        "HEAD^{tree}~1",
+        "HEAD^{tree}^",
+        "HEAD^{tree}^{commit}",
+        "HEAD:a.txt^{tree}",
+        "HEAD:a.txt/",
+        "HEAD:nope",
+        "HEAD:d/nope",
+        "HEAD:a.txt/x",
+        ":nope",
+        ":3:a.txt",
+        "HEAD:/a.txt",
+        "vblob^{commit}",
+    ];
+    let p = Pair::new(&setup);
+    for (i, target) in accepted.iter().enumerate() {
+        for (kind, flags) in [("light", vec![]), ("annotated", vec!["-a", "-m", "m"])] {
+            let name = format!("{kind}-{i}");
+            let mut argv = vec!["tag"];
+            argv.extend(&flags);
+            argv.push(&name);
+            argv.push(target);
+            let (code, _, err) = p.twin(&argv);
+            assert_eq!(code, 0, "git tags {target}: {err}");
+            let r = p.ours("", &argv).await;
+            assert_eq!(r.code, 0, "{target} ({kind}): {}", r.err);
+            if kind == "annotated" {
+                p.assert_tag_same(&name);
+            }
+        }
     }
-    p.assert_same("tree and blob spellings");
+    p.assert_same("tree, blob and peeled spellings");
+    // Negative controls: the accepted spellings include a tree, a blob and a
+    // commit, so a resolver that always answered one type fails above.
+    let types: std::collections::BTreeSet<String> =
+        (0..accepted.len()).map(|i| git_raw(&p.ours, &["cat-file", "-t", &format!("light-{i}")]).1).collect();
+    assert!(types.len() >= 3, "tree, blob and commit all appear: {types:?}");
+    let before = support::Fingerprint::take(&p.git_dir(true));
+    for target in refused {
+        let (code, _, err) = p.twin(&["tag", "refused", target]);
+        assert_ne!(code, 0, "git refuses {target} (negative control), said: {err}");
+        let r = p.ours("", &["tag", "refused", target]).await;
+        assert_ne!(r.code, 0, "{target} must be refused");
+    }
+    assert!(support::Fingerprint::take(&p.git_dir(true)).differences_from(&before).is_empty(), "a refusal wrote");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
