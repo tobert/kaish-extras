@@ -763,7 +763,7 @@ fn ensure_commit_settings(repo: &WriteRepo, command: &str) -> Result<(), GitErro
             )?;
         }
     }
-    if config_last(repo, "core", "logallrefupdates")?.is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "false" | "no" | "off" | "0" | "never")) {
+    if crate::verbs::write::state::reflog_turned_off(repo, command)? {
         bad(
             "core.logAllRefUpdates is off, and this shell always writes the reflog.".to_string(),
             "Commit with real git, outside this shell, or turn it on: git config core.logAllRefUpdates true.".to_string(),

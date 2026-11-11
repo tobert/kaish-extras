@@ -12,9 +12,11 @@
 //! The object is encoded here and not by `gix-object`, whose tag encoder
 //! leaves out the blank line git writes before an empty message.
 //!
-//! A tag has no reflog: `core.logAllRefUpdates` at its default logs branches,
-//! remote-tracking branches, notes and HEAD, and gix-ref keeps the same rule.
-//! `always` would log tags, so it refuses here.
+//! A tag has no reflog line unless its log file exists: `core.logAllRefUpdates`
+//! at its default logs branches, remote-tracking branches, notes and HEAD, and
+//! gix-ref keeps the same rule. A log file that exists is appended to, as in
+//! git, under git's message (`tag_reflog_message`). `always` would create
+//! logs for tags, so it refuses here.
 //!
 //! The object is written, then synced, then the ref is created; a refusal
 //! after the object is on disk says so (`Wrote::UnreachableObjects`).
@@ -182,7 +184,7 @@ fn ensure_tag_settings(repo: &WriteRepo, command: &str, annotated: bool) -> Resu
             "Create the tag with real git, outside this shell, or turn it off for this repository: git config tag.forceSignAnnotated false.".to_string(),
         )?;
     }
-    if config_last(repo, "core", "logallrefupdates")?.is_some_and(|v| v.eq_ignore_ascii_case("always")) {
+    if crate::verbs::write::state::ref_logs(repo, command)? == crate::verbs::write::state::RefLogs::Always {
         bad(
             "core.logAllRefUpdates is 'always', which makes git write a reflog for a tag, and this shell writes none.".to_string(),
             "Create the tag with real git, outside this shell, or set it to true: git config core.logAllRefUpdates true.".to_string(),

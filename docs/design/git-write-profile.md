@@ -400,7 +400,7 @@ Amy, 2026-11-06: the embedder pins, kernel variables are the fallback.
   `commit (initial): <subject>`, `branch: Created from <start as typed>`
   (`branch` with no start writes the current branch's name, or `HEAD` when
   detached; `switch -c` writes `HEAD`), `checkout: moving from <old> to <new>`;
-  a tag gets no reflog). gix writes no `HEAD` line for a
+  a tag gets no reflog line unless its log file exists, as in git). gix writes no `HEAD` line for a
   symbolic update, so `switch -c` appends its `checkout:` line itself. gix-ref 0.66
   declares a check for a line break in the message and never runs it, so a
   newline would forge a second reflog line. The message is therefore copied as
@@ -551,4 +551,5 @@ corrected.
    for the two switches; a switch to a start on HEAD's own commit leaves the
    files alone, so it is allowed; on an unborn HEAD `switch -c` rewrites `HEAD`
    and writes no log; in a bare repository git writes no branch reflog by
-   default, so `branch` refuses there unless `core.logAllRefUpdates` is true.
+   default, so `branch` refuses there unless `core.logAllRefUpdates` is true or
+   the branch's log file exists (git appends to one).

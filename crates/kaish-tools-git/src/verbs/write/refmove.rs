@@ -215,19 +215,13 @@ fn apply_move(
     if head_lock.is_some() {
         // The branch has already moved. The error must say so, or an agent
         // reads a failure and makes the same commit a second time.
-        append_head_reflog(repo, kind, old, new, &sig, message).map_err(|e| match e {
-            GitError::Repository { operation, what, path, source, .. } => GitError::Repository {
-                operation,
-                what: format!(
-                    "{} and '{refname}' now points at {new}, so do not run the command again; \
-                     only {what} failed (logs/HEAD lacks this entry)",
-                    kind.done
-                ),
-                path,
-                source,
-                wrote: Wrote::Described,
-            },
-            other => other,
+        append_head_reflog(repo, kind, old, new, &sig, message).map_err(|e| {
+            described(
+                repo,
+                kind,
+                e,
+                &format!("{} and '{refname}' now points at {new}, so do not run the command again", kind.done),
+            )
         })?;
     }
     drop(head_lock);
@@ -280,6 +274,13 @@ pub(crate) fn log_exists(repo: &WriteRepo, full: &str) -> Result<bool, GitError>
     }
 }
 
+/// Whether git writes a reflog line for the branch or HEAD `full`:
+/// `core.logAllRefUpdates` is not a false boolean, or its log file exists. A
+/// caller that finds no line is written needs no committer identity.
+pub(crate) fn writes_log(repo: &WriteRepo, command: &str, full: &str) -> Result<bool, GitError> {
+    Ok(!reflog_turned_off(repo, command)? || log_exists(repo, full)?)
+}
+
 /// Create the ref `full` at `new`, which must not exist (git-write-profile.md
 /// §6). The caller has already refused a name that exists, with git's wording;
 /// the compare-and-swap here closes the race after that look.
@@ -287,9 +288,8 @@ pub(crate) fn log_exists(repo: &WriteRepo, full: &str) -> Result<bool, GitError>
 /// `log` is the reflog line for the ref and the committer to write it as. A
 /// branch gets one (gix-ref's autocreate rule is git's: heads, remotes, notes
 /// and `HEAD`); a tag passes `None`, and gix-ref writes no log for it, unless
-/// the caller found a log file already there (see [`log_exists`]). With
-/// `core.logAllRefUpdates` off, git writes the line only to a log file that
-/// exists, so `log` is dropped when there is none.
+/// the caller found a log file already there (see [`writes_log`], which also
+/// decides it for a branch under `core.logAllRefUpdates=false`).
 pub(crate) fn create_ref(
     repo: &WriteRepo,
     kind: MoveKind,
@@ -298,7 +298,6 @@ pub(crate) fn create_ref(
     new: ObjectId,
     log: Option<(&str, &Signature)>,
 ) -> Result<(), GitError> {
-    let log = if log.is_some() && reflog_turned_off(repo, command)? && !log_exists(repo, full)? { None } else { log };
     let checked = if log.is_some() { repo.check_ref_write(full, false)? } else { repo.check_ref_write_unlogged(full)? };
     refuse_if_ref_locked(repo, command, &checked, full)?;
     let message = log.map(|(m, _)| copy_message(m)).unwrap_or_default();
@@ -337,13 +336,16 @@ pub(crate) struct HeadSwitch<'a> {
     pub(crate) command: &'a str,
     /// What HEAD named when the caller read it.
     pub(crate) was: &'a HeadTarget,
-    /// The commit HEAD was on, or `None` for an unborn branch.
+    /// The commit HEAD was on, or `None` for an unborn branch, which makes no
+    /// branch and logs nothing: HEAD just names the new one.
     pub(crate) head_oid: Option<ObjectId>,
     /// The full name of the new branch.
     pub(crate) full: &'a str,
-    /// The branch's reflog line, and the committer, when the branch is made.
-    /// An unborn HEAD makes no branch: HEAD just names the new one.
-    pub(crate) create: Option<(&'a str, &'a Signature)>,
+    /// The new branch's reflog line and the committer, when git writes one
+    /// ([`writes_log`]).
+    pub(crate) branch_log: Option<(&'a str, &'a Signature)>,
+    /// The committer of the `logs/HEAD` line, when git writes one.
+    pub(crate) head_log: Option<&'a Signature>,
     /// Set to true once the branch exists, so a caller that failed later can
     /// tell the branch transaction from the HEAD one.
     pub(crate) created: Option<&'a std::cell::Cell<bool>>,
@@ -356,7 +358,8 @@ pub(crate) fn switch_head(repo: &WriteRepo, s: &HeadSwitch<'_>) -> Result<(), Gi
     use crate::verbs::write::containment::Leaf;
     use std::io::Write;
     let kind = s.kind;
-    let checked = repo.check_ref_write(s.full, true)?;
+    let creates = s.head_oid.is_some();
+    let checked = repo.check_ref_write_as(s.full, s.branch_log.is_some(), creates && s.head_log.is_some())?;
     refuse_if_locked(repo, s.command, &checked, s.full)?;
     let head = repo.check(std::path::Path::new("HEAD"), Leaf::File)?;
     let mut lock = gix_lock::File::acquire_to_update_resource(&head, gix_lock::acquire::Fail::Immediately, None)
@@ -381,16 +384,13 @@ pub(crate) fn switch_head(repo: &WriteRepo, s: &HeadSwitch<'_>) -> Result<(), Gi
             Override::Never,
         );
     }
-    // With reflogs off, git appends to `logs/HEAD` only when it exists. Asked
-    // before the first write: a refusal here must leave the repository as it was.
-    let head_log = !reflog_turned_off(repo, s.command)? || log_exists(repo, "HEAD")?;
-    if let (Some(oid), Some((message, committer))) = (s.head_oid, s.create) {
-        create_ref(repo, kind, s.command, s.full, oid, Some((message, committer)))?;
+    if let Some(oid) = s.head_oid {
+        create_ref(repo, kind, s.command, s.full, oid, s.branch_log)?;
         if let Some(flag) = s.created {
             flag.set(true);
         }
     }
-    let created = s.create.is_some();
+    let created = creates;
     let after_branch = |what: String, source: std::io::Error| -> GitError {
         let what = if created {
             format!("{} and '{}' exists, but {what}", kind.done, s.full)
@@ -402,7 +402,7 @@ pub(crate) fn switch_head(repo: &WriteRepo, s: &HeadSwitch<'_>) -> Result<(), Gi
     lock.write_all(format!("ref: {}\n", s.full).as_bytes())
         .map_err(|e| after_branch("HEAD could not be written".to_string(), e))?;
     lock.commit().map_err(|e| after_branch("HEAD could not be replaced".to_string(), e.error))?;
-    if let (true, Some(oid), Some((_, committer))) = (head_log, s.head_oid, s.create) {
+    if let (Some(oid), Some(committer)) = (s.head_oid, s.head_log) {
         let from = match s.was {
             HeadTarget::Branch(b) => b.strip_prefix("refs/heads/").unwrap_or(b).to_string(),
             HeadTarget::Detached => oid.to_string(),
@@ -415,18 +415,13 @@ pub(crate) fn switch_head(repo: &WriteRepo, s: &HeadSwitch<'_>) -> Result<(), Gi
             time: &time,
         };
         append_head_reflog(repo, kind, Some(oid), oid, &sig, &copy_message(&format!("checkout: moving from {from} to {to}")))
-            .map_err(|e| match e {
-                GitError::Repository { operation, what, path, source, .. } => GitError::Repository {
-                    operation,
-                    what: format!(
-                        "{} and HEAD now names '{}', so do not run the command again; only {what} failed (logs/HEAD lacks this entry)",
-                        kind.done, s.full
-                    ),
-                    path,
-                    source,
-                    wrote: Wrote::Described,
-                },
-                other => other,
+            .map_err(|e| {
+                described(
+                    repo,
+                    kind,
+                    e,
+                    &format!("{} and HEAD now names '{}', so do not run the command again", kind.done, s.full),
+                )
             })?;
     }
     Ok(())
@@ -456,6 +451,36 @@ fn refuse_if_ref_locked(repo: &WriteRepo, command: &str, checked: &[std::path::P
     Ok(())
 }
 
+/// A failure of the `logs/HEAD` line after the ref was written, whatever kind
+/// of error it is: the text says the ref moved and the command must not run
+/// again, and [`Wrote::Described`] makes the hook transaction `committed`.
+fn described(repo: &WriteRepo, kind: MoveKind, e: GitError, lead: &str) -> GitError {
+    let tail = "(logs/HEAD lacks this entry)";
+    match e {
+        GitError::Repository { operation, what, path, source, .. } => GitError::Repository {
+            operation,
+            what: format!("{lead}; only {what} failed {tail}"),
+            path,
+            source,
+            wrote: Wrote::Described,
+        },
+        other => {
+            // A refusal's own text says nothing was written, which is false here.
+            let why = match &other {
+                GitError::WriteThroughLink { store, path, found, .. } => format!("'{path}' in {store} is {found}"),
+                other => other.to_string(),
+            };
+            GitError::Repository {
+                operation: kind.op,
+                what: format!("{lead}; only the logs/HEAD line failed {tail}"),
+                path: repo.git_dir().to_path_buf(),
+                source: Box::new(std::io::Error::other(why)),
+                wrote: Wrote::Described,
+            }
+        }
+    }
+}
+
 /// Append the line git writes to `logs/HEAD` when HEAD's branch moves:
 /// `<old> <new> <committer>\t<message>`, with the null oid as `old` for an
 /// unborn branch (the same line gix-ref writes to the branch's own log).
@@ -469,7 +494,7 @@ fn append_head_reflog(
 ) -> Result<(), GitError> {
     use crate::verbs::write::containment::Leaf;
     use std::io::Write;
-    let path = repo.check(std::path::Path::new("logs/HEAD"), Leaf::File)?;
+    let path = repo.check(std::path::Path::new("logs/HEAD"), Leaf::Ref)?;
     let mut line = format!("{} {} ", old.unwrap_or_else(|| new.kind().null()), new).into_bytes();
     committer
         .trim()
@@ -482,6 +507,12 @@ fn append_head_reflog(
         std::fs::create_dir_all(parent)
             .map_err(|e| GitError::repository(kind.op, "creating logs/", repo.git_dir(), e))?;
     }
+    // Git removes an empty directory tree in the way of a log, as gix-ref
+    // does for the branch's log. Only empty directories go: `remove_dir`
+    // fails on one that gained a file since the walk.
+    if path.is_dir() {
+        remove_empty_tree(&path).map_err(|e| GitError::repository(kind.op, "replacing an empty directory at logs/HEAD", repo.git_dir(), e))?;
+    }
     // One write call on an O_APPEND handle, so a concurrent appender's line
     // cannot land inside ours.
     std::fs::OpenOptions::new()
@@ -490,6 +521,19 @@ fn append_head_reflog(
         .open(&path)
         .and_then(|mut f| f.write_all(&line))
         .map_err(|e| GitError::repository(kind.op, "appending to logs/HEAD", repo.git_dir(), e))
+}
+
+/// Remove `dir` and the directories under it, deepest first, failing on the
+/// first entry that is not an empty directory.
+fn remove_empty_tree(dir: &std::path::Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            return Err(std::io::Error::other("the directory holds a file"));
+        }
+        remove_empty_tree(&entry.path())?;
+    }
+    std::fs::remove_dir(dir)
 }
 
 /// Everything that can refuse a ref move before anything is written: the
@@ -792,7 +836,8 @@ mod tests {
                 was,
                 head_oid: Some(oid),
                 full,
-                create: Some(("branch: Created from HEAD", &committer())),
+                branch_log: Some(("branch: Created from HEAD", &committer())),
+                head_log: Some(&committer()),
                 created: None,
             },
         )
@@ -855,5 +900,32 @@ mod tests {
         assert!(!text.to_lowercase().contains("nothing was"), "{text}");
         assert_eq!(std::fs::read_to_string(fx.common().join("HEAD")).expect("HEAD"), "ref: refs/heads/new\n");
         assert!(!fx.common().join("HEAD.lock").exists());
+    }
+
+    /// A link at `logs/HEAD` found after the branch moved is not a
+    /// `Repository` error, and used to come back as a plain refusal that said
+    /// nothing was written. Every failure after the ref write says the ref moved,
+    /// and the hook transaction that wrote it is `committed`, not `aborted`.
+    #[test]
+    fn any_failure_after_the_ref_moved_says_so_and_counts_as_written() {
+        let fx = Fixture::new();
+        let repo = fx.write_repo(false);
+        let log = fx.common().join("logs/HEAD");
+        std::fs::remove_file(&log).expect("rm");
+        std::os::unix::fs::symlink(fx.outside.join("logs_head"), &log).expect("link");
+        let err = move_main_with_deadline(&fx).expect_err("logs/HEAD is a link");
+        let text = err.to_string();
+        assert!(text.contains("do not run the command again") && text.contains("now points at"), "{text}");
+        assert!(crate::verbs::write::hookrun::ref_written(&err), "{text}");
+        assert!(!text.contains("nothing was written"), "{text}");
+        // The branch did move, which is what the message claims.
+        let main = git_stdout(&fx.repo, &["rev-parse", "main"]);
+        assert_ne!(main, git_stdout(&fx.repo, &["rev-parse", "main~1"]).as_str(), "the commit moved the branch");
+        // The same error through the helper the switch path uses.
+        let walk = repo.check(std::path::Path::new("logs/HEAD"), crate::verbs::write::containment::Leaf::File).expect_err("link");
+        assert!(!matches!(walk, GitError::Repository { .. }), "premise: a walk refusal is not a Repository error: {walk}");
+        let err = described(&repo, MoveKind::SWITCH, walk, "the branch was created and HEAD now names 'x', so do not run the command again");
+        assert!(crate::verbs::write::hookrun::ref_written(&err), "{err}");
+        assert!(err.to_string().contains("do not run the command again"), "{err}");
     }
 }

@@ -1710,7 +1710,7 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   dots and spaces). A hostile index naming `.git ` can be committed; real
   git's `verify_path` would refuse it.
 - **W19 — commit settings checked, not all of git's.** Refused: `commit.gpgSign`,
-  `tag.gpgSign`, `i18n.commitEncoding`, `commit.cleanup` other than
+  `i18n.commitEncoding`, `commit.cleanup` other than
   `default`/`whitespace`, `core.logAllRefUpdates=false`. Ignored without
   saying so: `commit.template` (no editor), `commit.status`, `commit.verbose`,
   `core.commentChar`, `user.useConfigOnly`, `trailer.*`. User-level
@@ -1874,8 +1874,11 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   `branch.<name>.remote` and `.merge` when the start is a remote-tracking
   branch of a configured remote (or, with `branch.autoSetupMerge=always`, any
   branch). This shell never writes configuration, so a start under
-  `refs/remotes/`, or `autoSetupMerge` of `always` or `inherit`, exits 4 unless
+  `refs/remotes/`, or `autoSetupMerge` of `always`, exits 4 unless
   `--no-track` is given; `branch.autoSetupMerge=false` allows it. With
+  `inherit` the start is refused only when it is a local branch (`HEAD` and no
+  start count as HEAD's branch) with `branch.<name>.remote` or `.merge`; with
+  `always`, for every start. With
   `simple` the start is refused only when a fetch refspec maps a branch called
   like the new one onto it, as git writes tracking only then; a negative
   refspec, or a refspec this cannot read, refuses the start (git might write
@@ -1894,8 +1897,8 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   - On an unborn HEAD `switch -c x` rewrites `HEAD` and writes no reflog and
     no branch, as git does; it then needs no identity.
   - `branch` in a bare repository exits 4 unless `core.logAllRefUpdates` is
-    set to true: git writes no reflog there by default and this shell always
-    writes one. `tag` works in a bare repository. `core.logAllRefUpdates=always`
+    set to true or the branch's log file exists: git writes no reflog there
+    by default and this shell writes one for a new branch. `tag` works in a bare repository. `core.logAllRefUpdates=always`
     refuses `tag`, which git would then log. `core.commentChar` and
     `core.commentString` refuse an annotated tag, whose `#` lines this drops.
   - `tag -F -` and `-F` of a file over 1 MiB or not UTF-8 refuse, as for
@@ -2021,11 +2024,26 @@ each with a hint (`src/spelling.rs`), and each could become a real feature.
   in `tests/write_hooks.rs`, ignored.
 - **W70 — ref and reflog writes: where this still differs from git.**
   - A tree of empty directories at a ref or its reflog is replaced only to 32
-    levels; a deeper one refuses (exit 4) as if it held a file.
-  - With `core.logAllRefUpdates=false`, `commit`, `reset` and a bare
-    repository with the setting unset still refuse (exit 4); `branch` and
-    `switch -c` write a log only where the file exists, as git does.
+    levels (31 directories under the leaf pass); a deeper one refuses (exit 4)
+    with its own text. The emptiness is checked, then gix-ref removes the tree
+    with `gix_tempfile::remove_dir::empty_depth_first`, which calls
+    `std::fs::remove_dir` only (gix-fs 0.22, `dir/remove.rs`), never a
+    recursive delete: a file that appears in between makes the write fail
+    after the check, and nothing is deleted. The `logs/HEAD` line is replaced
+    here by the same rule.
+  - With `core.logAllRefUpdates` false, `commit` and `reset` refuse (exit 4).
+    A bare repository with the setting unset refuses `branch` (exit 4) when
+    the branch has no log file, and `commit` and `reset` always; git makes the
+    ref with no log. `core.logAllRefUpdates` is read as git reads it: `always`
+    or a boolean, and `never` or any other word refuses (git dies on it).
+  - A hard-linked ref file refuses a move (exit 4). Measured on git 2.56:
+    `git commit` on a branch file with a second name succeeds and leaves the
+    other name as it was, because git renames the lock file over it. The
+    containment walk gives a ref the hard-link refusal of an in-place write;
+    a `Replaced` leaf for an existing ref path would fix it.
   - A new tag's line in an existing log is git's `tag: tagging <abbrev>
     (<subject>, <UTC date>)`. A commit subject that is not UTF-8 refuses the
     tag, `GIT_REFLOG_ACTION` is not read, and a log file that is a link
     refuses (exit 4) where git writes through it.
+  - A log file that cannot be appended to (mode 0444) stops the write before
+    the ref is made, as in git; the provider hears `aborted`.

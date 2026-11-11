@@ -160,31 +160,37 @@ impl WriteRepo {
     /// (`refs/bisect/*`, `HEAD`, `logs/HEAD`) is checked under the
     /// worktree's git directory and the rest under the common one.
     pub(crate) fn check_ref_write(&self, refname: &str, also_head: bool) -> Result<Vec<PathBuf>, GitError> {
-        self.check_ref_write_with(refname, also_head, true)
+        self.check_ref_write_as(refname, true, also_head)
     }
 
-    /// [`Self::check_ref_write`] for a ref the write gives no reflog (a tag).
-    /// Git opens the ref's log only if one exists, and a directory there is
-    /// not an error, so only the directories above the log are walked.
+    /// [`Self::check_ref_write`] for a ref the write gives no reflog (a tag,
+    /// or a branch with reflogs off and no log file). Git opens the ref's log
+    /// only if one exists, and a directory there is not an error, so only the
+    /// directories above the log are walked.
     pub(crate) fn check_ref_write_unlogged(&self, refname: &str) -> Result<Vec<PathBuf>, GitError> {
-        self.check_ref_write_with(refname, false, false)
+        self.check_ref_write_as(refname, false, false)
     }
 
-    fn check_ref_write_with(&self, refname: &str, also_head: bool, logged: bool) -> Result<Vec<PathBuf>, GitError> {
+    /// The write set of a ref move: `ref_log` says the ref's own reflog is
+    /// written, `head_log` that `logs/HEAD` is too.
+    pub(crate) fn check_ref_write_as(&self, refname: &str, ref_log: bool, head_log: bool) -> Result<Vec<PathBuf>, GitError> {
         let mut rels = vec![refname.to_string(), format!("{refname}.lock")];
-        if logged {
+        if ref_log {
             rels.push(format!("logs/{refname}"));
         }
-        if also_head && refname != "HEAD" {
+        if head_log && refname != "HEAD" {
             rels.push("logs/HEAD".to_string());
         }
         rels.push("packed-refs".to_string());
         rels.push("packed-refs.lock".to_string());
-        // The ref and its reflog may be an empty directory tree, which git
-        // removes; the lock and `packed-refs` are files only.
-        let leaf_of = |rel: &str| if rel == refname || rel.strip_prefix("logs/") == Some(refname) { Leaf::Ref } else { Leaf::File };
+        // A ref and a reflog may be an empty directory tree, which git
+        // removes; HEAD, the locks and `packed-refs` are files only.
+        let leaf_of = |rel: &str| {
+            let is_ref = rel != "HEAD" && (rel == refname || rel.strip_prefix("logs/") == Some(refname) || rel == "logs/HEAD");
+            if is_ref { Leaf::Ref } else { Leaf::File }
+        };
         let mut paths: Vec<PathBuf> = rels.iter().map(|rel| self.check(Path::new(rel), leaf_of(rel))).collect::<Result<_, _>>()?;
-        if !logged {
+        if !ref_log {
             if let Some(dir) = Path::new("logs").join(refname).parent() {
                 paths.push(self.check(dir, Leaf::Dir)?);
             }

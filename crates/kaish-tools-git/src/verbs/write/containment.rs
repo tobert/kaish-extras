@@ -16,6 +16,9 @@
 //! at rest, not a concurrent attacker, and `docs/embedding-git.md` says so.
 //! `openat2(RESOLVE_BENEATH)` would close it (kaish #276).
 //!
+//! One kind of directory is not refused: an empty directory tree where a ref
+//! or a reflog goes ([`Leaf::Ref`]), which git removes before it writes.
+//!
 //! Refusals name the offending component relative to its root, and never an
 //! absolute path or a link target. The existence-oracle rule: a refusal that
 //! echoed where a link points would let a hostile repository ask "does this
@@ -69,7 +72,7 @@ pub(crate) enum Leaf {
     /// makes them on purpose. A link, a directory or anything not a regular
     /// file still refuses.
     Replaced,
-    /// A ref, or the reflog of one, that a write creates or appends to. As
+    /// A ref, or the reflog of one (`logs/HEAD` included), that a write creates or appends to. As
     /// [`Leaf::File`], and a tree of empty directories also passes: git
     /// removes one in the way of a ref or a reflog and writes the file
     /// (checked on git 2.56 for `branch` and `tag`). A directory that holds a
@@ -246,10 +249,11 @@ pub(crate) fn check_beneath(
                     return Err(refuse(&seen, "a directory", THEN_NOT_FILE));
                 }
             } else if leaf == Leaf::Ref && ty.is_dir() {
-                if !only_empty_directories(&abs, EMPTY_TREE_DEPTH) {
-                    return Err(refuse(&seen, "a directory that holds files", THEN_NOT_FILE));
+                match empty_tree(&abs, EMPTY_TREE_DEPTH) {
+                    EmptyTree::Empty => continue,
+                    EmptyTree::HoldsFiles => return Err(refuse(&seen, "a directory that holds files", THEN_NOT_FILE)),
+                    EmptyTree::TooDeep => return Err(refuse(&seen, "a tree of empty directories deeper than 32 levels", THEN_NOT_FILE)),
                 }
-                continue;
             } else if !ty.is_file() {
                 return Err(refuse(&seen, "not a regular file", THEN_NOT_FILE));
             }
@@ -261,25 +265,39 @@ pub(crate) fn check_beneath(
     Ok(abs)
 }
 
-/// How deep [`only_empty_directories`] looks. A tree deeper than this is
-/// refused as if it held a file; git has no such bound, and no real
+/// How many levels of directories [`empty_tree`] looks through, the leaf
+/// itself counted: a tree with 31 directories under the leaf passes and one
+/// with 32 is [`EmptyTree::TooDeep`]. Git has no such bound, and no real
 /// repository leaves a tree this deep behind.
 const EMPTY_TREE_DEPTH: usize = 32;
 
-/// Whether `dir` holds nothing but directories, to `depth` levels, so git
-/// would remove it. A link, a file, anything unreadable, or a tree deeper
-/// than `depth` answers false.
-fn only_empty_directories(dir: &Path, depth: usize) -> bool {
-    let Some(depth) = depth.checked_sub(1) else { return false };
-    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+#[derive(Debug, PartialEq, Eq)]
+enum EmptyTree {
+    /// Nothing but directories, so git would remove it.
+    Empty,
+    /// A file, a link or something unreadable is in it.
+    HoldsFiles,
+    /// Only directories, but more levels than the bound.
+    TooDeep,
+}
+
+fn empty_tree(dir: &Path, depth: usize) -> EmptyTree {
+    let Some(depth) = depth.checked_sub(1) else { return EmptyTree::TooDeep };
+    let Ok(entries) = std::fs::read_dir(dir) else { return EmptyTree::HoldsFiles };
+    let mut deep = false;
     for entry in entries {
-        let Ok(entry) = entry else { return false };
+        let Ok(entry) = entry else { return EmptyTree::HoldsFiles };
         // `DirEntry::file_type` does not follow a link.
-        if !entry.file_type().is_ok_and(|t| t.is_dir()) || !only_empty_directories(&entry.path(), depth) {
-            return false;
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            return EmptyTree::HoldsFiles;
+        }
+        match empty_tree(&entry.path(), depth) {
+            EmptyTree::Empty => {}
+            EmptyTree::HoldsFiles => return EmptyTree::HoldsFiles,
+            EmptyTree::TooDeep => deep = true,
         }
     }
-    true
+    if deep { EmptyTree::TooDeep } else { EmptyTree::Empty }
 }
 
 const THEN_LEAVES: &str = "A write must stay beneath one directory of the repository, and this \
@@ -865,5 +883,41 @@ mod tests {
         // And `.git` is only special in the work tree: the git directory's
         // own tree has no such rule.
         repo.check(Path::new("refs/heads/.git"), Leaf::File).expect("not a work tree path");
+    }
+
+    /// The bound of [`EMPTY_TREE_DEPTH`], at a ref and at a reflog: 31
+    /// directories under the leaf pass, 32 refuse with their own text, and a
+    /// file anywhere refuses as a directory that holds files.
+    #[test]
+    fn an_empty_directory_tree_passes_to_31_levels_and_refuses_at_32() {
+        for leaf_rel in ["refs/heads/x", "logs/refs/heads/x"] {
+            for (levels, deep) in [(1, false), (31, false), (32, true), (40, true)] {
+                let fx = Fixture::new();
+                let repo = fx.write_repo(false);
+                let mut dir = fx.common().join(leaf_rel);
+                for _ in 0..levels {
+                    dir.push("d");
+                }
+                std::fs::create_dir_all(&dir).expect("tree");
+                let r = repo.check(Path::new(leaf_rel), Leaf::Ref);
+                if deep {
+                    let text = r.expect_err("too deep").to_string();
+                    assert!(text.contains("deeper than 32 levels"), "{leaf_rel} {levels}: {text}");
+                } else {
+                    r.unwrap_or_else(|e| panic!("{leaf_rel} {levels}: {e}"));
+                }
+            }
+            let fx = Fixture::new();
+            let repo = fx.write_repo(false);
+            let dir = fx.common().join(leaf_rel).join("d");
+            std::fs::create_dir_all(&dir).expect("tree");
+            std::fs::write(dir.join("f"), "x").expect("file");
+            let text = repo.check(Path::new(leaf_rel), Leaf::Ref).expect_err("a file").to_string();
+            assert!(text.contains("a directory that holds files"), "{leaf_rel}: {text}");
+            // A file leaf and a missing leaf pass: the negative controls.
+            let fx = Fixture::new();
+            let repo = fx.write_repo(false);
+            assert!(repo.check(Path::new(leaf_rel), Leaf::Ref).is_ok(), "{leaf_rel}: nothing there");
+        }
     }
 }

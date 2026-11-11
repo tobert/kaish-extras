@@ -531,7 +531,8 @@ A build with the `commit` cargo feature (off by default) has:
 - `WritableGitConfig::with_hooks` and `with_identity`, and the types they take
   (`GitHooks`, `Identity`). `with_hooks` is read by `commit`, `reset`, `branch`,
   `tag`, `switch -c` and `checkout -b`; `with_identity` by those verbs when
-  they write a reflog line or a tag, and by `var`.
+  they write a reflog line or a tag (a branch writes none when
+  `core.logAllRefUpdates` is false and its log file is absent), and by `var`.
   `with_rewrite_policy` takes a `RewritePolicy`, described next.
 - The per-profile router text. A tool without write settings answers `git add`
   with "this git is read-only". A tool with them never says that: for a git
@@ -574,7 +575,7 @@ nothing counts as published. Cost, trust and the other limits are
   `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` are optional. With nothing to
   use, `commit`, `var`, `reset`, `branch`, `tag`, `switch -c` and `checkout -b`
   exit 2 naming both variables and the pin (a reset or a branch needs a
-  committer only). Repo-local
+  committer only, and a branch needs one only when a reflog line is written). Repo-local
   `user.name`/`user.email` are not read. A date with no offset and the clock
   are UTC.
 - *Hooks.* This crate spawns nothing. Without a provider, a hook git would run
@@ -652,7 +653,8 @@ leading `-` and git's ref-format rules refuse, exit 2); a name that exists, or
 that would sit above or below another ref (`a` and `a/b`), refuses with exit
 1. A branch gets git's reflog line, `branch: Created from <start as typed>`
 (the current branch's name, or `HEAD` when detached, when no start is given).
-A tag gets no reflog, as in git. An annotated tag is a tag object written byte
+A tag gets no reflog line, as in git, unless its log file already exists: git
+appends to it, and so does this. An annotated tag is a tag object written byte
 for byte as git writes it, with the committer identity as tagger, and `-m`
 alone makes one, as in git. `switch -c` and `checkout -b` make the branch at
 HEAD, point `HEAD` at it, and append `checkout: moving from <old> to <new>` to
@@ -665,13 +667,15 @@ the upstream flags are refused with the command to type instead. Every
 creation passes the containment walk over what it writes before it writes: a
 branch walks the ref, its lock, its reflog and `packed-refs`; `switch -c` and
 `checkout -b` add `logs/HEAD`; a tag walks the ref, its lock and `packed-refs`
-and the directories above its (unwritten) log path, so a directory at the log
-path does not stop it, as in git. A planted link refuses (exit 4); a lock that
+and the directories above its log path (the log itself too, when it is a file
+and gets the line), so a directory at the log path does not stop it, as in
+git. An empty directory tree where a ref or a reflog goes is replaced, as git
+replaces it. A planted link refuses (exit 4); a lock that
 exists is never removed (exit 4). An annotated tag writes its object before the
 ref, and a commit writes its objects before the branch moves, so a refusal or
 an I/O failure after that says the objects remain, that nothing refers to them
 and that `git gc` prunes them. The differences from git are `docs/issues.md`
-W36-W47.
+W37-W39, W47 and W70.
 
 What the verbs do not do, stated plainly:
 

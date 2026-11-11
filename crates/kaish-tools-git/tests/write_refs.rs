@@ -2092,3 +2092,309 @@ async fn auto_setup_merge_simple_refuses_a_start_when_a_negative_refspec_is_conf
     assert_eq!(support::Fingerprint::take(&p.git_dir(true)).differences_from(&before), Vec::<String>::new());
     assert_eq!(p.ours("", &["branch", "--no-track", "other", "origin/feat"]).await.code, 0);
 }
+
+// ── review round: logs/HEAD, identity, settings, bare, read-only logs ──────
+
+fn off(d: &Path) {
+    base(d);
+    support::git(d, &["config", "core.logAllRefUpdates", "false"]);
+}
+
+/// An empty directory tree at `logs/HEAD` is removed by git before it writes
+/// the line, for `switch -c`, `checkout -b` and `commit`, and in a linked
+/// worktree's own log. The precheck and the write after the move agree.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_directory_at_logs_head_is_replaced_as_git_replaces_it() {
+    for argv in [vec!["switch", "-c", "x"], vec!["checkout", "-b", "x"], vec!["commit", "--allow-empty", "-m", "c"]] {
+        let p = Pair::new(&|d| {
+            base(d);
+            std::fs::remove_file(d.join(".git/logs/HEAD")).expect("rm");
+            std::fs::create_dir_all(d.join(".git/logs/HEAD/sub")).expect("dir");
+        });
+        let verb = if argv[0] == "checkout" { vec!["checkout", "-q", "-b", "x"] } else { argv.clone() };
+        let (code, _, gerr) = p.twin(&verb);
+        assert_eq!(code, 0, "git {argv:?}: {gerr}");
+        let r = p.ours("", &argv).await;
+        assert_eq!(r.code, 0, "{argv:?}: {}", r.err);
+        p.assert_same(&format!("{argv:?}"));
+    }
+    // The negative control: a directory that holds a file is refused by both.
+    let p = Pair::new(&|d| {
+        base(d);
+        std::fs::remove_file(d.join(".git/logs/HEAD")).expect("rm");
+        std::fs::create_dir_all(d.join(".git/logs/HEAD/sub")).expect("dir");
+        std::fs::write(d.join(".git/logs/HEAD/sub/f"), "x").expect("file");
+    });
+    let before = support::Fingerprint::take(&p.git_dir(true));
+    let r = p.ours("", &["switch", "-c", "x"]).await;
+    assert_eq!(r.code, 4, "{}", r.err);
+    assert_eq!(support::Fingerprint::take(&p.git_dir(true)).differences_from(&before), Vec::<String>::new());
+
+    // A linked worktree's logs/HEAD.
+    let p = Pair::new(&base);
+    for repo in [&p.ours, &p.twin] {
+        let wt = repo.parent().expect("parent").join(format!("{}-wt", repo.file_name().expect("name").to_string_lossy()));
+        support::git(repo, &["worktree", "add", "-q", "-b", "side", wt.to_str().expect("utf8")]);
+        let own = std::fs::read_dir(repo.join(".git/worktrees")).expect("worktrees").next().expect("one").expect("entry").path();
+        std::fs::remove_file(own.join("logs/HEAD")).expect("rm");
+        std::fs::create_dir_all(own.join("logs/HEAD/sub")).expect("dir");
+    }
+    let twin_wt = p.twin.parent().expect("parent").join("twin-wt");
+    assert_eq!(git_raw(&twin_wt, &["switch", "-q", "-c", "y"]).0, 0);
+    let r = p.ours("../ours-wt", &["switch", "-c", "y"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    let own = |repo: &Path| {
+        let d = std::fs::read_dir(repo.join(".git/worktrees")).expect("worktrees").next().expect("one").expect("entry").path();
+        std::fs::read(d.join("logs/HEAD")).expect("worktree logs/HEAD")
+    };
+    assert!(own(&p.ours) == own(&p.twin), "worktree logs/HEAD differs");
+}
+
+/// With reflogs off and no log file, no line is written, so no identity is
+/// read: git makes the branch with no identity and with a bad date. A log file
+/// that exists brings the identity back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_branch_that_gets_no_reflog_line_needs_no_identity() {
+    let bad_date = [("GIT_COMMITTER_DATE", "garbage")];
+    for (argv, vars) in [
+        (vec!["branch", "nolog"], &[][..]),
+        (vec!["branch", "nolog"], &bad_date[..]),
+        (vec!["switch", "-c", "nolog"], &[][..]),
+        (vec!["checkout", "-b", "nolog"], &bad_date[..]),
+    ] {
+        let p = Pair::new(&|d| {
+            off(d);
+            std::fs::remove_file(d.join(".git/logs/HEAD")).expect("rm");
+        });
+        let verb = if argv[0] == "checkout" { vec!["checkout", "-q", "-b", "nolog"] } else { argv.clone() };
+        assert_eq!(p.twin(&verb).0, 0, "git {argv:?}");
+        let r = run_with(&p.fx.root(), "/mnt/ours", &argv, vars, commit_profile()).await;
+        assert_eq!(r.code, 0, "{argv:?} {vars:?}: {}", r.err);
+        p.assert_same(&format!("{argv:?}"));
+    }
+    // Control: an existing branch log means a line is written, so no identity refuses.
+    let p = Pair::new(&|d| {
+        off(d);
+        std::fs::create_dir_all(d.join(".git/logs/refs/heads")).expect("dir");
+        std::fs::write(d.join(".git/logs/refs/heads/nolog"), "stale\n").expect("log");
+    });
+    let before = support::Fingerprint::take(&p.git_dir(true));
+    let r = run_with(&p.fx.root(), "/mnt/ours", &["branch", "nolog"], &[], commit_profile()).await;
+    assert_eq!(r.code, 2, "{}", r.err);
+    assert_eq!(support::Fingerprint::take(&p.git_dir(true)).differences_from(&before), Vec::<String>::new());
+}
+
+fn tracking_written(repo: &Path, name: &str) -> bool {
+    git_raw(repo, &["config", "--get-regexp", &format!("^branch\\.{name}\\.")]).0 == 0
+}
+
+/// `simple` and a fetch refspec whose source is not a branch: git writes no
+/// tracking. `inherit` copies the start's upstream and writes nothing for a
+/// start with none; `always` and `inherit` also read HEAD's branch when there
+/// is no start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tracking_settings_decide_as_git_decides_for_each_start() {
+    type Setup = fn(&Path);
+    fn pulls(d: &Path) {
+        base(d);
+        support::git(d, &["config", "remote.origin.url", "/nowhere"]);
+        support::git(d, &["config", "remote.origin.fetch", "+refs/pull/*:refs/remotes/origin/pr/*"]);
+        support::git(d, &["update-ref", "refs/remotes/origin/pr/1", "HEAD"]);
+        support::git(d, &["config", "branch.autoSetupMerge", "simple"]);
+    }
+    fn inherit_none(d: &Path) {
+        base(d);
+        support::git(d, &["config", "remote.origin.url", "/nowhere"]);
+        support::git(d, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+        support::git(d, &["update-ref", "refs/remotes/origin/feat", "HEAD"]);
+        support::git(d, &["config", "branch.autoSetupMerge", "inherit"]);
+    }
+    fn inherit_up(d: &Path) {
+        inherit_none(d);
+        support::git(d, &["config", "branch.main.remote", "."]);
+        support::git(d, &["config", "branch.main.merge", "refs/heads/other"]);
+    }
+    fn always(d: &Path) {
+        base(d);
+        support::git(d, &["config", "branch.autoSetupMerge", "always"]);
+    }
+    // (label, setup, argv, git writes tracking)
+    let cases: Vec<(&str, Setup, Vec<&str>, bool)> = vec![
+        ("simple, a source that is no branch", pulls as Setup, vec!["branch", "p1", "origin/pr/1"], false),
+        ("inherit, a start with no upstream", inherit_none, vec!["branch", "n1", "main"], false),
+        ("inherit, HEAD with no upstream", inherit_none, vec!["branch", "n2", "HEAD"], false),
+        ("inherit, no start, no upstream", inherit_none, vec!["branch", "n3"], false),
+        ("inherit, a remote-tracking start", inherit_none, vec!["branch", "n4", "origin/feat"], false),
+        ("inherit, start with an upstream", inherit_up, vec!["branch", "u1", "main"], true),
+        ("inherit, start spelled as a full name", inherit_up, vec!["branch", "u2", "refs/heads/main"], true),
+        ("inherit, HEAD with an upstream", inherit_up, vec!["branch", "u3", "HEAD"], true),
+        ("inherit, no start, with an upstream", inherit_up, vec!["branch", "u4"], true),
+        ("inherit, switch -c with an upstream", inherit_up, vec!["switch", "-c", "u5"], true),
+        ("always, no start", always, vec!["branch", "a1"], true),
+        ("always, switch -c", always, vec!["switch", "-c", "a2"], true),
+    ];
+    for (label, setup, argv, tracks) in cases {
+        let p = Pair::new(&setup);
+        let name = argv.iter().find(|a| !["branch", "switch", "-c"].contains(a)).copied().expect("name");
+        let (code, _, gerr) = p.twin(&argv);
+        assert_eq!(code, 0, "[{label}] git: {gerr}");
+        assert_eq!(tracking_written(&p.twin, name), tracks, "[{label}] premise");
+        let before = support::Fingerprint::take(&p.git_dir(true));
+        let r = p.ours("", &argv).await;
+        if tracks {
+            assert_eq!(r.code, 4, "[{label}] {}", r.err);
+            assert_eq!(support::Fingerprint::take(&p.git_dir(true)).differences_from(&before), Vec::<String>::new(), "[{label}]");
+        } else {
+            assert_eq!(r.code, 0, "[{label}] {}", r.err);
+            assert!(!tracking_written(&p.ours, name), "[{label}] wrote tracking");
+            p.assert_same(label);
+        }
+    }
+}
+
+/// `core.logAllRefUpdates` is read as git reads it: `always`, or a boolean.
+/// `never` and `maybe` are bad booleans, on which git dies (exit 128) for tag,
+/// branch, switch and commit; this refuses with exit 4 and writes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bad_log_all_ref_updates_refuses_every_verb_as_git_dies_on_it() {
+    for value in ["maybe", "never", ""] {
+        for argv in [
+            vec!["tag", "t"],
+            vec!["tag", "-a", "t", "-m", "m"],
+            vec!["branch", "b"],
+            vec!["switch", "-c", "b"],
+            vec!["commit", "--allow-empty", "-m", "c"],
+        ] {
+            let p = Pair::new(&|d| {
+                base(d);
+                support::git(d, &["config", "core.logAllRefUpdates", value]);
+            });
+            let (code, _, gerr) = p.twin(&argv);
+            // An empty value is false to git, not bad: the control.
+            if value.is_empty() {
+                assert_eq!(code, 0, "git {argv:?} with an empty value: {gerr}");
+                continue;
+            }
+            assert_eq!(code, 128, "git {argv:?}={value}: {gerr}");
+            let before = support::Fingerprint::take(&p.git_dir(true));
+            let r = p.ours("", &argv).await;
+            assert_eq!(r.code, 4, "{argv:?}={value}: {}", r.err);
+            assert!(r.err.contains("core.logAllRefUpdates") && r.err.contains("not a boolean"), "{argv:?}={value}: {}", r.err);
+            assert_eq!(support::Fingerprint::take(&p.git_dir(true)).differences_from(&before), Vec::<String>::new());
+        }
+    }
+    // Spellings git reads as a boolean are not refused.
+    for value in ["yes", "on", "1", "2", "TRUE", "Always"] {
+        let p = Pair::new(&|d| {
+            base(d);
+            support::git(d, &["config", "core.logAllRefUpdates", value]);
+        });
+        let r = p.ours("", &["branch", "b"]).await;
+        assert_eq!(r.code, 0, "{value}: {}", r.err);
+    }
+}
+
+/// A bare repository with the setting unset logs nothing new, and still
+/// appends to a log file that exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bare_repository_appends_to_an_existing_branch_log_as_git_does() {
+    let p = Pair::new(&base);
+    for (from, to) in [(&p.ours, "ours-bare"), (&p.twin, "twin-bare")] {
+        let dest = p.fx.path(to);
+        support::git(from, &["clone", "-q", "--bare", ".", dest.to_str().expect("utf8")]);
+        std::fs::create_dir_all(dest.join("logs/refs/heads")).expect("dir");
+        std::fs::write(dest.join("logs/refs/heads/nb"), "stale\n").expect("log");
+    }
+    let (ours_bare, twin_bare) = (p.fx.path("ours-bare"), p.fx.path("twin-bare"));
+    assert_eq!(git_raw(&twin_bare, &["branch", "nb"]).0, 0);
+    let r = p.ours("../ours-bare", &["branch", "nb"]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(logs_of(&ours_bare), logs_of(&twin_bare));
+    assert!(logs_of(&ours_bare)["logs/refs/heads/nb"].starts_with("stale\n0000"), "the line was appended");
+}
+
+/// The tag cases of the log-off test: an existing log is appended to, for a
+/// lightweight and an annotated tag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tags_with_reflogs_off_append_to_an_existing_log_only() {
+    for argv in [vec!["tag", "x"], vec!["tag", "-a", "x", "-m", "m"]] {
+        for (log, label) in [(true, "existing log"), (false, "no log")] {
+            let p = Pair::new(&|d| {
+                off(d);
+                if log {
+                    std::fs::create_dir_all(d.join(".git/logs/refs/tags")).expect("dir");
+                    std::fs::write(d.join(".git/logs/refs/tags/x"), "stale\n").expect("log");
+                }
+            });
+            assert_eq!(p.twin(&argv).0, 0, "git {argv:?} {label}");
+            let r = p.ours("", &argv).await;
+            assert_eq!(r.code, 0, "{argv:?} {label}: {}", r.err);
+            p.assert_same(&format!("{argv:?} {label}"));
+            assert_eq!(logs_of(&p.git_dir(true)).contains_key("logs/refs/tags/x"), log, "{label}");
+        }
+    }
+}
+
+/// A log file git cannot append to stops it before the ref is made (exit 128,
+/// no ref). This shell must not leave the ref behind and say nothing changed,
+/// nor claim the ref exists when it does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_only_existing_log_leaves_no_ref_as_in_git() {
+    use std::os::unix::fs::PermissionsExt;
+    for (verb, name, log) in [("tag", "x", "logs/refs/tags/x"), ("branch", "nb", "logs/refs/heads/nb")] {
+        let p = Pair::new(&|d| {
+            base(d);
+            let path = d.join(".git").join(log);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+            std::fs::write(&path, "stale\n").expect("log");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).expect("chmod");
+        });
+        if std::fs::OpenOptions::new().append(true).open(p.git_dir(true).join(log)).is_ok() {
+            return; // running as root
+        }
+        let (code, _, _) = p.twin(&[verb, name]);
+        assert_ne!(code, 0, "git {verb} fails on a read-only log");
+        let git_has = |repo: &Path| git_raw(repo, &["show-ref", "--verify", "-q", &format!("refs/{}/{name}", if verb == "tag" { "tags" } else { "heads" })]).0 == 0;
+        assert!(!git_has(&p.twin), "premise: git left no ref");
+        let r = p.ours("", &[verb, name]).await;
+        assert_ne!(r.code, 0, "{verb}: {}", r.err);
+        assert!(!git_has(&p.ours), "{verb}: the ref was made though its log could not be appended: {}", r.err);
+    }
+}
+
+/// A directory that holds a file at a log path: git leaves it alone for a tag,
+/// and for a branch with reflogs off; it refuses a branch with reflogs on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_non_empty_directory_at_a_log_path_is_handled_as_git_handles_it() {
+    let plant = |d: &Path, log: &str| {
+        let dir = d.join(".git").join(log);
+        std::fs::create_dir_all(dir.join("sub")).expect("dir");
+        std::fs::write(dir.join("f"), "x").expect("file");
+    };
+    // (argv, setup config off, log path, git succeeds)
+    for (argv, is_off, log, ok) in [
+        (vec!["tag", "x"], false, "logs/refs/tags/x", true),
+        (vec!["tag", "-a", "x", "-m", "m"], false, "logs/refs/tags/x", true),
+        (vec!["branch", "x"], false, "logs/refs/heads/x", false),
+        (vec!["branch", "x"], true, "logs/refs/heads/x", true),
+        (vec!["switch", "-c", "x"], false, "logs/refs/heads/x", false),
+        (vec!["switch", "-c", "x"], true, "logs/refs/heads/x", true),
+    ] {
+        let label = format!("{argv:?} off={is_off}");
+        let p = Pair::new(&|d| {
+            if is_off { off(d) } else { base(d) }
+            plant(d, log);
+        });
+        let (code, _, gerr) = p.twin(&argv);
+        assert_eq!(code == 0, ok, "[{label}] premise: {gerr}");
+        let before = support::Fingerprint::take(&p.git_dir(true));
+        let r = p.ours("", &argv).await;
+        if ok {
+            assert_eq!(r.code, 0, "[{label}] {}", r.err);
+            p.assert_same(&label);
+        } else {
+            assert_eq!(r.code, 4, "[{label}] {}", r.err);
+            assert_eq!(support::Fingerprint::take(&p.git_dir(true)).differences_from(&before), Vec::<String>::new());
+        }
+    }
+}
