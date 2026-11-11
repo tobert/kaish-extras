@@ -759,7 +759,7 @@ does not borrow the author's.
 | `--no-edit` or `--reset-author` without `--amend`; `--reset-author` with `--author` | 2 | usage |
 | `--fixup`, `--squash` | 2 | no autosquash |
 | `-S`, `--gpg-sign` | 2 | this shell never signs |
-| `commit.gpgSign` or `tag.gpgSign` true in the repository's config | 4 | same |
+| `commit.gpgSign` true in the repository's config | 4 | same |
 | `-p`, `--interactive` | 2 | no terminal |
 | `-e`, `-v`, no `-m` and no `-F` | 2 | no editor |
 | `-i`, `-m` with `-F`, `-F -`, `-a` with paths, `--only` with no paths | 2 | usage |
@@ -769,7 +769,7 @@ does not borrow the author's.
 | a named path git does not know | 1 | as git |
 | the branch moved while the commit was made | 1 | names the ref and both oids |
 | a hook present and no hook provider; `--no-verify` with a hook present and no provider | 4 | names the hook |
-| `i18n.commitEncoding`, `commit.cleanup` other than `default`/`whitespace`, `core.logAllRefUpdates=false` | 4 | the commit would differ from git's |
+| `i18n.commitEncoding`, `commit.cleanup` other than `default`/`whitespace`, `core.logAllRefUpdates=false` (a bad boolean refuses too, as git dies on it) | 4 | the commit would differ from git's |
 | a merge, rebase, ... in progress; a split or sparse index; the other states the index verbs refuse | 4 | design section 4 |
 | a symbolic link or hard link in the ref's write set (ref, `.lock`, reflog, `logs/HEAD`, `packed-refs`) | 4 | design section 6.1 |
 | `index.lock` or `<ref>.lock` already present | 4 | not removed |
@@ -885,7 +885,9 @@ and so does a name that would sit inside another (`a` beside `a/b`).
 that span refuses with exit 1 rather than saying there are fewer). The
 reflog line is `branch: Created from <start as typed>`; with no start it names
 the current branch, or `HEAD` when detached, as git does. A branch needs an
-identity for that line (the variables or the pinned one). An unborn HEAD has
+identity for that line (the variables or the pinned one), unless
+`core.logAllRefUpdates` is false and the branch's log file does not exist: git
+writes no line then and reads no identity. An unborn HEAD has
 nothing to start from (exit 1). A start that is a remote-tracking branch makes
 git write tracking configuration, which this shell never does: it refuses
 (exit 4) unless `--no-track` is given.
@@ -899,7 +901,10 @@ refuses. The tag object is git's, byte for byte: `object`, `type`, `tag`,
 `tagger` (the committer identity, with its date), a blank line and the
 message. The message is cleaned as git cleans a tag message: trailing spaces
 go, lines starting with `#` go, runs of blank lines collapse, the blank lines
-at both ends go. An empty message is allowed. Tags have no reflog.
+at both ends go. An empty message is allowed. A tag gets no reflog line unless its log file
+(`logs/refs/tags/<name>`) already exists, and then git appends to it, so this
+shell does too: `tag: tagging <abbrev> (<subject>, <date>)`, which needs an
+identity even for a lightweight tag.
 
 **`switch -c` and `checkout -b`** make the branch at HEAD and point `HEAD` at
 it. The index and every file stay as they are, local edits included. The
@@ -919,7 +924,7 @@ and `tag -a` without a message; `switch <branch>`, `checkout <branch>` and
 `core.commentString` is set to anything but `#` or `auto` (exit 4; those two
 leave a `-m` or `-F` message cleaned as `#` does, and the tag object is
 byte-identical to git's). The differences from git, and the cost of
-the name check, are `docs/issues.md` W36-W47.
+the name check, are `docs/issues.md` W37-W39, W47 and W70.
 
 ## Non-goals
 

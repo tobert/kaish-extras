@@ -791,7 +791,6 @@ async fn repository_states_and_settings_that_change_the_commit_refuse_with_exit_
         ("rebase-merge", |d| { base(d); std::fs::create_dir(d.join(".git/rebase-merge")).expect("w"); }, "a rebase is in progress"),
         ("bisect", |d| { base(d); std::fs::write(d.join(".git/BISECT_LOG"), "x\n").expect("w"); }, "a bisect is in progress"),
         ("commit.gpgSign", |d| { base(d); support::git(d, &["config", "commit.gpgSign", "true"]); }, "commit.gpgSign is true"),
-        ("tag.gpgSign", |d| { base(d); support::git(d, &["config", "tag.gpgSign", "true"]); }, "tag.gpgSign is true"),
         ("commitEncoding", |d| { base(d); support::git(d, &["config", "i18n.commitEncoding", "latin1"]); }, "i18n.commitEncoding"),
         ("commit.cleanup=strip", |d| { base(d); support::git(d, &["config", "commit.cleanup", "strip"]); }, "commit.cleanup is 'strip'"),
         ("logAllRefUpdates=false", |d| { base(d); support::git(d, &["config", "core.logAllRefUpdates", "false"]); }, "core.logAllRefUpdates is off"),
@@ -810,6 +809,25 @@ async fn repository_states_and_settings_that_change_the_commit_refuse_with_exit_
         assert!(r.err.contains(text), "[{label}] {}", r.err);
         assert!(r.err.trim_end().ends_with("Nothing was changed."), "[{label}] {}", r.err);
         assert!(support::Fingerprint::take(&p.ours.join(".git")).differences_from(&before).is_empty(), "[{label}] changed .git");
+    }
+}
+
+/// `tag.gpgSign` is a tag setting: `git commit` never reads it, so a true value
+/// and a bad one both commit (checked on git 2.56), and this shell commits the
+/// same bytes. The negative control is `commit.gpgSign` in the test above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tag_gpgsign_does_not_change_a_commit_as_in_git() {
+    for value in ["true", "maybe"] {
+        let p = Pair::new(&|d| {
+            base(d);
+            support::git(d, &["config", "tag.gpgSign", value]);
+            support::write_file(d, "a.txt", "changed\n");
+            support::git(d, &["add", "a.txt"]);
+        });
+        assert_eq!(p.twin(&["commit", "-m", "x"]).0, 0, "git ignores tag.gpgSign={value}");
+        let r = p.ours("", &["commit", "-m", "x"]).await;
+        assert_eq!(r.code, 0, "tag.gpgSign={value}: {}", r.err);
+        p.assert_same(value);
     }
 }
 

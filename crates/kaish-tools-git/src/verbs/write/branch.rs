@@ -27,7 +27,7 @@ use crate::verbs::write::refname::{self, RefKind};
 use crate::verbs::write::refusal::{refuse, Override};
 use crate::verbs::write::repo::WriteRepo;
 use crate::verbs::write::spec::Outcome;
-use crate::verbs::write::state::{config_last, ensure_reflog_on};
+use crate::verbs::write::state::{config_last, ensure_bare_reflog_set};
 
 const OP: &str = "branch";
 
@@ -165,14 +165,20 @@ pub(crate) fn scan_ref_hooks(repo: &WriteRepo, provider: bool, command: &str, na
     Ok(scan)
 }
 
-/// Whether git would write tracking configuration for a branch started at
-/// `start` (`branch.autoSetupMerge`): by default when `start` is a
-/// remote-tracking branch, with `always` and `inherit` more often.
-pub(crate) fn tracking_implied(repo: &WriteRepo, start: &str) -> Result<bool, GitError> {
+/// Whether git would write tracking configuration for the branch `name`
+/// started at `start` (`branch.autoSetupMerge`): by default when `start` is a
+/// remote-tracking branch, with `always` for any start. With `inherit`,
+/// when the start is a local branch (`HEAD` counts, as the branch it is on)
+/// that has an upstream in the configuration. With `simple`, only when `name` is the name of the branch the remote-tracking
+/// ref follows (checked on git 2.56: `branch other origin/feat` writes none,
+/// `branch feat origin/feat` does).
+pub(crate) fn tracking_implied(repo: &WriteRepo, start: &str, name: &str) -> Result<bool, GitError> {
     let setting = config_last(repo, "branch", "autosetupmerge")?;
-    match setting.as_deref().map(str::to_ascii_lowercase).as_deref() {
+    let setting = setting.as_deref().map(str::to_ascii_lowercase);
+    match setting.as_deref() {
         Some("false" | "no" | "off" | "0") => return Ok(false),
-        Some("always" | "inherit") => return Ok(true),
+        Some("always") => return Ok(true),
+        Some("inherit") => return inherits_upstream(repo, start),
         _ => {}
     }
     let full = if start.starts_with("refs/remotes/") { start.to_string() } else { format!("refs/remotes/{start}") };
@@ -180,7 +186,72 @@ pub(crate) fn tracking_implied(repo: &WriteRepo, start: &str) -> Result<bool, Gi
     if gix_ref::FullName::try_from(full.as_str()).is_err() {
         return Ok(false);
     }
-    Ok(refname::exists(repo, &full)?.is_some())
+    if refname::exists(repo, &full)?.is_none() {
+        return Ok(false);
+    }
+    if setting.as_deref() == Some("simple") {
+        return follows_branch_named(repo, &full, name);
+    }
+    Ok(true)
+}
+
+/// Whether the start of a branch is a local branch with an upstream, which
+/// `branch.autoSetupMerge=inherit` copies (checked on git 2.56: a start with
+/// none, and a remote-tracking start, write nothing). Either of
+/// `branch.<name>.remote` and `.merge` counts.
+fn inherits_upstream(repo: &WriteRepo, start: &str) -> Result<bool, GitError> {
+    let name = if matches!(start, "HEAD" | "@") {
+        repo.read().head()?.branch
+    } else if let Some(short) = start.strip_prefix("refs/heads/") {
+        Some(short.to_string())
+    } else if refname::exists(repo, &format!("refs/heads/{start}"))?.is_some() {
+        Some(start.to_string())
+    } else {
+        None
+    };
+    let Some(name) = name else { return Ok(false) };
+    for key in ["remote", "merge"] {
+        if repo.read().config_entries("branch", key)?.iter().any(|(sub, _)| sub.as_deref() == Some(name.as_str())) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether some fetch refspec of the repository maps a branch called `name`
+/// onto the ref `tracking`, or a refspec is one this cannot read (a negative
+/// refspec, a `*` that is not last, a key with no value), where git might.
+/// Only the repository's own configuration is read, as everywhere here.
+fn follows_branch_named(repo: &WriteRepo, tracking: &str, name: &str) -> Result<bool, GitError> {
+    let source_branch = format!("refs/heads/{name}");
+    for (_, value) in repo.read().config_entries("remote", "fetch")? {
+        let Some(spec) = value else { return Ok(true) };
+        let spec = spec.strip_prefix('+').unwrap_or(&spec);
+        if spec.starts_with('^') {
+            return Ok(true);
+        }
+        let Some((src, dst)) = spec.split_once(':') else { continue };
+        let source = match (src.strip_suffix('*'), dst.strip_suffix('*')) {
+            (Some(s), Some(d)) if !s.contains('*') && !d.contains('*') => match tracking.strip_prefix(d) {
+                Some(rest) => format!("{s}{rest}"),
+                None => continue,
+            },
+            (None, None) if !src.contains('*') && !dst.contains('*') => {
+                if dst == tracking {
+                    src.to_string()
+                } else {
+                    continue;
+                }
+            }
+            _ => return Ok(true),
+        };
+        // A source that is no branch (`refs/pull/*`) is never a branch of the
+        // new name: git writes no tracking for it (checked on git 2.56).
+        if source == source_branch {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The refusal for a start point that would set up tracking.
@@ -235,7 +306,7 @@ pub(crate) fn unborn_refusal(command: &str, branch: Option<&str>) -> GitError {
 pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &BranchCreate) -> Result<Outcome, GitError> {
     let cmd = opts.command.as_str();
     let full = refname::full_name(RefKind::Branch, cmd, &opts.name)?;
-    ensure_reflog_on(repo, cmd)?;
+    ensure_bare_reflog_set(repo, cmd, &full)?;
     let scan = scan_ref_hooks(repo, env.hooks.is_some(), cmd, &["reference-transaction"], "branch")?;
 
     let head = repo.read().head()?;
@@ -249,12 +320,16 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &BranchCreate) -> Resul
         .transpose()?;
     let (start_oid, shown) = match &opts.start {
         Some(start) => {
-            if !opts.no_track && tracking_implied(repo, start)? {
+            if !opts.no_track && tracking_implied(repo, start, &opts.name)? {
                 return Err(tracking_refusal(cmd, start, &opts.name));
             }
             (repo.read().resolve_commit(start)?, start.clone())
         }
         None => match head_oid {
+            // The branch starts at HEAD, and `always` and `inherit` read HEAD's branch.
+            Some(_) if !opts.no_track && tracking_implied(repo, "HEAD", &opts.name)? => {
+                return Err(tracking_refusal(cmd, "HEAD", &opts.name));
+            }
             Some(oid) => (oid, head.branch.clone().unwrap_or_else(|| "HEAD".to_string())),
             None => return Err(unborn_refusal(cmd, head.branch.as_deref())),
         },
@@ -266,7 +341,12 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &BranchCreate) -> Resul
     if let Some(why) = refname::blocked_by(repo, &full)? {
         return Err(blocked_refusal(cmd, "branch", &opts.name, &why));
     }
-    let committer = ident::resolve_committer(cmd, env.identity.as_ref(), &opts.vars, ident::now())?;
+    // No line, no identity: with reflogs off and no log file git reads neither.
+    let committer = if refmove::writes_log(repo, cmd, &full)? {
+        Some(ident::resolve_committer(cmd, env.identity.as_ref(), &opts.vars, ident::now())?)
+    } else {
+        None
+    };
     let message = format!("branch: Created from {shown}");
     let mut err = String::new();
     let tx = Tx::new(hookrun::null(), start_oid.to_string(), full.clone());
@@ -274,7 +354,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &BranchCreate) -> Resul
     if let Some(h) = env.hooks.as_ref() {
         hookrun::prepared(h.as_ref(), &ctx, MoveKind::BRANCH, cmd, std::slice::from_ref(&tx), &mut err)?;
     }
-    if let Err(e) = refmove::create_ref(repo, MoveKind::BRANCH, cmd, &full, start_oid, Some((&message, &committer))) {
+    if let Err(e) = refmove::create_ref(repo, MoveKind::BRANCH, cmd, &full, start_oid, committer.as_ref().map(|c| (message.as_str(), c))) {
         if let Some(h) = env.hooks.as_ref() {
             hookrun::aborted(h.as_ref(), &ctx, &tx, &mut err);
         }

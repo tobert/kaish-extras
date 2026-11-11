@@ -36,7 +36,7 @@ use crate::verbs::write::refname::{self, RefKind};
 use crate::verbs::write::refusal::{refuse, Override};
 use crate::verbs::write::repo::WriteRepo;
 use crate::verbs::write::spec::Outcome;
-use crate::verbs::write::state::{ensure_idle, ensure_reflog_on};
+use crate::verbs::write::state::{ensure_idle, ensure_bare_reflog_set};
 
 /// `git switch`'s argv surface.
 #[derive(Parser, Debug)]
@@ -235,7 +235,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &SwitchCreate) -> Resul
     let kind = if opts.op == "checkout" { MoveKind::CHECKOUT } else { MoveKind::SWITCH };
     let full = refname::full_name(RefKind::Branch, cmd, &opts.name)?;
     ensure_idle(repo, cmd, "switch branches")?;
-    ensure_reflog_on(repo, cmd)?;
+    ensure_bare_reflog_set(repo, cmd, &full)?;
     let scan = scan_ref_hooks(repo, env.hooks.is_some(), cmd, &["reference-transaction", "post-checkout"], opts.op)?;
 
     let head = repo.read().head()?;
@@ -262,7 +262,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &SwitchCreate) -> Resul
         if head_oid.is_none() && matches!(start, "HEAD" | "@") {
             return Err(unborn_refusal(cmd, head.branch.as_deref()));
         }
-        if !opts.no_track && tracking_implied(repo, start)? {
+        if !opts.no_track && tracking_implied(repo, start, &opts.name)? {
             return Err(tracking_refusal(cmd, start, &opts.name));
         }
         let oid = repo.read().resolve_commit(start)?;
@@ -276,9 +276,20 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &SwitchCreate) -> Resul
             );
         }
     }
-    let committer = match head_oid {
-        Some(_) => Some(ident::resolve_committer(cmd, env.identity.as_ref(), &opts.vars, ident::now())?),
-        None => None,
+    // With no start, `always` and `inherit` read HEAD's branch.
+    if opts.start.is_none() && head_oid.is_some() && !opts.no_track && tracking_implied(repo, "HEAD", &opts.name)? {
+        return Err(tracking_refusal(cmd, "HEAD", &opts.name));
+    }
+    // A line is written to the branch's log and to `logs/HEAD` unless reflogs
+    // are off and the file is not there; with neither, no identity is read.
+    let (branch_logged, head_logged) = match head_oid {
+        Some(_) => (refmove::writes_log(repo, cmd, &full)?, refmove::writes_log(repo, cmd, "HEAD")?),
+        None => (false, false),
+    };
+    let committer = if branch_logged || head_logged {
+        Some(ident::resolve_committer(cmd, env.identity.as_ref(), &opts.vars, ident::now())?)
+    } else {
+        None
     };
     let message = format!("branch: Created from {shown}");
     let mut err = String::new();
@@ -302,7 +313,8 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &SwitchCreate) -> Resul
             was: &was,
             head_oid,
             full: &full,
-            create: committer.as_ref().map(|c| (message.as_str(), c)),
+            branch_log: committer.as_ref().filter(|_| branch_logged).map(|c| (message.as_str(), c)),
+            head_log: committer.as_ref().filter(|_| head_logged),
             created: Some(&created),
         },
     );

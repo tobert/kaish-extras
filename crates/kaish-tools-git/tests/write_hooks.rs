@@ -862,3 +862,101 @@ async fn reset_to_a_revision_from_an_unborn_branch_tells_the_provider_what_git_t
         assert!(!p.ours.join(".git/ORIG_HEAD").exists() && !p.twin.join(".git/ORIG_HEAD").exists(), "{argv:?}");
     }
 }
+
+// ── reflogs off, and tag logs that exist ───────────────────────────────────
+
+fn reflogs_off(dir: &Path) {
+    base(dir);
+    support::git(dir, &["config", "core.logAllRefUpdates", "false"]);
+}
+
+fn with_tag_log(dir: &Path) {
+    base(dir);
+    std::fs::create_dir_all(dir.join(".git/logs/refs/tags")).expect("dir");
+    std::fs::write(dir.join(".git/logs/refs/tags/x"), "stale\n").expect("log");
+}
+
+fn counts(calls: &[String]) -> (usize, usize, usize) {
+    let n = |kind: &str| calls.iter().filter(|c| c.starts_with(kind)).count();
+    (n("rt prepared"), n("rt committed"), n("rt aborted"))
+}
+
+/// With `core.logAllRefUpdates=false` and no log file, the transaction is
+/// still written and `committed`; only the log line is absent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_branch_with_reflogs_off_is_committed_and_writes_no_branch_log() {
+    // (argv, transactions)
+    for (argv, n) in [(vec!["branch", "x"], 1), (vec!["switch", "-c", "x"], 2), (vec!["checkout", "-b", "x"], 2)] {
+        let p = Pair::new(&reflogs_off);
+        let rec = Arc::new(Rec::default());
+        let r = p.run(&rec, &argv).await;
+        assert_eq!(r.code, 0, "{argv:?}: {}", r.err);
+        assert_eq!(counts(&rec.calls()), (n, n, 0), "{argv:?}: {:?}", rec.calls());
+        assert!(!p.git_dir().join("logs/refs/heads/x").exists(), "{argv:?}: a branch log was made");
+        assert_eq!(git_raw(&p.ours, &["rev-parse", "--verify", "-q", "refs/heads/x"]).0, 0, "{argv:?}");
+    }
+}
+
+/// A tag whose log file exists gets the line, under a committed transaction; a
+/// veto at `prepared` leaves the ref absent and the log as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tag_with_an_existing_log_is_appended_to_and_a_veto_leaves_the_log_alone() {
+    for argv in [vec!["tag", "x"], vec!["tag", "-a", "x", "-m", "m"]] {
+        let p = Pair::new(&with_tag_log);
+        let rec = Arc::new(Rec::default());
+        let r = p.run(&rec, &argv).await;
+        assert_eq!(r.code, 0, "{argv:?}: {}", r.err);
+        assert_eq!(counts(&rec.calls()), (1, 1, 0), "{argv:?}");
+        let log = std::fs::read_to_string(p.git_dir().join("logs/refs/tags/x")).expect("log");
+        assert!(log.starts_with("stale\n") && log.contains("\ttag: tagging "), "{argv:?}: {log}");
+
+        let p = Pair::new(&with_tag_log);
+        let before = support::Fingerprint::take(&p.git_dir());
+        let rec = Arc::new(Rec { veto_ref: Some("refs/tags/x"), ..Rec::default() });
+        let r = p.run(&rec, &argv).await;
+        assert_eq!(r.code, 1, "{argv:?}: {}", r.err);
+        let after = support::Fingerprint::take(&p.git_dir());
+        let objects = argv.contains(&"-a");
+        let diffs = if objects { changed_outside_objects(&after, &before) } else { after.differences_from(&before) };
+        assert!(diffs.is_empty(), "{argv:?}: a veto changed .git: {diffs:?}");
+        assert_eq!(std::fs::read_to_string(p.git_dir().join("logs/refs/tags/x")).expect("log"), "stale\n");
+        assert_eq!(counts(&rec.calls()).1, 0, "{argv:?}");
+    }
+}
+
+/// A log that cannot be appended to stops git before the ref is made. What the
+/// provider hears and what the caller reads must agree with the disk: `committed`
+/// only when the ref exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_only_log_is_told_to_the_provider_as_what_happened() {
+    use std::os::unix::fs::PermissionsExt;
+    for (argv, log, full) in [
+        (vec!["tag", "x"], "logs/refs/tags/x", "refs/tags/x"),
+        (vec!["tag", "-a", "x", "-m", "m"], "logs/refs/tags/x", "refs/tags/x"),
+        (vec!["branch", "x"], "logs/refs/heads/x", "refs/heads/x"),
+        (vec!["switch", "-c", "x"], "logs/refs/heads/x", "refs/heads/x"),
+    ] {
+        let p = Pair::new(&|d| {
+            base(d);
+            let path = d.join(".git").join(log);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+            std::fs::write(&path, "stale\n").expect("log");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).expect("chmod");
+        });
+        if std::fs::OpenOptions::new().append(true).open(p.git_dir().join(log)).is_ok() {
+            return; // running as root
+        }
+        let rec = Arc::new(Rec::default());
+        let r = p.run(&rec, &argv).await;
+        assert_ne!(r.code, 0, "{argv:?}: the log is read-only: {}", r.err);
+        let exists = git_raw(&p.ours, &["rev-parse", "--verify", "-q", full]).0 == 0;
+        let (prepared, committed, aborted) = counts(&rec.calls());
+        if exists {
+            assert!(r.err.contains("do not run the command again") || r.err.contains("was made") || r.err.contains("created"), "{argv:?}: the ref exists, so the error says so: {}", r.err);
+            assert_eq!((committed, aborted), (prepared, 0), "{argv:?}: {:?}", rec.calls());
+        } else {
+            assert_eq!(committed, 0, "{argv:?}: no ref, so nothing is committed: {:?}", rec.calls());
+            assert_eq!(aborted, prepared, "{argv:?}: {:?}", rec.calls());
+        }
+    }
+}

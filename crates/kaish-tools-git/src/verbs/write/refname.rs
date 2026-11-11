@@ -79,7 +79,9 @@ pub(crate) fn blocked_by(repo: &WriteRepo, full: &str) -> Result<Option<String>,
         at += i;
         let part = &full[..at];
         at += 1;
-        if !part.contains('/') {
+        // A part that is no ref name (`refs/heads/a.` for `a./b`) names no
+        // ref, and asking for one is an error from the ref store.
+        if !part.contains('/') || gix_ref::FullName::try_from(part).is_err() {
             continue;
         }
         if exists(repo, part)?.is_some() {

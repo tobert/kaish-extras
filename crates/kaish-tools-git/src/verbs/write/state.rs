@@ -280,36 +280,74 @@ fn ensure_no_index_hook(repo: &WriteRepo, command: &str) -> Result<(), GitError>
     Ok(())
 }
 
-/// Refuse when git would write no reflog where this shell would: this shell
-/// always writes one, and a branch move that differs from git's there is not
-/// one to make. That is `core.logAllRefUpdates` turned off, and a bare
-/// repository that leaves it unset (git's default there is off).
-pub(crate) fn ensure_reflog_on(repo: &WriteRepo, command: &str) -> Result<(), GitError> {
-    let setting = config_last(repo, "core", "logallrefupdates")?;
-    let off = match setting.as_deref() {
-        Some(v) if v.eq_ignore_ascii_case("never") || v.eq_ignore_ascii_case("always") => v.eq_ignore_ascii_case("never"),
-        Some(_) => config_bool(repo, command, "core", "logallrefupdates", "core.logAllRefUpdates")? == Some(false),
-        None => false,
-    };
-    if off {
+/// What `core.logAllRefUpdates` says, read as git reads it: `always`
+/// (any case), or a boolean. Anything else, `never` included, is a bad
+/// boolean on which git dies, so this refuses (exit 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefLogs {
+    Unset,
+    Always,
+    On,
+    Off,
+}
+
+pub(crate) fn ref_logs(repo: &WriteRepo, command: &str) -> Result<RefLogs, GitError> {
+    Ok(match config_entry(repo, "core", "logallrefupdates")? {
+        None => RefLogs::Unset,
+        Some(Some(v)) if v.eq_ignore_ascii_case("always") => RefLogs::Always,
+        Some(_) => match config_bool(repo, command, "core", "logallrefupdates", "core.logAllRefUpdates")? {
+            Some(true) => RefLogs::On,
+            _ => RefLogs::Off,
+        },
+    })
+}
+
+/// Whether `core.logAllRefUpdates` is a false boolean. Git then writes a
+/// reflog line only to a log file that exists.
+pub(crate) fn reflog_turned_off(repo: &WriteRepo, command: &str) -> Result<bool, GitError> {
+    Ok(ref_logs(repo, command)? == RefLogs::Off)
+}
+
+/// Refuse a bare repository that leaves `core.logAllRefUpdates` unset, for the
+/// branch `full` that has no log file: git's default there is no reflog, and
+/// this shell cannot tell a first write from one that git would log. A log
+/// file that exists is appended to, as git does.
+pub(crate) fn ensure_bare_reflog_set(repo: &WriteRepo, command: &str, full: &str) -> Result<(), GitError> {
+    if repo.read().is_bare() && ref_logs(repo, command)? == RefLogs::Unset && !crate::verbs::write::refmove::log_exists(repo, full)? {
         return refuse(
             4,
             command,
-            "core.logAllRefUpdates is off, and this shell always writes the reflog.",
-            "Use real git, outside this shell, or turn it on: git config core.logAllRefUpdates true.",
-            Override::Repository,
-        );
-    }
-    if setting.is_none() && repo.read().is_bare() {
-        return refuse(
-            4,
-            command,
-            "This is a bare repository and core.logAllRefUpdates is not set, so git writes no reflog here, and this shell always writes one.",
+            "This is a bare repository, core.logAllRefUpdates is not set and the branch has no log file, so git writes no reflog here, and this shell always writes one.",
             "Use real git, outside this shell, or turn it on: git config core.logAllRefUpdates true.",
             Override::Repository,
         );
     }
     Ok(())
+}
+
+/// Refuse when git would write no reflog where this shell would: this shell
+/// always writes one on a move that is not a branch's creation, and a move
+/// that differs from git's there is not one to make. That is
+/// `core.logAllRefUpdates` turned off, and a bare repository that leaves it
+/// unset (git's default there is off).
+pub(crate) fn ensure_reflog_on(repo: &WriteRepo, command: &str) -> Result<(), GitError> {
+    match ref_logs(repo, command)? {
+        RefLogs::Off => refuse(
+            4,
+            command,
+            "core.logAllRefUpdates is off, and this shell always writes the reflog.",
+            "Use real git, outside this shell, or turn it on: git config core.logAllRefUpdates true.",
+            Override::Repository,
+        ),
+        RefLogs::Unset if repo.read().is_bare() => refuse(
+            4,
+            command,
+            "This is a bare repository and core.logAllRefUpdates is not set, so git writes no reflog here, and this shell always writes one.",
+            "Use real git, outside this shell, or turn it on: git config core.logAllRefUpdates true.",
+            Override::Repository,
+        ),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]

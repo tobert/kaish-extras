@@ -12,9 +12,11 @@
 //! The object is encoded here and not by `gix-object`, whose tag encoder
 //! leaves out the blank line git writes before an empty message.
 //!
-//! A tag has no reflog: `core.logAllRefUpdates` at its default logs branches,
-//! remote-tracking branches, notes and HEAD, and gix-ref keeps the same rule.
-//! `always` would log tags, so it refuses here.
+//! A tag has no reflog line unless its log file exists: `core.logAllRefUpdates`
+//! at its default logs branches, remote-tracking branches, notes and HEAD, and
+//! gix-ref keeps the same rule. A log file that exists is appended to, as in
+//! git, under git's message (`tag_reflog_message`). `always` would create
+//! logs for tags, so it refuses here.
 //!
 //! The object is written, then synced, then the ref is created; a refusal
 //! after the object is on disk says so (`Wrote::UnreachableObjects`).
@@ -182,7 +184,7 @@ fn ensure_tag_settings(repo: &WriteRepo, command: &str, annotated: bool) -> Resu
             "Create the tag with real git, outside this shell, or turn it off for this repository: git config tag.forceSignAnnotated false.".to_string(),
         )?;
     }
-    if config_last(repo, "core", "logallrefupdates")?.is_some_and(|v| v.eq_ignore_ascii_case("always")) {
+    if crate::verbs::write::state::ref_logs(repo, command)? == crate::verbs::write::state::RefLogs::Always {
         bad(
             "core.logAllRefUpdates is 'always', which makes git write a reflog for a tag, and this shell writes none.".to_string(),
             "Create the tag with real git, outside this shell, or set it to true: git config core.logAllRefUpdates true.".to_string(),
@@ -241,6 +243,17 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &TagCreate) -> Result<O
         }
     };
     refmove::precheck_ref(repo, cmd, &full)?;
+    // A tag gets no reflog unless its log file exists; then git appends to it.
+    let log_exists = refmove::log_exists(repo, &full)?;
+    let identity = if annotated || log_exists {
+        Some(ident::resolve_committer(cmd, env.identity.as_ref(), &opts.vars, ident::now())?)
+    } else {
+        None
+    };
+    let log = match (log_exists, identity.as_ref()) {
+        (true, Some(who)) => Some((tag_reflog_message(repo, target)?, who)),
+        _ => None,
+    };
 
     let ctx = scan.context(repo);
     let mut err = String::new();
@@ -252,7 +265,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &TagCreate) -> Result<O
         if let Some(h) = env.hooks.as_ref() {
             hookrun::prepared(h.as_ref(), &ctx, MoveKind::TAG, cmd, std::slice::from_ref(&tx), err).map_err(after)?;
         }
-        if let Err(e) = refmove::create_ref(repo, MoveKind::TAG, cmd, &full, oid, None) {
+        if let Err(e) = refmove::create_ref(repo, MoveKind::TAG, cmd, &full, oid, log.as_ref().map(|(m, who)| (m.as_str(), *who))) {
             if let Some(h) = env.hooks.as_ref() {
                 hookrun::aborted(h.as_ref(), &ctx, &tx, err);
             }
@@ -269,7 +282,7 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &TagCreate) -> Result<O
         return Ok(outcome(opts, &full, target, target, "lightweight", err));
     };
 
-    let tagger = ident::resolve_committer(cmd, env.identity.as_ref(), &opts.vars, ident::now())?;
+    let tagger = identity.as_ref().expect("an annotated tag resolved its identity above");
     let mut buf = Vec::new();
     let kind = repo
         .objects()
@@ -294,6 +307,35 @@ pub(crate) fn run(repo: &WriteRepo, env: &RefsEnv, opts: &TagCreate) -> Result<O
     writer.sync().map_err(GitError::after_objects)?;
     create(tag_id, true, &mut err)?;
     Ok(outcome(opts, &full, tag_id, target, "annotated", err))
+}
+
+/// The line git writes to a tag's existing reflog: `tag: tagging <abbrev> (<what>)`,
+/// where `what` is the commit's subject and its date in UTC, or the object's
+/// type and the word `object` for anything else (`other tag object` for a tag) (git's `create_reflog_msg`, checked on git 2.56).
+fn tag_reflog_message(repo: &WriteRepo, target: ObjectId) -> Result<String, GitError> {
+    let fail = |what: String, e: String| GitError::repository(OP, what, repo.git_dir(), std::io::Error::other(e));
+    let mut buf = Vec::new();
+    let found = repo
+        .objects()
+        .try_find(&target, &mut buf)
+        .map_err(|e| fail("reading the tagged object".to_string(), e.to_string()))?
+        .ok_or_else(|| fail("reading the tagged object".to_string(), "it is not in the object store".to_string()))?;
+    let what = match found.kind {
+        gix_object::Kind::Commit => {
+            let commit = gix_object::CommitRef::from_bytes(found.data, target.kind()).map_err(|e| fail("parsing the tagged commit".to_string(), e.to_string()))?;
+            // `find_commit_subject`: the first line after the blank lines that follow the headers.
+            let message = commit.message.to_vec();
+            let subject = message.split(|b| *b == b'\n').find(|l| !l.is_empty()).unwrap_or_default();
+            let subject = std::str::from_utf8(subject)
+                .map_err(|_| fail("reading the commit subject".to_string(), "the subject is not UTF-8, so the reflog line cannot be written as git writes it".to_string()))?;
+            let seconds = commit.committer().map_err(|e| fail("parsing the tagged commit".to_string(), e.to_string()))?.seconds();
+            let date = jiff::Timestamp::from_second(seconds).map_err(|e| fail("reading the commit date".to_string(), e.to_string()))?;
+            format!("{subject}, {}", date.strftime("%Y-%m-%d"))
+        }
+        gix_object::Kind::Tag => "other tag object".to_string(),
+        other => format!("{other} object"),
+    };
+    Ok(format!("tag: tagging {} ({what})", repo.read().short_oid(&target)?))
 }
 
 fn outcome(opts: &TagCreate, full: &str, oid: ObjectId, target: ObjectId, kind: &str, err: String) -> Outcome {
